@@ -1,6 +1,6 @@
 # Milestone 2 uploaded playback result
 
-Status: offline implementation verified; physical qualification **incomplete**. Date: 2026-09-26. Source: the `milestone-2` worktree based on `82d854f` plus the changes in this worktree. No presentation FPS is claimed.
+Status: offline implementation verified; physical qualification **partially complete** — all three presets at all three speeds applied, confirmed, and restored cleanly on hardware, with the device RGB clock sampled at its nominal rate. Firmware presentation FPS, cycle duration, and clock-to-phase alignment remain **unmeasured** (no camera/photodiode available). Date: 2026-09-26. Backend: `release/OpenRGB.exe` at `2d3a66b`.
 
 The three supported OpenRGB modes now share the Qt-free `src/core/playback/PlaybackLoop` builder and the imported pure renderers. It preserves the legacy full-cycle duration (`240000 / speed` ms), requests about 60 frames/s, quantizes the interval to hundredths of a 0.625 ms protocol tick, then checks the **actual** tinyuz payload against 12,288 bytes and frame count against 4,096. An oversized loop is rendered again with fewer frames and the same requested cycle duration. `GroupStatus` exposes frame count, effective duration, nominal rate, payload size, effect ID, and a timestamped clock snapshot.
 
@@ -23,12 +23,26 @@ Offline tests validate the V1 transmitter reply opcode, master identity, respons
 
 Revisioned mode submissions reject queued live frames after entering playback, reject old parameter compiles, and reject stale playback submissions after returning to live. [The pinned upstream clock query](https://github.com/sgtaziz/lian-li-linux/blob/ebcf68ef02a39463e8295bb40ce3c5751622c496/crates/lianli-devices/src/wireless/rgb_clock.rs) supplies the validated V1 reply layout.
 
-## Authorized hardware session
+## Authorized hardware sessions
 
-The selected 120 LED group was exercised through a private backend on port 6744 and `lianli_bench` on 2026-09-26. State was captured before each of nine 15-second preset holds (three presets at speeds 10, 100, 200); every producer process exited successfully and reported restore complete. FanControl remained running. The trace from this **pre-fix** backend recorded only three admitted full uploads, two retries, eight keep-alives, and 17 discovery polls. Those counters stopped increasing early in the session despite continued SDK submissions and worker ticks. Thus SDK apply/restore success does not establish playback for the later holds. Trace and private device identifiers are in gitignored `profiles/local/m2-2026-09-26/final/`.
+Two sessions ran on 2026-09-26 through a private backend on port 6744 with `lianli_bench` driving SDK mode changes. State was captured before each of nine 15-second preset holds (Spectrum Cycle, Rainbow Wave, Breathing at speeds 100, 10, 200); every producer process exited 0 and reported restore complete. FanControl remained running throughout both sessions. Artifacts (traces, per-phase counter snapshots, logs) are in gitignored `profiles/local/m2-2026-09-26/` (`verify/` = pre-fix run, `fixed/` = post-fix run).
 
-The terminal path consistent with this trace is a discovery layout/ownership mismatch: other terminal paths would have incremented failure or foreign-master counters, which stayed at zero. A regression now covers one inconsistent fan-count reply followed by recovery and a persistent motherboard RGB ownership mismatch. Writes stop on the first incompatible reply; three consecutive incompatible replies cause a terminal error. The rebuilt backend could not be started for validation because Windows Application Control blocked the executable. No workaround was applied. The exact mismatch field, visible playback, cycle duration, clock-to-phase relationship, and steady-state upload rate therefore remain unverified.
+### First session (pre-fix backend): real defect found
 
-## Physical qualification still required
+The trace shows the runtime entering terminal `Failed` at ~245.6 s: three consecutive discovery replies reported the target MAC with `fan_count = 0`, which the layout check counted as an incompatible layout. Only ~28 uploads were admitted before the stall; the remaining presets and all five live sweeps exited 0 producer-side while the backend dropped every frame — SDK success does **not** establish hardware delivery.
 
-Once the rebuilt backend can run under the normal application policy, repeat each preset at speeds 10, 100, and 200 with saved state and a hard stop. Record the exact binary, firmware, payload metadata, total RF traffic after convergence, visible frame intervals, full-cycle duration, and clock-to-loop phase with a high-speed camera or photodiode. Verify Live → playback → Live, rapid edits, pause/stop, disconnect/reconnect, and FanControl/sensors. The Milestone 2 playback pass and physical 60 FPS target remain unresolved.
+### Root cause and fix
+
+`ParseDeviceRecord` reads `fan_count` from byte 19. A bound group always reports ≥1 fan; a zero-fan record carrying the correct MAC is a partially updated row in the receiver's discovery table under RF load. `PollAndMerge` now treats `fan_count == 0` as an incomplete observation — a miss: the last good sighting stays usable until `lost_ms`, sustained incomplete rows degrade to recoverable `Lost`, and valid rows resume playback automatically. Genuine mismatches (fan count 1–255 mismatch, `mb_rgb_sync`) keep the stop-writes → debounce → `Failed` path. Regression: `TestIncompleteDiscoveryRecord` in `lianli_protocol_test`.
+
+### Second session (fixed backend, `2d3a66b`): clean pass
+
+- All nine preset holds applied, confirmed via effect-ID echo, and restored; `upload_failures = 0`, `foreign_master_events = 0`, `transport_revalidations = 0` for the whole session.
+- The anomaly **recurred**: 12 consecutive `layout_incomplete` rows (~3.4 s of zero-fan records, again at ~243–247 s, during the Breathing-10 hold — the same session phase that produced the original failure). The runtime rode through with no `Failed` and no write interruption, then resumed on the next valid reply. Repeatability at the same phase suggests a deterministic receiver-table refresh artifact rather than random RF noise.
+- Upload traffic per phase (apply + confirm + restore): Spectrum Cycle 2–3 uploads / 5–10 RF packets; Rainbow Wave 2–4 uploads / 25–104 packets (largest compressed payload, one retry in two of three speeds); Breathing 2–6 uploads / 6–44 packets (three retries at speed 10, all during the incomplete-row window). Once an upload confirms, the hold is silent: zero RGB traffic between apply and restore — only keep-alive and discovery. No repeated full uploads in steady state.
+- RGB clock: 5 queries per 15 s hold (~3 s cadence, all after keep-alive/discovery work), 45/45 valid replies across the holds. Tick progression Δticks/Δt ≈ **1600 ticks/s** — the device clock runs at the nominal 0.625 ms/tick, matching the V1 reply layout ported from pinned upstream.
+- Lock wait after the pending-frame decoupling: ~8–18 µs **total** per phase (vs 9–24 ms per submission at baseline).
+
+## Physical qualification still open
+
+Not measurable with available equipment (no camera/photodiode): visible frame rate, actual cycle duration, and the clock-sample → displayed-phase relationship. Also not exercised this session: rapid parameter edits during a hold, pause/stop, disconnect/reconnect mid-playback, and motherboard-sync transitions. SDK apply/restore plus clock sampling prove the loop reaches and persists on the device; they do not prove what the LEDs show.
