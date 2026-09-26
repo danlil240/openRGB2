@@ -6,49 +6,10 @@
 \*---------------------------------------------------------*/
 
 #include "LianLiWirelessService.h"
+#include "LianLiWirelessDiagnostics.h"
 #include <chrono>
-#include <cstdlib>
-#include <fstream>
 
 using namespace LianLiWireless;
-
-namespace
-{
-    using TraceClock = std::chrono::steady_clock;
-
-    void TraceService(const char* event, long long first,
-                      long long second, long long third)
-    {
-        static const char* trace_path = std::getenv("OPENRGB_LIANLI_TRACE");
-        if(trace_path == nullptr || *trace_path == '\0')
-        {
-            return;
-        }
-
-        static std::mutex trace_mutex;
-        static const TraceClock::time_point origin = TraceClock::now();
-        static std::ofstream trace(trace_path, std::ios::out | std::ios::trunc);
-        static unsigned int rows = 0;
-
-        std::lock_guard<std::mutex> lock(trace_mutex);
-        if(!trace.is_open())
-        {
-            return;
-        }
-        if(rows == 0)
-        {
-            trace << "time_us,event,first_us,second_us,third\n";
-        }
-        const long long time_us = std::chrono::duration_cast<std::chrono::microseconds>(
-            TraceClock::now() - origin).count();
-        trace << time_us << ',' << event << ',' << first << ','
-              << second << ',' << third << '\n';
-        if((++rows % 20) == 0)
-        {
-            trace.flush();
-        }
-    }
-}
 
 LianLiWirelessService::LianLiWirelessService(IWirelessLink& link_in,
                                              IWirelessClock& clock_in,
@@ -101,9 +62,12 @@ std::vector<Mac> LianLiWirelessService::Groups() const
 void LianLiWirelessService::SetDesired(const Mac& mac,
                                        std::shared_ptr<const RgbUpload> upload)
 {
+    using TraceClock = std::chrono::steady_clock;
+
     const auto begin = TraceClock::now();
     const long long packets = upload ? (long long)upload->PacketCount() : 0;
     bool accepted = false;
+    bool replaced_pending = false;
     TraceClock::time_point acquired;
     TraceClock::time_point finished;
     {
@@ -112,15 +76,19 @@ void LianLiWirelessService::SetDesired(const Mac& mac,
         auto it = runtimes.find(mac);
         if(it != runtimes.end())
         {
+            replaced_pending = it->second->HasUnconfirmedDesired();
             it->second->SetDesired(std::move(upload));
             accepted = true;
         }
         finished = TraceClock::now();
     }
-    TraceService("set_desired",
-        std::chrono::duration_cast<std::chrono::microseconds>(acquired - begin).count(),
-        std::chrono::duration_cast<std::chrono::microseconds>(finished - acquired).count(),
-        packets);
+    Diagnostics::Get().RecordSetDesired(
+        accepted, replaced_pending,
+        (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+            acquired - begin).count(),
+        (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+            finished - acquired).count(),
+        (uint64_t)packets);
     if(accepted)
     {
         wake_requested = true;
@@ -163,6 +131,8 @@ bool LianLiWirelessService::GetStatus(const Mac& mac, GroupStatus& out) const
 
 void LianLiWirelessService::StepAll()
 {
+    using TraceClock = std::chrono::steady_clock;
+
     const auto begin = TraceClock::now();
     TraceClock::time_point acquired;
     TraceClock::time_point finished;
@@ -177,10 +147,12 @@ void LianLiWirelessService::StepAll()
         }
         finished = TraceClock::now();
     }
-    TraceService("step_all",
-        std::chrono::duration_cast<std::chrono::microseconds>(acquired - begin).count(),
-        std::chrono::duration_cast<std::chrono::microseconds>(finished - acquired).count(),
-        group_count);
+    Diagnostics::Get().RecordStepAll(
+        (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+            acquired - begin).count(),
+        (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+            finished - acquired).count(),
+        (uint64_t)group_count);
 }
 
 void LianLiWirelessService::Start(uint32_t tick_ms)

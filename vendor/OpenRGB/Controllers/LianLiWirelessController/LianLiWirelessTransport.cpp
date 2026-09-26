@@ -8,6 +8,7 @@
 \*---------------------------------------------------------*/
 
 #include "LianLiWirelessTransport.h"
+#include "LianLiWirelessDiagnostics.h"
 
 #include <chrono>
 #include <cstdio>
@@ -339,36 +340,51 @@ bool LianLiWirelessUsbLink::FlushInput(libusb_device_handle* handle)
 
 bool LianLiWirelessUsbLink::ReadMasterMac(Mac& out)
 {
-    if(!EnsureOpen() || !FlushInput(tx))
+    const auto begin = std::chrono::steady_clock::now();
+    bool ok = false;
+    do
     {
-        return false;
-    }
+        if(!EnsureOpen() || !FlushInput(tx))
+        {
+            break;
+        }
 
-    uint8_t query[USB_CHUNK_SIZE]{};
-    query[0] = USB_CMD_GET_MAC;
-    if(!WriteAll(tx, query, sizeof(query), WRITE_TIMEOUT_MS))
-    {
-        return false;
-    }
+        uint8_t query[USB_CHUNK_SIZE]{};
+        query[0] = USB_CMD_GET_MAC;
+        if(!WriteAll(tx, query, sizeof(query), WRITE_TIMEOUT_MS))
+        {
+            break;
+        }
 
-    uint8_t reply[USB_CHUNK_SIZE];
-    int n = ReadSome(tx, reply, sizeof(reply), QUERY_TIMEOUT_MS);
-    if(n < 0)
-    {
-        return false;
-    }
-    if(n < 7 || reply[0] != USB_CMD_GET_MAC)
-    {
-        last_error = "invalid master query response";
-        return false;
-    }
+        uint8_t reply[USB_CHUNK_SIZE];
+        int n = ReadSome(tx, reply, sizeof(reply), QUERY_TIMEOUT_MS);
+        if(n < 0)
+        {
+            break;
+        }
+        if(n < 7 || reply[0] != USB_CMD_GET_MAC)
+        {
+            last_error = "invalid master query response";
+            break;
+        }
 
-    std::memcpy(out.data(), reply + 1, 6);
-    return true;
+        std::memcpy(out.data(), reply + 1, 6);
+        ok = true;
+    }
+    while(false);
+
+    if(ok)
+    {
+        Diagnostics::Get().RecordUsbRead(
+            (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - begin).count());
+    }
+    return ok;
 }
 
 bool LianLiWirelessUsbLink::PollDiscovery(std::vector<uint8_t>& out)
 {
+    const auto begin = std::chrono::steady_clock::now();
     out.clear();
     if(!EnsureOpen() || !FlushInput(rx))
     {
@@ -406,6 +422,9 @@ bool LianLiWirelessUsbLink::PollDiscovery(std::vector<uint8_t>& out)
         out.insert(out.end(), buf, buf + n);
         timeout = REPLY_NEXT_MS;
     }
+    Diagnostics::Get().RecordUsbRead(
+        (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - begin).count());
     return true;
 }
 
@@ -416,6 +435,7 @@ bool LianLiWirelessUsbLink::SendChunks(
     {
         return false;
     }
+    const auto begin = std::chrono::steady_clock::now();
     for(const UsbChunk& chunk : chunks)
     {
         if(!WriteAll(tx, chunk.data(), (int)chunk.size(), WRITE_TIMEOUT_MS))
@@ -425,5 +445,9 @@ bool LianLiWirelessUsbLink::SendChunks(
         std::this_thread::sleep_for(1ms);
     }
     std::this_thread::sleep_for(2ms);
+    Diagnostics::Get().RecordUsbSend(
+        USB_CHUNKS_PER_PACKET,
+        (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - begin).count());
     return true;
 }

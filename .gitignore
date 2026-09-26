@@ -11,6 +11,9 @@ __pycache__/
 .clangd/
 compile_commands.json
 
+# Local user state: resolved hardware identities, session records
+profiles/local/
+
 # Qt generated
 *.pro.user
 *.pro.user.*

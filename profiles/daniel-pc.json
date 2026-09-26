@@ -1,0 +1,43 @@
+{
+  "profile": "daniel-pc",
+  "description": "RGB topology for Daniel's PC (see docs/hardware/daniel-pc.md). Unique identifiers are resolved at runtime from profiles/local/ and are never committed.",
+  "devices": {
+    "wireless_group": {
+      "device_kind": "lianli_sl_wireless",
+      "fan_count": 3,
+      "leds_per_fan": 40,
+      "led_count": 120,
+      "match_hint": "name contains 'Lian Li' and location starts with 'Wireless:'",
+      "local_identity": "profiles/local/wireless-group.json"
+    },
+    "motherboard_headers": [
+      { "header": "ARGB_V2_1", "led_count": 8, "mapping": "four mirrored case fans" },
+      { "header": "ARGB_V2_2", "led_count": 16, "mapping": "radiator fans 0-7 (mirrored), pump 8-15" },
+      { "header": "ARGB_V2_3", "led_count": 8, "mapping": "top GPU fan" }
+    ],
+    "other_devices": [
+      { "device": "Corsair Vengeance RGB DDR5", "instances": 2, "leds_each": 10, "resolve_by": "stable identity/location" },
+      { "device": "AORUS RTX 5080 MASTER ICE", "zones": ["side logo"], "notes": "fan-ring behavior at 0 RPM unresolved; never change fan speed" },
+      { "device": "Razer Basilisk V3 Pro", "zones": ["wheel", "logo", "strip"], "notes": "resolve Synapse ownership first" },
+      { "device": "Logitech G512", "leds": 107, "notes": "per-key; exclude non-visible Extras zone" }
+    ],
+    "unmapped": [
+      { "device": "Motherboard LED_C / Chipset Accent", "reason": "physical location not verified" }
+    ]
+  },
+  "constraints": {
+    "fancontrol_owns_cooling": true,
+    "pwm_or_fan_control": "forbidden",
+    "automatic_driver_resets": "forbidden",
+    "competing_owner_policy": "detect and require explicit takeover; never kill silently",
+    "display_off": "pause RGB frames and reactive capture; keep required maintenance only"
+  },
+  "benchmark": {
+    "producer": "tools/bench/lianli_bench",
+    "sdk_port": 6744,
+    "backend_trace_env": "OPENRGB_LIANLI_TRACE",
+    "rate_sweep_fps": [10, 20, 30, 40, 60],
+    "workloads": ["gradient", "band", "entropy", "static"],
+    "report": "docs/benchmarks/baseline.md"
+  }
+}
