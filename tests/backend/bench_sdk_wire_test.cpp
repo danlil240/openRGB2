@@ -21,7 +21,7 @@ static int failures = 0;
 static int checks   = 0;
 
 #define CHECK(cond, msg) do { checks++; if(!(cond)) { failures++; \
-    printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, msg); } } while(0)
+    printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, msg); fflush(stdout); } } while(0)
 
 /*-------------------------------------------------------------*\
 | Writer mirroring the server-side serialization               |
@@ -101,8 +101,9 @@ static std::vector<uint8_t> MakeControllerBlob(uint32_t* mode_direct_len,
     w.U16(3);                                   /* num_colors */
     w.U32(0x000000FF); w.U32(0x0000FF00); w.U32(0x00FF0000);
 
-    /* patch the leading data_size */
-    const uint32_t total = (uint32_t)w.buf.size() - 4;
+    /* patch the leading data_size: the server's size field counts the
+       whole body, including the size field itself (SendReply_ControllerData) */
+    const uint32_t total = (uint32_t)w.buf.size();
     memcpy(w.buf.data(), &total, 4);
 
     if(mode_direct_len)   { *mode_direct_len = direct_len; }
@@ -247,7 +248,7 @@ static void TestRawModeRoundTrip()
     w.U16(0);        /* no zones */
     w.U16(0);        /* no leds  */
     w.U16(0);        /* no colors*/
-    const uint32_t total = (uint32_t)w.buf.size() - 4;
+    const uint32_t total = (uint32_t)w.buf.size();
     memcpy(w.buf.data(), &total, 4);
 
     SdkController c2;
@@ -260,12 +261,67 @@ static void TestRawModeRoundTrip()
           "raw mode block is byte-stable across re-parse");
 }
 
+/* wraps one raw mode block in a minimal controller blob and reparses it */
+static bool ParseSingleMode(const std::vector<uint8_t>& raw, uint32_t version,
+                            SdkMode& out)
+{
+    Writer w;
+    w.U32(4);
+    w.U32(2);
+    w.Str("dev");
+    w.Str("vendor");
+    w.Str("desc");
+    w.Str("");
+    w.Str("serial");
+    w.Str("loc");
+    w.U16(1);
+    w.U32(0);
+    w.buf.insert(w.buf.end(), raw.begin(), raw.end());
+    w.U16(0);        /* no zones  */
+    w.U16(0);        /* no leds   */
+    w.U16(0);        /* no colors */
+    const uint32_t total = (uint32_t)w.buf.size();
+    memcpy(w.buf.data(), &total, 4);
+
+    SdkController c;
+    if(!ParseControllerData(w.buf.data(), w.buf.size(), version, c)
+       || c.modes.size() != 1)
+    {
+        return false;
+    }
+    out = c.modes[0];
+    return true;
+}
+
+static void TestPatchModeSpeed()
+{
+    uint32_t dl = 0, sl = 0;
+    std::vector<uint8_t> blob = MakeControllerBlob(&dl, &sl);
+    SdkController c;
+    CHECK(ParseControllerData(blob.data(), blob.size(), 4, c), "blob parses");
+    CHECK(c.modes[1].speed == 100, "spectrum speed decodes");
+
+    std::vector<uint8_t> raw = c.modes[1].raw;
+    CHECK(PatchModeSpeed(raw, 4, 10), "patch speed to 10");
+    CHECK(raw.size() == c.modes[1].raw.size(), "patch keeps raw size");
+
+    SdkMode m;
+    CHECK(ParseSingleMode(raw, 4, m), "patched mode reparses");
+    CHECK(m.speed == 10 && m.name == "Spectrum Cycle",
+          "patched speed decodes, other fields intact");
+
+    /* truncated input rejected, not crashed */
+    std::vector<uint8_t> short_raw(raw.begin(), raw.begin() + 6);
+    CHECK(!PatchModeSpeed(short_raw, 4, 10), "truncated raw rejected");
+}
+
 int main()
 {
     TestParseControllerData();
     TestParseRejectsMalformed();
     TestRequestBodyBuilders();
     TestRawModeRoundTrip();
+    TestPatchModeSpeed();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

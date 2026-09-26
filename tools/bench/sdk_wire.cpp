@@ -52,7 +52,7 @@ namespace
     bool ParseMode(Cursor& c, uint32_t version, SdkMode& out)
     {
         const uint8_t* begin = c.Mark();
-        uint32_t speed_min = 0, speed_max = 0, speed = 0;
+        uint32_t speed_min = 0, speed_max = 0;
         uint32_t colors_min = 0, colors_max = 0;
         uint32_t brightness_min = 0, brightness_max = 0, brightness = 0;
         uint32_t direction = 0;
@@ -69,7 +69,7 @@ namespace
                 return false;
             }
         }
-        if(!c.U32(colors_min) || !c.U32(colors_max) || !c.U32(speed))
+        if(!c.U32(colors_min) || !c.U32(colors_max) || !c.U32(out.speed))
         {
             return false;
         }
@@ -149,7 +149,8 @@ bool ParseControllerData(const uint8_t* data, size_t len, uint32_t version,
     Cursor c{ data, len };
 
     uint32_t data_size = 0;
-    if(!c.U32(data_size) || data_size != len - 4)
+    /* the server's size field counts the whole body, including itself */
+    if(!c.U32(data_size) || data_size != len || len < 4)
     {
         return false;
     }
@@ -271,5 +272,32 @@ std::vector<uint8_t> BuildUpdateModeBody(int32_t mode_index,
         memcpy(body.data() + 8, raw_mode.data(), raw_mode.size());
     }
     return body;
+}
+
+bool PatchModeSpeed(std::vector<uint8_t>& raw, uint32_t version,
+                    uint32_t speed)
+{
+    /* name_len + name, then value/flags/speed_min/speed_max, then at v3+
+       brightness_min/brightness_max, then colors_min/colors_max —
+       the speed field follows */
+    if(raw.size() < 2)
+    {
+        return false;
+    }
+    uint16_t name_len = 0;
+    memcpy(&name_len, raw.data(), 2);
+
+    size_t off = 2 + name_len + 16;   /* name, value, flags, speed_min/max */
+    if(version >= 3)
+    {
+        off += 8;                     /* brightness_min/max */
+    }
+    off += 8;                         /* colors_min, colors_max            */
+    if(off + 4 > raw.size())
+    {
+        return false;
+    }
+    memcpy(raw.data() + off, &speed, 4);
+    return true;
 }
 }

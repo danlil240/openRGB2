@@ -45,6 +45,7 @@ namespace openrgb_bench
         std::string              name;
         uint32_t                 value       = 0;
         uint32_t                 flags       = 0;
+        uint32_t                 speed       = 0;
         uint32_t                 color_mode  = 0;
         /* raw serialized description at the negotiated protocol version —
            replayed verbatim by UpdateMode for state restore */
@@ -98,4 +99,12 @@ namespace openrgb_bench
     /* replays a raw mode description captured by ParseControllerData */
     std::vector<uint8_t> BuildUpdateModeBody(int32_t mode_index,
                                              const std::vector<uint8_t>& raw_mode);
+
+    /*---------------------------------------------------------*\
+    | Overwrites the speed field inside a raw mode             |
+    | description (as captured in SdkMode::raw). Returns       |
+    | false on malformed input.                                |
+    \*---------------------------------------------------------*/
+    bool PatchModeSpeed(std::vector<uint8_t>& raw, uint32_t version,
+                        uint32_t speed);
 }

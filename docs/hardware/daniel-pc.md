@@ -68,6 +68,23 @@ identifiers out of committed files.
       before any timing run.
 - [ ] FanControl sensors readable before and after the session.
 
+## Revalidation outcome — 2026-09-26 session
+
+Backend `vendor/OpenRGB/release/OpenRGB.exe` (openRGB2 `7332e3b` +
+Milestone-1 instrumentation) enumerated:
+
+| Expected | Observed | Status |
+| --- | --- | --- |
+| Wireless group, 3 fans × 40 LEDs | `UNI FAN SL V3 Wireless` group, **120 LEDs**, modes Direct/Static/Spectrum Cycle/Rainbow Wave/Breathing | ✓ (stable identity on file in `profiles/local/`) |
+| Motherboard headers 8/16/8 | `X870E AORUS ELITE WIFI7 ICE` reported **2 LEDs** total | **gap — headers did not enumerate as configured**; investigate before layout-dependent work |
+| DIMMs × 2 | not enumerated | backend ran non-elevated; PawnIO-dependent |
+| GPU logo | RTX 5080 MASTER ICE, 26 LEDs | ✓ |
+| Mouse / keyboard | Basilisk V3 Pro (13), G512 (108) | ✓ — G Hub running, owns G512 |
+
+Ownership: FanControl ran throughout (PID checked before/after); no
+L-Connect/Synapse/GCC/other OpenRGB instances held the wireless group;
+0 foreign-master events and 0 transport revalidations in ~2 h of tracing.
+
 ## Session artifacts
 
 | Artifact | Location |

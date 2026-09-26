@@ -178,6 +178,10 @@ static void Usage()
     "  --duration-s <n>     seconds per rate (default 30)\n"
     "  --settle-s <n>       quiet gap between sweep rates (default 2)\n"
     "  --out <path>         per-send CSV output\n"
+    "  --mode <name>        apply a named firmware mode instead of streaming\n"
+    "                       (e.g. \"Spectrum Cycle\"), hold, then restore\n"
+    "  --speed <n>          override the mode's speed field (with --mode)\n"
+    "  --hold-s <n>         observation time after --mode apply (default 15)\n"
     "  --dry-run            show the plan, send nothing\n"
     "\n"
     "Runs capture device state, enter Direct mode, stream the pattern, then\n"
@@ -218,6 +222,10 @@ int main(int argc, char** argv)
     uint32_t   duration_s = 30;
     uint32_t   settle_s   = 2;
     std::string out_path;
+    std::string mode_name;
+    bool       speed_set  = false;
+    uint32_t   speed      = 0;
+    uint32_t   hold_s     = 15;
     std::vector<std::string> device_filters;
     std::vector<uint32_t>    rates;
 
@@ -242,6 +250,9 @@ int main(int argc, char** argv)
         else if(arg == "--fps")        { if(!ParseUint32(next(), fps)) { fprintf(stderr, "bad fps\n"); return 2; } }
         else if(arg == "--duration-s") { if(!ParseUint32(next(), duration_s)) { fprintf(stderr, "bad duration\n"); return 2; } }
         else if(arg == "--settle-s")   { if(!ParseUint32(next(), settle_s)) { fprintf(stderr, "bad settle\n"); return 2; } }
+        else if(arg == "--mode")       { mode_name = next(); }
+        else if(arg == "--speed")      { if(!ParseUint32(next(), speed)) { fprintf(stderr, "bad speed\n"); return 2; } speed_set = true; }
+        else if(arg == "--hold-s")     { if(!ParseUint32(next(), hold_s)) { fprintf(stderr, "bad hold\n"); return 2; } }
         else if(arg == "--pattern")
         {
             const std::string p = next();
@@ -358,10 +369,12 @@ int main(int argc, char** argv)
         bool selected = select_all;
         if(!selected)
         {
-            const std::string lower_name = ToLower(c.name);
+            const std::string haystack = ToLower(
+                c.name + " " + c.vendor + " " + c.description + " "
+                + c.location);
             for(const std::string& f : device_filters)
             {
-                if(lower_name.find(ToLower(f)) != std::string::npos)
+                if(haystack.find(ToLower(f)) != std::string::npos)
                 {
                     selected = true;
                     break;
@@ -388,6 +401,106 @@ int main(int argc, char** argv)
     {
         fprintf(stderr, "no controllers matched the selection\n");
         return 1;
+    }
+
+    /* shared restore: re-applies the captured mode, then colors */
+    auto restore_all = [&]() -> bool
+    {
+        bool ok = true;
+        for(const Target& t : targets)
+        {
+            try
+            {
+                if(!t.restore_raw_mode.empty())
+                {
+                    client.UpdateMode(t.dev_id, t.restore_mode,
+                                      t.restore_raw_mode);
+                }
+                if(!t.restore_colors.empty())
+                {
+                    client.UpdateLEDs(t.dev_id, t.restore_colors);
+                }
+            }
+            catch(const std::exception& e)
+            {
+                ok = false;
+                fprintf(stderr, "device %u: RESTORE FAILED: %s\n",
+                        t.dev_id, e.what());
+            }
+        }
+        return ok;
+    };
+
+    /* --mode: apply a named firmware mode, hold for observation, restore */
+    if(!mode_name.empty())
+    {
+        printf("\nplan: mode='%s' hold=%us%s | devices:", mode_name.c_str(),
+               hold_s, speed_set ? " (speed overridden)" : "");
+        for(const Target& t : targets)
+        {
+            printf(" [%u] %s", t.dev_id, t.info.name.c_str());
+        }
+        printf("\n");
+        if(dry_run)
+        {
+            printf("dry run: no packets sent\n");
+            return 0;
+        }
+        for(const Target& t : targets)
+        {
+            int32_t mode_idx = -1;
+            for(size_t m = 0; m < t.info.modes.size(); m++)
+            {
+                if(ToLower(t.info.modes[m].name) == ToLower(mode_name))
+                {
+                    mode_idx = (int32_t)m;
+                    break;
+                }
+            }
+            if(mode_idx < 0 || t.info.modes[mode_idx].raw.empty())
+            {
+                fprintf(stderr, "device %u has no mode '%s'\n",
+                        t.dev_id, mode_name.c_str());
+                return 1;
+            }
+            std::vector<uint8_t> raw = t.info.modes[mode_idx].raw;
+            if(speed_set
+               && !PatchModeSpeed(raw, client.ProtocolVersion(), speed))
+            {
+                fprintf(stderr, "device %u: cannot patch speed on mode '%s'\n",
+                        t.dev_id, mode_name.c_str());
+                return 1;
+            }
+            try
+            {
+                client.UpdateMode(t.dev_id, mode_idx, raw);
+            }
+            catch(const std::exception& e)
+            {
+                fprintf(stderr, "device %u: mode apply failed: %s\n",
+                        t.dev_id, e.what());
+                return 1;
+            }
+            printf("device [%u] %s: mode '%s' applied\n", t.dev_id,
+                   t.info.name.c_str(), t.info.modes[mode_idx].name.c_str());
+        }
+        printf("holding %us for backend upload/resend observation ...\n",
+               hold_s);
+        const auto hold_end = Clock::now() + std::chrono::seconds(hold_s);
+        while(Clock::now() < hold_end && !g_stop)
+        {
+            SleepMs(50);
+        }
+        printf("restoring saved device state ...\n");
+        if(restore_all())
+        {
+            printf("restore complete\n");
+        }
+        else
+        {
+            fprintf(stderr, "restore incomplete — check devices manually\n");
+        }
+        return 0;
     }
 
     printf("\nplan: pattern=%s rates=", PatternName(pattern));
@@ -534,9 +647,9 @@ int main(int argc, char** argv)
     /* per-device interval summary */
     for(const Target& t : targets)
     {
-        std::vector<uint64_t> intervals;
         for(uint32_t rate : rates)
         {
+            std::vector<uint64_t> intervals;
             uint64_t prev = 0;
             bool first = true;
             for(const FrameRecord& r : records)
@@ -566,26 +679,7 @@ int main(int argc, char** argv)
 
     /* restore saved state */
     printf("restoring saved device state ...\n");
-    bool restore_ok = true;
-    for(const Target& t : targets)
-    {
-        try
-        {
-            if(!t.restore_raw_mode.empty())
-            {
-                client.UpdateMode(t.dev_id, t.restore_mode, t.restore_raw_mode);
-            }
-            if(!t.restore_colors.empty())
-            {
-                client.UpdateLEDs(t.dev_id, t.restore_colors);
-            }
-        }
-        catch(const std::exception& e)
-        {
-            restore_ok = false;
-            fprintf(stderr, "device %u: RESTORE FAILED: %s\n", t.dev_id, e.what());
-        }
-    }
+    const bool restore_ok = restore_all();
     if(restore_ok)
     {
         printf("restore complete\n");

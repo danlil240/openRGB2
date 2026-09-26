@@ -23,6 +23,17 @@ build/tools/bench/Release/lianli_bench.exe \
     --out session/sdk-gradient.csv
 ```
 
+Firmware-mode baseline (uploaded preset, runs autonomously on hardware):
+
+```bash
+build/tools/bench/Release/lianli_bench.exe \
+    --device "Lian Li" --mode "Spectrum Cycle" --speed 100 --hold-s 15
+```
+
+`--mode` applies the named mode (with optional `--speed` override patched
+into the raw mode description), holds `--hold-s` seconds so the backend
+upload/resend-until-ack traffic is observable in the trace, then restores.
+
 Ctrl+C stops early and still restores the saved mode and colors. Exit code
 3 means the run was aborted or restore was incomplete — check devices
 manually.
