@@ -934,6 +934,48 @@ static void TestLayoutMismatchDebounce()
           "persistent motherboard RGB ownership mismatch remains terminal");
 }
 
+static void TestIncompleteDiscoveryRecord()
+{
+    /* Seen on hardware: the RX table briefly reports the target MAC
+       with fan_count=0 at stream start — a half-written row, not a
+       bound group with zero fans. That is an incomplete observation
+       (a miss), not an incompatible layout: streaming keeps using the
+       still-fresh sighting, sustained incomplete rows degrade to Lost
+       instead of Failed, and valid rows recover on their own. */
+    FakeClock clk; FakeLink link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    auto up = std::make_shared<RgbUpload>(MakeUpload());
+    rt.SetDesired(up);
+    bool incomplete = false;
+    link.poll_fn = [&]
+    {
+        auto response = MakeDiscovery(MAC_TARGET, MAC_MASTER,
+            link.rgb_sends > 0 ? up->EffectId().data() : nullptr);
+        if(incomplete)
+            response[4 + 19] = 0;
+        return response;
+    };
+    RunFor(rt, clk, 2000);
+    CHECK(rt.Confirmed(), "upload confirmed before incomplete rows");
+
+    incomplete = true;
+    rt.SetDesired(std::make_shared<RgbUpload>(MakeUpload()));
+    int rgb_before = link.rgb_sends;
+    RunFor(rt, clk, 3000);
+    CHECK(link.rgb_sends > rgb_before,
+          "incomplete rows do not interrupt streaming on a fresh sighting");
+    CHECK(rt.State() != WirelessState::Failed,
+          "incomplete rows never vote toward terminal failure");
+
+    RunFor(rt, clk, 7000);
+    CHECK(rt.State() == WirelessState::Lost && !rt.Confirmed(),
+          "sustained incomplete rows degrade to Lost, not Failed");
+    incomplete = false;
+    RunFor(rt, clk, 4000);
+    CHECK(rt.Confirmed(), "valid rows recover after an incomplete window");
+}
+
 static void TestChangedTransmitterOnReconnect()
 {
     FakeClock clk; FakeLink link;
@@ -1088,6 +1130,7 @@ int main()
     TestBriefOutageRevalidatesIdentity();
     TestRgbFailureBudget();
     TestLayoutMismatchDebounce();
+    TestIncompleteDiscoveryRecord();
     TestSharedLinkReconnect();
     TestEffectRendering();
 

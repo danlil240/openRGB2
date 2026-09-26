@@ -289,6 +289,18 @@ void Diagnostics::RecordForeignMaster()
     TraceLocked("foreign_master", 0, 0, 0);
 }
 
+void Diagnostics::RecordRgbClock(bool valid, uint32_t ticks)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    counters.rgb_clock_queries++;
+    if(valid)
+    {
+        counters.rgb_clock_valid_samples++;
+        counters.rgb_clock_ticks = ticks;
+    }
+    TraceLocked("rgb_clock", (long long)ticks, valid ? 1 : 0, 0);
+}
+
 void Diagnostics::OpenTrace(const std::string& path, uint64_t max_rows)
 {
     std::lock_guard<std::mutex> lock(mutex);
@@ -429,6 +441,9 @@ void Diagnostics::WriteSummaryLocked() const
     DIAG_FIELD(keepalive_gap_ms_max)
     DIAG_FIELD(transport_revalidations)
     DIAG_FIELD(foreign_master_events)
+    DIAG_FIELD(rgb_clock_queries)
+    DIAG_FIELD(rgb_clock_valid_samples)
+    DIAG_FIELD(rgb_clock_ticks)
     #undef DIAG_FIELD
     summary << "trace_rows," << sink->rows << '\n';
     summary << "trace_capped," << (sink->capped ? 1 : 0) << '\n';

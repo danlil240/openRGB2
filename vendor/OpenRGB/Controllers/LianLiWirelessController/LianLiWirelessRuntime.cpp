@@ -311,7 +311,9 @@ void WirelessRuntime::Tick()
     {
         next_rgb_clock_ms = now + 3000;
         uint32_t ticks = 0;
-        if(link.ReadRgbClock(master, latest.channel, ticks) && ticks != 0)
+        const bool got = link.ReadRgbClock(master, latest.channel, ticks)
+                         && ticks != 0;
+        if(got)
         {
             const bool reboot = rgb_clock.valid
                 && uint32_t(ticks - rgb_clock.ticks) > 0x80000000u;
@@ -323,6 +325,7 @@ void WirelessRuntime::Tick()
         {
             rgb_clock.valid = false;
         }
+        Diagnostics::Get().RecordRgbClock(got && rgb_clock.valid, ticks);
     }
 }
 
@@ -394,6 +397,22 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
         {
             found = &s;
         }
+    }
+
+    /*---------------------------------------------------------*\
+    | A matching record with fan_count == 0 is an incomplete    |
+    | observation — the RX table can briefly expose a partially |
+    | written row under RF load (seen on hardware at stream     |
+    | start). A bound group always reports >= 1 fan, so zero    |
+    | means "row not yet reliable": treat it as a miss, keep    |
+    | the last good sighting until it goes stale, and never let |
+    | it vote toward a layout failure.                          |
+    \*---------------------------------------------------------*/
+    if(found != nullptr && found->fan_count == 0)
+    {
+        Diagnostics::Get().Trace("layout_incomplete", expected_fans,
+                                 found->fan_count, found->mb_rgb_sync ? 1 : 0);
+        found = nullptr;
     }
 
     Diagnostics::Get().RecordDiscovery(poll_duration_us, found != nullptr,

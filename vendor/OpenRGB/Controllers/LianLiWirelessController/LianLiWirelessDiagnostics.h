@@ -103,6 +103,11 @@ namespace LianLiWireless
         /* resets and ownership */
         uint64_t transport_revalidations = 0;
         uint64_t foreign_master_events   = 0;
+
+        /* playback clock queries (V1 master RGB clock) */
+        uint64_t rgb_clock_queries       = 0;
+        uint64_t rgb_clock_valid_samples = 0;
+        uint64_t rgb_clock_ticks         = 0;   /* last sampled ticks */
     };
 
     class Diagnostics
@@ -136,6 +141,7 @@ namespace LianLiWireless
         void RecordUsbRead(uint64_t duration_us);
         void RecordTransportRevalidation();
         void RecordForeignMaster();
+        void RecordRgbClock(bool valid, uint32_t ticks);
 
         /* explicit trace control (tests); production reads
            OPENRGB_LIANLI_TRACE / OPENRGB_LIANLI_TRACE_MAX_ROWS */
