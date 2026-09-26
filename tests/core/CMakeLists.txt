@@ -58,6 +58,28 @@ dls_suite(device_preset_test ${SCENE_SRC} ${V3_SRC})
 dls_suite(studio_editor_test ${SCENE_SRC} ${V3_SRC} ${EDITOR_SRC})
 dls_suite(effect_json_test  ${SCENE_SRC} ${V3_SRC})
 
+add_executable(playback_test
+    playback_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/playback/PlaybackLoop.cpp
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessEffects.cpp
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessCodec.cpp
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies/tinyuz/compress/tuz_enc.cpp
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies/tinyuz/compress/tuz_enc_private/tuz_enc_clip.cpp
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies/tinyuz/compress/tuz_enc_private/tuz_enc_code.cpp
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies/tinyuz/compress/tuz_enc_private/tuz_enc_match.cpp
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies/tinyuz/compress/tuz_enc_private/tuz_sstring.cpp
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies/tinyuz/decompress/tuz_dec.c
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies/HDiffPatch/libHDiffPatch/HDiff/private_diff/libdivsufsort/divsufsort.cpp)
+target_include_directories(playback_test PRIVATE
+    ${CORE_DIR}
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/Controllers/LianLiWirelessController
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies/tinyuz
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies/HDiffPatch)
+target_compile_definitions(playback_test PRIVATE NDEBUG _IS_USED_MULTITHREAD=0)
+add_test(NAME playback_test COMMAND playback_test)
+set_tests_properties(playback_test PROPERTIES LABELS core)
+
 # Key translation is self-contained.
 add_executable(key_translate_test key_translate_test.cpp
     ${CORE_DIR}/inputs/KeyTranslate.cpp)

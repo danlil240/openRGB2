@@ -62,6 +62,7 @@ namespace LianLiWireless
         bool ReadMasterMac(Mac& out) override;
         bool PollDiscovery(std::vector<uint8_t>& out) override;
         bool SendChunks(const std::array<UsbChunk, USB_CHUNKS_PER_PACKET>& chunks) override;
+        bool ReadRgbClock(const Mac& master, uint8_t channel, uint32_t& ticks) override;
         uint64_t ConnectionGeneration() const override { return connection_generation; }
 
         const char* LastError() const { return last_error.c_str(); }

@@ -27,6 +27,8 @@
 ||     usb_read     duration_us   0             0             ||
 ||     revalidate   0             0             0             ||
 ||     foreign_master 0          0             0             ||
+||     state        old_state     new_state     has_error     ||
+||     layout_mismatch expected  observed      mb_rgb_sync   ||
 ||                                                           ||
 ||   This file is part of the OpenRGB project                ||
 ||   SPDX-License-Identifier: GPL-2.0-or-later               ||

@@ -889,6 +889,51 @@ static void TestRgbFailureBudget()
     CHECK(rt.Confirmed(), "RGB-only transport failures recover after backoff");
 }
 
+static void TestLayoutMismatchDebounce()
+{
+    FakeClock clk; FakeLink link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    auto up = std::make_shared<RgbUpload>(MakeUpload());
+    rt.SetDesired(up);
+    int bad_polls = 0;
+    link.poll_fn = [&]
+    {
+        auto response = MakeDiscovery(MAC_TARGET, MAC_MASTER,
+            link.rgb_sends > 0 ? up->EffectId().data() : nullptr);
+        if(bad_polls++ == 0)
+            response[4 + 19] = 2;
+        return response;
+    };
+    RunFor(rt, clk, 300);
+    CHECK(link.rgb_sends == 0 && rt.State() != WirelessState::Failed,
+          "one inconsistent fan count stops writes without terminal failure");
+    RunFor(rt, clk, 2000);
+    CHECK(rt.Confirmed(), "valid layout after one mismatch restores playback");
+
+    bad_polls = 0;
+    for(int i = 0; i < 10 && bad_polls == 0; ++i)
+    {
+        clk.Advance(100);
+        rt.Tick();
+    }
+    CHECK(bad_polls > 0 && rt.Latest() == nullptr
+          && rt.State() != WirelessState::Failed,
+          "one layout mismatch during active playback invalidates the route");
+    RunFor(rt, clk, 2000);
+    CHECK(rt.Confirmed(), "active playback resumes after valid layout returns");
+
+    link.poll_fn = [&]
+    {
+        auto response = MakeDiscovery(MAC_TARGET, MAC_MASTER);
+        response[4 + 28] |= 0x40;
+        return response;
+    };
+    RunFor(rt, clk, 2000);
+    CHECK(rt.State() == WirelessState::Failed && !rt.Confirmed(),
+          "persistent motherboard RGB ownership mismatch remains terminal");
+}
+
 static void TestChangedTransmitterOnReconnect()
 {
     FakeClock clk; FakeLink link;
@@ -1042,6 +1087,7 @@ int main()
     TestChangedTransmitterOnReconnect();
     TestBriefOutageRevalidatesIdentity();
     TestRgbFailureBudget();
+    TestLayoutMismatchDebounce();
     TestSharedLinkReconnect();
     TestEffectRendering();
 

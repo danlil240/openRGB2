@@ -36,6 +36,13 @@ namespace LianLiWireless
             std::string   last_error;
             bool          have_sighting = false;
             Sighting      latest{};
+            uint16_t      frame_count = 0;
+            uint32_t      interval_hundredths = 0;
+            double        effective_cycle_ms = 0;
+            double        nominal_fps = 0;
+            size_t        compressed_bytes = 0;
+            std::array<uint8_t, 4> effect_id{};
+            RgbClockSnapshot rgb_clock;
         };
 
         /*---------------------------------------------------------*\
@@ -56,7 +63,9 @@ namespace LianLiWireless
         std::vector<Mac> Groups() const;
 
         /* newest-frame-wins; unknown MAC is ignored */
-        void SetDesired(const Mac& mac, std::shared_ptr<const RgbUpload> upload);
+        uint64_t BeginMode(const Mac& mac, bool playback);
+        void SetDesired(const Mac& mac, std::shared_ptr<const RgbUpload> upload,
+                        uint64_t revision = 0);
         void ClearDesired(const Mac& mac);
 
         bool GetStatus(const Mac& mac, GroupStatus& out) const;
@@ -78,6 +87,16 @@ namespace LianLiWireless
 
         mutable std::mutex    mutex;
         std::map<Mac, std::unique_ptr<WirelessRuntime>> runtimes;
+        struct PendingUpload
+        {
+            bool queued = false;
+            std::shared_ptr<const RgbUpload> upload;
+            bool mode_selected = false;
+            bool playback = false;
+            uint64_t revision = 0;
+        };
+        std::mutex pending_mutex;
+        std::map<Mac, PendingUpload> pending;
         std::thread           worker;
         std::atomic<bool>     stop{false};
         std::mutex            wake_mutex;

@@ -52,7 +52,8 @@ LianLiWirelessController::LianLiWirelessController(
     led_count = (uint8_t)(fan_count * fan_info.leds_per_fan);
 }
 
-void LianLiWirelessController::SetLEDs(const RGBColor* led_colors, size_t count)
+void LianLiWirelessController::SetLEDs(const RGBColor* led_colors, size_t count,
+                                      uint64_t revision)
 {
     std::vector<uint8_t> payload(led_count * 3);
 
@@ -77,9 +78,10 @@ void LianLiWirelessController::SetLEDs(const RGBColor* led_colors, size_t count)
         auto upload = std::make_shared<RgbUpload>(
             CompressTimed(payload.data(), payload.size()),
             led_count, 1, timing,
-            (uint8_t)(upload_variant.fetch_add(1) & 0xFF));
+            upload_variant.fetch_add(1));
 
-        service.SetDesired(mac, std::move(upload));
+        service.SetDesired(mac, std::move(upload), revision);
+        last_error.clear();
     }
     catch(const std::exception& e)
     {
@@ -113,9 +115,38 @@ void LianLiWirelessController::SetFrames(const std::vector<uint8_t>& rgb_frames,
         auto upload = std::make_shared<RgbUpload>(
             CompressTimed(rgb_frames.data(), rgb_frames.size()),
             led_count, frame_count, timing,
-            (uint8_t)(upload_variant.fetch_add(1) & 0xFF));
+            upload_variant.fetch_add(1));
 
         service.SetDesired(mac, std::move(upload));
+        last_error.clear();
+    }
+    catch(const std::exception& e)
+    {
+        last_error = e.what();
+    }
+}
+
+void LianLiWirelessController::SetPlaybackLoop(const PlaybackLoop& loop,
+                                               uint64_t revision)
+{
+    if(loop.frame_count == 0
+       || loop.rgb.size() != (size_t)led_count * 3 * loop.frame_count
+       || loop.compressed.empty()
+       || loop.compressed.size() > MAX_COMPRESSED_BYTES)
+    {
+        last_error = "invalid playback loop for group";
+        return;
+    }
+
+    try
+    {
+        Diagnostics::Get().RecordCompress(loop.compression_us,
+            (uint64_t)loop.rgb.size(), (uint64_t)loop.compressed.size());
+        auto upload = std::make_shared<RgbUpload>(loop.compressed, led_count,
+            loop.frame_count, loop.timing,
+            upload_variant.fetch_add(1));
+        service.SetDesired(mac, std::move(upload), revision);
+        last_error.clear();
     }
     catch(const std::exception& e)
     {
@@ -133,6 +164,10 @@ std::string LianLiWirelessController::GetMacString() const
 
 std::string LianLiWirelessController::GetStatus() const
 {
+    if(!last_error.empty())
+    {
+        return last_error;
+    }
     LianLiWirelessService::GroupStatus st;
 
     if(service.GetStatus(mac, st))

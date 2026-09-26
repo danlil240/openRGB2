@@ -14,6 +14,7 @@
 
 #include "LianLiWirelessController.h"
 #include "RGBController.h"
+#include <atomic>
 
 class RGBController_LianLiWireless : public RGBController
 {
@@ -33,4 +34,5 @@ public:
 
 private:
     LianLiWirelessController*   controller;
+    std::atomic<uint64_t> mode_revision{0};
 };
