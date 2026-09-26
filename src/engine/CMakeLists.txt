@@ -38,4 +38,6 @@ add_executable(openrgb2-engine
     ${CORE_DIR}/effects/Presets.cpp
     ${CORE_DIR}/presets/EffectRegistry.cpp
     ${CORE_DIR}/presets/DevicePreset.cpp)
-target_link_libraries(openrgb2-engine PRIVATE openrgb2_engine)
+target_link_libraries(openrgb2-engine PRIVATE
+    openrgb2_engine
+    openrgb2_backend_openrgb)

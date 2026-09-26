@@ -18,6 +18,9 @@
 #include "Engine.h"
 #include "SceneWorker.h"
 
+#include "OpenRgbClient.h"
+#include "TcpSocket.h"
+
 #include "effects/Presets.h"
 #include "presets/EffectRegistry.h"
 #include "scene/SceneJson.h"
@@ -48,6 +51,7 @@ void Usage(const char* argv0)
 {
     std::fprintf(stderr,
         "usage: %s [--scene <scene.json>] [--effects-dir <dir>]\n"
+        "          [--sdk [host:port]]\n"
         "\n"
         "  Runs the lighting engine until SIGINT/SIGTERM. No UI is\n"
         "  required or expected. Without --scene the engine idles at\n"
@@ -55,7 +59,11 @@ void Usage(const char* argv0)
         "  --scene expects an expanded SceneDocument JSON (the core\n"
         "  scene schema); workspace/profile resolution lands with the\n"
         "  profile task. --effects-dir loads effect-look JSON files so\n"
-        "  scenes that name a preset resolve through the registry.\n",
+        "  scenes that name a preset resolve through the registry.\n"
+        "  --sdk connects submitLatest to the OpenRGB backend SDK\n"
+        "  (default 127.0.0.1:6744); without it frames go to a null\n"
+        "  sink. The backend is launched externally — this process\n"
+        "  never spawns it.\n",
         argv0);
 }
 
@@ -102,6 +110,8 @@ int main(int argc, char** argv)
 {
     std::string scene_path;
     std::string effects_dir;
+    std::string sdk_addr;                 /* empty = SDK disabled */
+    bool        sdk_enabled = false;
     for(int i = 1; i < argc; ++i)
     {
         const std::string arg = argv[i];
@@ -112,6 +122,17 @@ int main(int argc, char** argv)
         else if((arg == "--effects-dir") && i + 1 < argc)
         {
             effects_dir = argv[++i];
+        }
+        else if(arg == "--sdk")
+        {
+            /* Optional host:port; defaults to the pinned backend
+               endpoint (plan section 4). */
+            sdk_enabled = true;
+            sdk_addr    = "127.0.0.1:6744";
+            if(i + 1 < argc && argv[i + 1][0] != '-')
+            {
+                sdk_addr = argv[++i];
+            }
         }
         else if(arg == "--help" || arg == "-h")
         {
@@ -128,6 +149,52 @@ int main(int argc, char** argv)
     }
 
     openrgb2::Engine engine;
+
+    /* Optional SDK output: the client is the submitLatest sink —
+       its SubmitLatest sends one complete-controller UPDATELEDS
+       per RgbFrame over the protocol-4 wire. Reconnects run on the
+       client's bounded backoff (polled below); connection state
+       is surfaced through its DeviceSnapshots. */
+    std::shared_ptr<openrgb2::sdk::OpenRgbClient> sdk_client;
+    if(sdk_enabled)
+    {
+        openrgb2::sdk::OpenRgbClientOptions opts;
+        const std::string::size_type colon = sdk_addr.rfind(':');
+        if(colon != std::string::npos)
+        {
+            opts.host = sdk_addr.substr(0, colon);
+            opts.port = (uint16_t)std::strtoul(
+                sdk_addr.substr(colon + 1).c_str(), nullptr, 10);
+        }
+        else
+        {
+            opts.host = sdk_addr;
+        }
+        sdk_client =
+            std::make_shared<openrgb2::sdk::OpenRgbClient>(
+                opts,
+                std::make_unique<openrgb2::sdk::TcpSocket>());
+        engine.SetFrameSink(sdk_client);
+        if(sdk_client->Connect())
+        {
+            std::fprintf(stderr,
+                "openrgb2-engine: SDK connected to %s:%u "
+                "(protocol %u, %zu controllers)\n",
+                opts.host.c_str(), (unsigned)opts.port,
+                sdk_client->ProtocolVersion(),
+                sdk_client->Snapshots().size());
+        }
+        else
+        {
+            /* Not fatal: the sink reports Disconnected and the
+               bounded backoff keeps retrying via Poll(). */
+            std::fprintf(stderr,
+                "openrgb2-engine: SDK connect failed: %s "
+                "(will retry)\n",
+                sdk_client->LastError().c_str());
+            sdk_client->ReconnectNow();
+        }
+    }
 
     /* Frames are counted for the skeleton's heartbeat log. Device
        mapping (EvaluatedFrame -> per-controller RgbFrame -> the
@@ -185,6 +252,10 @@ int main(int argc, char** argv)
     const auto started = openrgb2::Clock::now();
     while(!g_stop.load())
     {
+        if(sdk_client)
+        {
+            sdk_client->Poll();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
