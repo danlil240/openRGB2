@@ -79,9 +79,20 @@ bool operator< (const DeviceKey& a, const DeviceKey& b); /* map ordering */
 ||   topology_generation — bumped on every enumeration/     |
 ||     topology change; frames stamped with a stale         |
 ||     generation are obsolete and must be rejected         |
-||   zones    — zone identities + LED counts (SDK order)    |
+||   zones    — zone identities + LED counts (SDK order);   |
+||     a zone's offset in the complete-controller buffer    |
+||     is the sum of the preceding zones' counts            |
 ||   modes    — supported mode names from enumeration,      |
 ||     never hard-coded array indices                       |
+||   name/vendor/device_type — raw enumeration fields       |
+||     (key.device is the "vendor:name" composite); they    |
+||     feed DeviceBinding resolution, which matches on      |
+||     name/vendor/serial/location, never on indices        |
+||   colors   — the controller's last-ENUMERATED per-LED    |
+||     colors (RGB order, LedCount() entries). The device   |
+||     mapper seeds complete-controller frames from them    |
+||     so unmapped LEDs keep their current colors (plan     |
+||     section 4). Empty when the backend reports none.     |
 \*---------------------------------------------------------*/
 enum class ConnectionState
 {
@@ -100,10 +111,14 @@ struct DeviceSnapshot
 {
     DeviceKey                 key;
     uint64_t                  topology_generation = 0;
+    std::string               name;
+    std::string               vendor;
+    int32_t                   device_type = -1;
     std::vector<ZoneSnapshot> zones;
     std::vector<std::string>  modes;
     int32_t                   active_mode = -1;
     ConnectionState           connection  = ConnectionState::Disconnected;
+    std::vector<RgbColor>     colors;
 
     uint32_t LedCount() const; /* sum of zone LED counts */
 };

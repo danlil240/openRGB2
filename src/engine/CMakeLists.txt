@@ -15,10 +15,12 @@ add_library(openrgb2_engine STATIC
     EngineTypes.cpp
     FrameSink.cpp
     DeliveryPipeline.cpp
+    DeviceMapper.cpp
     SceneWorker.cpp
     Engine.cpp
     ${CORE_DIR}/scene/SceneTypes.cpp
     ${CORE_DIR}/scene/SceneGraph.cpp
+    ${CORE_DIR}/scene/BindingResolver.cpp
     ${CORE_DIR}/effects/EffectTypes.cpp
     ${CORE_DIR}/effects/EffectEngine.cpp)
 target_include_directories(openrgb2_engine PUBLIC

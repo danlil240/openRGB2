@@ -16,6 +16,7 @@
 \*---------------------------------------------------------*/
 
 #include "DeliveryPipeline.h"
+#include "DeviceMapper.h"
 #include "Engine.h"
 #include "SceneWorker.h"
 
@@ -28,11 +29,13 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -52,12 +55,15 @@ void OnSignal(int)
    qualified per controller, never a global rate). The wireless
    group's measured ceiling is ~33.5 admitted uploads/s
    (docs/benchmarks/wireless-result.md), so it is paced at 30 ms.
-   Other controllers are unpaced until measured — the 60 Hz scene
+   Qualification is device-aware: IsWirelessGroupController keys
+   on the wireless service's own transport identity (the
+   "Wireless:" location prefix), not a name heuristic. Other
+   controllers are unpaced until measured — the 60 Hz scene
    clock already bounds how often producers can submit. */
 openrgb2::Clock::duration BudgetFor(
     const openrgb2::DeviceSnapshot& snap)
 {
-    if(snap.key.device.find("Wireless") != std::string::npos)
+    if(openrgb2::IsWirelessGroupController(snap))
     {
         return std::chrono::milliseconds(30);
     }
@@ -72,7 +78,14 @@ void SyncLanes(openrgb2::DeliveryPipeline& pipeline,
     pipeline.SyncDevices(snaps);
     for(const openrgb2::DeviceSnapshot& snap : snaps)
     {
-        pipeline.SetBudget(snap.key, BudgetFor(snap));
+        /* Only re-apply on change — SetBudget notifies the lane
+           even when the value is identical. */
+        openrgb2::Clock::duration current;
+        const openrgb2::Clock::duration want = BudgetFor(snap);
+        if(!pipeline.Budget(snap.key, current) || current != want)
+        {
+            pipeline.SetBudget(snap.key, want);
+        }
     }
 }
 
@@ -184,11 +197,18 @@ int main(int argc, char** argv)
        budgets, unchanged-frame suppression, and the distinct
        reliable convergence path (Task 3.3). It drains into the
        SDK transport below; with no transport configured its
-       lanes simply idle (and device mapping — Task 3.4 — is
-       what will produce per-controller RgbFrames). */
+       lanes simply idle. */
     std::shared_ptr<openrgb2::DeliveryPipeline> pipeline =
         std::make_shared<openrgb2::DeliveryPipeline>();
     engine.SetFrameSink(pipeline);
+
+    /* Device mapping (Task 3.4): resolves the scene's persisted
+       DeviceBindings against each enumeration — identities
+       re-resolve per reconnect, never persisted indices — and
+       assembles ONE complete-controller RgbFrame per
+       controller (wireless group's three zone edits = one
+       frame; unmapped LEDs keep their colors). */
+    openrgb2::DeviceMapper mapper;
 
     /* Optional SDK output: the client is the pipeline's
        transport — its SubmitLatest sends one
@@ -197,6 +217,7 @@ int main(int argc, char** argv)
        backoff (polled below); connection state is surfaced
        through its DeviceSnapshots, which are mirrored into
        pipeline lanes. */
+
     std::shared_ptr<openrgb2::sdk::OpenRgbClient> sdk_client;
     if(sdk_enabled)
     {
@@ -239,12 +260,19 @@ int main(int argc, char** argv)
         SyncLanes(*pipeline, *sdk_client);
     }
 
-    /* Frames are counted for the skeleton's heartbeat log. Device
-       mapping (EvaluatedFrame -> per-controller RgbFrame -> the
-       submitLatest sink) is a later M3 task. */
+    /* Every evaluated scene frame is split into per-controller
+       complete-controller frames and handed to the pipeline via
+       the engine's submitLatest sink. */
     std::atomic<uint64_t> frames{ 0 };
     engine.Worker().SetFrameCallback(
-        [&frames](const openrgb2::EvaluatedFrame&) { ++frames; });
+        [&engine, &mapper, &frames](const openrgb2::EvaluatedFrame& eval)
+        {
+            ++frames;
+            for(const openrgb2::RgbFrame& frame : mapper.MapFrame(eval))
+            {
+                engine.SubmitLatest(frame);
+            }
+        });
 
     if(!effects_dir.empty())
     {
@@ -274,6 +302,9 @@ int main(int argc, char** argv)
         }
         engine.Worker().SubmitScene(doc, std::move(layers),
                                     /*revision*/ 1);
+        /* The document owns the persisted bindings — resolution
+           itself runs on every SyncDevices (re-enumeration). */
+        mapper.SetScene(doc);
     }
 
     std::signal(SIGINT, OnSignal);
@@ -296,6 +327,14 @@ int main(int argc, char** argv)
        transport send cannot stall the others. */
     pipeline->Start();
 
+    /* Bound controllers need their direct (custom) mode before
+       live UpdateLEDs writes reach the LEDs. Applied once per
+       (controller, topology generation) — a reconnect/new
+       enumeration re-asserts it. Playback-mode ownership is the
+       M3 playback task's concern; nothing selects an uploaded
+       loop here yet. */
+    std::map<openrgb2::DeviceKey, uint64_t> custom_mode_done;
+
     const auto started = openrgb2::Clock::now();
     while(!g_stop.load())
     {
@@ -306,6 +345,32 @@ int main(int argc, char** argv)
                validation tracks the live backend state and new
                controllers get lanes without a restart. */
             SyncLanes(*pipeline, *sdk_client);
+
+            const std::vector<openrgb2::DeviceSnapshot> snaps =
+                sdk_client->Snapshots();
+            mapper.SyncDevices(snaps);
+            for(const openrgb2::DeviceKey& key :
+                mapper.BoundControllers())
+            {
+                const auto snap_it =
+                    std::find_if(snaps.begin(), snaps.end(),
+                        [&key](const openrgb2::DeviceSnapshot& s)
+                        { return s.key == key; });
+                if(snap_it == snaps.end() ||
+                   snap_it->connection !=
+                       openrgb2::ConnectionState::Connected)
+                {
+                    continue;
+                }
+                uint64_t& done = custom_mode_done[key];
+                if(done != snap_it->topology_generation)
+                {
+                    if(sdk_client->SetCustomMode(key))
+                    {
+                        done = snap_it->topology_generation;
+                    }
+                }
+            }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }

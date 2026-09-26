@@ -272,6 +272,9 @@ bool OpenRgbClient::EnumerateLocked(std::string& err)
         rec.index               = i;
         rec.snap.key            = MakeKey(c);
         rec.snap.topology_generation = 0;      /* stamped below */
+        rec.snap.name           = c.name;
+        rec.snap.vendor         = c.vendor;
+        rec.snap.device_type    = (int32_t)c.type;
         rec.snap.active_mode    = (int32_t)c.active_mode;
         rec.snap.connection     = ConnectionState::Connected;
         rec.modes               = c.modes;
@@ -285,6 +288,14 @@ bool OpenRgbClient::EnumerateLocked(std::string& err)
             zs.name      = z.name;
             zs.led_count = z.leds_count;
             rec.snap.zones.push_back(std::move(zs));
+        }
+        /* Last-enumerated device colors — the device mapper seeds
+           complete-controller frames from them so unmapped LEDs
+           keep their state (plan section 4). */
+        rec.snap.colors.reserve(c.colors.size());
+        for(const uint32_t packed : c.colors)
+        {
+            rec.snap.colors.push_back(FromSceneColor(packed));
         }
 
         /* Identical name+serial+location is genuinely ambiguous
@@ -677,6 +688,15 @@ bool OpenRgbClient::ResizeZone(const DeviceKey& controller,
         MarkBrokenLocked(e.what(), Clock::now());
         return false;
     }
+
+    /* The zone's LED count changed on the device: every frame
+       assembled against the old topology is obsolete (plan
+       section 6 — stop obsolete frames on topology change).
+       Bump the generation WITHOUT re-stamping the snapshots:
+       snapshots keep reporting their pre-change generation, so
+       every subsequent SubmitLatest rejects as stale until the
+       caller's Enumerate() refreshes zones and colors. */
+    ++topology_generation_;
     return true;
 }
 
