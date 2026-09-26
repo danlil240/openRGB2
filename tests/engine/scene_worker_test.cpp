@@ -245,6 +245,77 @@ static void TestWorkerThread()
     worker.Stop();
 }
 
+static void TestNextDeadline()
+{
+    const TimePoint epoch = Clock::now();
+
+    /* First tick strictly after now on a past epoch: 25 ms in is
+       tick 2 of the 60 Hz grid (epoch + 2/60 s). */
+    TimePoint d = SceneWorker::NextDeadline(
+        epoch, epoch + std::chrono::milliseconds(25));
+    const TimePoint tick2 = epoch +
+        std::chrono::duration_cast<Clock::duration>(
+            std::chrono::duration<double>(2.0 / 60.0));
+    CHECK(d > epoch + std::chrono::milliseconds(25));
+    CHECK(d <= epoch + std::chrono::milliseconds(25) +
+                   std::chrono::milliseconds(17));
+    CHECK(std::chrono::abs(d - tick2) < std::chrono::milliseconds(1));
+
+    /* Missed ticks are dropped — a far-past epoch still yields the
+       next grid point just ahead of now, not a catch-up backlog. */
+    d = SceneWorker::NextDeadline(epoch, epoch + std::chrono::seconds(1));
+    const TimePoint tick61 = epoch +
+        std::chrono::duration_cast<Clock::duration>(
+            std::chrono::duration<double>(61.0 / 60.0));
+    CHECK(std::chrono::abs(d - tick61) < std::chrono::milliseconds(1));
+
+    /* Regression (task 3.1 review): an epoch at or after now is a
+       future "scene starts at T" reference — the deadline is the
+       epoch itself. Pre-fix, a negative elapsed was cast to
+       uint64_t (UB, ~2^64 garbage), producing a deadline hundreds
+       of millions of years out and silently deading the worker. */
+    CHECK(SceneWorker::NextDeadline(epoch, epoch) == epoch);
+    const TimePoint future = epoch + std::chrono::seconds(5);
+    CHECK(SceneWorker::NextDeadline(future, epoch) == future);
+    CHECK(SceneWorker::NextDeadline(future,
+                                    future - std::chrono::milliseconds(1)) ==
+          future);
+    /* Past the future epoch, the grid resumes normally. */
+    d = SceneWorker::NextDeadline(future,
+                                  future + std::chrono::milliseconds(20));
+    CHECK(d > future + std::chrono::milliseconds(20));
+}
+
+static void TestFutureEpochWorker()
+{
+    /* Live regression for the same bug: with a future epoch, the
+       worker must still wake at the epoch and produce frames
+       (t >= 0), not sleep forever on a garbage deadline. */
+    SceneWorker worker;
+    worker.SubmitScene(WaveDoc(), SolidLayers(0, 200, 0));
+
+    std::atomic<uint64_t> frames{ 0 };
+    std::atomic<int>      nonnegative_t{ 0 };
+    worker.SetFrameCallback([&](const EvaluatedFrame& f)
+    {
+        ++frames;
+        if(f.scene_time_s >= 0.0)
+        {
+            ++nonnegative_t;
+        }
+    });
+
+    CHECK(worker.Start());
+    worker.SetEpoch(Clock::now() + std::chrono::milliseconds(150));
+    std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    worker.Stop();
+
+    /* ~12 post-epoch ticks in the last 200 ms at 60 Hz; a stalled
+       worker produces none with t >= 0. */
+    CHECK(nonnegative_t.load() >= 5);
+    CHECK(frames.load() >= 5);
+}
+
 static void TestEngineComposition()
 {
     Engine engine;
@@ -279,6 +350,8 @@ int main()
     TestLatestWinsScene();
     TestNoScene();
     TestInputSlot();
+    TestNextDeadline();
+    TestFutureEpochWorker();
     TestWorkerThread();
     TestEngineComposition();
     std::printf("scene worker: %d checks, %d failures\n", checks, failures);

@@ -104,6 +104,14 @@ public:
     void     Stop();
     bool     Running() const;
 
+    /* Next tick deadline strictly after `now` for the tick grid
+       anchored at `epoch`. Missed ticks are dropped — the result is
+       the first grid point after `now`, never a backlog. When `epoch`
+       is at or after `now` (a future "scene starts at T" epoch), the
+       deadline is the epoch itself (t = 0 first frame). Exposed for
+       deterministic deadline tests; the worker loop uses it too. */
+    static TimePoint NextDeadline(TimePoint epoch, TimePoint now);
+
 private:
     struct SceneState
     {

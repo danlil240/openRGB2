@@ -152,10 +152,28 @@ bool SceneWorker::Running() const
     return run_;
 }
 
-void SceneWorker::Run()
+TimePoint SceneWorker::NextDeadline(TimePoint epoch, TimePoint now)
 {
     const std::chrono::duration<double> period(1.0 / kTickHz);
+    const double elapsed =
+        std::chrono::duration<double>(now - epoch).count();
+    if(elapsed <= 0.0)
+    {
+        /* Epoch is now or in the future: the first frame is due at
+           the epoch itself (t = 0). Returning `epoch` here also
+           avoids casting a negative tick index to uint64_t, which
+           would be UB and could yield a deadline ~2^64 ns out —
+           silently stalling the worker while it reports Running(). */
+        return epoch;
+    }
+    const uint64_t next_tick =
+        static_cast<uint64_t>(std::floor(elapsed * kTickHz)) + 1;
+    return epoch + std::chrono::duration_cast<Clock::duration>(
+                       period * static_cast<double>(next_tick));
+}
 
+void SceneWorker::Run()
+{
     for(;;)
     {
         /* Deadline = the first tick strictly after now. Ticks already
@@ -168,13 +186,7 @@ void SceneWorker::Run()
             {
                 return;
             }
-            const double elapsed =
-                std::chrono::duration<double>(Clock::now() - epoch_).count();
-            const uint64_t next_tick =
-                static_cast<uint64_t>(std::floor(elapsed * kTickHz)) + 1;
-            deadline = epoch_ +
-                std::chrono::duration_cast<Clock::duration>(
-                    period * static_cast<double>(next_tick));
+            deadline = NextDeadline(epoch_, Clock::now());
         }
 
         {
