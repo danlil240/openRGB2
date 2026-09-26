@@ -8,6 +8,8 @@
 \*---------------------------------------------------------*/
 
 #include "LianLiWirelessRuntime.h"
+#include "LianLiWirelessDiagnostics.h"
+#include <chrono>
 #include <stdexcept>
 
 using namespace LianLiWireless;
@@ -35,7 +37,12 @@ void WirelessRuntime::SetDesired(std::shared_ptr<const RgbUpload> upload)
        Discovery resumes one normal poll interval after the stream stops. */
     if(have_sighting)
     {
-        next_poll_ms = now + cfg.poll_ms;
+        const uint64_t postponed = now + cfg.poll_ms;
+        if(postponed > next_poll_ms)
+        {
+            Diagnostics::Get().RecordDiscoveryDeferred();
+        }
+        next_poll_ms = postponed;
     }
     resends        = 0;
     drift_mismatch = 0;
@@ -67,6 +74,10 @@ bool WirelessRuntime::Confirmed() const
 void WirelessRuntime::Enter(WirelessState s, const char* err)
 {
     state = s;
+    if(s == WirelessState::ForeignMaster)
+    {
+        Diagnostics::Get().RecordForeignMaster();
+    }
     if(err && *err)
     {
         last_error = err;
@@ -89,6 +100,7 @@ void WirelessRuntime::RetryTransport()
 {
     /* Preserve the desired profile and original master identity, but
        discard all observations/counters from before the outage. */
+    Diagnostics::Get().RecordTransportRevalidation();
     master_known = false;
     have_sighting = false;
     latest = {};
@@ -113,6 +125,7 @@ void WirelessRuntime::RevalidateTransport(const char* err)
 {
     /* Even one failed operation can invalidate and reopen the USB pair.
        Re-read its identity before any further discovery-driven writes. */
+    Diagnostics::Get().RecordTransportRevalidation();
     master_known = false;
     have_sighting = false;
     latest = {};
@@ -244,6 +257,13 @@ void WirelessRuntime::Tick()
     {
         SendDesired(now);
     }
+    else if(state == WirelessState::Uploading && desired && have_sighting
+            && !keepalive_initial)
+    {
+        /* desired frame pending, but the RF stream budget, the resend
+           schedule, or an outstanding initial keep-alive gated it */
+        Diagnostics::Get().RecordUploadDeferred();
+    }
 }
 
 bool WirelessRuntime::PollAndMerge(uint64_t now)
@@ -273,7 +293,12 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
     }
 
     std::vector<uint8_t> response;
-    if(!link.PollDiscovery(response))
+    const auto poll_begin = std::chrono::steady_clock::now();
+    bool poll_ok = link.PollDiscovery(response);
+    const uint64_t poll_duration_us =
+        (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - poll_begin).count();
+    if(!poll_ok)
     {
         have_sighting = false;
         /*---------------------------------------------------------*\
@@ -310,6 +335,10 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
             found = &s;
         }
     }
+
+    Diagnostics::Get().RecordDiscovery(poll_duration_us, found != nullptr,
+                                       sightings.size(),
+                                       have_sighting ? (int64_t)(now - last_seen_ms) : -1);
 
     if(found == nullptr)
     {
@@ -366,6 +395,7 @@ bool WirelessRuntime::SendDesired(uint64_t now)
 {
     if(resends >= cfg.max_resends)
     {
+        Diagnostics::Get().RecordUploadFailure();
         Enter(WirelessState::Failed, "upload retry budget exhausted");
         return false;
     }
@@ -374,6 +404,7 @@ bool WirelessRuntime::SendDesired(uint64_t now)
     | Address with the freshest sighting's channel/receiver so  |
     | a channel move self-corrects.                             |
     \*---------------------------------------------------------*/
+    const auto send_begin = std::chrono::steady_clock::now();
     bool ok = true;
     for(size_t i = 0; i < desired->PacketCount(); i++)
     {
@@ -387,9 +418,13 @@ bool WirelessRuntime::SendDesired(uint64_t now)
             ok = link.SendChunks(chunks);
         }
     }
+    const uint64_t send_duration_us =
+        (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - send_begin).count();
 
     if(!ok)
     {
+        Diagnostics::Get().RecordUploadFailure();
         if(++send_failures >= cfg.max_send_failures)
         {
             TransportFailed("upload transport failure");
@@ -401,6 +436,13 @@ bool WirelessRuntime::SendDesired(uint64_t now)
         return false;
     }
 
+    Diagnostics::Get().RecordUploadAdmitted(desired->PacketCount(),
+                                             1, send_duration_us);
+    if(resends >= 1)
+    {
+        Diagnostics::Get().RecordUploadRetry();
+    }
+
     send_failures  = 0;
     resends++;
     next_stream_ms = now + cfg.stream_ms;
@@ -408,12 +450,32 @@ bool WirelessRuntime::SendDesired(uint64_t now)
     return true;
 }
 
-bool WirelessRuntime::SendKeepAlive(uint64_t /*now*/, bool initial)
+bool WirelessRuntime::SendKeepAlive(uint64_t now, bool /*initial*/)
 {
     uint16_t year   = 2000;
     uint8_t  month  = 1, day = 1, hour = 0, minute = 0, second = 0;
     clock.WallClock(year, month, day, hour, minute, second);
     auto chunks = ClockChunks(master, have_sighting ? latest.channel : 0,
-                              year, month, day, hour, minute, second, initial);
-    return link.SendChunks(chunks);
+                              year, month, day, hour, minute, second,
+                              keepalive_initial);
+
+    const auto begin = std::chrono::steady_clock::now();
+    const bool ok   = link.SendChunks(chunks);
+    const uint64_t duration_us =
+        (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - begin).count();
+
+    if(ok)
+    {
+        const int64_t gap_ms = keepalive_completed
+                             ? (int64_t)(now - last_keepalive_ms) : -1;
+        Diagnostics::Get().RecordKeepAlive(gap_ms, duration_us);
+        last_keepalive_ms    = now;
+        keepalive_completed  = true;
+    }
+    else
+    {
+        Diagnostics::Get().RecordKeepAliveFailure();
+    }
+    return ok;
 }

@@ -10,10 +10,26 @@
 
 #include "LianLiWirelessController.h"
 #include "LianLiWirelessCodec.h"
+#include "LianLiWirelessDiagnostics.h"
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 
 using namespace LianLiWireless;
+
+/*---------------------------------------------------------*\
+| Shared compression with duration/size diagnostics.       |
+\*---------------------------------------------------------*/
+static std::vector<uint8_t> CompressTimed(const uint8_t* data, size_t len)
+{
+    const auto begin = std::chrono::steady_clock::now();
+    std::vector<uint8_t> compressed = LianLiWirelessCodec::Compress(data, len);
+    Diagnostics::Get().RecordCompress(
+        (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - begin).count(),
+        (uint64_t)len, (uint64_t)compressed.size());
+    return compressed;
+}
 
 /*---------------------------------------------------------*\
 | Process-wide upload variant. The fan firmware ignores an  |
@@ -59,7 +75,7 @@ void LianLiWirelessController::SetLEDs(const RGBColor* led_colors, size_t count)
     try
     {
         auto upload = std::make_shared<RgbUpload>(
-            LianLiWirelessCodec::Compress(payload.data(), payload.size()),
+            CompressTimed(payload.data(), payload.size()),
             led_count, 1, timing,
             (uint8_t)(upload_variant.fetch_add(1) & 0xFF));
 
@@ -95,7 +111,7 @@ void LianLiWirelessController::SetFrames(const std::vector<uint8_t>& rgb_frames,
     try
     {
         auto upload = std::make_shared<RgbUpload>(
-            LianLiWirelessCodec::Compress(rgb_frames.data(), rgb_frames.size()),
+            CompressTimed(rgb_frames.data(), rgb_frames.size()),
             led_count, frame_count, timing,
             (uint8_t)(upload_variant.fetch_add(1) & 0xFF));
 

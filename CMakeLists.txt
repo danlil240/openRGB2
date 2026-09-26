@@ -29,3 +29,6 @@ enable_testing()
 # engine, ui, backend. Targets are added as their milestones land.
 add_subdirectory(tests/core)
 add_subdirectory(tests/backend)
+
+# Milestone 1 benchmark producer (opt-in physical runs, offline build)
+add_subdirectory(tools/bench)

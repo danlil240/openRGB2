@@ -13,6 +13,9 @@ milestones.
 | `src/core/` | Qt-free scene/effects/resolver core (imported Desktop Lighting Studio core) |
 | `tests/core/` | Qt-free offline regression suites (CTest label `core`) |
 | `tests/backend/` | Offline Lian Li wireless protocol harness (CTest label `backend`) |
+| `tools/bench/` | Milestone 1 benchmark producer (`lianli_bench`); physical runs are opt-in, wire layer is offline-tested |
+| `docs/` | Hardware profile (`hardware/daniel-pc.md`) and benchmark reports (`benchmarks/baseline.md`) |
+| `profiles/` | Committed topology profiles (no unique IDs); `profiles/local/` is gitignored user state |
 
 ## Toolchain (pinned)
 

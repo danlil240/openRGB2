@@ -110,6 +110,10 @@ namespace LianLiWireless
         size_t          SendFailures() const { return send_failures + keepalive_failures; }
         const char*     LastError()    const { return last_error.c_str(); }
 
+        /* true when a desired upload is set but not yet confirmed on the
+           device — used by the service to count replaced-pending frames */
+        bool HasUnconfirmedDesired() const { return desired && !Confirmed(); }
+
     private:
         bool PollAndMerge(uint64_t now);
         bool SendDesired(uint64_t now);
@@ -147,6 +151,8 @@ namespace LianLiWireless
         uint64_t             next_keepalive_ms = 0;
         bool                 keepalive_initial = true;
         bool                 keepalive_ok = true;
+        bool                 keepalive_completed = false;
+        uint64_t             last_keepalive_ms = 0;
         uint64_t             next_poll_ms = 0;
 
         std::string          last_error;
