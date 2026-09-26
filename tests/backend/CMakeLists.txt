@@ -6,6 +6,7 @@
 set(CTRL ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/Controllers/LianLiWirelessController)
 set(DEPS ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies)
 set(LLW_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/core/playback/PlaybackLoop.cpp
     ${CTRL}/LianLiWirelessProtocol.cpp
     ${CTRL}/LianLiWirelessCodec.cpp
     ${CTRL}/LianLiWirelessRuntime.cpp
@@ -20,6 +21,7 @@ set(LLW_SOURCES
     ${DEPS}/tinyuz/decompress/tuz_dec.c
     ${DEPS}/HDiffPatch/libHDiffPatch/HDiff/private_diff/libdivsufsort/divsufsort.cpp)
 set(LLW_INCLUDES
+    ${CMAKE_SOURCE_DIR}/src/core
     ${CTRL}
     ${DEPS}
     ${DEPS}/tinyuz
@@ -38,6 +40,18 @@ add_test(NAME lianli_protocol_test COMMAND lianli_protocol_test)
 set_tests_properties(lianli_protocol_test PROPERTIES
     LABELS backend
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(lianli_playback_test playback_test.cpp ${LLW_SOURCES})
+target_include_directories(lianli_playback_test PRIVATE ${LLW_INCLUDES})
+target_compile_definitions(lianli_playback_test PRIVATE ${LLW_DEFINES})
+add_test(NAME lianli_playback_test COMMAND lianli_playback_test)
+set_tests_properties(lianli_playback_test PROPERTIES LABELS backend)
+
+add_executable(service_pending_test service_pending_test.cpp ${LLW_SOURCES})
+target_include_directories(service_pending_test PRIVATE ${LLW_INCLUDES})
+target_compile_definitions(service_pending_test PRIVATE ${LLW_DEFINES})
+add_test(NAME service_pending_test COMMAND service_pending_test)
+set_tests_properties(service_pending_test PROPERTIES LABELS backend)
 
 # Bounded-diagnostics harness: also compiles the device-side controller so
 # the compression call sites are exercised (RGBControllerInterface.h is

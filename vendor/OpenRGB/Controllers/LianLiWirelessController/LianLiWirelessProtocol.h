@@ -85,6 +85,9 @@ namespace LianLiWireless
     \*---------------------------------------------------------*/
     bool ParseDeviceRecord(const uint8_t* data, size_t len, Sighting& out);
     bool ParseMasterRecord(const uint8_t* data, size_t len, Mac& mac, uint8_t& channel);
+    // V1 transmitter clock reply: opcode, master MAC, big-endian tick count.
+    bool ParseRgbClockResponse(const uint8_t* data, size_t len,
+                               const Mac& expected_master, uint32_t& ticks);
 
     /*---------------------------------------------------------*\
     | Parse a full GetDev response. Throws std::invalid_argument|
@@ -119,11 +122,13 @@ namespace LianLiWireless
         | a different variant.                                      |
         \*---------------------------------------------------------*/
         RgbUpload(std::vector<uint8_t> compressed, uint8_t led_count,
-                  uint16_t frame_count, RgbTiming timing, uint8_t variant = 0);
+                  uint16_t frame_count, RgbTiming timing, uint32_t variant = 0);
 
         const std::array<uint8_t, 4>& EffectId() const { return effect_id; }
         uint8_t LedCount()    const { return led_count; }
         uint16_t FrameCount() const { return frame_count; }
+        RgbTiming Timing() const { return timing; }
+        size_t CompressedBytes() const { return compressed.size(); }
         size_t  PacketCount() const;
 
         /* index 0 = header packet; 1..n = payload chunks        */

@@ -12,6 +12,7 @@
 
 #include "RGBController_LianLiWireless.h"
 #include "LianLiWirelessEffects.h"
+#include "playback/PlaybackLoop.h"
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -175,7 +176,7 @@ void RGBController_LianLiWireless::DeviceUpdateLEDs()
     {
         return;
     }
-    controller->SetLEDs(colors.data(), colors.size());
+    controller->SetLEDs(colors.data(), colors.size(), mode_revision.load());
 }
 
 void RGBController_LianLiWireless::DeviceUpdateZoneLEDs(int /* zone */)
@@ -195,13 +196,18 @@ void RGBController_LianLiWireless::DeviceUpdateSingleLED(int /* led */)
 void RGBController_LianLiWireless::DeviceUpdateMode()
 {
     const mode& active = modes[active_mode];
+    const bool playback = active.value == LLW_MODE_SPECTRUM
+                       || active.value == LLW_MODE_RAINBOW
+                       || active.value == LLW_MODE_BREATHING;
+    const uint64_t revision = controller->BeginMode(playback);
+    mode_revision = revision;
 
     switch(active.value)
     {
         case LLW_MODE_STATIC:
         {
             std::vector<RGBColor> solid(colors.size(), active.colors[0]);
-            controller->SetLEDs(solid.data(), solid.size());
+            controller->SetLEDs(solid.data(), solid.size(), revision);
             break;
         }
 
@@ -213,40 +219,38 @@ void RGBController_LianLiWireless::DeviceUpdateMode()
             | Render one full cycle; the firmware loops |
             | it until a new upload arrives.            |
             \*-----------------------------------------*/
-            const uint16_t interval_ms = (uint16_t)std::max(1u,
-                    5000 / std::max(1u, active.speed));
-
-            std::vector<uint8_t> frames;
-
+            LianLiWireless::PlaybackRequest request;
+            request.led_count = leds.size();
+            request.speed = active.speed;
             if(active.value == LLW_MODE_SPECTRUM)
-            {
-                frames = LianLiWireless::RenderSpectrumCycle(
-                        leds.size(), LianLiWireless::EFFECT_LOOP_FRAMES);
-            }
+                request.preset = LianLiWireless::PlaybackPreset::SpectrumCycle;
             else if(active.value == LLW_MODE_RAINBOW)
             {
-                frames = LianLiWireless::RenderRainbowWave(
-                        leds.size(), LianLiWireless::EFFECT_LOOP_FRAMES,
-                        active.direction == MODE_DIRECTION_RIGHT,
-                        controller->GetLEDsPerFan(),
-                        LianLiWireless::FanLedOrder(controller->GetFanType()));
+                request.preset = LianLiWireless::PlaybackPreset::RainbowWave;
+                request.reverse = active.direction == MODE_DIRECTION_RIGHT;
+                request.leds_per_fan = controller->GetLEDsPerFan();
+                request.led_order = LianLiWireless::FanLedOrder(controller->GetFanType());
             }
             else
             {
-                frames = LianLiWireless::RenderBreathing(
-                        leds.size(), LianLiWireless::EFFECT_LOOP_FRAMES,
-                        (uint8_t)RGBGetRValue(active.colors[0]),
-                        (uint8_t)RGBGetGValue(active.colors[0]),
-                        (uint8_t)RGBGetBValue(active.colors[0]));
+                request.preset = LianLiWireless::PlaybackPreset::Breathing;
+                request.red = (uint8_t)RGBGetRValue(active.colors[0]);
+                request.green = (uint8_t)RGBGetGValue(active.colors[0]);
+                request.blue = (uint8_t)RGBGetBValue(active.colors[0]);
             }
-
-            controller->SetFrames(frames, LianLiWireless::EFFECT_LOOP_FRAMES,
-                                  interval_ms);
+            try
+            {
+                controller->SetPlaybackLoop(LianLiWireless::BuildPlaybackLoop(request), revision);
+            }
+            catch(const std::exception& e)
+            {
+                controller->SetPlaybackError(e.what());
+            }
             break;
         }
 
         default:
-            DeviceUpdateLEDs();
+            controller->SetLEDs(colors.data(), colors.size(), revision);
             break;
     }
 }

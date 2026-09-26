@@ -51,6 +51,7 @@ namespace LianLiWireless
         virtual bool ReadMasterMac(Mac& out)                                   = 0;
         virtual bool PollDiscovery(std::vector<uint8_t>& out)                  = 0;
         virtual bool SendChunks(const std::array<UsbChunk, USB_CHUNKS_PER_PACKET>& chunks) = 0;
+        virtual bool ReadRgbClock(const Mac&, uint8_t, uint32_t&) { return false; }
         /* Changes whenever a shared link drops/reopens its USB handles.
            Access is serialized by the service worker with all link I/O. */
         virtual uint64_t ConnectionGeneration() const { return 0; }
@@ -69,15 +70,25 @@ namespace LianLiWireless
         Cancelled,
     };
 
+    struct RgbClockSnapshot
+    {
+        bool valid = false;
+        uint32_t ticks = 0;
+        uint64_t sampled_at_ms = 0;
+        uint64_t age_ms = 0;
+    };
+
     struct WirelessRuntimeConfig
     {
         uint64_t poll_ms          = 300;
+        uint64_t max_discovery_defer_ms = 1000; /* continuous frames cannot hide stale routes */
         uint64_t stream_ms        = 25;     /* minimum gap between RGB uploads */
         uint64_t resend_ms        = 1500;
         uint64_t keepalive_ms     = 750;
         uint64_t lost_ms          = 8000;
         uint64_t hold_drift_ms    = 400;    /* poll cadence while holding   */
         uint32_t master_debounce  = 3;      /* consecutive foreign sightings */
+        uint32_t layout_debounce  = 3;      /* consecutive incompatible layouts */
         uint32_t drift_debounce   = 3;      /* consecutive mismatches -> resend */
         uint32_t max_send_failures = 5;     /* transport failures -> Failed  */
         uint32_t max_resends      = 8;      /* per-upload resend budget      */
@@ -109,6 +120,9 @@ namespace LianLiWireless
         size_t          ResendCount()  const { return resends; }
         size_t          SendFailures() const { return send_failures + keepalive_failures; }
         const char*     LastError()    const { return last_error.c_str(); }
+        RgbClockSnapshot ClockSnapshot() const;
+        uint64_t NextDeadlineMs() const;
+        const RgbUpload* DesiredUpload() const { return desired.get(); }
 
         /* true when a desired upload is set but not yet confirmed on the
            device — used by the service to count replaced-pending frames */
@@ -146,6 +160,7 @@ namespace LianLiWireless
         uint32_t             keepalive_failures = 0;
         uint32_t             poll_failures = 0;
         uint32_t             master_mismatch = 0;
+        uint32_t             layout_mismatch = 0;
         uint32_t             drift_mismatch = 0;
 
         uint64_t             next_keepalive_ms = 0;
@@ -160,5 +175,7 @@ namespace LianLiWireless
         bool                 retry_transport = false;
         uint64_t             next_reconnect_ms = 0;
         uint64_t             connection_generation = 0;
+        uint64_t             next_rgb_clock_ms = 0;
+        RgbClockSnapshot     rgb_clock;
     };
 }

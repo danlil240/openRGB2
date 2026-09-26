@@ -351,6 +351,11 @@ win32:INCLUDEPATH +=                                                            
 
 win32:SOURCES += $$CONTROLLER_CPP_WINDOWS
 
+# OpenRGB2 shared, Qt-free playback compiler (also used by the future engine).
+INCLUDEPATH += ../../src/core
+SOURCES += ../../src/core/playback/PlaybackLoop.cpp
+HEADERS += ../../src/core/playback/PlaybackLoop.h
+
 #-----------------------------------------------------------------------------------------------#
 # Exclude controllers that depend on PawnIO from the 32-bit BUILDDATE_STRING                    #
 #-----------------------------------------------------------------------------------------------#

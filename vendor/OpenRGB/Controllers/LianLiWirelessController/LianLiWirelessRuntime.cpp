@@ -9,6 +9,7 @@
 
 #include "LianLiWirelessRuntime.h"
 #include "LianLiWirelessDiagnostics.h"
+#include <algorithm>
 #include <chrono>
 #include <stdexcept>
 
@@ -17,6 +18,34 @@ using namespace LianLiWireless;
 WirelessRuntime::WirelessRuntime(IWirelessLink& l, IWirelessClock& c, WirelessRuntimeConfig cfg_in)
     : link(l), clock(c), cfg(cfg_in)
 {
+}
+
+RgbClockSnapshot WirelessRuntime::ClockSnapshot() const
+{
+    RgbClockSnapshot result = rgb_clock;
+    result.age_ms = clock.NowMs() >= result.sampled_at_ms
+        ? clock.NowMs() - result.sampled_at_ms : UINT64_MAX;
+    result.valid = result.valid && result.age_ms <= 6000;
+    return result;
+}
+
+uint64_t WirelessRuntime::NextDeadlineMs() const
+{
+    const uint64_t now = clock.NowMs();
+    if(cancelled || state == WirelessState::ForeignMaster)
+        return now + 1000;
+    if(state == WirelessState::Failed)
+        return retry_transport ? next_reconnect_ms : now + 1000;
+
+    uint64_t due = next_poll_ms;
+    if(master_known && have_sighting)
+        due = std::min(due, next_keepalive_ms);
+    if(state == WirelessState::Uploading && desired && have_sighting
+       && !keepalive_initial)
+        due = std::min(due, std::max(next_stream_ms, next_resend_ms));
+    if(master_known && have_sighting && desired && desired->FrameCount() > 1)
+        due = std::min(due, next_rgb_clock_ms);
+    return due;
 }
 
 void WirelessRuntime::SetTarget(const Mac& mac, uint8_t fans)
@@ -32,12 +61,12 @@ void WirelessRuntime::SetDesired(std::shared_ptr<const RgbUpload> upload)
     const uint64_t now = clock.NowMs();
     next_resend_ms = now > next_stream_ms ? now : next_stream_ms;
     /* A live stream changes effect_id faster than discovery can confirm it.
-       Once identity/channel are known, postpone the blocking RX poll from
-       the newest frame so continuous animation keeps the TX path clear.
-       Discovery resumes one normal poll interval after the stream stops. */
+       Defer a poll only until the last sighting reaches the freshness bound;
+       continuous frames must not hide a lost or re-bound group. */
     if(have_sighting)
     {
-        const uint64_t postponed = now + cfg.poll_ms;
+        const uint64_t postponed = std::min(now + cfg.poll_ms,
+            last_seen_ms + cfg.max_discovery_defer_ms);
         if(postponed > next_poll_ms)
         {
             Diagnostics::Get().RecordDiscoveryDeferred();
@@ -55,6 +84,7 @@ void WirelessRuntime::SetDesired(std::shared_ptr<const RgbUpload> upload)
 void WirelessRuntime::ClearDesired()
 {
     desired.reset();
+    rgb_clock.valid = false;
 }
 
 void WirelessRuntime::Cancel()
@@ -73,6 +103,9 @@ bool WirelessRuntime::Confirmed() const
 
 void WirelessRuntime::Enter(WirelessState s, const char* err)
 {
+    if(s != state || (err && *err))
+        Diagnostics::Get().Trace("state", (long long)state, (long long)s,
+                                  err && *err ? 1 : 0);
     state = s;
     if(s == WirelessState::ForeignMaster)
     {
@@ -107,6 +140,7 @@ void WirelessRuntime::RetryTransport()
     last_seen_ms = 0;
     master_read_tries = 0;
     master_mismatch = 0;
+    layout_mismatch = 0;
     poll_failures = 0;
     send_failures = 0;
     keepalive_failures = 0;
@@ -118,6 +152,8 @@ void WirelessRuntime::RetryTransport()
     next_keepalive_ms = 0;
     keepalive_initial = true;
     retry_transport = false;
+    rgb_clock.valid = false;
+    next_rgb_clock_ms = 0;
     Enter(WirelessState::Boot);
 }
 
@@ -131,10 +167,13 @@ void WirelessRuntime::RevalidateTransport(const char* err)
     latest = {};
     master_read_tries = 0;
     master_mismatch = 0;
+    layout_mismatch = 0;
     keepalive_initial = true;
     next_keepalive_ms = 0;
     next_resend_ms = 0;
     next_poll_ms = clock.NowMs() + cfg.poll_ms;
+    rgb_clock.valid = false;
+    next_rgb_clock_ms = 0;
     Enter(WirelessState::Boot, err);
 }
 
@@ -264,6 +303,27 @@ void WirelessRuntime::Tick()
            schedule, or an outstanding initial keep-alive gated it */
         Diagnostics::Get().RecordUploadDeferred();
     }
+
+    // Master-clock reads are maintenance traffic, never part of live frame
+    // admission. The worker serializes this bounded query with TX/RX.
+    if(master_known && have_sighting && !keepalive_initial && desired
+       && desired->FrameCount() > 1 && now >= next_rgb_clock_ms)
+    {
+        next_rgb_clock_ms = now + 3000;
+        uint32_t ticks = 0;
+        if(link.ReadRgbClock(master, latest.channel, ticks) && ticks != 0)
+        {
+            const bool reboot = rgb_clock.valid
+                && uint32_t(ticks - rgb_clock.ticks) > 0x80000000u;
+            rgb_clock.valid = !reboot;
+            rgb_clock.ticks = ticks;
+            rgb_clock.sampled_at_ms = clock.NowMs();
+        }
+        else
+        {
+            rgb_clock.valid = false;
+        }
+    }
 }
 
 bool WirelessRuntime::PollAndMerge(uint64_t now)
@@ -342,6 +402,7 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
 
     if(found == nullptr)
     {
+        layout_mismatch = 0;
         /*---------------------------------------------------------*\
         | A stale sighting is not an observation — clear it so the  |
         | Tick state machine stops resending to a vanished device.  |
@@ -365,6 +426,7 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
     \*---------------------------------------------------------*/
     if(master_known && found->master != master)
     {
+        layout_mismatch = 0;
         have_sighting = false;
         if(++master_mismatch >= cfg.master_debounce)
         {
@@ -380,11 +442,18 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
 
     if(found->fan_count != expected_fans || found->mb_rgb_sync)
     {
+        Diagnostics::Get().Trace("layout_mismatch", expected_fans,
+                                  found->fan_count, found->mb_rgb_sync ? 1 : 0);
         have_sighting = false;
-        Enter(WirelessState::Failed, "fan layout or motherboard RGB ownership changed");
+        /* A single discovery reply can briefly report an incomplete layout.
+           Stop writes immediately, then require repeated incompatible replies
+           before making the failure terminal. */
+        if(++layout_mismatch >= cfg.layout_debounce)
+            Enter(WirelessState::Failed, "fan layout or motherboard RGB ownership changed");
         return false;
     }
 
+    layout_mismatch = 0;
     latest        = *found;
     have_sighting = true;
     last_seen_ms  = now;

@@ -19,6 +19,7 @@
 #include "LianLiWirelessFanType.h"
 #include "LianLiWirelessService.h"
 #include "RGBControllerInterface.h"
+#include "playback/PlaybackLoop.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -36,7 +37,9 @@ public:
                              const LianLiWireless::Mac& mac, uint8_t fan_count,
                              LianLiWireless::WirelessFanInfo fan_info);
 
-    void        SetLEDs(const RGBColor* led_colors, size_t count);
+    uint64_t    BeginMode(bool playback) { return service.BeginMode(mac, playback); }
+    void        SetLEDs(const RGBColor* led_colors, size_t count,
+                        uint64_t revision = 0);
 
     /*---------------------------------------------------------*\
     | Upload a pre-rendered animation loop: rgb_frames holds    |
@@ -46,6 +49,9 @@ public:
     \*---------------------------------------------------------*/
     void        SetFrames(const std::vector<uint8_t>& rgb_frames,
                           uint16_t frame_count, uint16_t interval_ms);
+    void        SetPlaybackLoop(const LianLiWireless::PlaybackLoop& loop,
+                                uint64_t revision = 0);
+    void        SetPlaybackError(const std::string& error) { last_error = error; }
 
     std::string GetMacString()  const;
     std::string GetFanName()    const { return fan_info.name; }

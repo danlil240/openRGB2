@@ -377,6 +377,15 @@ static void TestCompressionViaController()
     c = DIAG.Snapshot();
     CHECK(c.compress_calls == 2 && c.compress_bytes_in == 360 + 720,
           "SetFrames compression recorded separately");
+    auto loop = LianLiWireless::BuildPlaybackLoop({LianLiWireless::PlaybackPreset::SpectrumCycle,
+        120, 100});
+    ctl.SetPlaybackLoop(loop);
+    c = DIAG.Snapshot();
+    CHECK(c.compress_calls == 3 && c.compress_bytes_out >= loop.compressed.size(),
+          "playback builder compression included in diagnostics");
+    ctl.SetPlaybackError("loop exceeds upload limit");
+    CHECK(ctl.GetStatus() == "loop exceeds upload limit",
+          "playback build errors appear in controller status");
 }
 
 /*-------------------------------------------------------------*\

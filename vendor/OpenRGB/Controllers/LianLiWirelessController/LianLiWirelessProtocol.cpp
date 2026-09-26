@@ -130,8 +130,22 @@ std::vector<Sighting> LianLiWireless::ParseDiscoveryResponse(const uint8_t* data
     return result;
 }
 
+bool LianLiWireless::ParseRgbClockResponse(const uint8_t* data, size_t len,
+                                            const Mac& expected_master, uint32_t& ticks)
+{
+    if(data == nullptr || len < 11 || data[0] != USB_CMD_GET_MAC
+       || !IsValidUnicastMac(expected_master)
+       || !std::equal(expected_master.begin(), expected_master.end(), data + 1))
+    {
+        return false;
+    }
+    ticks = (uint32_t(data[7]) << 24) | (uint32_t(data[8]) << 16)
+          | (uint32_t(data[9]) << 8) | uint32_t(data[10]);
+    return true;
+}
+
 RgbUpload::RgbUpload(std::vector<uint8_t> compressed_in, uint8_t led_count_in,
-                     uint16_t frame_count_in, RgbTiming timing_in, uint8_t variant)
+                     uint16_t frame_count_in, RgbTiming timing_in, uint32_t variant)
     : compressed(std::move(compressed_in))
     , led_count(led_count_in)
     , frame_count(frame_count_in)
@@ -173,7 +187,10 @@ RgbUpload::RgbUpload(std::vector<uint8_t> compressed_in, uint8_t led_count_in,
     mix((uint8_t)(timing.secondary_frame_count >> 8));
     mix((uint8_t)timing.secondary_frame_count);
     mix(timing.outer_longest ? 1 : 0);
-    mix(variant);
+    mix((uint8_t)(variant >> 24));
+    mix((uint8_t)(variant >> 16));
+    mix((uint8_t)(variant >> 8));
+    mix((uint8_t)variant);
 
     uint32_t id = std::max<uint32_t>(hash, 1);
     effect_id = { (uint8_t)(id >> 24), (uint8_t)(id >> 16),

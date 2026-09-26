@@ -382,6 +382,21 @@ bool LianLiWirelessUsbLink::ReadMasterMac(Mac& out)
     return ok;
 }
 
+bool LianLiWirelessUsbLink::ReadRgbClock(const Mac& master, uint8_t channel,
+                                        uint32_t& ticks)
+{
+    if(!EnsureOpen() || !FlushInput(tx))
+        return false;
+    uint8_t query[USB_CHUNK_SIZE]{};
+    query[0] = USB_CMD_GET_MAC;
+    query[1] = channel;
+    if(!WriteAll(tx, query, sizeof(query), WRITE_TIMEOUT_MS))
+        return false;
+    uint8_t reply[USB_CHUNK_SIZE]{};
+    const int n = ReadSome(tx, reply, sizeof(reply), 500);
+    return n > 0 && ParseRgbClockResponse(reply, size_t(n), master, ticks);
+}
+
 bool LianLiWirelessUsbLink::PollDiscovery(std::vector<uint8_t>& out)
 {
     const auto begin = std::chrono::steady_clock::now();
