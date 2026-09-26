@@ -49,7 +49,7 @@ void DeliveryPipeline::RegisterDevice(const DeviceSnapshot& snapshot)
     auto it = lanes_.find(snapshot.key);
     if(it == lanes_.end())
     {
-        auto lane            = std::make_unique<Lane>();
+        auto lane            = std::make_shared<Lane>();
         lane->snap           = snapshot;
         lane->min_interval   = default_budget_;
         lane->stats.provenance =
@@ -117,7 +117,7 @@ void DeliveryPipeline::SyncDevices(
 
 void DeliveryPipeline::RemoveDevice(const DeviceKey& controller)
 {
-    std::unique_ptr<Lane> lane;
+    std::shared_ptr<Lane> lane;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = lanes_.find(controller);
@@ -142,7 +142,7 @@ bool DeliveryPipeline::HasDevice(const DeviceKey& controller) const
 void DeliveryPipeline::SetBudget(const DeviceKey& controller,
                                  Clock::duration min_interval)
 {
-    Lane* lane = nullptr;
+    std::shared_ptr<Lane> lane;   /* keep alive across the notify */
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = lanes_.find(controller);
@@ -151,7 +151,7 @@ void DeliveryPipeline::SetBudget(const DeviceKey& controller,
             return;
         }
         it->second->min_interval = min_interval;
-        lane = it->second.get();
+        lane = it->second;
     }
     lane->cv.notify_all();  /* a shorter budget may be due already */
 }
@@ -341,7 +341,10 @@ bool DeliveryPipeline::DeliverOne(Lane& lane, RgbFrame frame,
 size_t DeliveryPipeline::DrainDue(const DeviceKey& controller,
                                   TimePoint now)
 {
-    Lane*    lane     = nullptr;
+    /* Hold a shared_ptr across the unlocked transport call —
+       a concurrent RemoveDevice/SyncDevices may erase and
+       destroy the lane's map entry mid-drain. */
+    std::shared_ptr<Lane> lane;
     RgbFrame frame;
     bool     reliable = false;
     bool     have     = false;
@@ -352,7 +355,7 @@ size_t DeliveryPipeline::DrainDue(const DeviceKey& controller,
         {
             return 0;
         }
-        lane = it->second.get();
+        lane = it->second;
         if(lane->has_reliable)
         {
             frame             = std::move(lane->reliable);
@@ -544,7 +547,12 @@ bool DeliveryPipeline::Start()
 
 void DeliveryPipeline::Stop()
 {
-    std::vector<Lane*> lanes;
+    /* shared_ptr refs keep every lane alive across the joins —
+       a concurrent RemoveDevice cannot destroy a lane whose
+       thread is still being joined here. Bound: the sum of
+       in-flight transport sends (bounded by the transport's
+       own send timeout) plus join time — see the Stop() doc. */
+    std::vector<std::shared_ptr<Lane>> lanes;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if(!running_)
@@ -556,10 +564,10 @@ void DeliveryPipeline::Stop()
         {
             entry.second->stop = true;
             entry.second->cv.notify_all();
-            lanes.push_back(entry.second.get());
+            lanes.push_back(entry.second);
         }
     }
-    for(Lane* lane : lanes)
+    for(const std::shared_ptr<Lane>& lane : lanes)
     {
         StopLane(*lane);
     }

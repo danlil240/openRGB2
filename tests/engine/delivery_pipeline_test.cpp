@@ -10,9 +10,11 @@
 
 #include "DeliveryPipeline.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <set>
@@ -41,9 +43,17 @@ public:
             ++blocked_entries_;
             blocked_cv_.wait(lock, [this] { return released_; });
         }
+        if(on_send)
+        {
+            on_send();
+        }
         delivered_[f.controller].push_back(f);
         return SubmitResult::Accept();
     }
+
+    /* Optional hook run inside every send — widens the
+       interleaving window for concurrency tests. */
+    std::function<void()> on_send;
 
     DeliveryStats Stats() const override { return DeliveryStats{}; }
 
@@ -567,6 +577,100 @@ static void TestBlockedWirelessKeepsWiredRate()
     CHECK(!pipe.Running());
 }
 
+/* Regression: DrainDue/DrainAllDue ran on a raw Lane* across
+   the unlocked transport call — a concurrent RemoveDevice /
+   SyncDevices could free the lane mid-drain. Lanes are now
+   shared_ptr so the drain itself extends the lifetime; this
+   hammers the interleaving. */
+static void TestDrainVsDeviceRemoval()
+{
+    auto transport = std::make_shared<FakeTransport>();
+    transport->on_send = [] { std::this_thread::yield(); };
+    DeliveryPipeline pipe(transport);
+    const DeviceSnapshot w = Wireless();
+    const DeviceSnapshot f = Wired();
+    pipe.RegisterDevice(w);
+    pipe.RegisterDevice(f);
+
+    std::atomic<bool> run{ true };
+    std::thread drainer([&]
+    {
+        uint64_t seq = 0;
+        while(run.load())
+        {
+            /* Seq keeps climbing so re-registered lanes (guard
+               reset) still admit; removed lanes reject. */
+            pipe.SubmitLatest(MakeFrame(w, ++seq, { 1, 0, 0 }));
+            pipe.DrainDue(w.key);
+            pipe.DrainAllDue();
+        }
+    });
+    for(int i = 0; i < 2000; ++i)
+    {
+        pipe.SyncDevices({ w, f });
+        pipe.SyncDevices({ f });
+        pipe.SyncDevices({});
+    }
+    run = false;
+    drainer.join();
+
+    /* Reaching here without heap corruption is the test — the
+       pre-fix path dereferenced a freed Lane*. End state is
+       deterministic: the final SyncDevices emptied the map. */
+    CHECK(!pipe.HasDevice(w.key));
+    CHECK(!pipe.HasDevice(f.key));
+}
+
+/* Regression: Stop()/RemoveDevice join lane threads, and a
+   lane inside transport->SubmitLatest cannot be interrupted —
+   the honest bound is "in-flight send + join". The production
+   transport bounds the send itself via SO_SNDTIMEO
+   (io_timeout_ms); here a fake parks the send and Stop() must
+   wait for it, then join promptly once released. */
+static void TestStopBoundedByInFlightSend()
+{
+    auto transport = std::make_shared<FakeTransport>();
+    DeliveryPipeline pipe(transport);
+    const DeviceSnapshot w = Wireless();
+    pipe.RegisterDevice(w);
+    CHECK(pipe.Start());
+
+    transport->Block(w.key);
+    pipe.SubmitLatest(MakeFrame(w, 1, { 1, 0, 0 }));
+    const auto entered_deadline =
+        std::chrono::steady_clock::now() + 2s;
+    while(transport->BlockedEntries() == 0 &&
+          std::chrono::steady_clock::now() < entered_deadline)
+    {
+        std::this_thread::sleep_for(2ms);
+    }
+    CHECK(transport->BlockedEntries() == 1);
+
+    std::atomic<bool> stopped{ false };
+    std::thread         stopper([&]
+    {
+        pipe.Stop();
+        stopped = true;
+    });
+    /* Stop waits for the in-flight send — it must NOT return
+       while the send is still parked. */
+    std::this_thread::sleep_for(100ms);
+    CHECK(!stopped.load());
+
+    /* Once the send completes (in production: returns or hits
+       SO_SNDTIMEO), the join finishes promptly. */
+    transport->Release();
+    const auto stop_deadline = std::chrono::steady_clock::now() + 5s;
+    while(!stopped.load() &&
+          std::chrono::steady_clock::now() < stop_deadline)
+    {
+        std::this_thread::sleep_for(2ms);
+    }
+    CHECK(stopped.load());
+    stopper.join();
+    CHECK(!pipe.Running());
+}
+
 int main()
 {
     TestBurstCollapse();
@@ -580,6 +684,8 @@ int main()
     TestReliablePriority();
     TestNoTransport();
     TestBlockedWirelessKeepsWiredRate();
+    TestDrainVsDeviceRemoval();
+    TestStopBoundedByInFlightSend();
     std::printf("delivery pipeline: %d checks, %d failures\n",
                 checks, failures);
     return failures ? 1 : 0;

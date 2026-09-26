@@ -34,11 +34,14 @@ class IStreamTransport
 public:
     virtual ~IStreamTransport() = default;
 
-    /* Connects to host:port with bounded connect/recv
-       timeouts. Returns false + err on failure. */
+    /* Connects to host:port with a bounded connect timeout and
+       a bounded per-call I/O timeout applied to BOTH recv and
+       send (a wedged peer must not hold a send forever — see
+       the shutdown bound in DeliveryPipeline.h). Returns
+       false + err on failure. */
     virtual bool       Connect(const std::string& host, uint16_t port,
                                uint32_t connect_timeout_ms,
-                               uint32_t recv_timeout_ms,
+                               uint32_t io_timeout_ms,
                                std::string& err) = 0;
     virtual void       Close() = 0;
     virtual bool       IsOpen() const = 0;

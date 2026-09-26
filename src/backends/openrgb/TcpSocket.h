@@ -3,7 +3,8 @@
 |||                                                           |
 |||   Blocking TCP IStreamTransport for the OpenRGB SDK      ||
 |||   client. Loopback-only usage (127.0.0.1:6744 per plan   ||
-|||   section 4); connect/recv carry bounded timeouts.       ||
+|||   section 4); connect and per-call I/O (recv AND send)   ||
+|||   carry bounded timeouts.                                ||
 |||   Qt-free, Windows (Winsock2). The SOCKET handle stays   ||
 |||   inside the .cpp so winsock never leaks into headers    ||
 |||   or dependents.                                         ||
@@ -31,7 +32,7 @@ public:
 
     bool       Connect(const std::string& host, uint16_t port,
                        uint32_t connect_timeout_ms,
-                       uint32_t recv_timeout_ms,
+                       uint32_t io_timeout_ms,
                        std::string& err) override;
     void       Close() override;
     bool       IsOpen() const override;

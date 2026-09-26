@@ -58,7 +58,7 @@ TcpSocket::~TcpSocket()
 
 bool TcpSocket::Connect(const std::string& host, uint16_t port,
                         uint32_t connect_timeout_ms,
-                        uint32_t recv_timeout_ms, std::string& err)
+                        uint32_t io_timeout_ms, std::string& err)
 {
     if(!WsaReady())
     {
@@ -149,9 +149,16 @@ bool TcpSocket::Connect(const std::string& host, uint16_t port,
         return false;
     }
 
-    DWORD recv_timeout = recv_timeout_ms;
+    /* One I/O timeout both ways. SO_SNDTIMEO bounds every send()
+       call in SendAll: without it a wedged peer could hold a
+       blocked send for the OS TCP retransmit timeout, stalling
+       the serialized client send path AND pipeline lane joins
+       (Stop/RemoveDevice bound = in-flight send + join). */
+    DWORD io_timeout = io_timeout_ms;
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
-               (const char*)&recv_timeout, sizeof(recv_timeout));
+               (const char*)&io_timeout, sizeof(io_timeout));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO,
+               (const char*)&io_timeout, sizeof(io_timeout));
     int rcvbuf = 1024 * 1024;
     setsockopt(s, SOL_SOCKET, SO_RCVBUF,
                (const char*)&rcvbuf, sizeof(rcvbuf));

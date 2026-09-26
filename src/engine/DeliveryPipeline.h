@@ -149,7 +149,18 @@ public:
     /* One delivery worker thread per lane. A lane blocked
        inside a slow transport send cannot stall the others —
        its submissions still collapse into the depth-1 slots.
-       Stop() is synchronous (joins every lane thread). */
+
+       Stop() is synchronous (joins every lane thread). Its
+       bound is honest, not instant: one in-flight transport
+       send per lane plus join time — a lane inside
+       transport->SubmitLatest cannot be interrupted, so the
+       bound is only as strong as the transport's own send
+       timeout. The production transport applies SO_SNDTIMEO
+       (OpenRgbClientOptions::io_timeout_ms, default 4 s), so
+       Stop() completes within ~(lanes x io_timeout) in the
+       worst case; lanes join sequentially but each blocked
+       send hits its timeout independently. The same bound
+       applies to RemoveDevice() and the destructor. */
     bool Start();
     void Stop();
     bool Running() const;
@@ -196,9 +207,16 @@ private:
     void   StartLane(Lane& lane);      /* under mutex_ */
     void   StopLane(Lane& lane);       /* join — no lock held */
 
+    /* Lanes are shared_ptr: synchronous drains (DrainDue /
+       DrainAllDue) and Stop() hold a reference across the
+       unlocked transport call, so a concurrent RemoveDevice /
+       SyncDevices can erase the lane from the map — and even
+       destroy it — while a drain still uses it safely. The
+       lane object outlives its map entry until the last
+       in-flight user releases it. */
     mutable std::mutex                 mutex_;
     std::shared_ptr<IFrameSink>        transport_;
-    std::map<DeviceKey, std::unique_ptr<Lane>> lanes_;
+    std::map<DeviceKey, std::shared_ptr<Lane>> lanes_;
     Clock::duration                    default_budget_{};
     bool                               running_ = false;
     DeliveryStats                      aggregate_;
