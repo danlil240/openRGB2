@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdio>
 #include <memory>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -57,7 +58,10 @@ static void TestNullSink()
     CHECK(d.submitted == 2);
     CHECK(d.replaced_pending == 0);
     CHECK(d.rejected == 0);
-    CHECK(d.transport_completed == 2); /* nothing stays pending */
+    /* A null sink transports nothing: no fabricated completions
+       and provenance stays Unknown. */
+    CHECK(d.transport_completed == 0);
+    CHECK(d.provenance == MeasurementProvenance::Unknown);
 }
 
 static void TestLatestSinkValidation()
@@ -117,6 +121,88 @@ static void TestLatestSinkReplacement()
     CHECK(d.submitted == 2);
     CHECK(d.replaced_pending == 1);
     CHECK(d.rejected == 0);
+
+    /* Per-controller stats mirror the aggregate for the single
+       registered device. */
+    DeliveryStats per;
+    CHECK(sink.Stats(snap.key, per));
+    CHECK(per.submitted == 2 && per.replaced_pending == 1);
+    CHECK(!sink.Stats(DeviceKey{ "nope", "", "", "" }, per));
+}
+
+static void TestLatestSinkSequenceGuard()
+{
+    LatestFrameSink sink;
+    const DeviceSnapshot snap = WirelessGroup();
+    sink.RegisterDevice(snap);
+
+    CHECK(sink.SubmitLatest(MakeFrame(snap, 5, { 1, 0, 0 })).status ==
+          SubmitStatus::Accepted);
+    /* An older sequence is obsolete — it must not displace the
+       newer pending frame. */
+    CHECK(sink.SubmitLatest(MakeFrame(snap, 4, { 9, 0, 0 })).status ==
+          SubmitStatus::Rejected);
+    RgbFrame pending;
+    CHECK(sink.Pending(snap.key, &pending));
+    CHECK(pending.sequence == 5);
+    /* An equal sequence still replaces (same vintage, latest
+       arrival wins). */
+    CHECK(sink.SubmitLatest(MakeFrame(snap, 5, { 2, 0, 0 })).status ==
+          SubmitStatus::ReplacedPending);
+
+    sink.DrainPending(nullptr);
+
+    /* The guard also covers already-drained state: seq 3 < the
+       admitted high-water 5 — still obsolete. */
+    CHECK(sink.SubmitLatest(MakeFrame(snap, 3, { 7, 0, 0 })).status ==
+          SubmitStatus::Rejected);
+
+    /* A topology-generation change resets the guard. */
+    DeviceSnapshot next = snap;
+    next.topology_generation = 2;
+    sink.RegisterDevice(next);
+    RgbFrame f = MakeFrame(next, 1, { 1, 0, 0 });
+    CHECK(sink.SubmitLatest(f).status == SubmitStatus::Accepted);
+}
+
+static void TestLatestSinkDrainRestore()
+{
+    LatestFrameSink sink;
+    const DeviceSnapshot snap = WirelessGroup();
+    sink.RegisterDevice(snap);
+
+    sink.SubmitLatest(MakeFrame(snap, 1, { 1, 0, 0 }));
+    sink.SubmitLatest(MakeFrame(snap, 2, { 2, 0, 0 }));
+
+    int calls = 0;
+    const auto throwing = [&calls](const RgbFrame&)
+    {
+        ++calls;
+        throw std::runtime_error("deliver failed");
+    };
+    bool threw = false;
+    try
+    {
+        sink.DrainPending(throwing);
+    }
+    catch(const std::runtime_error&)
+    {
+        threw = true;
+    }
+    CHECK(threw && calls == 1);
+    /* The throw restored the undelivered frame to its slot. */
+    RgbFrame pending;
+    CHECK(sink.Pending(snap.key, &pending));
+    CHECK(pending.sequence == 2);
+    CHECK(sink.Stats().transport_completed == 0);
+
+    /* Draining with no deliver callback drops without fabricating
+       completions — the frame counts as suppressed. */
+    sink.SubmitLatest(MakeFrame(snap, 3, { 3, 0, 0 }));
+    CHECK(sink.DrainPending(nullptr) == 1);
+    const DeliveryStats d = sink.Stats();
+    CHECK(d.transport_completed == 0);
+    CHECK(d.suppressed == 1);
 }
 
 static void TestLatestSinkDrain()
@@ -208,6 +294,8 @@ int main()
     TestNullSink();
     TestLatestSinkValidation();
     TestLatestSinkReplacement();
+    TestLatestSinkSequenceGuard();
+    TestLatestSinkDrainRestore();
     TestLatestSinkDrain();
     TestLatestSinkTopologyChange();
     TestEngineSinkPlumbing();

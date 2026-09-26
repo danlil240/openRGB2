@@ -182,8 +182,16 @@ enum class MeasurementProvenance
 ||   submitted           — non-rejected SubmitLatest calls  |
 ||   replaced_pending    — submissions that replaced a      |
 ||                         pending frame                    |
-||   transport_completed — frames handed off by the         |
-||                         transport drain                  |
+||   transport_completed — frames accepted by the           |
+||                         transport drain (never           |
+||                         "displayed")                     |
+||   suppressed          — drained frames deliberately not  |
+||                         retransmitted (identical to the  |
+||                         last delivered frame, or stale   |
+||                         versus already-delivered state)  |
+||   transport_rejected  — drained frames the downstream    |
+||                         sink refused (not connected,     |
+||                         send failure, validation)        |
 ||   intervals           — between consecutive transport    |
 ||                         completions (seconds)            |
 \*---------------------------------------------------------*/
@@ -193,6 +201,8 @@ struct DeliveryStats
     uint64_t replaced_pending    = 0;
     uint64_t rejected            = 0;
     uint64_t transport_completed = 0;
+    uint64_t suppressed          = 0;
+    uint64_t transport_rejected  = 0;
 
     double   last_interval_s = 0.0;
     double   min_interval_s  = 0.0;

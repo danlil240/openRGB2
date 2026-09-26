@@ -14,6 +14,7 @@ find_package(Threads REQUIRED)
 add_library(openrgb2_engine STATIC
     EngineTypes.cpp
     FrameSink.cpp
+    DeliveryPipeline.cpp
     SceneWorker.cpp
     Engine.cpp
     ${CORE_DIR}/scene/SceneTypes.cpp

@@ -327,7 +327,7 @@ Dependencies: **0 → 1 → 2 → 3 → 4 → 5 → 6**. Within Milestone 2, qua
 - [ ] Move scene evaluation to the engine worker while preserving `EffectEngine::Evaluate`.
 - [ ] Implement the negotiated SDK client, controller enumeration, direct mode, resize/configuration, complete-controller writes, and reconnect.
 - [ ] Test fragmented/coalesced TCP packets, malformed sizes, unsupported versions/modes, and changed controller indices.
-- [ ] Implement per-controller pending-frame replacement, absolute-time sampling, unchanged-frame suppression, and independent budgets. Test blocked wireless alongside fast wired output.
+- [x] Implement per-controller pending-frame replacement, absolute-time sampling, unchanged-frame suppression, and independent budgets. Test blocked wireless alongside fast wired output.
 - [ ] Implement exact motherboard mapping, full-group wireless batching, unmapped-color preservation, and DIMM identity resolution.
 - [ ] Implement bounded/versioned local IPC and restricted read-only backend metrics.
 - [ ] Add `PlaybackMode`/`PlaybackStatus`, SDK preset selection, and frame suppression while a wireless loop is active. Test unsupported presets and mode/parameter acknowledgement.

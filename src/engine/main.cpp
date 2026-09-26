@@ -15,6 +15,7 @@
 ||   SPDX-License-Identifier: GPL-2.0-or-later               |
 \*---------------------------------------------------------*/
 
+#include "DeliveryPipeline.h"
 #include "Engine.h"
 #include "SceneWorker.h"
 
@@ -45,6 +46,34 @@ std::atomic<bool> g_stop{ false };
 void OnSignal(int)
 {
     g_stop.store(true);
+}
+
+/* Per-controller delivery budgets (plan section 4 — budgets are
+   qualified per controller, never a global rate). The wireless
+   group's measured ceiling is ~33.5 admitted uploads/s
+   (docs/benchmarks/wireless-result.md), so it is paced at 30 ms.
+   Other controllers are unpaced until measured — the 60 Hz scene
+   clock already bounds how often producers can submit. */
+openrgb2::Clock::duration BudgetFor(
+    const openrgb2::DeviceSnapshot& snap)
+{
+    if(snap.key.device.find("Wireless") != std::string::npos)
+    {
+        return std::chrono::milliseconds(30);
+    }
+    return openrgb2::Clock::duration::zero();
+}
+
+void SyncLanes(openrgb2::DeliveryPipeline& pipeline,
+               const openrgb2::sdk::OpenRgbClient& client)
+{
+    const std::vector<openrgb2::DeviceSnapshot> snaps =
+        client.Snapshots();
+    pipeline.SyncDevices(snaps);
+    for(const openrgb2::DeviceSnapshot& snap : snaps)
+    {
+        pipeline.SetBudget(snap.key, BudgetFor(snap));
+    }
 }
 
 void Usage(const char* argv0)
@@ -150,11 +179,24 @@ int main(int argc, char** argv)
 
     openrgb2::Engine engine;
 
-    /* Optional SDK output: the client is the submitLatest sink —
-       its SubmitLatest sends one complete-controller UPDATELEDS
-       per RgbFrame over the protocol-4 wire. Reconnects run on the
-       client's bounded backoff (polled below); connection state
-       is surfaced through its DeviceSnapshots. */
+    /* The delivery pipeline is the engine's submitLatest sink:
+       per-controller depth-1 pending lanes with independent
+       budgets, unchanged-frame suppression, and the distinct
+       reliable convergence path (Task 3.3). It drains into the
+       SDK transport below; with no transport configured its
+       lanes simply idle (and device mapping — Task 3.4 — is
+       what will produce per-controller RgbFrames). */
+    std::shared_ptr<openrgb2::DeliveryPipeline> pipeline =
+        std::make_shared<openrgb2::DeliveryPipeline>();
+    engine.SetFrameSink(pipeline);
+
+    /* Optional SDK output: the client is the pipeline's
+       transport — its SubmitLatest sends one
+       complete-controller UPDATELEDS per RgbFrame over the
+       protocol-4 wire. Reconnects run on the client's bounded
+       backoff (polled below); connection state is surfaced
+       through its DeviceSnapshots, which are mirrored into
+       pipeline lanes. */
     std::shared_ptr<openrgb2::sdk::OpenRgbClient> sdk_client;
     if(sdk_enabled)
     {
@@ -174,7 +216,7 @@ int main(int argc, char** argv)
             std::make_shared<openrgb2::sdk::OpenRgbClient>(
                 opts,
                 std::make_unique<openrgb2::sdk::TcpSocket>());
-        engine.SetFrameSink(sdk_client);
+        pipeline->SetTransport(sdk_client);
         if(sdk_client->Connect())
         {
             std::fprintf(stderr,
@@ -194,6 +236,7 @@ int main(int argc, char** argv)
                 sdk_client->LastError().c_str());
             sdk_client->ReconnectNow();
         }
+        SyncLanes(*pipeline, *sdk_client);
     }
 
     /* Frames are counted for the skeleton's heartbeat log. Device
@@ -249,17 +292,26 @@ int main(int argc, char** argv)
         "required; Ctrl+C to stop)\n",
         openrgb2::SceneWorker::kTickHz);
 
+    /* Per-lane delivery workers: a lane blocked inside a slow
+       transport send cannot stall the others. */
+    pipeline->Start();
+
     const auto started = openrgb2::Clock::now();
     while(!g_stop.load())
     {
         if(sdk_client)
         {
             sdk_client->Poll();
+            /* Mirror connection/topology into the lanes so
+               validation tracks the live backend state and new
+               controllers get lanes without a restart. */
+            SyncLanes(*pipeline, *sdk_client);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
     engine.Stop();
+    pipeline->Stop();
 
     const double elapsed =
         std::chrono::duration<double>(openrgb2::Clock::now() - started)
