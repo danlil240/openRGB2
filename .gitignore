@@ -1,0 +1,32 @@
+# Build output
+build/
+build-*/
+out/
+__pycache__/
+
+# IDE / tooling
+.vs/
+.vscode/
+.idea/
+.clangd/
+compile_commands.json
+
+# Qt generated
+*.pro.user
+*.pro.user.*
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+.qmake.cache
+.qmake.stash
+Makefile*
+
+# Vendored OpenRGB build output (in-tree qmake artifacts)
+vendor/OpenRGB/debug/
+vendor/OpenRGB/release/
+vendor/OpenRGB/OpenRGB Windows 64-bit/
+vendor/OpenRGB/OpenRGB Windows 32-bit/
+vendor/OpenRGB/*_debug/
+vendor/OpenRGB/*_release/
+vendor/OpenRGB/OpenRGB-baseline-backup/

@@ -1,0 +1,68 @@
+{
+  "$schema": "../../schemas/effect.schema.json",
+  "schema_version": 1,
+  "id": "reactor",
+  "name": "Reactor",
+  "description": "Spinning rings, climbing RAM, key pulses",
+  "needs": "",
+  "layers": [
+    {
+      "primitive": "static",
+      "palette": [
+        { "pos": 0.0, "color": "#0A0806" }
+      ]
+    },
+    {
+      "primitive": "spin",
+      "space": "local",
+      "scale": { "remix_pick": [2.0, 3.0] },
+      "speed": { "remix": [0.4, 0.8] },
+      "opacity": 1.0,
+      "palette": [
+        { "pos": 0.0, "color": "#30E0FF" },
+        { "pos": 0.35, "color": "#062028" },
+        { "pos": 0.8, "color": "#0A3C46" }
+      ],
+      "targets": ["fan_body", "mouse/strip"]
+    },
+    {
+      "primitive": "spin",
+      "space": "local",
+      "scale": 2.0,
+      "speed": { "remix_neg": [0.3, 0.55] },
+      "palette": [
+        { "pos": 0.0, "color": "#FFD040" },
+        { "pos": 0.4, "color": "#402000" },
+        { "pos": 0.85, "color": "#603008" }
+      ],
+      "targets": ["pump_body"]
+    },
+    {
+      "primitive": "wave",
+      "space": "local",
+      "direction": [1.0, 0.0, 0.0],
+      "scale": 0.10,
+      "speed": { "remix": [0.06, 0.12] },
+      "density": 0.0,
+      "palette": [
+        { "pos": 0.0, "color": "#FF6010" },
+        { "pos": 0.45, "color": "#FFD040" },
+        { "pos": 0.7, "color": "#FF4000" },
+        { "pos": 0.9, "color": "#401000" }
+      ],
+      "targets": ["ram_body"]
+    },
+    {
+      "primitive": "wave",
+      "direction": { "remix_yaw": [1.0, 0.0, 0.0, -0.3, 0.3] },
+      "scale": 0.25,
+      "speed": { "remix": [0.2, 0.4] },
+      "density": 1.4,
+      "palette": [
+        { "pos": 0.0, "color": "#00E0C0" },
+        { "pos": 0.6, "color": "#003030" }
+      ],
+      "targets": ["keyboard_body"]
+    }
+  ]
+}

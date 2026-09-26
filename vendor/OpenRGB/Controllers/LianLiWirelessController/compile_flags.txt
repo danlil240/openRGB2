@@ -1,0 +1,14 @@
+-IC:/Users/daniel/tools/openrgb-unified/OpenRGB
+-IC:/Users/daniel/tools/openrgb-unified/OpenRGB/dependencies
+-IC:/Users/daniel/tools/openrgb-unified/OpenRGB/dependencies/libusb-1.0.27/include
+-IC:/Users/daniel/tools/openrgb-unified/OpenRGB/dependencies/tinyuz
+-IC:/Users/daniel/tools/openrgb-unified/OpenRGB/dependencies/HDiffPatch
+-IC:/Users/daniel/tools/openrgb-unified/OpenRGB/dependencies/HDiffPatch/libHDiffPatch/HDiff/private_diff/libdivsufsort
+-IC:/Users/daniel/tools/openrgb-unified/OpenRGB/dependencies/json
+-IC:/Users/daniel/tools/openrgb-unified/OpenRGB/dependencies/hidapi-hotplug-win/include
+-IC:/Users/daniel/tools/openrgb-unified/OpenRGB/RGBController
+-IC:/Users/daniel/tools/openrgb-unified/OpenRGB/hidapi_wrapper
+-IC:/Users/daniel/tools/openrgb-unified/OpenRGB/i2c_smbus
+-IC:/Users/daniel/tools/openrgb-unified/OpenRGB/SPDAccessor
+-D_IS_USED_MULTITHREAD=0
+-std=c++17

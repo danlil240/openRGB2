@@ -1,0 +1,37 @@
+{
+  "$schema": "../../schemas/effect.schema.json",
+  "schema_version": 1,
+  "id": "chrome",
+  "name": "Liquid chrome",
+  "description": "Slow pearlescent gradients",
+  "needs": "",
+  "layers": [
+    {
+      "primitive": "gradient",
+      "direction": { "remix_yaw": [1.0, 0.0, 0.25, -0.5, 0.5] },
+      "scale": { "remix": [0.6, 1.0] },
+      "speed": { "remix": [0.02, 0.05] },
+      "phase": { "remix01": true },
+      "opacity": 0.9,
+      "palette": [
+        { "pos": 0.0, "color": "#F0F0F6" },
+        { "pos": 0.3, "color": "#A0B0C8" },
+        { "pos": 0.55, "color": "#E8ECF4" },
+        { "pos": 0.8, "color": "#7080A0" }
+      ]
+    },
+    {
+      "primitive": "noise",
+      "blend": "screen",
+      "scale": 9.0,
+      "direction": [0.06, 0.02, 0.10],
+      "speed": 0.6,
+      "density": 0.88,
+      "seed": { "remix_u32": [0, 4294967295] },
+      "opacity": 0.45,
+      "palette": [
+        { "pos": 0.0, "color": "#FFFFFF" }
+      ]
+    }
+  ]
+}

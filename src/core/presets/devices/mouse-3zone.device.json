@@ -1,0 +1,68 @@
+{
+  "$schema": "../../schemas/device.schema.json",
+  "schema_version": 1,
+  "id": "mouse-3zone",
+  "name": "Gaming mouse (wheel/logo/strip)",
+  "category": "mouse",
+  "entities": {
+    "body": {
+      "geometry": "mouse_body",
+      "size_m": [0.066, 0.04, 0.117],
+      "x": 0.0, "y": 0.0, "z": 0.0,
+      "rx": 0.0, "ry": 0.0, "rz": 0.0
+    },
+    "logo": {
+      "geometry": "mouse_zone",
+      "size_m": [0.0, 0.0, 0.0],
+      "x": 0.0, "y": 0.025, "z": 0.02,
+      "rx": 0.0, "ry": 0.0, "rz": 0.0,
+      "zone": "logo"
+    },
+    "strip": {
+      "geometry": "mouse_zone",
+      "size_m": [0.0, 0.0, 0.0],
+      "x": 0.0, "y": -0.008, "z": 0.005,
+      "rx": 0.0, "ry": 0.0, "rz": 0.0,
+      "zone": "strip"
+    },
+    "wheel": {
+      "geometry": "mouse_zone",
+      "size_m": [0.0, 0.0, 0.0],
+      "x": 0.0, "y": 0.025, "z": -0.035,
+      "rx": 0.0, "ry": 0.0, "rz": 0.0,
+      "zone": "wheel"
+    }
+  },
+  "zones": [
+    {
+      "id": "wheel",
+      "entity": "wheel",
+      "led_count": 1,
+      "layout": {
+        "type": "points",
+        "points": [[0.0, 0.0, 0.0]]
+      }
+    },
+    {
+      "id": "logo",
+      "entity": "logo",
+      "led_count": 1,
+      "layout": {
+        "type": "points",
+        "points": [[0.0, 0.0, 0.0]]
+      }
+    },
+    {
+      "id": "strip",
+      "entity": "strip",
+      "led_count": 11,
+      "layout": {
+        "type": "ring",
+        "radius_m": 0.028,
+        "start_angle_deg": 90.0,
+        "face_y_m": 0.0,
+        "reverse": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "../../schemas/device.schema.json",
+  "schema_version": 1,
+  "id": "desk",
+  "name": "Desk surface",
+  "category": "furniture",
+  "entities": {
+    "body": {
+      "geometry": "desk",
+      "size_m": [1.4, 0.04, 0.75],
+      "x": 0.0, "y": 0.0, "z": 0.0,
+      "rx": 0.0, "ry": 0.0, "rz": 0.0
+    }
+  },
+  "zones": []
+}

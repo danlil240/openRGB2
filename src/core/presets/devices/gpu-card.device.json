@@ -1,0 +1,16 @@
+{
+  "$schema": "../../schemas/device.schema.json",
+  "schema_version": 1,
+  "id": "gpu-card",
+  "name": "Graphics card (decor)",
+  "category": "gpu",
+  "entities": {
+    "body": {
+      "geometry": "gpu_body",
+      "size_m": [0.3, 0.05, 0.13],
+      "x": 0.0, "y": 0.0, "z": 0.0,
+      "rx": 0.0, "ry": 0.0, "rz": 0.0
+    }
+  },
+  "zones": []
+}

@@ -1,0 +1,203 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://openrgb.org/plugins/DesktopLightingStudio/schemas/effect.schema.json",
+  "title": "Desktop Lighting Studio effect look",
+  "description": "Parametric lighting-look definition (presets/effects/<id>.effect.json). The file basename (<id>.effect.json) must equal \"id\". Layers composite in order over the emitter's painted color. Deterministic: numeric fields may carry remix specs that draw from the scene's remix seed — draws consume the seed's stream in document order (layers array order, then field order inside each layer object). Units: meters, seconds.",
+  "type": "object",
+  "required": ["schema_version", "id", "layers"],
+  "additionalProperties": true,
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "type": "integer", "const": 1 },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "minLength": 1,
+      "description": "Look id — must equal the file basename (<id>.effect.json)."
+    },
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "needs": {
+      "type": "string",
+      "enum": ["", "audio", "key", "screen"],
+      "description": "Required input source; empty = none."
+    },
+    "layers": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/definitions/layer" }
+    }
+  },
+  "definitions": {
+    "numberOrRemix": {
+      "description": "A literal number, or one remix spec object drawing from the seed stream: {\"remix\":[lo,hi]} -> Range(lo,hi); {\"remix01\":true} -> Next01(); {\"remix_angle\":true} -> Angle(); {\"remix_neg\":[lo,hi]} -> -Range(lo,hi); {\"remix_pick\":[a,b]} -> Next01()<0.5 ? a : b.",
+      "oneOf": [
+        { "type": "number" },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "properties": {
+            "remix":       { "$ref": "#/definitions/numPair" },
+            "remix_neg":   { "$ref": "#/definitions/numPair" },
+            "remix_pick":  { "$ref": "#/definitions/numPair" },
+            "remix01":     { "type": "boolean", "const": true },
+            "remix_angle": { "type": "boolean", "const": true }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "numPair": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "vec3OrRemix": {
+      "description": "An [x,y,z] array (elements may themselves be scalar remix specs), or {\"remix_yaw\":[x,y,z,lo,hi]} -> RotateYaw(Normalize({x,y,z}), Range(lo,hi)) — direction fields only.",
+      "oneOf": [
+        {
+          "type": "array",
+          "items": { "$ref": "#/definitions/numberOrRemix" },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "required": ["remix_yaw"],
+          "properties": {
+            "remix_yaw": {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 5,
+              "maxItems": 5,
+              "description": "[x,y,z,lo,hi] — base vector + yaw range (radians)."
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "stop": {
+      "type": "object",
+      "required": ["pos", "color"],
+      "additionalProperties": false,
+      "properties": {
+        "pos": {
+          "$ref": "#/definitions/numberOrRemix",
+          "description": "Stop position 0..1; stops must be strictly increasing."
+        },
+        "color": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        }
+      }
+    },
+    "layer": {
+      "type": "object",
+      "description": "One parametric field + how it composites. All fields optional; unspecified fields take EffectLayer defaults (primitive \"static\", space \"world\", blend \"replace\", opacity 1, speed 1, scale 0.5, phase 0, density 1, origin {0,0,0}, direction {1,0,0}, empty path/palette/targets, source \"\", seed 0, enabled true).",
+      "additionalProperties": false,
+      "properties": {
+        "primitive": {
+          "type": "string",
+          "enum": ["static", "gradient", "wave", "pulse", "comet",
+                   "noise", "spin", "ripple", "screenfield", "level"]
+        },
+        "space": {
+          "type": "string",
+          "enum": ["world", "local"],
+          "description": "\"world\" = shared desk frame; \"local\" = per-object frame."
+        },
+        "blend": {
+          "type": "string",
+          "enum": ["replace", "add", "screen"]
+        },
+        "opacity": {
+          "$ref": "#/definitions/numberOrRemix",
+          "description": "Coverage multiplier 0..1 (intensity slider multiplies on top)."
+        },
+        "speed": {
+          "$ref": "#/definitions/numberOrRemix",
+          "description": "Primitive motion rate (m/s, rev/s, ...). The global speed slider multiplies on top."
+        },
+        "scale": {
+          "$ref": "#/definitions/numberOrRemix",
+          "description": "Wavelength / ring spacing / noise frequency / spoke count / comet tail length / ripple band half-width / screenfield width (m). Must be > 0."
+        },
+        "phase": {
+          "$ref": "#/definitions/numberOrRemix",
+          "description": "0..1 starting offset."
+        },
+        "density": {
+          "$ref": "#/definitions/numberOrRemix",
+          "description": "Band sharpness / noise contrast / ripple decay (1/s). >= 0."
+        },
+        "origin": {
+          "$ref": "#/definitions/vec3OrRemix",
+          "description": "pulse/comet/spin center; ripple spawn for position-less events; screenfield screen center."
+        },
+        "direction": {
+          "$ref": "#/definitions/vec3OrRemix",
+          "description": "wave/gradient axis; noise wind. remix_yaw allowed here."
+        },
+        "path": {
+          "type": "array",
+          "description": "comet waypoints (polyline, auto-closed).",
+          "maxItems": 256,
+          "items": {
+            "type": "array",
+            "items": { "type": "number" },
+            "minItems": 3,
+            "maxItems": 3
+          }
+        },
+        "palette": {
+          "type": "array",
+          "description": "Interpolated color stops, pos strictly increasing. Omit entirely when the primitive never samples color — a present-but-empty palette is an error.",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/definitions/stop" }
+        },
+        "targets": {
+          "type": "array",
+          "description": "Object ids, geometry tags, emitter groups; empty = every device object.",
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "source": {
+          "type": "string",
+          "enum": ["", "audio", "key", "screen"],
+          "description": "Which input events feed a ripple (\"\" = all)."
+        },
+        "seed": {
+          "description": "Per-layer deterministic variation: an unsigned 32-bit literal, or {\"remix_u32\":[lo,hi]} -> integer draw ([0,4294967295] maps to Next() verbatim).",
+          "oneOf": [
+            { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 1,
+              "required": ["remix_u32"],
+              "properties": {
+                "remix_u32": {
+                  "type": "array",
+                  "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "false = the layer composites nothing (layer-stack editor on/off)."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,141 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://openrgb.org/plugins/DesktopLightingStudio/schemas/device.schema.json",
+  "title": "Desktop Lighting Studio device type",
+  "description": "Reusable device-type definition (presets/devices/<id>.device.json). A workspace instance references it through devices.<instance>.type; the file basename (<id>.device.json) must equal \"id\". Entities are local parts (geometry + local transform) or child-device references (another type id + local transform — nested assemblies, recursion rejected). Zones generate emitters on their entity. Units: meters, Euler degrees (Rz*Ry*Rx).",
+  "type": "object",
+  "required": ["schema_version", "id", "entities"],
+  "additionalProperties": true,
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "type": "integer", "const": 1 },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "minLength": 1,
+      "description": "Type id — must equal the file basename (<id>.device.json)."
+    },
+    "name": { "type": "string" },
+    "category": { "type": "string" },
+    "entities": {
+      "type": "object",
+      "description": "Local parts and child-device references keyed by entity id. Expanded objects are named <instance path>/<entity id>.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "Child device-type reference — mounts another preset at this local transform (nested assembly). Mutually exclusive with geometry/size_m/zone/appearance."
+          },
+          "geometry": { "type": "string" },
+          "size_m": {
+            "$ref": "#/definitions/vec3",
+            "description": "Body dimensions in meters; each component >= 0, 0 falls back to the geometry's canonical axis."
+          },
+          "x": { "type": "number" },
+          "y": { "type": "number" },
+          "z": { "type": "number" },
+          "rx": { "type": "number", "description": "Euler degrees, Rz*Ry*Rx." },
+          "ry": { "type": "number" },
+          "rz": { "type": "number" },
+          "parent": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "Optional entity id inside this type — the entity-parent chain composes local transforms. Cycles rejected."
+          },
+          "zone": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "Zone id this entity carries (must match a zones[] entry whose entity names this entity)."
+          },
+          "appearance": {
+            "type": "object",
+            "description": "Authoring material hints (colors, roughness, ...) retained verbatim."
+          }
+        }
+      }
+    },
+    "zones": {
+      "type": "array",
+      "description": "Emitter-bearing zones; each generates emitters local to its entity.",
+      "items": {
+        "type": "object",
+        "required": ["id", "entity", "layout"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+          "entity": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "Entity carrying the LEDs (local part, not a child ref)."
+          },
+          "led_count": { "type": "integer", "minimum": 0 },
+          "layout": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type": { "type": "string", "enum": ["ring", "strip", "matrix", "points"] },
+              "radius_m": { "type": "number", "exclusiveMinimum": 0 },
+              "start_angle_deg": { "type": "number" },
+              "face_y_m": { "type": "number", "description": "Emitter plane offset along the entity's +Y." },
+              "reverse": { "type": "boolean" },
+              "spacing_m": { "type": "number", "exclusiveMinimum": 0 },
+              "origin": { "$ref": "#/definitions/vec3" },
+              "dynamic": { "type": "boolean", "description": "matrix: emitters rebuilt from the bound zone's matrix map at runtime." },
+              "rows": { "type": "integer", "minimum": 0, "maximum": 256 },
+              "cols": { "type": "integer", "minimum": 0, "maximum": 256 },
+              "pitch_x_m": { "type": "number" },
+              "pitch_z_m": { "type": "number" },
+              "empty": { "type": "integer", "minimum": 0, "description": "matrix map sentinel for unmapped cells." },
+              "map": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+              "points": {
+                "type": "array",
+                "items": { "$ref": "#/definitions/vec3" },
+                "description": "Explicit emitter positions for irregular hardware."
+              },
+              "addresses": {
+                "type": "array",
+                "items": { "type": "integer" },
+                "description": "Optional per-point addresses; default = instance addr_base + index."
+              }
+            }
+          }
+        }
+      }
+    },
+    "binding_hints": {
+      "type": "array",
+      "description": "Informational compatible-hardware hints carried by the type (never per-instance serials; never grants verified). Known keys only — unknown keys are rejected as likely typos.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "controller_name": { "type": "string" },
+          "vendor": { "type": "string" },
+          "zone_name": { "type": "string" }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "vec3": {
+      "oneOf": [
+        {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        {
+          "type": "object",
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "z": { "type": "number" }
+          }
+        }
+      ],
+      "description": "[x,y,z] preferred; {x,y,z} accepted."
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "../../schemas/device.schema.json",
+  "schema_version": 1,
+  "id": "gpu-fan",
+  "name": "GPU fan — 8 LEDs, downward",
+  "category": "gpu",
+  "entities": {
+    "body": {
+      "geometry": "fan_body",
+      "size_m": [0.0, 0.0, 0.0],
+      "x": 0.0, "y": 0.0, "z": 0.0,
+      "rx": 0.0, "ry": 0.0, "rz": 0.0,
+      "zone": "ring"
+    }
+  },
+  "zones": [
+    {
+      "id": "ring",
+      "entity": "body",
+      "led_count": 8,
+      "layout": {
+        "type": "ring",
+        "radius_m": 0.04,
+        "start_angle_deg": 0.0,
+        "face_y_m": -0.016,
+        "reverse": false
+      }
+    }
+  ]
+}

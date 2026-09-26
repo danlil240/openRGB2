@@ -1,0 +1,9 @@
+{
+  "$schema": "../../schemas/device.schema.json",
+  "schema_version": 1,
+  "id": "group",
+  "name": "Placement group",
+  "category": "group",
+  "entities": {},
+  "zones": []
+}

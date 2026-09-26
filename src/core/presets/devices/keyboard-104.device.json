@@ -1,0 +1,34 @@
+{
+  "$schema": "../../schemas/device.schema.json",
+  "schema_version": 1,
+  "id": "keyboard-104",
+  "name": "Full-size keyboard (zone matrix)",
+  "category": "keyboard",
+  "entities": {
+    "body": {
+      "geometry": "keyboard_body",
+      "size_m": [0.0, 0.0, 0.0],
+      "x": 0.0, "y": 0.0, "z": 0.0,
+      "rx": 0.0, "ry": 0.0, "rz": 0.0,
+      "zone": "matrix"
+    }
+  },
+  "zones": [
+    {
+      "id": "matrix",
+      "entity": "body",
+      "led_count": 0,
+      "layout": {
+        "type": "matrix",
+        "dynamic": true,
+        "rows": 0,
+        "cols": 0,
+        "pitch_x_m": 0.019,
+        "pitch_z_m": 0.019,
+        "origin": [0.0, 0.0, 0.0],
+        "empty": 4294967295,
+        "map": []
+      }
+    }
+  ]
+}

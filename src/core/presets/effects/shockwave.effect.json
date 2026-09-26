@@ -1,0 +1,40 @@
+{
+  "$schema": "../../schemas/effect.schema.json",
+  "schema_version": 1,
+  "id": "shockwave",
+  "name": "Bass shockwave",
+  "description": "Audio onsets launch spatial rings",
+  "needs": "audio",
+  "layers": [
+    {
+      "primitive": "static",
+      "palette": [
+        { "pos": 0.0, "color": "#08060E" }
+      ]
+    },
+    {
+      "primitive": "ripple",
+      "source": "audio",
+      "origin": [0.47, 0.22, -0.10],
+      "speed": { "remix": [0.55, 0.85] },
+      "scale": { "remix": [0.05, 0.09] },
+      "density": { "remix": [1.6, 2.4] },
+      "opacity": 1.0,
+      "palette": [
+        { "pos": 0.0, "color": "#FFF0C8" },
+        { "pos": 0.35, "color": "#FF5A3C" },
+        { "pos": 0.7, "color": "#A020A0" },
+        { "pos": 1.0, "color": "#180830" }
+      ]
+    },
+    {
+      "primitive": "level",
+      "blend": "screen",
+      "opacity": 0.5,
+      "palette": [
+        { "pos": 0.0, "color": "#001E28" },
+        { "pos": 1.0, "color": "#28DCC8" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,215 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://openrgb.org/plugins/DesktopLightingStudio/schemas/studio.schema.json",
+  "title": "Desktop Lighting Studio workspace",
+  "description": "Authoritative active workspace document (studio.json), compact v3: device INSTANCES (type id + placement), bindings, per-instance settings, colors, input/output settings, and editor preferences. Reusable device definitions live in external type files (presets/devices/*.device.json, see device.schema.json) — never inline here. Units: meters for positions, degrees for Euler rotations (Rz*Ry*Rx), colors written as \"#RRGGBB\".",
+  "type": "object",
+  "required": ["schema_version"],
+  "additionalProperties": true,
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": {
+      "type": "integer",
+      "const": 3,
+      "description": "Workspace schema version. 3 = compact instances. v1/v2 expanded documents migrate on file load; newer documents are rejected, not rewritten."
+    },
+    "name": { "type": "string" },
+    "ui": {
+      "type": "object",
+      "properties": {
+        "theme": { "type": "string", "default": "graphite" },
+        "reduced_motion": { "type": "boolean", "default": false },
+        "favorites": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "description": "Pinned device-type ids (library UI state — not undoable, never part of the scene)."
+        }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "properties": {
+        "view": { "type": "string", "enum": ["desk", "top", "front", "case", "free"], "default": "desk" },
+        "projection": { "type": "string", "enum": ["orthographic", "perspective"], "default": "orthographic" },
+        "target": {
+          "type": "object",
+          "description": "Pan/orbit focus point in world meters. Optional; persisted after camera gestures.",
+          "properties": {
+            "x": { "type": "number" }, "y": { "type": "number" }, "z": { "type": "number" }
+          }
+        },
+        "yaw_deg": { "type": "number", "default": 0, "description": "Free-view orbit yaw." },
+        "pitch_deg": { "type": "number", "default": -38, "description": "Free-view orbit pitch." },
+        "distance": { "type": "number", "exclusiveMinimum": 0, "default": 1.21, "description": "Perspective dolly distance, meters." },
+        "span": { "type": "number", "exclusiveMinimum": 0, "default": 0.9, "description": "Orthographic vertical extent, meters." }
+      }
+    },
+    "controls": {
+      "type": "object",
+      "properties": {
+        "middle_drag": { "type": "string", "enum": ["pan", "orbit"], "default": "pan" },
+        "move_snap_m": { "type": "number", "exclusiveMinimum": 0, "default": 0.01 },
+        "rotate_snap_deg": { "type": "number", "exclusiveMinimum": 0, "default": 15 }
+      }
+    },
+    "render": {
+      "type": "object",
+      "properties": {
+        "quality": { "type": "string", "enum": ["low", "balanced", "high"], "default": "balanced" },
+        "bloom": { "type": "boolean", "default": true }
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "properties": {
+        "audio": { "type": "boolean", "default": false },
+        "keys": { "type": "boolean", "default": false },
+        "screen": { "type": "boolean", "default": false },
+        "screen_index": { "type": "integer", "minimum": 0, "default": 0 },
+        "sens_pct": { "type": "integer", "minimum": 25, "maximum": 200, "default": 100 },
+        "decay_pct": { "type": "integer", "minimum": 50, "maximum": 300, "default": 100 }
+      }
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "brightness": { "type": "number", "minimum": 0, "maximum": 1, "default": 1 },
+        "live_on_startup": {
+          "type": "boolean",
+          "default": false,
+          "description": "Restore live hardware output on startup. Defaults false; migration and imported documents may never enable it."
+        }
+      }
+    },
+    "devices": {
+      "type": "object",
+      "description": "Root device instances keyed by stable instance id. Each entry is placement only: the reusable definition is devices.<id>.type resolved to presets/devices/<type>.device.json (file id must match).",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "Device-type id — resolves to presets/devices/<id>.device.json."
+          },
+          "x": { "type": "number", "description": "Meters." },
+          "y": { "type": "number", "description": "Meters." },
+          "z": { "type": "number", "description": "Meters." },
+          "rx": { "type": "number", "description": "Euler degrees, Rz*Ry*Rx order." },
+          "ry": { "type": "number" },
+          "rz": { "type": "number" },
+          "parent": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "Optional parent INSTANCE id — placement is then relative to it. Must resolve; cycles rejected."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "description": "Persistent hardware identities keyed by binding id — never controller-list indices.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "controller_name": { "type": "string" },
+          "vendor": { "type": "string" },
+          "serial": { "type": "string" },
+          "location": { "type": "string" },
+          "device_type": { "type": "integer" },
+          "zone_name": { "type": "string" },
+          "zone_leds": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "device_settings": {
+      "type": "object",
+      "description": "Per-instance state keyed by instance path (a root instance id, or <parent>/<child-entity> for a nested child device inside a type).",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "visible": { "type": "boolean", "default": true },
+          "locked": { "type": "boolean", "default": false },
+          "mirror_of": {
+            "type": "string",
+            "description": "Another instance path of the SAME type. Every expanded object under this path becomes a Linked copy of the corresponding object under the target — output ownership, never placement. Chains rejected."
+          },
+          "zones": {
+            "type": "object",
+            "description": "Zone id -> physical attachment for zones declared by this instance's type.",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "binding": {
+                  "type": "string",
+                  "description": "bindings key; must resolve when set."
+                },
+                "addr_base": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "First LED index this zone occupies in the bound hardware zone."
+                },
+                "verified": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Hardware-verified => writable. Type files can never grant this."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "colors": {
+      "type": "object",
+      "properties": {
+        "objects": {
+          "type": "object",
+          "description": "Resolved object path (<instance>/<entity>) -> base color.",
+          "additionalProperties": { "$ref": "#/definitions/color" }
+        },
+        "emitters": {
+          "type": "object",
+          "description": "Resolved object path -> emitter index -> painted color override.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": { "$ref": "#/definitions/color" }
+          }
+        }
+      }
+    },
+    "effects": {
+      "type": "object",
+      "properties": {
+        "preset": { "type": "string" },
+        "seed": { "type": "integer", "minimum": 0, "maximum": 4294967295, "description": "uint32 remix seed — remix() spans the full unsigned range." },
+        "speed": { "type": "number", "exclusiveMinimum": 0 },
+        "intensity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "playing": { "type": "boolean" },
+        "layers": {
+          "type": "array",
+          "description": "The user's authored inline effect layer stack — resolved literals only (no remix specs; those live in presets/effects/*.effect.json look documents). When non-empty it wins over \"preset\" at runtime; \"preset\" keeps provenance. Layer shape: see effect.schema.json#/definitions/layer.",
+          "items": { "type": "object" }
+        }
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "description": "Third-party extension data, retained verbatim."
+    }
+  },
+  "definitions": {
+    "color": {
+      "oneOf": [
+        { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        { "type": "integer", "minimum": 0, "maximum": 16777215 }
+      ],
+      "description": "\"#RRGGBB\" preferred; packed 0x00BBGGRR integer accepted for older files."
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "../../schemas/effect.schema.json",
+  "schema_version": 1,
+  "id": "ambient",
+  "name": "Screen atmosphere",
+  "description": "Screen colors wash over the setup",
+  "needs": "screen",
+  "layers": [
+    {
+      "primitive": "static",
+      "opacity": 0.6,
+      "palette": [
+        { "pos": 0.0, "color": "#0A080C" }
+      ]
+    },
+    {
+      "primitive": "screenfield",
+      "origin": [0.0, 0.32, -0.22],
+      "scale": 0.62,
+      "opacity": 1.0
+    }
+  ]
+}

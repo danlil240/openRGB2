@@ -1,0 +1,28 @@
+{
+  "$schema": "../../schemas/device.schema.json",
+  "schema_version": 1,
+  "id": "gpu-logo",
+  "name": "GPU side logo — 4 LEDs",
+  "category": "gpu",
+  "entities": {
+    "body": {
+      "geometry": "gpu_logo",
+      "size_m": [0.0, 0.0, 0.0],
+      "x": 0.0, "y": 0.0, "z": 0.0,
+      "rx": 0.0, "ry": 0.0, "rz": 0.0,
+      "zone": "strip"
+    }
+  },
+  "zones": [
+    {
+      "id": "strip",
+      "entity": "body",
+      "led_count": 4,
+      "layout": {
+        "type": "strip",
+        "spacing_m": 0.02,
+        "origin": [-0.03, 0.0, 0.0]
+      }
+    }
+  ]
+}

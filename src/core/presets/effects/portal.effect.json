@@ -1,0 +1,29 @@
+{
+  "$schema": "../../schemas/effect.schema.json",
+  "schema_version": 1,
+  "id": "portal",
+  "name": "Portal",
+  "description": "Waves expanding out of the case",
+  "needs": "",
+  "layers": [
+    {
+      "primitive": "static",
+      "palette": [
+        { "pos": 0.0, "color": "#050A12" }
+      ]
+    },
+    {
+      "primitive": "pulse",
+      "origin": [0.47, 0.22, -0.10],
+      "scale": { "remix": [0.18, 0.3] },
+      "speed": { "remix": [0.2, 0.4] },
+      "density": { "remix": [1.8, 3.0] },
+      "phase": { "remix01": true },
+      "opacity": 1.0,
+      "palette": [
+        { "pos": 0.0, "color": "#40F0E0" },
+        { "pos": 0.5, "color": "#8040FF" }
+      ]
+    }
+  ]
+}

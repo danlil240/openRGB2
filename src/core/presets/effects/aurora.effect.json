@@ -1,0 +1,44 @@
+{
+  "$schema": "../../schemas/effect.schema.json",
+  "schema_version": 1,
+  "id": "aurora",
+  "name": "Aurora",
+  "description": "Teal/violet ribbons sweeping the desk",
+  "needs": "",
+  "layers": [
+    {
+      "primitive": "static",
+      "palette": [
+        { "pos": 0.0, "color": "#060C1A" }
+      ]
+    },
+    {
+      "primitive": "wave",
+      "direction": { "remix_yaw": [0.55, 0.0, -0.6, -0.4, 0.4] },
+      "scale": { "remix": [0.35, 0.6] },
+      "speed": { "remix": [0.15, 0.3] },
+      "density": { "remix": [1.2, 2.2] },
+      "phase": { "remix01": true },
+      "opacity": 0.95,
+      "palette": [
+        { "pos": 0.0, "color": "#00C8B4" },
+        { "pos": 0.35, "color": "#7040E0" },
+        { "pos": 0.65, "color": "#081838" },
+        { "pos": 0.85, "color": "#005A6E" }
+      ]
+    },
+    {
+      "primitive": "noise",
+      "blend": "screen",
+      "scale": 7.0,
+      "direction": [0.12, 0.05, 0.08],
+      "speed": 1.0,
+      "density": 0.86,
+      "seed": { "remix_u32": [0, 4294967295] },
+      "opacity": 0.5,
+      "palette": [
+        { "pos": 0.0, "color": "#EBF5FF" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "../../schemas/effect.schema.json",
+  "schema_version": 1,
+  "id": "keyripple",
+  "name": "Key ripple",
+  "description": "Key presses ripple out to the desk",
+  "needs": "key",
+  "layers": [
+    {
+      "primitive": "static",
+      "palette": [
+        { "pos": 0.0, "color": "#060A12" }
+      ]
+    },
+    {
+      "primitive": "ripple",
+      "source": "key",
+      "origin": [-0.06, 0.04, 0.26],
+      "speed": { "remix": [0.45, 0.7] },
+      "scale": { "remix": [0.03, 0.06] },
+      "density": { "remix": [1.8, 2.6] },
+      "opacity": 1.0,
+      "palette": [
+        { "pos": 0.0, "color": "#DCF5FF" },
+        { "pos": 0.4, "color": "#50A0FF" },
+        { "pos": 1.0, "color": "#102050" }
+      ]
+    }
+  ]
+}
