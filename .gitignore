@@ -18,6 +18,9 @@ profiles/local/
 *.pro.user
 *.pro.user.*
 moc_*.cpp
+
+# Agent scratch (SDD workspace)
+.superpowers/
 moc_*.h
 qrc_*.cpp
 ui_*.h

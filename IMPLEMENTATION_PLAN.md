@@ -272,12 +272,12 @@ Dependencies: **0 → 1 → 2 → 3 → 4 → 5 → 6**. Within Milestone 2, qua
 
 **Create:** `vendor/OpenRGB/`, `vendor/provenance/`, `src/core/`, `tests/backend/`, `tests/core/`, `CMakeLists.txt`.
 
-- [ ] Inventory relevant tracked changes and untracked files in the old project/submodule; record revisions, paths, hashes, and licenses.
-- [ ] Import the wireless-enabled backend, including required untracked effects files and dependencies, into reproducible project source. Exclude generated builds and unrelated work.
-- [ ] Import the Qt-free scene/effects/resolver code and useful regression tests.
-- [ ] Build the imported backend with Qt 6.8.3/MSVC 2022 without replacing the installed build.
-- [ ] Adapt and run offline tests. Historical check counts are not current results.
-- [ ] Remove historical security-bypass workarounds from imported test/build workflows; use ordinary approved/signed execution without weakening platform protection.
+- [x] Inventory relevant tracked changes and untracked files in the old project/submodule; record revisions, paths, hashes, and licenses.
+- [x] Import the wireless-enabled backend, including required untracked effects files and dependencies, into reproducible project source. Exclude generated builds and unrelated work.
+- [x] Import the Qt-free scene/effects/resolver code and useful regression tests.
+- [x] Build the imported backend with Qt 6.8.3/MSVC 2022 without replacing the installed build.
+- [x] Adapt and run offline tests. Historical check counts are not current results.
+- [x] Remove historical security-bypass workarounds from imported test/build workflows; use ordinary approved/signed execution without weakening platform protection.
 
 **Pass:** Reproducible imported source and passing offline tests; the old working tree remains unchanged.
 
@@ -285,12 +285,12 @@ Dependencies: **0 → 1 → 2 → 3 → 4 → 5 → 6**. Within Milestone 2, qua
 
 **Create:** `tools/bench/`, `docs/hardware/daniel-pc.md`, `docs/benchmarks/baseline.md`, `profiles/daniel-pc.json`.
 
-- [ ] Revalidate actual firmware, topology, mapping, and ownership; keep unique hardware identifiers in local user state.
-- [ ] Instrument submissions, lock wait, compression, runtime admission, USB sends, discovery, and heartbeat with bounded diagnostics.
-- [ ] Prepare an opt-in physical test with selected devices, patterns, saved-state restoration, competing-owner handling, and a hard stop.
-- [ ] During an authorized hardware session, measure the old Studio path and a minimal SDK producer separately.
-- [ ] Run the section 3 workload matrix on the wireless group and full setup; verify FanControl/sensors remain functional.
-- [ ] Baseline the three existing uploaded presets, recording speed, frame count, nominal interval, measured playback, and upload traffic separately from the live tests.
+- [x] Revalidate actual firmware, topology, mapping, and ownership; keep unique hardware identifiers in local user state.
+- [x] Instrument submissions, lock wait, compression, runtime admission, USB sends, discovery, and heartbeat with bounded diagnostics.
+- [x] Prepare an opt-in physical test with selected devices, patterns, saved-state restoration, competing-owner handling, and a hard stop.
+- [x] During an authorized hardware session, measure the old Studio path and a minimal SDK producer separately.
+- [x] Run the section 3 workload matrix on the wireless group and full setup; verify FanControl/sensors remain functional.
+- [x] Baseline the three existing uploaded presets, recording speed, frame count, nominal interval, measured playback, and upload traffic separately from the live tests.
 
 **Pass:** A report names measured limiting stages and the exact binary/configuration. No unmeasured presentation FPS is reported.
 
@@ -301,22 +301,22 @@ Dependencies: **0 → 1 → 2 → 3 → 4 → 5 → 6**. Within Milestone 2, qua
 
 **2A — Uploaded playback**
 
-- [ ] Extract/share the three existing pure preset renderers and add a deterministic loop builder with the section 3.4 duration, timing, and compression rules. Keep the backend build compatible with its existing recipe.
-- [ ] Test loop seams, LED order/direction, RGB bounds, all supported speeds, fractional intervals, actual compression limits, and duration-preserving frame reduction. Verify that speed changes do not inadvertently change requested smoothness.
-- [ ] Update the three backend modes to use the loop builder and protocol timing; serialize mode changes with live submissions. Test a queued live write at each mode transition and rapid parameter revisions during upload.
-- [ ] Port the validated V1 RGB clock query through the existing worker; test identity/response validation, wrap, reboot, timeout, and bounded maintenance priority.
-- [ ] Expose effective playback metadata and clock snapshots in read-only diagnostics; test bounded messages, unsupported versions, and stale snapshots.
-- [ ] Physically verify the three presets, the loop-phase/clock relationship, visible frame rate, cycle duration, and steady-state absence of repeated full uploads. Record measurements and any lower limits in `playback-result.md`.
+- [x] Extract/share the three existing pure preset renderers and add a deterministic loop builder with the section 3.4 duration, timing, and compression rules. Keep the backend build compatible with its existing recipe.
+- [x] Test loop seams, LED order/direction, RGB bounds, all supported speeds, fractional intervals, actual compression limits, and duration-preserving frame reduction. Verify that speed changes do not inadvertently change requested smoothness.
+- [x] Update the three backend modes to use the loop builder and protocol timing; serialize mode changes with live submissions. Test a queued live write at each mode transition and rapid parameter revisions during upload.
+- [x] Port the validated V1 RGB clock query through the existing worker; test identity/response validation, wrap, reboot, timeout, and bounded maintenance priority.
+- [x] Expose effective playback metadata and clock snapshots in read-only diagnostics; test bounded messages, unsupported versions, and stale snapshots.
+- [x] Physically verify the three presets, the loop-phase/clock relationship, visible frame rate, cycle duration, and steady-state absence of repeated full uploads. Record measurements and any lower limits in `playback-result.md`.
 
 **2B — Live delivery**
 
-- [ ] Add failing tests for burst input, stale sightings under continuous frames, deadline scheduling, shared-link recovery, cancellation, ID reuse, and heartbeat starvation.
-- [ ] Decouple pending-frame exchange from blocking I/O; keep transport and runtime state owned by one worker.
-- [ ] Replace duplicated/fixed pacing assumptions with the tested device delivery policy and monotonic deadlines.
-- [ ] Compare the local protocol with pinned Lian Li Linux; port only evidence-backed changes relevant to the V1 SL group.
-- [ ] Qualify packet pacing and header-repetition changes individually, preserving discovery/convergence/recovery behavior.
-- [ ] Run the 10/20/30/40/60 sweep and report physical throughput, jitter, compression sensitivity, and resets/retries.
-- [ ] Resolve the performance gate: document whether 60 passes. A lower ceiling requires an explicit accepted release criterion.
+- [x] Add failing tests for burst input, stale sightings under continuous frames, deadline scheduling, shared-link recovery, cancellation, ID reuse, and heartbeat starvation.
+- [x] Decouple pending-frame exchange from blocking I/O; keep transport and runtime state owned by one worker.
+- [x] Replace duplicated/fixed pacing assumptions with the tested device delivery policy and monotonic deadlines.
+- [x] Compare the local protocol with pinned Lian Li Linux; port only evidence-backed changes relevant to the V1 SL group.
+- [x] Qualify packet pacing and header-repetition changes individually, preserving discovery/convergence/recovery behavior.
+- [x] Run the 10/20/30/40/60 sweep and report physical throughput, jitter, compression sensitivity, and resets/retries.
+- [x] Resolve the performance gate: document whether 60 passes. A lower ceiling requires an explicit accepted release criterion.
 
 **Pass:** Regression tests and separate physical reports establish uploaded-playback behavior and live before/after results. Record unresolved numerical release criteria explicitly; a successful loop does not pass the live target.
 
