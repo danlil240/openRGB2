@@ -307,10 +307,26 @@ bool DeviceMapper::StartIdentify(const DeviceKey& controller,
     return true;
 }
 
-bool DeviceMapper::CancelIdentify(const DeviceKey& controller)
+bool DeviceMapper::CancelIdentify(const DeviceKey& controller,
+                                  TimePoint now)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return identify_.erase(controller) != 0;
+    const auto it = identify_.find(controller);
+    if(it == identify_.end())
+    {
+        return false;
+    }
+    /* Stamp expiry, never erase outright: the restore frame
+       exists only in ApplyIdentify's expiry branch, so an
+       erased booking with no scene frame following would
+       freeze the blink's last phase on the hardware (round-2
+       review). The stamped entry keeps IdentifyActive() true —
+       the frame path stays awake for the one tick that prunes
+       the booking and emits the restore. Identifying() reports
+       false at once (now >= until); the caller's reply
+       contract is unchanged. */
+    it->second.until = now;
+    return true;
 }
 
 bool DeviceMapper::Identifying(const DeviceKey& controller,

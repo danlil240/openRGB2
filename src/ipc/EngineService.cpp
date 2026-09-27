@@ -1296,7 +1296,8 @@ IpcReply EngineService::HandleIdentify(const nlohmann::json& body)
     }
     if(duration_ms == 0)
     {
-        const bool was = deps_.mapper->CancelIdentify(key);
+        const bool was =
+            deps_.mapper->CancelIdentify(key, Clock::now());
         return IpcReply::Success(MsgType::Ok,
             nlohmann::json::object({
                 { "identifying", false                 },

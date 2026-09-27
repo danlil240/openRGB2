@@ -431,7 +431,8 @@ int main()
                     CHECK(frames[0].colors[5].r == 0x00);
                 }
             }
-            CHECK(mapper.CancelIdentify(fsnap.key));
+            CHECK(mapper.CancelIdentify(fsnap.key,
+                                        Clock::now()));
         }
 
         /*---- scene mutations: a device-bound document ------*/
@@ -826,6 +827,109 @@ int main()
         CHECK(!mapper4.IdentifyActive());
         CHECK(engine4.Worker().Step(
             after + std::chrono::milliseconds(20)) == false);
+    }
+
+    /*---- Task 4.4 review round 2: CANCEL with no scene must
+           still land the restore frame -------------------------
+           duration_ms:0 used to erase the booking outright —
+           the restore frame lives only in the expiry branch,
+           so with no scene driving the lane nothing ever ran it
+           and the blink's last phase froze on the hardware.
+           Cancel now stamps the booking expired; the normal
+           prune+restore tick ends it. */
+    {
+        Engine           engine5;
+        DeliveryPipeline pipe5;
+        DeviceMapper     mapper5;
+
+        DeviceSnapshot csnap;
+        csnap.key = DeviceKey{ "Lian Li: SL Wireless",
+                               "AABBCCDDEEFF",
+                               "Wireless: AA:BB:CC:DD:EE:FF", "" };
+        csnap.topology_generation = 1;
+        csnap.zones = { ZoneSnapshot{ "Fan 1", 40 } };
+        csnap.colors.assign(40, RgbColor{ 0x11, 0x22, 0x33 });
+        csnap.connection = ConnectionState::Connected;
+        pipe5.RegisterDevice(csnap);
+        mapper5.SyncDevices(std::vector<DeviceSnapshot>{ csnap });
+
+        EngineService::Deps d5;
+        d5.pipeline = &pipe5;
+        d5.mapper   = &mapper5;
+        d5.snapshots = [&csnap]
+        {
+            return std::vector<DeviceSnapshot>{ csnap };
+        };
+        EngineService svc5(engine5, d5);
+
+        engine5.Worker().SetFrameCallback(
+            [&mapper5, &pipe5](const EvaluatedFrame& ev)
+            {
+                for(const RgbFrame& f : mapper5.MapFrame(ev))
+                {
+                    pipe5.SubmitLatest(f);
+                }
+            });
+
+        IpcReply r = svc5.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "identify" },
+                { "controller", nlohmann::json::object({
+                    {"device","Lian Li: SL Wireless"},
+                    {"serial","AABBCCDDEEFF"},
+                    {"location","Wireless: AA:BB:CC:DD:EE:FF"}}) },
+                { "zone", "Fan 1" },
+                { "duration_ms", 30000 },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["identifying"].get<bool>() == true);
+
+        /* One blink frame lands — the first half-period is
+           lit, the freeze case the review flagged. */
+        CHECK(engine5.Worker().Step(Clock::now()) == true);
+        RgbFrame pending;
+        CHECK(pipe5.Pending(csnap.key, &pending));
+        CHECK(pending.colors.size() == 40);
+        if(pending.colors.size() == 40)
+        {
+            CHECK(pending.colors[0].r == 0xFF);
+        }
+
+        /* UI Stop -> duration_ms:0. The reply contract is
+           unchanged — and the booking is only STAMPED expired,
+           so Identifying() reports false at once while
+           IdentifyActive() keeps the frame path awake for the
+           one tick that still owes the restore. */
+        r = svc5.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "identify" },
+                { "controller", nlohmann::json::object({
+                    {"device","Lian Li: SL Wireless"},
+                    {"serial","AABBCCDDEEFF"},
+                    {"location","Wireless: AA:BB:CC:DD:EE:FF"}}) },
+                { "duration_ms", 0 },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["identifying"].get<bool>() == false);
+        CHECK(r.body["cancelled"].get<bool>() == true);
+        CHECK(!mapper5.Identifying(csnap.key, Clock::now()));
+        CHECK(mapper5.IdentifyActive());
+
+        /* The very next Step lands the restore — the pre-
+           identify baseline (the enumerated colors), replacing
+           the lit blink frame in the lane — then the booking
+           drains and the path sleeps. */
+        CHECK(engine5.Worker().Step(Clock::now()) == true);
+        CHECK(pipe5.Pending(csnap.key, &pending));
+        CHECK(pending.colors.size() == 40);
+        if(pending.colors.size() == 40)
+        {
+            CHECK(pending.colors[0].r  == 0x11);
+            CHECK(pending.colors[0].g  == 0x22);
+            CHECK(pending.colors[39].r == 0x11);
+        }
+        CHECK(!mapper5.IdentifyActive());
+        CHECK(engine5.Worker().Step(Clock::now()) == false);
     }
 
     /*---- presets ---------------------------------------------*/

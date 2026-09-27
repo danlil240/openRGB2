@@ -282,7 +282,9 @@ freeze the LEDs on a lit phase) and the frame path sleeps again.
 `zone` names a zone (or `controller.zone` carries it); `led_index`
 selects one LED inside the scope; `duration_ms` defaults to 3000 and
 is clamped to 500–30000; `duration_ms:0` cancels →
-`{identifying:false, cancelled, controller}`.
+`{identifying:false, cancelled, controller}`. A cancel ends the
+overlay through the same one restore frame on the next produced
+frame — the blink never freezes on its last phase.
 Errors: absent/disconnected controller → `unavailable`; bad zone or
 out-of-range index → `bad_request`; a wireless group owned by an
 uploaded animation loop → `unavailable` (one producer per group).

@@ -140,12 +140,19 @@ public:
     |  phase when no scene frame follows. led_start is         |
     |  absolute in the complete-controller buffer; the caller  |
     |  resolves zone offsets.                                  |
+    |  CancelIdentify stamps the booking expired instead of    |
+    |  erasing it — the restore frame exists only in the       |
+    |  expiry branch, so an outright erase with no scene       |
+    |  frame following would freeze the blink's last phase on  |
+    |  the hardware; the stamped entry keeps IdentifyActive()  |
+    |  true until the one tick that prunes it and restores.    |
     \*---------------------------------------------------------*/
     bool StartIdentify(const DeviceKey& controller,
                        uint32_t led_start, uint32_t led_count,
                        Clock::duration duration, TimePoint now,
                        std::string& err);
-    bool CancelIdentify(const DeviceKey& controller);
+    bool CancelIdentify(const DeviceKey& controller,
+                        TimePoint now);
     bool Identifying(const DeviceKey& controller,
                      TimePoint now) const;
 

@@ -263,6 +263,12 @@ static void ModelTests()
     CHECK(!m.BuildSetMirror("fan1", "fan1", op, err));  /* self */
     CHECK(!m.BuildSetMirror("fan1", "case", op, err));  /* decor */
     CHECK(!m.BuildSetMirror("fan1", "fan0copy", op, err)); /* chain */
+    /* fan0 is fan0copy's mirror SOURCE — linking it would
+       strand fan0copy.mirror_of on a linked object (the chain
+       the engine's graph validation forbids). Same refusal as
+       the verb boundary; a copy sharing that source is legal. */
+    CHECK(!m.BuildSetMirror("fan0", "fan1", op, err));
+    CHECK(m.BuildSetMirror("ghost", "fan0", op, err));
     CHECK(m.BuildSetMirror("fan0copy", "", op, err));   /* unlink */
     CHECK(op.body["mirror_of"] == "");
     CHECK(!m.BuildSetMirror("fan0", "", op, err));      /* not linked */
