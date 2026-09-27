@@ -547,7 +547,9 @@ bool EngineHost::Start(std::string& err)
        reported, never taken over or killed. */
     if(opts_.single_instance)
     {
-        if(!instance_.Acquire(err))
+        instance_ = std::make_unique<SingleInstanceGuard>(
+            opts_.instance_name);
+        if(!instance_->Acquire(err))
         {
             return false;
         }

@@ -99,6 +99,25 @@ set_tests_properties(e2e_lifecycle_test PROPERTIES
     LABELS engine
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Plan section 6 acceptance measurement — "UI responsiveness:
+# p95 local control response below 100 ms during full output".
+# Real EngineHost composition + REAL named pipes + a SUBSCRIBE
+# "all" client, while 60 Hz frames stream to the in-process fake
+# backend. 300 request/reply samples over the six-verb UI
+# surface (reads AND the two mutation paths); the run takes a
+# few seconds and doubles as the regression gate (p95 < 100 ms).
+# Method/coverage: docs/benchmarks/ui-responsiveness.md.
+add_executable(e2e_responsiveness_test e2e_responsiveness_test.cpp)
+target_link_libraries(e2e_responsiveness_test PRIVATE
+    openrgb2_host)
+target_include_directories(e2e_responsiveness_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(e2e_responsiveness_test PRIVATE NDEBUG)
+add_test(NAME e2e_responsiveness_test COMMAND e2e_responsiveness_test)
+set_tests_properties(e2e_responsiveness_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Task 5.4 — non-interference: display-off zero writes per
 # lane (incl. a distinct GPU lane asserted separately),
 # parked playback requests across the gate (no wire write,

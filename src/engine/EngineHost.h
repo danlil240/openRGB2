@@ -227,7 +227,11 @@ private:
     void ReprobeSdk(TimePoint now);
 
     EngineHostOptions        opts_;
-    SingleInstanceGuard      instance_;
+    /* Built in Start() with opts_.instance_name — the option is
+       a real seam: tests take a test-scoped guard name so a
+       production engine holding the well-known name never makes
+       the offline suite collide. */
+    std::unique_ptr<SingleInstanceGuard> instance_;
     OwnershipReport          ownership_;
     std::atomic<bool>        stop_{ false };
 

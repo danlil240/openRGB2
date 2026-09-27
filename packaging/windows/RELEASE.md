@@ -104,6 +104,14 @@ camera/photodiode exists on this rig.
   decelerating toward ~5 MB. The plan's **8-hour criterion was not
   run** — the owner accepted the bounded 65 + 60 min legs as the
   release qualification (`docs/benchmarks/mixed-and-soak.md`).
+- **UI responsiveness (plan §6):** p95 local control response
+  **31.1 ms < 100 ms** — 300 IPC request→reply samples over real named
+  pipes (subscribed session, six-verb UI surface incl. the SET_SCENE
+  save path) while the engine held 60 Hz output to the in-process
+  fake backend. Scope: this is the IPC/engine half of "control
+  response"; the QML/GUI half is bounded separately by the
+  `ui_hardening_test` flood probe. See
+  `docs/benchmarks/ui-responsiveness.md` for method + coverage.
 
 ## Known limitations / residuals
 
