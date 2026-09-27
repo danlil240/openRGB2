@@ -35,8 +35,10 @@ read the tier definitions before the table.
    re-bound by identity).
 2. **GPU fan rings**: the three 8-LED "fan" zones accepted frames in every
    session, but no physical observation ever confirmed which light (if any)
-   is wired to them on this card — the AORUS MASTER ICE side/top logos are
-   the verified emitters. Rings stay flagged unverified until seen.
+   is wired to them on this card — the hardware profile records only the
+   AORUS MASTER ICE **side logo** as verified (`docs/hardware/daniel-pc.md`);
+   the **top logo** enumerates but has no physical verification on file.
+   Rings stay flagged unverified until seen.
 3. **Motherboard unidentified LEDs**: `LED_C` and `Chipset Accent` accept
    frames at transport level and are bound in the qualified scene, but
    per the plan's pass criterion they remain **outside the verified
