@@ -300,6 +300,11 @@ public:
     \*------------------------------------------------------*/
     PlaybackStatus       Status() const;
     PlaybackMode         RequestedMode() const;
+    /* The recorded parameter selection — the value
+       SET_PLAYBACK_MODE omitted params fields preserve
+       (the wire reports parameter revisions, not values, so
+       this record is the only authoritative source). */
+    PlaybackParams       CurrentParams() const;
     uint64_t             RequestedRevision() const;
     bool                 AckPending() const;
     PlaybackCapabilities Caps() const;

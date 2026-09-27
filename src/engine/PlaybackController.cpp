@@ -1407,6 +1407,12 @@ PlaybackMode PlaybackController::RequestedMode() const
     return requested_mode_;
 }
 
+PlaybackParams PlaybackController::CurrentParams() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return params_;
+}
+
 uint64_t PlaybackController::RequestedRevision() const
 {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -349,6 +349,112 @@ int main()
         CHECK(w["state"]["scene"]["loaded"].get<bool>() == true);
     }
 
+    /*---- SET_PLAYBACK_MODE params merge: omitted fields
+           preserve the recorded selection -------------------
+           The wire reports parameter revisions, not values —
+           a client has nothing honest to seed fields it is
+           not changing, so dispatch seeds the PlaybackParams
+           from the controller's record and overlays only the
+           fields present. An omitted color must NOT reset a
+           persisted non-red loop color to the default. */
+    {
+        Engine           engine2;
+        DeliveryPipeline pipe2;
+
+        DeviceSnapshot wsnap;
+        wsnap.key = DeviceKey{ "Lian Li: SL Wireless",
+                               "AABBCCDDEEFF",
+                               "Wireless: AA:BB:CC:DD:EE:FF", "" };
+        wsnap.topology_generation = 1;
+        wsnap.zones = { ZoneSnapshot{ "Fan 1", 40 } };
+        wsnap.modes = { "Direct", "Breathing" };
+        wsnap.connection = ConnectionState::Connected;
+        pipe2.RegisterDevice(wsnap);
+
+        std::vector<PlaybackModePatch> patches;
+        const TimePoint fixed_now{};
+        PlaybackController::Deps pd;
+        pd.snapshots = [&wsnap]
+        {
+            return std::vector<DeviceSnapshot>{ wsnap };
+        };
+        pd.select_mode =
+            [&patches](const DeviceKey&, const std::string&,
+                       const PlaybackModePatch& p, std::string&)
+            {
+                patches.push_back(p);
+                return true;
+            };
+        pd.set_suppressed =
+            [&pipe2](const DeviceKey& k, bool s,
+                     const std::string& r)
+            { pipe2.SetSuppressed(k, s, r); };
+        pd.drop_pending =
+            [&pipe2](const DeviceKey& k)
+            { return pipe2.DropPending(k); };
+        pd.wait_idle =
+            [&pipe2](const DeviceKey& k, Clock::duration t)
+            { return pipe2.WaitIdle(k, t); };
+        pd.now = [fixed_now] { return fixed_now; };
+        PlaybackController ctl2(pd);
+
+        EngineService::Deps d2;
+        d2.pipeline = &pipe2;
+        d2.playback = &ctl2;
+        /* The service wires its scene provider onto the
+           controller — capabilities classify from the doc
+           applied through the shared path below. */
+        EngineService svc2(engine2, d2);
+
+        IpcReply r = svc2.Dispatch(MsgType::SetScene,
+            nlohmann::json::object({
+                { "document", nlohmann::json::object({
+                    { "version", 2 },
+                    { "name",    "b" },
+                    { "effect",  nlohmann::json::object(
+                        {{"preset","breathing"}}) },
+                }) }}));
+        CHECK(r.code == ErrCode::Ok);
+
+        r = svc2.Dispatch(MsgType::SetPlaybackMode,
+            nlohmann::json::object({
+                { "mode", "animation_playback" },
+                { "params", nlohmann::json::object(
+                    {{"speed",150},{"color","#00FF00"}}) },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(patches.size() == 1);
+        CHECK(patches[0].has_colors);
+        /* 0x00BBGGRR: {r=0x00,g=0xFF,b=0x00} -> 0x0000FF00. */
+        CHECK(patches[0].colors[0] == 0x0000FF00u);
+
+        /* Speed-only request: the omitted color preserves the
+           recorded green — the old dispatch seeded defaults,
+           silently clobbering it with red. */
+        r = svc2.Dispatch(MsgType::SetPlaybackMode,
+            nlohmann::json::object({
+                { "mode", "animation_playback" },
+                { "params", nlohmann::json::object(
+                    {{"speed",170}}) },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(patches.size() == 2);
+        CHECK(patches[1].has_colors);
+        CHECK(patches[1].colors[0] == 0x0000FF00u);
+        CHECK(ctl2.CurrentParams().speed == 170);
+        CHECK(ctl2.CurrentParams().color.g == 0xFF);
+
+        /* An omitted params object preserves everything too. */
+        r = svc2.Dispatch(MsgType::SetPlaybackMode,
+            nlohmann::json::object({
+                { "mode",    "animation_playback" },
+                { "control", "paused" },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(ctl2.CurrentParams().speed == 170);
+        CHECK(ctl2.CurrentParams().color.g == 0xFF);
+    }
+
     std::printf("ipc_engine_service_test: %d checks, %d failures\n",
                 checks, failures);
     return failures ? 1 : 0;

@@ -81,8 +81,10 @@ struct DeviceGroup
     std::string label;            /* display label              */
     std::string binding;          /* DeviceBinding id ("" none) */
     std::string controller_name;  /* from the binding           */
+    std::string vendor;           /* from the binding           */
     std::string serial;           /* from the binding           */
     std::string location;         /* from the binding           */
+    int         device_type = -1; /* from the binding (-1 any)  */
     std::string zone_name;        /* from the binding           */
     uint32_t    zone_leds   = 0;  /* declared by the binding    */
     size_t      emitter_count = 0;
@@ -120,6 +122,18 @@ public:
        or was saved through this model and echoed augmented. */
     void Commit();            /* baseline = working (save OK)  */
     void DiscardEdits();      /* working  = baseline           */
+    /* The applied-scene push OUR OWN save produced (the
+       caller correlates by scene revision — the SET_SCENE OK
+       and the scene event carry the same counter): the engine
+       reserializes the document it applied (float narrowing,
+       defaulted fields filled in), so the echo differs from
+       the submitted working copy while being semantically the
+       same apply. Adopt it as the new baseline — and as the
+       working copy when nothing was edited since the commit —
+       without flagging a conflict: nothing foreign moved.
+       Edits made after the save stay pending; dirty simply
+       recomputes against the echoed baseline. */
+    void AdoptApplied(const nlohmann::json& doc);
 
     bool                    HasBaseline() const;
     bool                    HasWorking()  const;

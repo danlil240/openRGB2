@@ -100,9 +100,12 @@ class SceneEditController : public QObject
     Q_PROPERTY(QString libraryError READ libraryError
                    NOTIFY libraryErrorChanged)
 
-    /*---- tracked playback params (what the UI last sent,
-           resent on every request so an absent params field
-           can't reset the engine's record to defaults) ----*/
+    /*---- tracked playback params (what the UI last sent;
+           only fields the user TOUCHED this session are
+           emitted — the engine preserves its per-scene
+           record for omitted fields, so resending an
+           untouched field can't clobber a persisted value
+           the wire never lets the UI read back) ----------*/
     Q_PROPERTY(int paramSpeed READ paramSpeed
                    NOTIFY paramsChanged)
     Q_PROPERTY(bool paramReverse READ paramReverse
@@ -138,9 +141,18 @@ public:
     Q_INVOKABLE int  requestMode(const QString& mode);
     Q_INVOKABLE int  setPlaybackControl(const QString& control);
     /* Emits only params the selected uploaded preset
-       supports; the current control is preserved. */
+       supports AND that were touched this session; the
+       current control is preserved. Untouched fields stay
+       out of the request so the engine keeps its recorded
+       per-scene value (protocol §5 — an omitted params field
+       preserves, it does not reset). */
     Q_INVOKABLE int  sendPlaybackParams(int speed, bool reverse,
                                         const QString& colorHex);
+    /* Marks one uploaded-preset param ("speed" | "reverse" |
+       "color") as user-touched this session — the paramTimer
+       path calls this from the control that actually moved so
+       sendPlaybackParams can emit just the changed fields. */
+    Q_INVOKABLE void noteParamTouched(const QString& field);
 
     /*---- profiles -------------------------------------------*/
     Q_INVOKABLE bool saveProfile(const QString& name);
@@ -217,13 +229,29 @@ private:
     int             pending_save_id_ = 0;
     bool            saving_          = false;
     QString         save_error_;
+    /* The scene revision a successful SET_SCENE reported —
+       the applied-scene push carrying the SAME revision is
+       that save's own echo (the engine reserializes the
+       applied document), adopted as baseline+working rather
+       than read as a remote change. 0 = none pending. A
+       strictly-newer revision clears it: the echo was
+       coalesced into a later apply (the event queue is
+       latest-wins) and the remote state is authoritative. */
+    quint64         pending_echo_revision_ = 0;
 
-    /* Tracked last-sent uploaded-preset params — resent on
-       every playback request so absent fields can't reset
-       the engine's record to defaults (protocol gap noted). */
-    int             param_speed_   = 100;
-    bool            param_reverse_ = false;
-    QString         param_color_   = QStringLiteral("#FF0000");
+    /* Tracked last-sent uploaded-preset params — emitted on
+       playback requests ONLY for fields the user touched
+       this session (the *_touched_ latches). The wire reports
+       parameter revisions, not values, so untouched fields
+       have nothing honest to send — omitting them lets the
+       engine preserve its recorded per-scene value instead
+       of being clobbered by the UI defaults. */
+    int             param_speed_           = 100;
+    bool            param_reverse_         = false;
+    QString         param_color_           = QStringLiteral("#FF0000");
+    bool            param_speed_touched_   = false;
+    bool            param_reverse_touched_ = false;
+    bool            param_color_touched_   = false;
 };
 
 } /* namespace ui */

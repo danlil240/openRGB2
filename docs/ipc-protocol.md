@@ -212,7 +212,11 @@ SET_PLAYBACK_MODE accepts `mode` plus optional `control`
 (`"playing"` default | `"paused"` sampled-hold | `"stopped"` black) and
 optional `params` `{speed:int, reverse:bool, color:"#RRGGBB"}` applied
 to the uploaded preset (speed 10..200, direction for Rainbow Wave,
-color for Breathing). Animation playback is limited to the three
+color for Breathing). Each params field overlays the engine's recorded
+per-scene selection — an omitted field (or an omitted `params` object)
+PRESERVES the recorded value rather than resetting it to defaults: the
+wire reports parameter revisions, not values, so clients send only the
+fields they are changing. Animation playback is limited to the three
 uploaded presets — `Spectrum Cycle`, `Rainbow Wave`, `Breathing` —
 which a scene selects by naming one of them in `effect.preset` (SDK
 names and `snake_case` ids both accepted). While an uploaded loop owns

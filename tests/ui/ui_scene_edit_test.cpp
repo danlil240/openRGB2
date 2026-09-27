@@ -164,6 +164,57 @@ int main(int argc, char** argv)
         CHECK(m.Baseline()["effect"]["preset"] == "comet");
     }
 
+    /*---- own-save echo: normalized doc adopted, no conflict -*/
+    std::printf("-- save echo adoption\n");
+    {
+        SceneEditModel m;
+        m.LoadApplied(FixtureDoc());
+        std::string err;
+        CHECK(m.SetPreset("breathing", err));
+        CHECK(m.SetBrightness(0.33));
+        m.Commit();
+
+        /* The engine reserializes what it applied
+           (ToJson(FromJson(doc))): floats narrow (0.33 ->
+           0.33000001311302185) and defaulted fields appear —
+           the echo is a DIFFERENT json document yet the same
+           apply. The caller correlates it by scene revision;
+           the model adopts it without flagging a remote
+           change. */
+        nlohmann::json echo = m.Working();
+        echo["brightness"] = (double)(float)0.33;
+        echo["objects"][0]["parent_id"] = "";
+        echo["objects"][0]["mirror_of"] = "";
+        echo["objects"][0]["layout"]    = "";
+        echo["objects"][0]["label"]     = "fan0";   /* <- id */
+        echo["objects"][0]["size_m"] =
+            nlohmann::json::object({{"x",0},{"y",0},{"z",0}});
+        echo["bindings"][0]["vendor"]      = "Lian Li";
+        echo["bindings"][0]["device_type"] = -1;
+        CHECK(echo != m.Working());   /* not the submitted doc */
+
+        m.AdoptApplied(echo);
+        CHECK(!m.Dirty());
+        CHECK(!m.Conflict());
+        CHECK(m.Baseline() == echo);
+        CHECK(m.Working() == echo);
+
+        /* Edits made after the save stay pending through the
+           echo — dirty recomputes, never a conflict. */
+        SceneEditModel m2;
+        m2.LoadApplied(FixtureDoc());
+        CHECK(m2.SetPreset("comet", err));
+        m2.Commit();
+        CHECK(m2.SetBrightness(0.9));
+        nlohmann::json echo2 = m2.Baseline();
+        echo2["name"] = "normalized-name";
+        m2.AdoptApplied(echo2);
+        CHECK(m2.Dirty());
+        CHECK(!m2.Conflict());
+        CHECK(m2.Baseline()["name"] == "normalized-name");
+        CHECK(m2.Working()["brightness"].get<double>() == 0.9);
+    }
+
     /*---- preset pick replaces an inline layer stack -------*/
     std::printf("-- preset replaces inline layers\n");
     {

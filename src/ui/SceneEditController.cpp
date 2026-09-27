@@ -95,13 +95,46 @@ SceneEditController::SceneEditController(EngineBridge* bridge,
 
 void SceneEditController::OnSceneChanged()
 {
-    const QVariant doc_var =
-        bridge_->scene().value(QStringLiteral("document"));
+    const QVariantMap scene  = bridge_->scene();
+    const QVariant    doc_var =
+        scene.value(QStringLiteral("document"));
     const nlohmann::json doc =
         doc_var.isValid() ? VariantToJson(doc_var) : nlohmann::json(nullptr);
     const bool was_dirty = model_.Dirty();
     const bool had_conf  = model_.Conflict();
-    model_.LoadApplied(doc);
+
+    /* Correlate the push to our own save: the SET_SCENE OK
+       and the scene event it triggered carry the SAME scene
+       revision (docs §5 — OK {revision,name}, SCENE/event
+       {revision,...}). A matching revision is our own apply
+       echoed back reserialized — adopt it, never flag it.
+       A strictly newer revision means a different apply
+       superseded ours before the echo drained (queued events
+       are latest-wins per kind): that IS a remote change and
+       the pending correlation is dead. */
+    const quint64 rev =
+        scene.value(QStringLiteral("revision")).toULongLong();
+    bool own_echo = false;
+    if(pending_echo_revision_ != 0)
+    {
+        if(rev == pending_echo_revision_)
+        {
+            pending_echo_revision_ = 0;
+            own_echo = true;
+        }
+        else if(rev > pending_echo_revision_)
+        {
+            pending_echo_revision_ = 0;
+        }
+    }
+    if(own_echo)
+    {
+        model_.AdoptApplied(doc);
+    }
+    else
+    {
+        model_.LoadApplied(doc);
+    }
     emit sceneChanged();
     emit workingChanged();
     emit groupsChanged();
@@ -131,6 +164,14 @@ void SceneEditController::OnReplyReceived(int id, const QString& type,
     }
     if(type == QLatin1String("OK"))
     {
+        /* Record the committed revision BEFORE the echo can
+           land: the scene event carrying this revision is our
+           own save reserialized, adopted rather than
+           conflicted (OK replies and EVENT pushes drain on
+           different engine threads — the echo may arrive
+           after this). */
+        pending_echo_revision_ =
+            body.value(QStringLiteral("revision")).toULongLong();
         model_.Commit();
         SetSaveError(QString());
         emit workingChanged();
@@ -373,15 +414,22 @@ QVariantMap SceneEditController::FilteredParams() const
     {
         return params;      /* no uploaded preset selected */
     }
-    if(info.speed)
+    /* Only fields the user TOUCHED this session ride the
+       request: the wire reports parameter revisions, not
+       values, so an untouched field has nothing honest to
+       send — and the engine preserves its recorded per-scene
+       value for any field the request omits (protocol §5).
+       Resending UI defaults for untouched fields would
+       silently clobber the persisted selection. */
+    if(info.speed && param_speed_touched_)
     {
         params.insert(QStringLiteral("speed"), param_speed_);
     }
-    if(info.direction)
+    if(info.direction && param_reverse_touched_)
     {
         params.insert(QStringLiteral("reverse"), param_reverse_);
     }
-    if(info.color)
+    if(info.color && param_color_touched_)
     {
         params.insert(QStringLiteral("color"), param_color_);
     }
@@ -421,7 +469,15 @@ int SceneEditController::sendPlaybackParams(int speed, bool reverse,
 {
     /* Only fields the selected uploaded preset supports may
        be emitted — the engine is the backstop (it validates),
-       the UI is the filter (protocol §5 table). */
+       the UI is the filter (protocol §5 table). And only
+       fields the user touched this session go on the wire: a
+       changed argument marks its field touched (the QML
+       controls also call noteParamTouched from the handler
+       that moved, which covers a deliberate set-to-same-value
+       a diff can't see). Fields still untouched are omitted
+       so the engine preserves its recorded per-scene value —
+       the wire reports parameter revisions, not values, so
+       the UI has nothing honest to seed them with. */
     PlaybackPresetInfo info;
     const bool is_playback =
         PlaybackPresetFromName(model_.PresetId(), info);
@@ -429,31 +485,72 @@ int SceneEditController::sendPlaybackParams(int speed, bool reverse,
     QVariantMap params;
     if(is_playback && info.speed)
     {
-        params.insert(QStringLiteral("speed"),
-                      ClampPlaybackSpeed(speed));
-        param_speed_ = ClampPlaybackSpeed(speed);
+        const int clamped = ClampPlaybackSpeed(speed);
+        if(clamped != param_speed_)
+        {
+            param_speed_touched_ = true;
+        }
+        param_speed_ = clamped;
+        if(param_speed_touched_)
+        {
+            params.insert(QStringLiteral("speed"), clamped);
+        }
     }
     if(is_playback && info.direction)
     {
-        params.insert(QStringLiteral("reverse"), reverse);
+        if(reverse != param_reverse_)
+        {
+            param_reverse_touched_ = true;
+        }
         param_reverse_ = reverse;
+        if(param_reverse_touched_)
+        {
+            params.insert(QStringLiteral("reverse"), reverse);
+        }
     }
     if(is_playback && info.color &&
        SceneEditModel::IsHexColor(colorHex.toStdString()))
     {
         const std::string norm =
             SceneEditModel::NormalizeHexColor(colorHex.toStdString());
-        params.insert(QStringLiteral("color"),
-                      QString::fromStdString(norm));
-        param_color_ = QString::fromStdString(norm);
+        const QString qnorm = QString::fromStdString(norm);
+        if(qnorm != param_color_)
+        {
+            param_color_touched_ = true;
+        }
+        param_color_ = qnorm;
+        if(param_color_touched_)
+        {
+            params.insert(QStringLiteral("color"), qnorm);
+        }
     }
     emit paramsChanged();
     if(params.isEmpty())
     {
-        return 0;    /* nothing supported — nothing sent */
+        return 0;    /* nothing touched — nothing sent */
     }
     return bridge_->setPlaybackMode(RequestedMode(),
                                     CurrentControl(), params);
+}
+
+void SceneEditController::noteParamTouched(const QString& field)
+{
+    /* Latching: once the user has touched a field this
+       session, the tracked value is UI-authoritative and
+       keeps riding subsequent requests (the engine merges
+       omitted fields over its own record). */
+    if(field == QLatin1String("speed"))
+    {
+        param_speed_touched_ = true;
+    }
+    else if(field == QLatin1String("reverse"))
+    {
+        param_reverse_touched_ = true;
+    }
+    else if(field == QLatin1String("color"))
+    {
+        param_color_touched_ = true;
+    }
 }
 
 /*---------------------------------------------------------*\
@@ -590,8 +687,19 @@ QVariantMap SceneEditController::ResolveGroupHints(
     }
 
     /* Collect candidate snapshots the way BindingResolver
-       does: serial wins, else name-substring + vendor +
-       device_type, then location narrows. */
+       does (src/core/scene/BindingResolver.cpp — the hint
+       must agree with the engine's authoritative answer):
+         1. serial non-empty -> serial + name must match
+            (vendor/device_type are NOT consulted);
+         2. otherwise name-substring AND device_type when the
+            binding pins one (>= 0) AND vendor when non-empty
+            (case-insensitive equality);
+         3. >1 candidate -> a non-empty location narrows;
+            still >1 -> ambiguous;
+         4. one candidate -> a named zone must exist on it,
+            else unresolved. */
+    const QString vendor =
+        QString::fromStdString(g.vendor).toLower();
     QVariantList matches;
     for(const QVariant& sv : bridge_->snapshots())
     {
@@ -600,14 +708,35 @@ QVariantMap SceneEditController::ResolveGroupHints(
             snap.value(QStringLiteral("key")).toMap();
         const QString name =
             snap.value(QStringLiteral("name")).toString();
-        if(!g.serial.empty() &&
-           key.value(QStringLiteral("serial")).toString() !=
-               QString::fromStdString(g.serial))
+        if(!g.serial.empty())
         {
+            /* Serial is the disambiguator — vendor and
+               device_type stay out of it, mirroring the
+               resolver's serial branch exactly. */
+            if(key.value(QStringLiteral("serial")).toString() !=
+                   QString::fromStdString(g.serial) ||
+               !NameMatches(QString::fromStdString(g.controller_name),
+                            name))
+            {
+                continue;
+            }
+            matches.push_back(snap);
             continue;
         }
         if(!NameMatches(QString::fromStdString(g.controller_name),
                         name))
+        {
+            continue;
+        }
+        if(g.device_type >= 0 &&
+           snap.value(QStringLiteral("device_type")).toInt() !=
+               g.device_type)
+        {
+            continue;
+        }
+        if(!vendor.isEmpty() &&
+           snap.value(QStringLiteral("vendor")).toString().toLower() !=
+               vendor)
         {
             continue;
         }
@@ -644,17 +773,13 @@ QVariantMap SceneEditController::ResolveGroupHints(
     }
 
     const QVariantMap snap = matches.first().toMap();
-    out.insert(QStringLiteral("state"),
-               QStringLiteral("resolved"));
-    out.insert(QStringLiteral("snapshot_name"),
-               snap.value(QStringLiteral("name")).toString());
-    out.insert(QStringLiteral("connected"),
-               snap.value(QStringLiteral("connection")).toString() ==
-                   QLatin1String("connected"));
-    /* Zone LED count from the snapshot's own zones. */
+    /* The single candidate must actually carry the bound
+       zone — the resolver reports Unresolved when
+       zone_name has no match on the controller. */
     int leds = 0;
     if(!g.zone_name.empty())
     {
+        bool found = false;
         for(const QVariant& zv :
             snap.value(QStringLiteral("zones")).toList())
         {
@@ -662,15 +787,29 @@ QVariantMap SceneEditController::ResolveGroupHints(
             if(z.value(QStringLiteral("name")).toString() ==
                QString::fromStdString(g.zone_name))
             {
-                leds = z.value(QStringLiteral("led_count")).toInt();
+                found = true;
+                leds  = z.value(QStringLiteral("led_count")).toInt();
                 break;
             }
+        }
+        if(!found)
+        {
+            out.insert(QStringLiteral("state"),
+                       QStringLiteral("absent"));
+            return out;
         }
     }
     else
     {
         leds = snap.value(QStringLiteral("led_count")).toInt();
     }
+    out.insert(QStringLiteral("state"),
+               QStringLiteral("resolved"));
+    out.insert(QStringLiteral("snapshot_name"),
+               snap.value(QStringLiteral("name")).toString());
+    out.insert(QStringLiteral("connected"),
+               snap.value(QStringLiteral("connection")).toString() ==
+                   QLatin1String("connected"));
     out.insert(QStringLiteral("led_count"), leds);
     return out;
 }

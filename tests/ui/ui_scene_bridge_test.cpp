@@ -96,6 +96,51 @@ static nlohmann::json SceneFixture()
     });
 }
 
+/* The engine's apply path reserializes the document it
+   accepted (studio::ToJson(studio::FromJson(doc))): floats
+   narrow to their stored precision and defaulted fields
+   appear (parent_id/mirror_of/layout/label, binding
+   vendor/device_type). Model that normalization so the
+   post-save scene echo differs from the submitted document —
+   the regression was the UI reading its OWN save's echo as a
+   remote change (dirty + conflict after a successful save). */
+static nlohmann::json NormalizedDoc(const nlohmann::json& doc)
+{
+    nlohmann::json out = doc;
+    if(out.contains("brightness") && out["brightness"].is_number())
+    {
+        out["brightness"] =
+            (double)(float)out["brightness"].get<double>();
+    }
+    for(nlohmann::json& o : out["objects"])
+    {
+        if(!o.is_object())
+        {
+            continue;
+        }
+        if(!o.contains("parent_id")) o["parent_id"] = "";
+        if(!o.contains("mirror_of")) o["mirror_of"] = "";
+        if(!o.contains("layout"))    o["layout"]    = "";
+        if(!o.contains("label"))     o["label"]     =
+            o.value("id", std::string());
+        if(!o.contains("size_m"))
+        {
+            o["size_m"] = nlohmann::json::object(
+                {{"x",0},{"y",0},{"z",0}});
+        }
+    }
+    for(nlohmann::json& b : out["bindings"])
+    {
+        if(!b.is_object())
+        {
+            continue;
+        }
+        if(!b.contains("vendor"))      b["vendor"]      = "";
+        if(!b.contains("device_type")) b["device_type"] = -1;
+    }
+    return out;
+}
+
 struct Server
 {
     explicit Server(ServerPeer peer) : srv(std::move(peer)) {}
@@ -146,7 +191,7 @@ static nlohmann::json SceneEnvelope(const Server& s)
     return nlohmann::json::object({
         { "loaded",   true },
         { "revision", s.revision },
-        { "name",     "desk" },
+        { "name",     s.doc.value("name", std::string("desk")) },
         { "playing",  true },
         { "document", s.doc },
     });
@@ -225,16 +270,21 @@ static bool ServeOnce(Server& s, uint32_t wait_ms = 15)
         }
         else
         {
-            s.doc = body.value("document",
-                               nlohmann::json::object());
+            /* The stored + echoed document is the RESERIALIZED
+               one — like the engine's ToJson(FromJson(doc)),
+               which is a different json value than the client
+               submitted (narrowed floats, filled defaults). */
+            s.doc = NormalizedDoc(
+                body.value("document",
+                           nlohmann::json::object()));
             ++s.revision;
             s.srv.SendMsg(MsgType::Ok, m.request_id,
                 nlohmann::json::object(
                     { { "revision", s.revision },
                       { "name",     "desk" } }));
             /* The engine emits a scene event on apply — the
-               applied-state refresh the task requires. Echo
-               the stored document so the UI converges. */
+               applied-state refresh the task requires, with
+               the SAME revision the OK carried. */
             s.srv.SendMsg(MsgType::Event, 0,
                 nlohmann::json::object({
                     { "kind", "scene" },
@@ -335,6 +385,8 @@ int main(int argc, char** argv)
                             { "zone",     "" } }) },
                         { "name",       "Lian Li UNI FAN SL "
                                         "Wireless" },
+                        { "vendor",     "Lian Li" },
+                        { "device_type", 2 },
                         { "connection", "connected" },
                         { "led_count",  120 },
                         { "zones", nlohmann::json::array({
@@ -354,11 +406,68 @@ int main(int argc, char** argv)
                       .toBool();
     }));
 
+    /*---- vendor disambiguates same-name snapshots ----------*/
+    std::printf("-- vendor disambiguation\n");
+    /* Two snapshots with the SAME name but different vendors:
+       the binding pins "Lian Li", so the resolver chain (and
+       the hint) resolves unambiguously — name+vendor matching
+       must not report ambiguous. */
+    s.srv.SendMsg(MsgType::Event, 0,
+        nlohmann::json::object({
+            { "kind", "topology" },
+            { "data", nlohmann::json::object({
+                { "snapshots", nlohmann::json::array({
+                    nlohmann::json::object({
+                        { "key", nlohmann::json::object({
+                            { "device",   "Other SL Wireless" },
+                            { "serial",   "SN-2" },
+                            { "location", "usb:9/9" },
+                            { "zone",     "" } }) },
+                        { "name",       "Lian Li UNI FAN SL "
+                                        "Wireless" },
+                        { "vendor",     "OtherVendor" },
+                        { "device_type", 2 },
+                        { "connection", "connected" },
+                        { "led_count",  120 },
+                        { "zones", nlohmann::json::array({
+                            nlohmann::json::object({
+                                { "name",      "Fan 1" },
+                                { "led_count", 40 } }) }) },
+                    }),
+                    nlohmann::json::object({
+                        { "key", nlohmann::json::object({
+                            { "device",   "Lian Li SL Wireless" },
+                            { "serial",   "SN-1" },
+                            { "location", "usb:1/3" },
+                            { "zone",     "" } }) },
+                        { "name",       "Lian Li UNI FAN SL "
+                                        "Wireless" },
+                        { "vendor",     "Lian Li" },
+                        { "device_type", 2 },
+                        { "connection", "connected" },
+                        { "led_count",  120 },
+                        { "zones", nlohmann::json::array({
+                            nlohmann::json::object({
+                                { "name",      "Fan 1" },
+                                { "led_count", 40 } }) }) },
+                    }),
+                }) },
+            }) },
+        }));
+    CHECK(PumpBoth(s, [&] {
+        const QVariantList g = edit.deviceGroups();
+        return g.size() == 1
+               && g[0].toMap().value(QStringLiteral("state"))
+                      .toString() == QStringLiteral("resolved")
+               && g[0].toMap().value(QStringLiteral("led_count"))
+                      .toInt() == 40;
+    }));
+
     /*---- scene edit -> SET_SCENE body ----------------------*/
     std::printf("-- SET_SCENE body\n");
     CHECK(edit.setPreset(QStringLiteral("breathing")));
     CHECK(edit.dirty());
-    edit.setBrightness(0.5);
+    edit.setBrightness(0.33);
     edit.toggleGroup(QStringLiteral("fan0"));
     edit.save();
     CHECK(PumpBoth(s, [&] { return s.scene_saves >= 1; }));
@@ -369,21 +478,70 @@ int main(int argc, char** argv)
     CHECK(d["version"].get<int>() == 2);
     CHECK(d["effect"]["preset"] == "breathing");
     CHECK(d["effect"]["playing"].get<bool>());
-    CHECK(std::abs(d["brightness"].get<double>() - 0.5)
+    CHECK(std::abs(d["brightness"].get<double>() - 0.33)
           < 0.001);
     CHECK(d["object_colors"]["fan0"] == "#00B4A0");
 
     /* OK commits; the scene EVENT echo (post-apply refresh)
-       converges to the stored document — clean state. */
+       carries the SAME revision and the RESERIALIZED document
+       — narrowed brightness (0.33 -> 0.33000001311302185) and
+       defaulted fields the client never sent. It is our own
+       save echoed, adopted by revision correlation: clean
+       state, no spurious dirty+conflict. */
     CHECK(PumpBoth(s, [&] {
         return !edit.saving() && !edit.dirty();
     }));
     CHECK(edit.saveError().isEmpty());
+    /* The OK alone can clear saving/dirty — wait until the
+       normalized echo has actually landed before asserting
+       the adopted state. */
+    CHECK(PumpBoth(s, [&] {
+        const QVariantList objs = bridge.scene()
+            .value(QStringLiteral("document")).toMap()
+            .value(QStringLiteral("objects")).toList();
+        return !objs.isEmpty()
+               && objs[0].toMap().contains(
+                      QStringLiteral("parent_id"));
+    }));
+    CHECK(!edit.dirty());
+    CHECK(!edit.conflict());
+    /* Prove the echo really was the normalized document — the
+       regression only bites when it differs from working. */
+    CHECK(s.doc["objects"][0].contains("parent_id"));
+    CHECK(s.doc["objects"][0].contains("mirror_of"));
+    CHECK(std::abs(s.doc["brightness"].get<double>()
+                   - (double)(float)0.33) < 1e-12);
+    CHECK(s.doc != d);
     CHECK(bridge.scene()
               .value(QStringLiteral("document")).toMap()
               .value(QStringLiteral("effect")).toMap()
               .value(QStringLiteral("preset")).toString()
           == QStringLiteral("breathing"));
+
+    /*---- remote apply under pending edits -> conflict ------*/
+    std::printf("-- remote change still conflicts\n");
+    /* A scene event carrying a DIFFERENT (newer) revision is a
+       genuine remote apply — pending edits must flag the
+       conflict, never be silently merged. */
+    edit.setBrightness(0.9);
+    CHECK(edit.dirty());
+    {
+        nlohmann::json remote = s.doc;
+        remote["name"] = "remote-change";
+        s.doc = remote;
+        ++s.revision;            /* > our committed revision */
+        s.srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "scene" },
+                { "data", SceneEnvelope(s) },
+            }));
+    }
+    CHECK(PumpBoth(s, [&] { return edit.conflict(); }));
+    CHECK(edit.dirty());         /* edits kept */
+    edit.discardEdits();
+    CHECK(PumpBoth(s, [&] {
+        return !edit.dirty() && !edit.conflict();
+    }));
 
     /*---- save failure surfaces + preserves the edit --------*/
     std::printf("-- save failure\n");
@@ -407,17 +565,35 @@ int main(int argc, char** argv)
     CHECK(std::abs(s.doc["brightness"].get<double>() - 0.25)
           < 0.001);
 
-    /*---- params emit only supported fields ------------------*/
+    /*---- params emit only touched supported fields ----------*/
     std::printf("-- playback param filtering\n");
-    /* breathing supports speed + color, NOT direction — the
-       emitted params must contain only supported keys, and
-       the engine's paused control must be preserved rather
-       than silently resumed. */
+    /* A speed-only change on a FRESH controller must not emit
+       the untouched color: the engine preserves its recorded
+       per-scene value for omitted fields (protocol §5), so a
+       speed drag can no longer clobber a persisted non-red
+       loop color with the UI default. */
     const qlonglong sent =
         edit.sendPlaybackParams(150, true,
-                                QStringLiteral("#00FF10"));
+                                QStringLiteral("#FF0000"));
     CHECK(sent > 0);
     CHECK(PumpBoth(s, [&] { return s.mode_requests >= 1; }));
+    CHECK(s.last_mode_body.value("control", "") == "paused");
+    {
+        const nlohmann::json& p = s.last_mode_body["params"];
+        CHECK(p.is_object());
+        CHECK(p["speed"].get<double>() == 150.0);
+        CHECK(!p.contains("color"));
+        CHECK(!p.contains("reverse"));
+    }
+
+    /* breathing supports speed + color, NOT direction — a
+       changed color marks the field touched and is emitted;
+       direction stays out of the request entirely, and the
+       engine's paused control is preserved rather than
+       silently resumed. */
+    CHECK(edit.sendPlaybackParams(150, true,
+                                  QStringLiteral("#00FF10")) > 0);
+    CHECK(PumpBoth(s, [&] { return s.mode_requests >= 2; }));
     CHECK(s.last_mode_body.value("control", "") == "paused");
     const nlohmann::json& params = s.last_mode_body["params"];
     CHECK(params.is_object());
@@ -429,7 +605,7 @@ int main(int argc, char** argv)
     CHECK(edit.setPreset(QStringLiteral("aurora")));
     CHECK(edit.sendPlaybackParams(150, false, "") == 0);
     /* Give the wire a beat to deliver anything it shouldn't. */
-    CHECK(!PumpBoth(s, [&] { return s.mode_requests >= 2; },
+    CHECK(!PumpBoth(s, [&] { return s.mode_requests >= 3; },
                     400));
 
     bridge.stop();

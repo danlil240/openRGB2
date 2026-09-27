@@ -664,10 +664,13 @@ Item {
                    Only fields the selected preset supports are
                    emitted (protocol §5): speed 10..200 always,
                    direction for Rainbow Wave, color for
-                   Breathing. Sent through the controller so the
-                   current transport control is preserved — a
-                   speed drag can never silently resume a
-                   paused upload.                       */
+                   Breathing — and only fields the user touched
+                   this session, so untouched fields keep the
+                   engine's recorded per-scene value instead of
+                   being clobbered by UI defaults. Sent through
+                   the controller so the current transport
+                   control is preserved — a speed drag can never
+                   silently resume a paused upload.           */
                 Card {
                     title: qsTr("UPLOADED PRESET")
                     width: parent.width - 2 * col.padding
@@ -702,7 +705,11 @@ Item {
                                 enabled: root.editorUp && parent.enabled
                                          && sceneEdit.presetSupport.speed === true
                                 from: 10; to: 200; stepSize: 1
-                                onMoved: paramTimer.restart()
+                                onMoved: {
+                                    if(root.editorUp)
+                                        sceneEdit.noteParamTouched("speed");
+                                    paramTimer.restart();
+                                }
                                 Binding {
                                     target: upSpeedSlider
                                     property: "value"
@@ -744,7 +751,11 @@ Item {
                                          && root.requestedMode === "animation_playback"
                                          && sceneEdit.presetSupport.direction === true
                                 text: qsTr("reverse")
-                                onToggled: if(enabled) paramTimer.restart()
+                                onToggled: if(enabled) {
+                                    if(root.editorUp)
+                                        sceneEdit.noteParamTouched("reverse");
+                                    paramTimer.restart();
+                                }
                                 Binding {
                                     target: dirCheck
                                     property: "checked"
@@ -784,21 +795,33 @@ Item {
                                     enabled: root.editorUp && root.engineUp
                                              && root.requestedMode === "animation_playback"
                                              && sceneEdit.presetSupport.color === true
-                                    onMoved: paramTimer.restart()
+                                    onMoved: {
+                                        if(root.editorUp)
+                                            sceneEdit.noteParamTouched("color");
+                                        paramTimer.restart();
+                                    }
                                 }
                                 AppSlider {
                                     id: upS
                                     width: parent.width
                                     from: 0; to: 1; stepSize: 0.001; value: 1
                                     enabled: upH.enabled
-                                    onMoved: paramTimer.restart()
+                                    onMoved: {
+                                        if(root.editorUp)
+                                            sceneEdit.noteParamTouched("color");
+                                        paramTimer.restart();
+                                    }
                                 }
                                 AppSlider {
                                     id: upV
                                     width: parent.width
                                     from: 0; to: 1; stepSize: 0.001; value: 1
                                     enabled: upH.enabled
-                                    onMoved: paramTimer.restart()
+                                    onMoved: {
+                                        if(root.editorUp)
+                                            sceneEdit.noteParamTouched("color");
+                                        paramTimer.restart();
+                                    }
                                 }
                             }
                             Text {

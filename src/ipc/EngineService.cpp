@@ -847,8 +847,17 @@ IpcReply EngineService::Dispatch(MsgType type,
         }
 
         /* Optional preset parameters (animation playback):
-           {speed:int, reverse:bool, color:"#RRGGBB"}. */
-        PlaybackParams params;
+           {speed:int, reverse:bool, color:"#RRGGBB"}. Fields
+           present in the request overlay the controller's
+           RECORDED selection — an omitted field preserves the
+           persisted per-scene value rather than resetting to
+           defaults (the wire exposes parameter revisions, not
+           values, so a UI has nothing honest to seed fields
+           it isn't changing; omission must never clobber the
+           recorded selection). */
+        PlaybackParams params = deps_.playback
+            ? deps_.playback->CurrentParams()
+            : PlaybackParams{};
         {
             const auto it = body.find("params");
             if(it != body.end())

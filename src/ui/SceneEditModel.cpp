@@ -205,6 +205,21 @@ void SceneEditModel::DiscardEdits()
     preset_replaced_layers_ = false;
 }
 
+void SceneEditModel::AdoptApplied(const nlohmann::json& doc)
+{
+    /* The working copy only differs from the committed
+       baseline when the user edited again after the save —
+       keep those pending edits (dirty recomputes against the
+       new baseline). Otherwise adopt the normalized document
+       verbatim so the reserialization can't read as an edit. */
+    if(working_ == baseline_)
+    {
+        working_ = doc;
+    }
+    baseline_ = doc;
+    conflict_ = false;
+}
+
 bool SceneEditModel::HasBaseline() const
 {
     return baseline_.is_object();
@@ -448,9 +463,15 @@ std::vector<DeviceGroup> SceneEditModel::DeviceGroups() const
             if(const nlohmann::json* b = find_binding(g.binding))
             {
                 g.controller_name = JStr(*b, "controller_name");
+                g.vendor          = JStr(*b, "vendor");
                 g.serial          = JStr(*b, "serial");
                 g.location        = JStr(*b, "location");
                 g.zone_name       = JStr(*b, "zone_name");
+                const auto dt = b->find("device_type");
+                if(dt != b->end() && dt->is_number())
+                {
+                    g.device_type = (int)dt->get<double>();
+                }
                 const auto zl = b->find("zone_leds");
                 if(zl != b->end() && zl->is_number())
                 {
