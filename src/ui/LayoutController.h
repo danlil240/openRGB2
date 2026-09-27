@@ -38,6 +38,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
 
@@ -97,7 +98,9 @@ class LayoutController : public QObject
                    NOTIFY statusTextChanged)
     /* The active identification target as last acknowledged —
        {key:{device,serial,location}, zone, led_start,
-       led_count, duration_ms}; empty when none/ cancelled. */
+       led_count, duration_ms}; empty when none/cancelled/
+       expired (a single-shot timer mirrors the engine-side
+       duration — the blink end has no push event). */
     Q_PROPERTY(QVariantMap identifying READ identifying
                    NOTIFY identifyingChanged)
 
@@ -218,8 +221,16 @@ private:
     Pending         pending_;
 
     /* Identify replies are informational only (transient op,
-       no history) — tracked just to surface the outcome. */
+       no history) — tracked just to surface the outcome.
+       cancelIdentify() uses the same slot: its {identifying:
+       false} reply clears identifying_ like an expiry. */
     int             pending_identify_id_ = 0;
+
+    /* The engine's overlay expires on its own clock with no
+       push event — this single-shot clears the local banner
+       (Stop button / "identifying" text) when the blink ends,
+       one half-period of slack after duration_ms. */
+    QTimer          identify_timer_;
 };
 
 } /* namespace ui */

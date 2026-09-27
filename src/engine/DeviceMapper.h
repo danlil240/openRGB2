@@ -134,9 +134,12 @@ public:
     |  loaded; it travels the normal delivery lane like any    |
     |  frame, so lane suppression/budgets stay authoritative.  |
     |  Expiry is checked against sample_time — a stalled       |
-    |  worker simply ends identification on its next frame.    |
-    |  led_start is absolute in the complete-controller        |
-    |  buffer; the caller resolves zone offsets.               |
+    |  worker simply ends identification on its next frame,    |
+    |  emitting ONE restore frame on the pre-identify          |
+    |  baseline so the blink can't freeze the LEDs on a lit    |
+    |  phase when no scene frame follows. led_start is         |
+    |  absolute in the complete-controller buffer; the caller  |
+    |  resolves zone offsets.                                  |
     \*---------------------------------------------------------*/
     bool StartIdentify(const DeviceKey& controller,
                        uint32_t led_start, uint32_t led_count,
@@ -145,6 +148,14 @@ public:
     bool CancelIdentify(const DeviceKey& controller);
     bool Identifying(const DeviceKey& controller,
                      TimePoint now) const;
+
+    /* True while ANY identification overlay is still booked —
+       including an expired-but-unpruned one, so the frame path
+       stays awake for the prune+restore tick that ends it.
+       EngineService wires this as the worker's idle-frame
+       hook: the blink must reach hardware BEFORE a scene
+       exists to bind it (docs/ipc-protocol.md §5). */
+    bool IdentifyActive() const;
 
     /*---- Introspection (diagnostics/tests) ----------------*\
     | BindingState: the persisted binding's latest resolver   |

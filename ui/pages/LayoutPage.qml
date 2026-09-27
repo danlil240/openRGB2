@@ -854,15 +854,18 @@ Item {
                                             ? zonePick.zones[
                                                 zonePick.currentIndex]
                                             : "";
-                                        /* non-numeric / negative
-                                           fields never reach the
-                                           wire — led # blank or
-                                           <0 means whole scope */
+                                        /* led # blank or <0 means
+                                           whole scope — but a
+                                           NON-NUMERIC field (-2) is
+                                           refused, never silently
+                                           remapped to a whole-
+                                           controller blink. */
                                         var led = root.parseIdx(
                                             ledField.text);
                                         var dur = root.parseIdx(
                                             durField.text);
-                                        if(led === -2) led = -1;
+                                        if(led === -2 || dur === -2)
+                                            return;
                                         if(dur < 0)    dur = 3000;
                                         layoutCtl.identify(
                                             snap.key, zone, led,
@@ -879,6 +882,18 @@ Item {
                                     onClicked: layoutCtl.cancelIdentify(
                                         snap.key)
                                 }
+                            }
+                            /* the refusal is visible, not silent —
+                               a mistyped field never becomes a
+                               whole-controller blink */
+                            Text {
+                                visible: root.parseIdx(
+                                             ledField.text) === -2
+                                         || root.parseIdx(
+                                                durField.text) === -2
+                                text: qsTr("led # and ms must be whole numbers")
+                                color: Theme.bad
+                                font.pixelSize: Theme.fontSizeSmall
                             }
                         }
                     }

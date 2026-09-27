@@ -25,6 +25,18 @@ LayoutController::LayoutController(EngineBridge* bridge,
             this, &LayoutController::OnSnapshotsChanged);
     connect(bridge_, &EngineBridge::replyReceived,
             this, &LayoutController::OnReplyReceived);
+
+    /* Engine-side expiry is authoritative — the timer only
+       drops the stale banner (the blink itself already
+       ended). The acknowledged duration plus one half-period
+       of slack keeps it visible through the last phase. */
+    identify_timer_.setSingleShot(true);
+    connect(&identify_timer_, &QTimer::timeout, this, [this] {
+        identifying_ = QVariantMap{};
+        emit identifyingChanged();
+        SetStatus(QStringLiteral("identification ended"));
+    });
+
     connect(bridge_, &EngineBridge::engineLost, this, [this] {
         /* The pending entry is a live request — an engine loss
            forfeits it; drop the recorded undo so a refused
@@ -39,6 +51,7 @@ LayoutController::LayoutController(EngineBridge* bridge,
             emit busyChanged();
         }
         pending_identify_id_ = 0;
+        identify_timer_.stop();
         identifying_ = QVariantMap{};
         emit identifyingChanged();
         SetLastError(QStringLiteral("engine connection lost"));
@@ -85,16 +98,34 @@ void LayoutController::OnReplyReceived(int id,
         pending_identify_id_ = 0;
         if(ok)
         {
-            identifying_ = body;
-            emit identifyingChanged();
             const bool active =
                 body.value(QStringLiteral("identifying"))
                     .toBool();
-            SetStatus(active
-                          ? QStringLiteral(
-                                "identifying controller…")
-                          : QStringLiteral(
-                                "identification cleared"));
+            if(active)
+            {
+                identifying_ = body;
+                emit identifyingChanged();
+                /* No push arrives when the blink ends — the
+                   banner clears on the acknowledged duration
+                   (plus one 250 ms half-period of slack). */
+                identify_timer_.start(
+                    (int)body.value(
+                             QStringLiteral("duration_ms"))
+                        .toLongLong() + 250);
+                SetStatus(QStringLiteral(
+                              "identifying controller…"));
+            }
+            else
+            {
+                /* Cancel acknowledgement — clear like an
+                   expiry: the reply still carries the key,
+                   which must NOT read as an active banner. */
+                identify_timer_.stop();
+                identifying_ = QVariantMap{};
+                emit identifyingChanged();
+                SetStatus(QStringLiteral(
+                              "identification cleared"));
+            }
         }
         else
         {
@@ -479,8 +510,18 @@ int LayoutController::cancelIdentify(
     QVariantMap args;
     args.insert(QStringLiteral("controller"), controllerKey);
     args.insert(QStringLiteral("duration_ms"), 0);
-    return bridge_->layoutCommand(QStringLiteral("identify"),
-                                  args);
+    const int req = bridge_->layoutCommand(
+        QStringLiteral("identify"), args);
+    if(req <= 0)
+    {
+        return 0;
+    }
+    /* Route the cancel reply through the same pending slot —
+       its {identifying:false} acknowledgement clears the
+       banner like an expiry (it used to be dropped, leaving
+       identifying_ stuck active). */
+    pending_identify_id_ = req;
+    return req;
 }
 
 void LayoutController::reload()

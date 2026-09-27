@@ -273,10 +273,16 @@ Every request carries `{verb:"<name>", ...args}`; unknown verbs →
 document. The engine runs a bounded blink overlay in the frame path
 (device mapper): the identified LED range alternates lit/dark on a
 250 ms half-period over a dark field, through the normal delivery
-lane (budgets and suppression still apply). `zone` names a zone (or
-`controller.zone` carries it); `led_index` selects one LED inside the
-scope; `duration_ms` defaults to 3000 and is clamped to 500–30000;
-`duration_ms:0` cancels → `{identifying:false, cancelled, controller}`.
+lane (budgets and suppression still apply). It works **with or
+without a scene loaded** — finding hardware precedes binding it, so
+while an overlay is booked the worker's no-scene ticks still produce
+frames for the mapper's overlay pass; on expiry the mapper emits one
+restore frame on the pre-identify baseline (the blink can never
+freeze the LEDs on a lit phase) and the frame path sleeps again.
+`zone` names a zone (or `controller.zone` carries it); `led_index`
+selects one LED inside the scope; `duration_ms` defaults to 3000 and
+is clamped to 500–30000; `duration_ms:0` cancels →
+`{identifying:false, cancelled, controller}`.
 Errors: absent/disconnected controller → `unavailable`; bad zone or
 out-of-range index → `bad_request`; a wireless group owned by an
 uploaded animation loop → `unavailable` (one producer per group).
@@ -293,8 +299,12 @@ loaded scene → `unavailable`. Fields:
   object a render-only `linked` copy sharing the target's output —
   its binding/emitters/verified are cleared (unlink does NOT restore
   them; UI undo reverts the whole document). Targets must be device
-  objects; self-mirror and chains → `bad_request`. Mirrored fans
-  share the source zone — addressable LED counts never multiply.
+  objects; self-mirror and chains → `bad_request`. Linking an object
+  that is already another object's mirror SOURCE is likewise
+  `bad_request` — it would strand that `mirror_of` on a `linked`
+  object (the same chain the scene-graph validator forbids); unlink
+  its copies first. Mirrored fans share the source zone —
+  addressable LED counts never multiply.
 - `calibrate_led` sets an emitter's `address` — an index inside the
   object's bound zone; `-1` marks it render-only. The bound is the
   binding's `zone_leds`, else the resolved zone's enumerated count;

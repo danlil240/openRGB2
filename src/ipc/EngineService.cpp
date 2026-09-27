@@ -8,6 +8,7 @@
 
 #include "ProfileStore.h"      /* ValidateSceneLedAddresses */
 
+#include "scene/SceneGraph.h"  /* ValidateSceneGraph         */
 #include "scene/SceneJson.h"
 
 #include <algorithm>
@@ -274,6 +275,23 @@ EngineService::EngineService(Engine& engine, Deps deps,
         deps_.playback->SetSceneProvider(
             [this]() { return Scene(); });
     }
+
+    /* Task 4.4 review fix: `identify` exists to find hardware
+       BEFORE a scene is bound, so the blink must reach the
+       transports with NO scene loaded — but the worker's
+       no-scene ticks sleep unless an idle hook asks for the
+       frame path. The mapper's overlay ledger is that hook:
+       while any overlay is booked (expired-but-unpruned
+       included — the prune+restore frame needs its tick) the
+       worker keeps producing frames and MapFrame's overlay
+       pass does the rest. The overlay's own expiry bounds the
+       ticking; with no mapper wired the hook stays unset. */
+    if(deps_.mapper)
+    {
+        DeviceMapper* m = deps_.mapper;
+        engine_.Worker().SetIdleFrameHook(
+            [m] { return m->IdentifyActive(); });
+    }
 }
 
 void EngineService::SetEventSink(
@@ -327,6 +345,33 @@ bool EngineService::ApplySceneDocument(
         if(!doc)
         {
             err = "scene preparation returned no document";
+            return false;
+        }
+    }
+
+    /* Structural rules the SceneJson parser enforces are
+       re-checked HERE because the layout mutation verbs edit
+       the applied document directly — they never re-enter
+       FromJson. A mutation that strands mirror_of on a
+       Linked object (a mirror chain), a parent cycle, or a
+       duplicate id can never reach the live document. SET_
+       SCENE documents already passed this exact check inside
+       FromJson — re-running it is free, not a policy change.
+       (Task 4.4 review: set_mirror refuses the chain at the
+       verb too; this is the boundary that also covers
+       undo-reverts and any future mutating verb.) */
+    {
+        std::vector<std::string> errs;
+        if(!studio::ValidateSceneGraph(*doc, &errs))
+        {
+            err = errs.empty()
+                      ? "scene document failed graph validation"
+                      : errs.front();
+            if(errs.size() > 1)
+            {
+                err += " (+" + std::to_string(errs.size() - 1) +
+                       " more)";
+            }
             return false;
         }
     }
@@ -1469,6 +1514,25 @@ IpcReply EngineService::HandleLayoutMutate(
                     "mirror target '" + target +
                     "' is not a device object (mirror chains "
                     "are not allowed)");
+            }
+            /* The reverse chain is equally forbidden: if
+               `oid` is already someone's mirror SOURCE,
+               linking it strands that mirror_of on a Linked
+               object — the same chain ValidateSceneGraph
+               rejects, and the source's bound zone would
+               freeze (MapFrame skips Linked objects). */
+            for(const studio::SceneObject& other : doc->objects)
+            {
+                if(other.id != oid && other.mirror_of == oid)
+                {
+                    return IpcReply::Fail(ErrCode::BadRequest,
+                        "object '" + oid + "' is '" +
+                        other.id +
+                        "'s mirror source — unlink '" +
+                        other.id +
+                        "' first (mirror chains are not "
+                        "allowed)");
+                }
             }
             obj->kind      = studio::ObjectKind::Linked;
             obj->mirror_of = target;

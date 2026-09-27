@@ -23,6 +23,12 @@ void SceneWorker::SetFrameCallback(FrameCallback cb)
     callback_ = std::move(cb);
 }
 
+void SceneWorker::SetIdleFrameHook(IdleFrameHook hook)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    idle_frame_hook_ = std::move(hook);
+}
+
 void SceneWorker::SubmitScene(
     std::shared_ptr<const studio::SceneDocument> doc,
     std::vector<studio::EffectLayer> layers,
@@ -70,6 +76,7 @@ bool SceneWorker::Step(TimePoint now)
 {
     FrameCallback cb;
     EvaluatedFrame frame;
+    bool         evaluate;
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -89,8 +96,14 @@ bool SceneWorker::Step(TimePoint now)
             has_pending_input_ = false;
         }
 
-        if(!active_scene_.doc)
+        evaluate = active_scene_.doc != nullptr;
+        if(!evaluate &&
+           (!idle_frame_hook_ || !idle_frame_hook_()))
         {
+            /* No scene and nothing downstream needs a frame —
+               the clock idles (Task 4.4 review: an identify
+               overlay wires the hook, so the blink reaches
+               hardware with no scene loaded). */
             return false;
         }
 
@@ -106,9 +119,14 @@ bool SceneWorker::Step(TimePoint now)
 
     /* Evaluate outside the lock — the core engine is pure; the
        callback may re-enter the worker (SubmitScene/SubmitInput)
-       without deadlocking. */
-    engine_.Evaluate(*active_scene_.doc, frame.scene_time_s,
-                     frame.colors, active_input_.get());
+       without deadlocking. Idle-hook frames skip evaluation: there
+       is no scene, so colors stay empty and the callback's overlay
+       pass (identify) is what produces output. */
+    if(evaluate)
+    {
+        engine_.Evaluate(*active_scene_.doc, frame.scene_time_s,
+                         frame.colors, active_input_.get());
+    }
     if(cb)
     {
         cb(frame);

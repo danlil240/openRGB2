@@ -436,38 +436,45 @@ int main()
 
         /*---- scene mutations: a device-bound document ------*/
         events.clear();
+        /* `fan2` exists so the mirror-source chain check has a
+           valid Device target to refuse. */
+        const nlohmann::json layout_doc = nlohmann::json::object({
+            { "version", 2 }, { "name", "layout" },
+            { "bindings", nlohmann::json::array({
+                nlohmann::json::object({
+                    { "id", "slw0" },
+                    { "controller_name", "UNI FAN" },
+                    { "vendor", "Lian Li" },
+                    { "zone_name", "Fan 1" },
+                    { "zone_leds", 40 } }) }) },
+            { "objects", nlohmann::json::array({
+                nlohmann::json::object({
+                    { "id", "fan0" }, { "kind", "device" },
+                    { "binding", "slw0" },
+                    { "position", nlohmann::json::object(
+                        {{"x",0},{"y",0},{"z",0}}) },
+                    { "emitters", nlohmann::json::array({
+                        nlohmann::json::object(
+                            {{"address",0}}),
+                        nlohmann::json::object(
+                            {{"address",1}}) }) } }),
+                nlohmann::json::object({
+                    { "id", "fan1" }, { "kind", "device" },
+                    { "binding", "slw0" },
+                    { "emitters", nlohmann::json::array({
+                        nlohmann::json::object(
+                            {{"address",2}}) }) } }),
+                nlohmann::json::object({
+                    { "id", "fan2" }, { "kind", "device" },
+                    { "emitters", nlohmann::json::array({
+                        nlohmann::json::object(
+                            {{"address",3}}) }) } }),
+                nlohmann::json::object({
+                    { "id", "case" }, { "kind", "decor" } }),
+            }) },
+        });
         r = svc.Dispatch(MsgType::SetScene,
-            nlohmann::json::object({
-                { "document", nlohmann::json::object({
-                    { "version", 2 }, { "name", "layout" },
-                    { "bindings", nlohmann::json::array({
-                        nlohmann::json::object({
-                            { "id", "slw0" },
-                            { "controller_name", "UNI FAN" },
-                            { "vendor", "Lian Li" },
-                            { "zone_name", "Fan 1" },
-                            { "zone_leds", 40 } }) }) },
-                    { "objects", nlohmann::json::array({
-                        nlohmann::json::object({
-                            { "id", "fan0" }, { "kind", "device" },
-                            { "binding", "slw0" },
-                            { "position", nlohmann::json::object(
-                                {{"x",0},{"y",0},{"z",0}}) },
-                            { "emitters", nlohmann::json::array({
-                                nlohmann::json::object(
-                                    {{"address",0}}),
-                                nlohmann::json::object(
-                                    {{"address",1}}) }) } }),
-                        nlohmann::json::object({
-                            { "id", "fan1" }, { "kind", "device" },
-                            { "binding", "slw0" },
-                            { "emitters", nlohmann::json::array({
-                                nlohmann::json::object(
-                                    {{"address",2}}) }) } }),
-                        nlohmann::json::object({
-                            { "id", "case" }, { "kind", "decor" } }),
-                    }) },
-                }) }}));
+            nlohmann::json::object({{ "document", layout_doc }}));
         CHECK(r.code == ErrCode::Ok);
 
         /* set_position: full vector applies; partial refuses. */
@@ -558,6 +565,30 @@ int main()
             CHECK(f1["mirror_of"].get<std::string>() == "fan0");
             CHECK(f1["emitters"].empty());
         }
+        /* Review fix: fan0 is now fan1's mirror SOURCE —
+           linking IT (fan0 -> fan2) would strand fan1.mirror_of
+           on a Linked object, the chain ValidateSceneGraph
+           forbids. Refused at the verb, before any apply. */
+        r = svc.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "set_mirror" }, { "object_id", "fan0" },
+                { "mirror_of", "fan2" },
+            }));
+        CHECK(r.code == ErrCode::BadRequest);
+        /* ...while a second copy sharing the same source is
+           legal — fan2 -> fan0 is no chain. */
+        r = svc.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "set_mirror" }, { "object_id", "fan2" },
+                { "mirror_of", "fan0" },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        r = svc.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "set_mirror" }, { "object_id", "fan2" },
+                { "mirror_of", "" },
+            }));
+        CHECK(r.code == ErrCode::Ok);           /* unlink   */
         r = svc.Dispatch(MsgType::LayoutCommand,
             nlohmann::json::object({
                 { "verb", "set_mirror" }, { "object_id", "fan0" },
@@ -590,6 +621,25 @@ int main()
             CHECK(r.body["document"]["objects"][1]["kind"]
                       .get<std::string>() == "device");
         }
+        /* With fan1 unlinked, fan0 is a source no more — the
+           same refused link is legal now. It consumes fan0's
+           emitters/binding, so re-apply the document to
+           restore them for the checks below. */
+        r = svc.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "set_mirror" }, { "object_id", "fan0" },
+                { "mirror_of", "fan2" },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        r = svc.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "set_mirror" }, { "object_id", "fan0" },
+                { "mirror_of", "" },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        r = svc.Dispatch(MsgType::SetScene,
+            nlohmann::json::object({{ "document", layout_doc }}));
+        CHECK(r.code == ErrCode::Ok);
 
         /* set_binding: unbind, existing id, and snapshot-
            derived creation — a client can never fabricate
@@ -678,6 +728,104 @@ int main()
                     {{"x",0},{"y",0},{"z",0}}) },
             }));
         CHECK(r.code == ErrCode::Unavailable);
+    }
+
+    /*---- Task 4.4 review: identify with NO scene loaded must
+           still put frames on the wire -------------------------
+           The worker's no-scene ticks used to sleep, so the
+           identify ACK lied — the blink never left the mapper.
+           The service now wires the mapper's overlay ledger as
+           the worker's idle-frame hook: Dispatch -> Step ->
+           MapFrame -> pipeline lane, verified end-to-end with
+           no scene anywhere in the composition. */
+    {
+        Engine           engine4;
+        DeliveryPipeline pipe4;
+        DeviceMapper     mapper4;
+
+        DeviceSnapshot isnap;
+        isnap.key = DeviceKey{ "Lian Li: SL Wireless",
+                               "AABBCCDDEEFF",
+                               "Wireless: AA:BB:CC:DD:EE:FF", "" };
+        isnap.topology_generation = 1;
+        isnap.zones = { ZoneSnapshot{ "Fan 1", 40 } };
+        isnap.colors.assign(40, RgbColor{ 0x11, 0x22, 0x33 });
+        isnap.connection = ConnectionState::Connected;
+        pipe4.RegisterDevice(isnap);
+        mapper4.SyncDevices(std::vector<DeviceSnapshot>{ isnap });
+
+        EngineService::Deps d4;
+        d4.pipeline = &pipe4;
+        d4.mapper   = &mapper4;
+        d4.snapshots = [&isnap]
+        {
+            return std::vector<DeviceSnapshot>{ isnap };
+        };
+        EngineService svc4(engine4, d4);
+
+        /* The host's frame path, replicated: evaluated tick ->
+           mapper -> delivery lane (EngineHost wires the same,
+           plus playback bookkeeping). The service's ctor wired
+           the idle hook against mapper4 already. */
+        engine4.Worker().SetFrameCallback(
+            [&mapper4, &pipe4](const EvaluatedFrame& ev)
+            {
+                for(const RgbFrame& f : mapper4.MapFrame(ev))
+                {
+                    pipe4.SubmitLatest(f);
+                }
+            });
+
+        /* No scene and no overlay booked — the frame path
+           sleeps exactly as before. */
+        CHECK(engine4.Worker().Step(Clock::now()) == false);
+        CHECK(pipe4.PendingCount(isnap.key) == 0);
+        CHECK(!mapper4.IdentifyActive());
+
+        IpcReply r = svc4.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "identify" },
+                { "controller", nlohmann::json::object({
+                    {"device","Lian Li: SL Wireless"},
+                    {"serial","AABBCCDDEEFF"},
+                    {"location","Wireless: AA:BB:CC:DD:EE:FF"}}) },
+                { "zone", "Fan 1" },
+                { "duration_ms", 1000 },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["identifying"].get<bool>() == true);
+        CHECK(mapper4.IdentifyActive());
+
+        /* With no scene anywhere, a Step still produces the
+           blink frame and the lane admits it — the whole
+           40-LED zone lit on the first half-period. */
+        CHECK(engine4.Worker().Step(Clock::now()) == true);
+        RgbFrame pending;
+        CHECK(pipe4.Pending(isnap.key, &pending));
+        CHECK(pending.colors.size() == 40);
+        if(pending.colors.size() == 40)
+        {
+            CHECK(pending.colors[0].r  == 0xFF);
+            CHECK(pending.colors[39].r == 0xFF);
+        }
+
+        /* Past expiry exactly one more frame lands — the
+           pre-identify baseline (the enumerated colors) so the
+           blink can't freeze the LEDs on a lit phase — then
+           the booking drains and the path sleeps again. */
+        const TimePoint after =
+            Clock::now() + std::chrono::milliseconds(1200);
+        CHECK(engine4.Worker().Step(after) == true);
+        CHECK(pipe4.Pending(isnap.key, &pending));
+        CHECK(pending.colors.size() == 40);
+        if(pending.colors.size() == 40)
+        {
+            CHECK(pending.colors[0].r == 0x11);
+            CHECK(pending.colors[0].g == 0x22);
+        }
+        CHECK(!mapper4.IdentifyActive());
+        CHECK(engine4.Worker().Step(
+            after + std::chrono::milliseconds(20)) == false);
     }
 
     /*---- presets ---------------------------------------------*/

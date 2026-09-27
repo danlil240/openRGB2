@@ -530,6 +530,24 @@ bool LayoutEditModel::BuildSetMirror(const std::string& id,
                   "' is not a device object";
             return false;
         }
+        /* `id` must not already BE a mirror source: linking it
+           strands that mirror_of on a linked object — the
+           chain the engine's graph validation forbids. */
+        const auto objs = applied_.find("objects");
+        if(objs != applied_.end() && objs->is_array())
+        {
+            for(const nlohmann::json& other : *objs)
+            {
+                if(JStr(other, "id") != id &&
+                   JStr(other, "mirror_of") == id)
+                {
+                    err = "object '" + id + "' is '" +
+                          JStr(other, "id") +
+                          "'s mirror source — unlink it first";
+                    return false;
+                }
+            }
+        }
         out.label = "link " + id + " → " + target;
     }
     out.body = nlohmann::json::object({

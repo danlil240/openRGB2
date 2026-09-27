@@ -321,6 +321,16 @@ bool DeviceMapper::Identifying(const DeviceKey& controller,
     return it != identify_.end() && now < it->second.until;
 }
 
+bool DeviceMapper::IdentifyActive() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    /* Booked, not merely unexpired: an expired entry is still
+       work — ApplyIdentify prunes it and emits the restore
+       frame on the NEXT produced frame, so the idle hook must
+       keep the frame path awake until the map drains. */
+    return !identify_.empty();
+}
+
 void DeviceMapper::ApplyIdentify(std::vector<RgbFrame>& out,
                                  TimePoint sample_time)
 {
@@ -335,9 +345,66 @@ void DeviceMapper::ApplyIdentify(std::vector<RgbFrame>& out,
     {
         if(sample_time >= it->second.until)
         {
-            it = identify_.erase(it);   /* expiry is honest —
-                                           the next frame is
-                                           scene colors again */
+            /* Expiry is honest — but with no scene frame
+               following (no scene loaded, or the controller
+               unmapped) the blink's last phase would FREEZE on
+               the hardware, possibly lit. Emit ONE restore
+               frame on the pre-identify baseline — the same
+               baseline the writes loop uses (last emitted
+               frame for this generation, else the enumerated
+               colors) — then drop the booking. A controller
+               that left or disconnected keeps the obsolete-
+               frame rule: nothing is sent to it. */
+            const DeviceKey& key = it->first;
+            const auto sit = snapshots_.find(key);
+            if(sit != snapshots_.end() &&
+               sit->second.connection == ConnectionState::Connected)
+            {
+                bool have_frame = false;
+                for(const RgbFrame& f : out)
+                {
+                    if(f.controller == key)
+                    {
+                        have_frame = true;   /* the scene writes
+                                                already restored
+                                                the look */
+                        break;
+                    }
+                }
+                if(!have_frame)
+                {
+                    const DeviceSnapshot& snap = sit->second;
+                    const uint32_t led_count = snap.LedCount();
+                    Emitted& st = emitted_[key];
+                    RgbFrame  f;
+                    f.controller          = key;
+                    f.topology_generation =
+                        snap.topology_generation;
+                    f.sample_time         = sample_time;
+                    if(st.generation == snap.topology_generation &&
+                       st.colors.size() == led_count)
+                    {
+                        f.colors = st.colors;
+                    }
+                    else
+                    {
+                        f.colors = snap.colors;
+                        f.colors.resize(led_count);
+                        st.generation = snap.topology_generation;
+                        /* st.seq is NOT reset here: overlay-only
+                           controllers book no generation tag, so
+                           this branch also runs mid-generation —
+                           and the blink frames already spent seqs
+                           in the lane's live space. Only a real
+                           topology change may restart sequences
+                           (the lane's guard resets with it). */
+                    }
+                    f.sequence = ++st.seq;
+                    st.colors  = f.colors;
+                    out.push_back(std::move(f));
+                }
+            }
+            it = identify_.erase(it);
             continue;
         }
         const Identify& id = it->second;

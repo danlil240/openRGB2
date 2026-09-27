@@ -68,6 +68,20 @@ public:
        never queued). */
     void     SetFrameCallback(FrameCallback cb);
 
+    /* No-scene ticks normally produce nothing. A host-wired idle
+       hook can request the frame path anyway — the one consumer is
+       the device mapper's identify overlay (Task 4.4): the blink
+       must reach hardware BEFORE any scene exists to bind it.
+       While the hook reports true, Step produces an EvaluatedFrame
+       with an EMPTY color map — no scene evaluation — and runs the
+       normal frame callback, so overlay output still flows to the
+       transports. Queried once per no-scene tick; must be cheap.
+       The hook bounds the ticking itself: it reports false once
+       its work ends (an expired-but-unpruned overlay still counts
+       as work — the prune/restore frame needs its tick). */
+    using IdleFrameHook = std::function<bool()>;
+    void     SetIdleFrameHook(IdleFrameHook hook);
+
     /* Latest-wins scene submission: `doc` is immutable once shared;
        `layers` is the caller-resolved effect stack (preset/inline
        resolution stays with the scene provider). `revision` is
@@ -92,8 +106,10 @@ public:
     /* One deterministic evaluation step at absolute time `now`:
        applies pending state, samples t = now - epoch, evaluates,
        and fires the frame callback. Returns false when no scene is
-       set. The threaded loop calls this with Clock::now() after
-       waking; tests call it directly with synthetic times.
+       set AND no idle hook requested a frame (an idle-hook frame
+       carries an empty color map — evaluation is skipped). The
+       threaded loop calls this with Clock::now() after waking;
+       tests call it directly with synthetic times.
        Single-caller: do not invoke Step concurrently (the worker
        thread owns it while Running()). */
     bool     Step(TimePoint now);
@@ -140,6 +156,7 @@ private:
 
     studio::EffectEngine  engine_;
     FrameCallback         callback_;
+    IdleFrameHook         idle_frame_hook_;
 };
 
 } /* namespace openrgb2 */
