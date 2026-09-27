@@ -594,6 +594,24 @@ nlohmann::json EngineService::FrameStatusJson() const
     });
 }
 
+nlohmann::json EngineService::PowerJson() const
+{
+    if(!deps_.power)
+    {
+        return nullptr;
+    }
+    nlohmann::json out;
+    out["display_on"]      = deps_.power->DisplayOn();
+    out["suspended"]       = deps_.power->Suspended();
+    out["output_paused"]   = deps_.power->OutputPaused();
+    out["power_hold"]      = deps_.power->PowerHold();
+    out["restore_pending"] = deps_.power->RestorePending();
+    const std::string detail = deps_.power->Detail();
+    out["detail"] = detail.empty() ? nlohmann::json(nullptr)
+                                   : nlohmann::json(detail);
+    return out;
+}
+
 nlohmann::json EngineService::StateJson() const
 {
     nlohmann::json ipc_stats = nullptr;
@@ -623,6 +641,7 @@ nlohmann::json EngineService::StateJson() const
         { "scene",      SceneJsonLocked()                    },
         { "sdk",        ConnectionJson()                     },
         { "playback",   PlaybackJson()                       },
+        { "power",      PowerJson()                          },
         { "ipc",        ipc_stats                            },
     });
 }
@@ -647,6 +666,7 @@ nlohmann::json EngineService::DiagnosticsJson(TimePoint now) const
         { "delivery",         DeliveryStatsJson(
                                   nlohmann::json::object())  },
         { "sdk",              ConnectionJson()               },
+        { "power",            PowerJson()                    },
         { "ipc",              deps_.server_stats
                                   ? StateJson()["ipc"]
                                   : nlohmann::json(nullptr)  },
@@ -973,6 +993,27 @@ IpcReply EngineService::Dispatch(MsgType type,
         return IpcReply::Fail(ErrCode::Unavailable,
             "layout/calibration verb '" + verb +
             "' is reserved for the Milestone-4 layout engine");
+    }
+
+    case MsgType::Quit:
+    {
+        /* The "Quit All" hook (plan section 4): the UI's quit
+           command lands here; the engine then runs its ordered,
+           bounded shutdown (OrderlyShutdown in main.cpp — owned
+           components stop in order). The reply is prepared
+           BEFORE the hook fires so the requester sees OK. */
+        if(!deps_.request_shutdown)
+        {
+            return IpcReply::Fail(ErrCode::Unavailable,
+                "engine shutdown is not wired on this process");
+        }
+        const IpcReply reply = IpcReply::Success(MsgType::Ok,
+            nlohmann::json::object({
+                { "shutting_down", true },
+                { "ordered",       true },
+            }));
+        deps_.request_shutdown();
+        return reply;
     }
 
     case MsgType::DiagGet:

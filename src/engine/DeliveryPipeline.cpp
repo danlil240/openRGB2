@@ -226,6 +226,19 @@ SubmitResult DeliveryPipeline::SubmitLatest(const RgbFrame& frame)
                 : lane.suppress_reason);
     }
 
+    if(output_paused_)
+    {
+        /* Display-off / suspend (Task 3.7): all RGB frame output
+           is gated. The refusal is honest — the producer sees a
+           Rejected with reason, never a silent drop. */
+        ++lane.stats.rejected;
+        ++aggregate_.rejected;
+        return SubmitResult::Reject(
+            pause_reason_.empty()
+                ? "RGB output paused (display off or suspend)"
+                : pause_reason_);
+    }
+
     const SubmitResult valid = Validate(lane, frame);
     if(valid.status == SubmitStatus::Rejected)
     {
@@ -290,6 +303,16 @@ SubmitResult DeliveryPipeline::SubmitReliable(const RgbFrame& frame)
             lane.suppress_reason.empty()
                 ? "controller owned by uploaded playback"
                 : lane.suppress_reason);
+    }
+
+    if(output_paused_)
+    {
+        ++lane.stats.rejected;
+        ++aggregate_.rejected;
+        return SubmitResult::Reject(
+            pause_reason_.empty()
+                ? "RGB output paused (display off or suspend)"
+                : pause_reason_);
     }
 
     const SubmitResult valid = Validate(lane, frame);
@@ -427,6 +450,67 @@ bool DeliveryPipeline::WaitIdle(const DeviceKey& controller,
         });
 }
 
+size_t DeliveryPipeline::DropAllPending()
+{
+    std::vector<std::shared_ptr<Lane>> lanes;
+    size_t dropped = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for(auto& entry : lanes_)
+        {
+            dropped += size_t(entry.second->has_live) +
+                       size_t(entry.second->has_reliable);
+            entry.second->has_live     = false;
+            entry.second->has_reliable = false;
+            lanes.push_back(entry.second);
+        }
+    }
+    for(const std::shared_ptr<Lane>& lane : lanes)
+    {
+        lane->cv.notify_all();
+    }
+    return dropped;
+}
+
+std::vector<DeviceKey> DeliveryPipeline::LaneKeys() const
+{
+    std::vector<DeviceKey> out;
+    std::lock_guard<std::mutex> lock(mutex_);
+    out.reserve(lanes_.size());
+    for(const auto& entry : lanes_)
+    {
+        out.push_back(entry.first);
+    }
+    return out;
+}
+
+void DeliveryPipeline::SetOutputPaused(bool paused,
+                                       std::string reason)
+{
+    std::vector<std::shared_ptr<Lane>> lanes;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        output_paused_ = paused;
+        pause_reason_  = std::move(reason);
+        for(auto& entry : lanes_)
+        {
+            lanes.push_back(entry.second);
+        }
+    }
+    /* Wake every lane so a paused worker sleeps and a resumed
+       worker re-evaluates its pending frame immediately. */
+    for(const std::shared_ptr<Lane>& lane : lanes)
+    {
+        lane->cv.notify_all();
+    }
+}
+
+bool DeliveryPipeline::OutputPaused() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return output_paused_;
+}
+
 bool DeliveryPipeline::DeliverOne(Lane& lane, RgbFrame frame,
                                   bool reliable, TimePoint now)
 {
@@ -524,6 +608,12 @@ size_t DeliveryPipeline::DrainDue(const DeviceKey& controller,
             /* An uploaded loop owns the group: nothing in this
                lane may reach the transport until the producer
                resumes (plan section 3.4 — one producer). */
+            return 0;
+        }
+        if(output_paused_)
+        {
+            /* Display-off/suspend: a pending frame stored just
+               before the gate must not reach the transport. */
             return 0;
         }
         if(lane->has_reliable)
@@ -683,6 +773,15 @@ void DeliveryPipeline::LaneRun(Lane* lane)
                     /* Uploaded playback owns the group — pending
                        work must not deliver until resume (the
                        controller drops it on transition anyway). */
+                    lane->cv.wait(lock);
+                    continue;
+                }
+                if(output_paused_)
+                {
+                    /* Display-off/suspend: RGB output is gated.
+                       The lane sleeps until the lifecycle resumes
+                       output — no periodic writes can leave while
+                       the display sleeps (plan section 6). */
                     lane->cv.wait(lock);
                     continue;
                 }

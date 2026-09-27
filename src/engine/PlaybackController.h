@@ -216,8 +216,72 @@ public:
 
     /* Maintenance hook (engine owner loop, ~500 ms):
        acknowledgement polling, clock sampling, topology
-       re-resolution, suppression re-assert. */
+       re-resolution, suppression re-assert. While the power gate
+       is set (system suspending — Task 3.7) Poll is fully
+       parked: no acknowledgement refresh, no clock sampling, no
+       transport control, so the controller can never emit a
+       hardware write across a suspend boundary. */
     void   Poll(TimePoint now);
+
+    /*---- Task 3.7 — power/lifecycle interface ---------------*\
+    || These entry points serve the engine's power lifecycle   ||
+    || (display-off freeze, suspend/wake restore, reconnect    ||
+    || recovery). They are lifecycle state, not user input:    ||
+    || RequestPowerControl never rewrites the per-scene        ||
+    || persisted selection.                                    ||
+    |\*--------------------------------------------------------*/
+
+    /* The power-driven transport hold: freezes an acknowledged
+       Playing upload to the sampled-frame hold (ONE
+       maintenance/freeze transition — the loop is paused by an
+       explicit write, never by stopping required traffic), or
+       resumes Playing on wake. Returns accepted=false with a
+       reason when no acknowledged upload exists or a
+       transition is in flight — the caller treats that as
+       "nothing to freeze", never as a failure. */
+    Result RequestPowerControl(PlaybackControl control);
+
+    /* The intended transport control WITHOUT a hardware write:
+       display-off during an in-flight upload parks the intent
+       so the post-ack do_control convergence lands the hold;
+       wake paths set Playing so revalidation compares the
+       intended state, not the frozen one. */
+    void   SetIntendedControl(PlaybackControl control);
+    PlaybackControl IntendedControl() const;
+
+    /* Parks Poll() (see Poll doc). Set while the system is
+       suspending; cleared by the lifecycle after the post-wake
+       revalidation + restore completes. */
+    void   SetPowerGate(bool gated);
+    bool   PowerGate() const;
+
+    /* Suspend/reconnect recovery (plan section 3.4: recovery
+       revalidates identity before restoring playback):
+       Phase 1 — RefreshStatus + re-resolve the owned group's
+         identity in the current enumeration. NOTHING is written
+         while either can still fail.
+       Phase 2 — compare the backend-reported mode against the
+         intended selection. A still-consistent owned group gets
+         NO restore write — a loop it never lost is not
+         restarted, and reconnect recovery never restarts
+         hardware state the engine didn't own/lose.
+       Phase 3 — divergence re-runs the intended selection's
+         transition (the force path skips the idempotent no-op,
+         which would otherwise trust stale bookkeeping). */
+    enum class RevalidateResult
+    {
+        NotOwned,        /* no group owned — nothing to do       */
+        Busy,            /* a serialized transition is in flight */
+        TransportFailed, /* refresh/identity could not run —
+                            nothing was written; retry later     */
+        IdentityLost,    /* owned group absent after revalidation
+                            (marked Failed)                       */
+        Consistent,      /* backend still reports the intended
+                            state — no restore write issued      */
+        Restored,        /* divergence: the restore transition
+                            was issued                          */
+    };
+    RevalidateResult RevalidateAndRestore();
 
     /*---- Reporting ----------------------------------------*\
     || Status(): the APPLIED PlaybackStatus — selected mode  ||
@@ -280,7 +344,8 @@ private:
 
     Result RequestImpl(PlaybackMode mode, PlaybackControl control,
                        const PlaybackParams& params,
-                       const std::shared_ptr<const studio::SceneDocument>& doc);
+                       const std::shared_ptr<const studio::SceneDocument>& doc,
+                       bool force_restore = false);
     bool   FindWireless(DeviceSnapshot& out) const;
     bool   BackendReports(const Expect& exp, const DeviceKey& key);
     void   MarkFailedLocked(const std::string& detail);
@@ -315,6 +380,7 @@ private:
     PlaybackMode       requested_mode_   = PlaybackMode::LiveEffects;
     PlaybackControl    requested_control_= PlaybackControl::Playing;
     bool               transition_       = false;  /* serialized  */
+    bool               power_gate_       = false;  /* suspending  */
     uint64_t           epoch_            = 0;      /* request gen */
 
     /* The owned wireless group + its upload geometry. */

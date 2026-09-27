@@ -90,6 +90,7 @@ const char* MsgTypeName(MsgType t)
     case MsgType::Unsubscribe:     return "UNSUBSCRIBE";
     case MsgType::Ping:            return "PING";
     case MsgType::GetPresets:      return "GET_PRESETS";
+    case MsgType::Quit:            return "QUIT";
     case MsgType::DiagGet:         return "DIAG_GET";
     case MsgType::Welcome:         return "WELCOME";
     case MsgType::Ok:              return "OK";

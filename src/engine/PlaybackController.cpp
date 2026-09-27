@@ -244,7 +244,8 @@ PlaybackController::Result PlaybackController::Request(
 PlaybackController::Result PlaybackController::RequestImpl(
     PlaybackMode mode, PlaybackControl control,
     const PlaybackParams& params,
-    const std::shared_ptr<const studio::SceneDocument>& doc)
+    const std::shared_ptr<const studio::SceneDocument>& doc,
+    bool force_restore)
 {
     Result        r;
     const TimePoint now = deps_.now();
@@ -336,7 +337,12 @@ PlaybackController::Result PlaybackController::RequestImpl(
             applied_mode_ == PlaybackMode::AnimationPlayback &&
             upload_ == UploadState::Active &&
             same_params && control == control_;
-        if(!ack_pending_ && (live_is_rest || anim_is_same))
+        /* force_restore (Task 3.7 RevalidateAndRestore) skips
+           the idempotent no-op: it runs only after the backend's
+           reported state proved the bookkeeping stale, so the
+           "already applied" shortcut must not fire. */
+        if(!force_restore && !ack_pending_ &&
+           (live_is_rest || anim_is_same))
         {
             /* The persisted per-scene selection records THIS
                request — a stale requested_mode_/params_ left
@@ -865,9 +871,14 @@ void PlaybackController::Poll(TimePoint now)
     PlaybackControl want_control = PlaybackControl::Playing;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if(transition_)
+        if(transition_ || power_gate_)
         {
-            return;   /* a serialized transition is in flight */
+            /* A serialized transition is in flight — or the
+               lifecycle parked the controller across a suspend:
+               no acknowledgement refresh, clock sampling, or
+               transport control may run while the power gate
+               is set (Task 3.7). */
+            return;
         }
         epoch = epoch_;
         key   = wireless_key_;
@@ -1085,6 +1096,220 @@ void PlaybackController::Poll(TimePoint now)
 
 /*---------------------------------------------------------*\
 || Reporting                                                ||
+\*---------------------------------------------------------*/
+
+/*---------------------------------------------------------*\
+||| Power/lifecycle interface (Task 3.7)                     ||
+\*---------------------------------------------------------*/
+
+PlaybackController::Result PlaybackController::RequestPowerControl(
+    PlaybackControl control)
+{
+    Result r;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(transition_)
+        {
+            r.reason = "a playback transition is already in progress";
+            return r;
+        }
+        if(applied_mode_ != PlaybackMode::AnimationPlayback ||
+           upload_ != UploadState::Active || ack_pending_)
+        {
+            /* Nothing to hold/resume at the transport level —
+               "not applicable", never a failure. The caller
+               (PowerLifecycle) falls back to SetIntendedControl
+               so an in-flight upload still lands held. */
+            r.reason = "no acknowledged upload to control";
+            return r;
+        }
+        if(control_ == control && requested_control_ == control)
+        {
+            r.accepted = true;
+            r.revision = applied_param_rev_;
+            return r;
+        }
+        /* Same serialized slot as a user control request, but
+           the per-scene persisted selection is NOT touched —
+           a power hold is lifecycle state, not user choice. */
+        transition_        = true;
+        ++epoch_;
+        requested_control_ = control;
+        ++next_rev_;
+        requested_rev_     = next_rev_;
+    }
+    std::string err;
+    DoControl(control, err);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        transition_ = false;
+        if(!err.empty())
+        {
+            status_detail_ = err;
+            r.reason       = err;
+            return r;
+        }
+        r.accepted = true;
+        r.pending  = ack_pending_;
+        r.revision = requested_rev_;
+    }
+    Changed();
+    return r;
+}
+
+void PlaybackController::SetIntendedControl(PlaybackControl control)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    requested_control_ = control;
+}
+
+PlaybackControl PlaybackController::IntendedControl() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return requested_control_;
+}
+
+void PlaybackController::SetPowerGate(bool gated)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    power_gate_ = gated;
+}
+
+bool PlaybackController::PowerGate() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return power_gate_;
+}
+
+PlaybackController::RevalidateResult
+PlaybackController::RevalidateAndRestore()
+{
+    PlaybackMode    want_mode;
+    PlaybackControl want_control;
+    PlaybackParams  want_params;
+    PlaybackMode    applied;
+    UploadState     upload;
+    bool            suppressed;
+    DeviceKey       key;
+    LianLiWireless::PlaybackPreset preset;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(!has_wireless_ || upload_ == UploadState::None)
+        {
+            return RevalidateResult::NotOwned;
+        }
+        if(transition_)
+        {
+            return RevalidateResult::Busy;
+        }
+        key          = wireless_key_;
+        want_mode    = requested_mode_;
+        want_control = requested_control_;
+        want_params  = params_;
+        preset       = preset_;
+        applied      = applied_mode_;
+        upload       = upload_;
+        suppressed   = suppressed_;
+    }
+
+    /*---- Phase 1: revalidate identity BEFORE any restore ----*\
+    || RefreshStatus re-fetches the backend's controller state  ||
+    || (falling through to a full enumeration on structural     ||
+    || change), then the owned group's identity is re-resolved  ||
+    || against the fresh enumeration. No write may run while    ||
+    || either step can still fail (plan section 3.4 lifecycle). ||
+    \*---------------------------------------------------------*/
+    if(!deps_.refresh_status)
+    {
+        return RevalidateResult::TransportFailed;
+    }
+    {
+        std::string io_err;
+        if(!deps_.refresh_status(io_err))
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            status_detail_ =
+                "wake/reconnect revalidation failed: " + io_err;
+            return RevalidateResult::TransportFailed;
+        }
+    }
+    DeviceSnapshot snap;
+    bool           found = false;
+    if(deps_.snapshots)
+    {
+        for(const DeviceSnapshot& s : deps_.snapshots())
+        {
+            if(s.key == key &&
+               s.connection == ConnectionState::Connected)
+            {
+                snap  = s;
+                found = true;
+                break;
+            }
+        }
+    }
+    if(!found)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            MarkFailedLocked(
+                "the wireless group was absent in the post-wake "
+                "identity revalidation");
+        }
+        Changed();
+        return RevalidateResult::IdentityLost;
+    }
+
+    /*---- Phase 2: is the reported state already the intended --*\
+    || A consistent owned group gets NO restore write — the      ||
+    || loop it never lost is not restarted (reconnect recovery   ||
+    || must not restart hardware state the engine didn't own).   ||
+    \*-----------------------------------------------------------*/
+    Expect exp;
+    if(want_mode == PlaybackMode::AnimationPlayback &&
+       want_control == PlaybackControl::Playing)
+    {
+        exp = BuildExpect(PlaybackPresetSdkName(preset),
+                          preset, want_params);
+    }
+    else
+    {
+        exp.mode_name = "Direct";
+    }
+    const bool applied_matches =
+        applied == want_mode &&
+        (want_mode == PlaybackMode::AnimationPlayback
+             ? (upload == UploadState::Active)
+             : !suppressed);
+    if(applied_matches && BackendReports(exp, key))
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        wireless_gen_  = snap.topology_generation;
+        wireless_leds_ = snap.LedCount();
+        return RevalidateResult::Consistent;
+    }
+
+    /*---- Phase 3: restore the intended selection -------------*/
+    std::shared_ptr<const studio::SceneDocument> doc;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        doc = deps_.scene ? deps_.scene() : nullptr;
+    }
+    const Result r = RequestImpl(want_mode, want_control,
+                                 want_params, doc,
+                                 /*force_restore*/ true);
+    if(!r.accepted)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        status_detail_ = "wake/reconnect restore failed: " +
+                         r.reason;
+        return RevalidateResult::TransportFailed;
+    }
+    return RevalidateResult::Restored;
+}
+
+/*---------------------------------------------------------*\
+||| Reporting                                                ||
 \*---------------------------------------------------------*/
 
 PlaybackStatus PlaybackController::Status() const

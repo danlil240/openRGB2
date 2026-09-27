@@ -134,10 +134,37 @@ public:
                          std::string reason = "");
     bool   IsSuppressed(const DeviceKey& controller) const;
     size_t DropPending(const DeviceKey& controller);
+    size_t DropAllPending();            /* every lane; frames dropped */
     void   ResetDeliveredState(const DeviceKey& controller);
     size_t InFlight(const DeviceKey& controller) const;
     bool   WaitIdle(const DeviceKey& controller,
                     Clock::duration timeout);
+    std::vector<DeviceKey> LaneKeys() const;
+
+    /*---- Global output pause (Task 3.7 — plan section 6) ----*\
+    | SetOutputPaused(true, reason) gates ALL RGB frame output: |
+    | SubmitLatest and SubmitReliable reject with the reason    |
+    | (honest refusals counted in stats, never silent drops)    |
+    | and the drain/lane-worker paths deliver nothing — a racy  |
+    | pending frame stored just before the pause can never      |
+    | reach the transport while the gate is on. Owner writes    |
+    | that bypass the lanes entirely (the playback controller's |
+    | direct_submit pause-hold / stop-black) are unaffected —   |
+    | the single maintenance/freeze transition on display-off   |
+    | goes through exactly once.                               |
+    |                                                          |
+    | The gate does not touch lane state: delivered-state       |
+    | memory, sequences, budgets, and suppression survive a     |
+    | pause/resume cycle, and a pending frame held through the  |
+    | pause delivers current state on resume (the producer's    |
+    | latest, never an obsolete FIFO). RGB output pausing is    |
+    | deliberately the ONLY thing the gate does — it can never  |
+    | be used to starve device-required maintenance traffic,    |
+    | which this pipeline does not carry at all (the backend    |
+    | driver owns heartbeats; plan section 3.4).               |
+    \*---------------------------------------------------------*/
+    void   SetOutputPaused(bool paused, std::string reason = "");
+    bool   OutputPaused() const;
 
     /* The reliable static-state convergence path (plan 3.3 —
        kept distinct from replaceable live frames): same
@@ -272,6 +299,8 @@ private:
     std::map<DeviceKey, std::shared_ptr<Lane>> lanes_;
     Clock::duration                    default_budget_{};
     bool                               running_ = false;
+    bool                               output_paused_ = false;
+    std::string                        pause_reason_;
     DeliveryStats                      aggregate_;
 };
 

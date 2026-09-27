@@ -87,6 +87,9 @@ enum class MsgType : uint16_t
     Unsubscribe      = 0x0109,   /* -> Ok                               */
     Ping             = 0x010a,   /* -> Pong                             */
     GetPresets       = 0x010b,   /* -> Presets (preset cards)           */
+    Quit             = 0x010c,   /* -> Ok; requests the engine's ordered
+                                       shutdown (the "Quit All" hook —
+                                       plan section 4)                  */
 
     /*---- diagnostics channel (the only post-HELLO verb) ---*/
     DiagGet          = 0x0300,   /* -> Diagnostics                      */

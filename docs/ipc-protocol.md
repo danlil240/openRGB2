@@ -146,6 +146,7 @@ Request → reply. `request_id` echoes.
 | 0x0109 | UNSUBSCRIBE | `{}` | OK `{subscribed:[]}` |
 | 0x010A | PING | `{}` | PONG `{}` |
 | 0x010B | GET_PRESETS | `{}` | PRESETS |
+| 0x010C | QUIT | `{}` | OK `{shutting_down:true, ordered:true}` / ERROR |
 | 0x0300 | DIAG_GET | `{}` | DIAGNOSTICS (valid on both pipes) |
 
 Reply types: WELCOME 0x8001, OK 0x8002, ERROR 0x8003, SNAPSHOTS 0x8100,
@@ -232,9 +233,21 @@ mean_interval_s,interval_count,provenance}`.
 "displayed" (plan section 4).
 
 **STATE** — `{engine:{running,scene_clock_hz,scene_sequence}, scene:{...},
-sdk:{...}, playback:{...}, ipc:{sessions_active, messages_in, responses_out,
-events_sent, events_dropped, queued_events, resync_bytes, rejected_hellos,
-rate_limited, refused_busy}}`.
+sdk:{...}, playback:{...}, power:{...}, ipc:{sessions_active, messages_in,
+responses_out, events_sent, events_dropped, queued_events, resync_bytes,
+rejected_hellos, rate_limited, refused_busy}}`.
+
+**QUIT** — the "Quit All" hook (plan section 4): requests the engine's
+ordered, bounded shutdown (the power monitor, IPC intake, scene worker,
+delivery lanes, and SDK transport stop in order; the reply is prepared
+before the hook fires). `unavailable` when the process has no shutdown
+hook wired. Owning the backend's process is the caller's concern — the
+engine never spawns it.
+
+**POWER** (STATE/DIAGNOSTICS field, `null` when unwired) —
+`{display_on, suspended, output_paused, power_hold, restore_pending,
+detail}`: the Task 3.7 lifecycle state — display-off/suspend gating,
+the one-time loop freeze (`power_hold`), and wake-restore progress.
 
 **PRESETS** — `{presets:[{id,name,description,needs}]}` — Lighting-view
 preset cards.
@@ -252,6 +265,7 @@ Milestone-4 layout engine"); unknown verbs → `bad_request`.
   "playback": {"requested_mode":..., "capabilities":..., "status":{...}},
   "delivery": {"available":..., "aggregate":{...}, "pending":N, "controllers":[...]},
   "sdk":      {"state":..., "protocol_version":N, "reconnect_attempt":N, ...},
+  "power":    {"display_on":B, "suspended":B, "output_paused":B, ...},
   "ipc":      {"sessions_active":N, "queued_events":N, "events_dropped":N, ...},
   "clock":    {"steady_ms":F},
   "backend_counters": null }

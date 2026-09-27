@@ -14,6 +14,7 @@ milestones.
 | `src/engine/` | Qt-free lighting engine: scene worker, delivery pipeline, device mapping, `openrgb2-engine` process |
 | `src/backends/openrgb/` | Qt-free OpenRGB SDK v4 client (loopback TCP to the pinned backend) |
 | `src/ipc/` | Versioned/bounded local IPC: restricted named pipes (command + read-only diagnostics), JSON framing — contract in `docs/ipc-protocol.md` |
+| `src/platform/windows/` | Qt-free Win32 platform pieces: display/system power monitor (message-only window feeding `PowerLifecycle` events) |
 | `tests/core/` | Qt-free offline regression suites (CTest label `core`) |
 | `tests/backend/` | Offline Lian Li wireless protocol harness (CTest label `backend`) |
 | `tests/engine/` | Qt-free engine + IPC suites (CTest label `engine`) |

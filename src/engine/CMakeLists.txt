@@ -31,6 +31,8 @@ add_library(openrgb2_engine STATIC
     PlaybackPresets.cpp
     PlaybackClockSync.cpp
     PlaybackController.cpp
+    PowerLifecycle.cpp
+    OrderlyShutdown.cpp
     Engine.cpp
     ${CORE_DIR}/scene/SceneTypes.cpp
     ${CORE_DIR}/scene/SceneGraph.cpp
@@ -76,4 +78,5 @@ add_executable(openrgb2-engine
 target_link_libraries(openrgb2-engine PRIVATE
     openrgb2_engine
     openrgb2_backend_openrgb
-    openrgb2_ipc)
+    openrgb2_ipc
+    openrgb2_platform_windows)

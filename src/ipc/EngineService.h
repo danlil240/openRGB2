@@ -36,6 +36,7 @@
 #include "Engine.h"
 #include "OpenRgbClient.h"
 #include "PlaybackController.h"
+#include "PowerLifecycle.h"
 
 #include "effects/Presets.h"
 #include "scene/SceneTypes.h"
@@ -81,9 +82,19 @@ public:
            requests get an honest Unavailable. */
         std::function<PlaybackCapabilities()> playback_caps;
 
+        /* Task 3.7 power lifecycle — surfaced read-only in
+           STATE/DIAGNOSTICS (display/suspend/gate flags). */
+        const PowerLifecycle* power = nullptr;
+
         /* IPC-side queue/counter source (IpcServer::Stats) —
            diagnostics exposes queue depths, not guesses. */
         std::function<IpcServerStats()> server_stats;
+
+        /* The "Quit All" hook (plan section 4): QUIT invokes this
+           AFTER the reply is prepared; production wires it to the
+           owner loop's stop flag so owned components shut down in
+           order (OrderlyShutdown). Empty -> Unavailable. */
+        std::function<void()> request_shutdown;
     };
 
     explicit EngineService(Engine& engine);
@@ -158,6 +169,7 @@ private:
     void   Emit(const std::string& kind, const nlohmann::json& data);
     nlohmann::json SceneJsonLocked() const;
     nlohmann::json PlaybackJson() const;
+    nlohmann::json PowerJson() const;
     nlohmann::json StateJson() const;
     nlohmann::json SnapshotsJson() const;
     nlohmann::json DeliveryStatsJson(const nlohmann::json& body) const;

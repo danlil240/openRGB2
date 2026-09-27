@@ -18,7 +18,9 @@
 #include "DeliveryPipeline.h"
 #include "DeviceMapper.h"
 #include "Engine.h"
+#include "OrderlyShutdown.h"
 #include "PlaybackController.h"
+#include "PowerLifecycle.h"
 #include "SceneWorker.h"
 
 #include "EngineService.h"
@@ -27,6 +29,8 @@
 
 #include "OpenRgbClient.h"
 #include "TcpSocket.h"
+
+#include "WinPowerMonitor.h"
 
 #include "effects/Presets.h"
 #include "presets/EffectRegistry.h"
@@ -426,6 +430,75 @@ int main(int argc, char** argv)
        pipe exists yet — sync reports honest Unknown/Stale. */
     openrgb2::PlaybackController playback(std::move(pdeps));
 
+    /* Power lifecycle (Task 3.7): display-off gates ALL RGB
+       frame output + reactive capture through the pipeline's
+       output pause and freezes an active uploaded loop ONCE
+       (explicit sampled-hold, never a write stream and never
+       a maintenance stop); suspend discards pending work and
+       parks the controller; wake/reconnect revalidates
+       identity before any restore write. All hardware-facing
+       operations are the injected deps below — the Windows
+       monitor only posts events into this machine. */
+    std::atomic<bool> capture_paused{ false };
+    openrgb2::PowerLifecycle::Deps ldeps;
+    ldeps.set_output_paused =
+        [&pipeline](bool p, const std::string& r)
+        { pipeline->SetOutputPaused(p, r); };
+    ldeps.lane_keys =
+        [&pipeline]() { return pipeline->LaneKeys(); };
+    ldeps.drop_pending =
+        [&pipeline](const openrgb2::DeviceKey& k)
+        { return pipeline->DropPending(k); };
+    ldeps.reset_delivered =
+        [&pipeline](const openrgb2::DeviceKey& k)
+        { pipeline->ResetDeliveredState(k); };
+    ldeps.last_delivered =
+        [&pipeline](const openrgb2::DeviceKey& k,
+                    openrgb2::RgbFrame& out)
+        { return pipeline->LastDelivered(k, out); };
+    ldeps.reliable_submit =
+        [&pipeline](const openrgb2::RgbFrame& f)
+        { return pipeline->SubmitReliable(f); };
+    ldeps.set_capture_paused =
+        [&capture_paused](bool p)
+        {
+            /* The reactive-input pause seam: platform reactive
+               samplers (a later milestone) must read this flag —
+               GPU-side capture writes must not run while the
+               display sleeps. */
+            capture_paused.store(p);
+        };
+    ldeps.snapshots =
+        [&sdk_client]() -> std::vector<openrgb2::DeviceSnapshot>
+        {
+            return sdk_client ? sdk_client->Snapshots()
+                              : std::vector<openrgb2::DeviceSnapshot>{};
+        };
+    ldeps.playback = &playback;
+    ldeps.log =
+        [](const std::string& line)
+        { std::fprintf(stderr, "openrgb2-engine: %s\n", line.c_str()); };
+    openrgb2::PowerLifecycle lifecycle(std::move(ldeps));
+
+    /* The Windows event source: a dedicated thread + message-
+       only window carrying the display-state and suspend/resume
+       registrations (Qt-free adaptation of the preserved
+       DisplayPowerMonitor). Failure is non-fatal — the engine
+       runs unmonitored (output never power-pauses) and the
+       reason is logged. */
+    openrgb2::platform::WinPowerMonitor power_monitor;
+    {
+        std::string perr;
+        if(!power_monitor.Start(
+            [&lifecycle](openrgb2::PowerLifecycle::Event e)
+            { lifecycle.PostEvent(e); }, perr))
+        {
+            std::fprintf(stderr,
+                "openrgb2-engine: power monitoring unavailable: "
+                "%s (continuing)\n", perr.c_str());
+        }
+    }
+
     /* Every evaluated scene frame is split into per-controller
        complete-controller frames and handed to the pipeline via
        the engine's submitLatest sink. While an uploaded loop
@@ -468,6 +541,12 @@ int main(int argc, char** argv)
     ipc_deps.mapper   = &mapper;
     ipc_deps.sdk      = sdk_client.get();
     ipc_deps.playback = &playback;
+    ipc_deps.power    = &lifecycle;
+    /* The "Quit All" hook (plan section 4): QUIT flips the
+       owner loop's stop flag; the ordered, bounded teardown
+       runs below (OrderlyShutdown). */
+    ipc_deps.request_shutdown =
+        [] { g_stop.store(true); };
     openrgb2::ipc::EngineService ipc_service(engine, ipc_deps);
 
     std::unique_ptr<openrgb2::ipc::IpcServer>         ipc_server;
@@ -574,11 +653,21 @@ int main(int argc, char** argv)
                validation tracks the live backend state and new
                controllers get lanes without a restart. */
             SyncLanes(*pipeline, *sdk_client);
+        }
 
-            /* Playback maintenance: acknowledgement polling,
-               clock sampling, topology re-resolution. */
-            playback.Poll(openrgb2::Clock::now());
+        /* Power lifecycle (Task 3.7): applies queued display/
+           suspend events, diffs connection state for reconnect
+           recovery, and runs the deferred wake restore — always
+           BEFORE playback maintenance so the restore ordering
+           (revalidate -> write) is never pre-empted by a poll-
+           side convergence write. */
+        lifecycle.Poll(openrgb2::Clock::now());
+        /* Playback maintenance: acknowledgement polling, clock
+           sampling, topology re-resolution. */
+        playback.Poll(openrgb2::Clock::now());
 
+        if(sdk_client)
+        {
             const std::vector<openrgb2::DeviceSnapshot> snaps =
                 sdk_client->Snapshots();
             mapper.SyncDevices(snaps);
@@ -612,21 +701,70 @@ int main(int argc, char** argv)
                 }
             }
         }
-        else
-        {
-            playback.Poll(openrgb2::Clock::now());
-        }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
-    engine.Stop();
-    pipeline->Stop();
+    /* Ordered, bounded shutdown (plan section 4 "Quit All shuts
+       down owned processes in order" + section 6 bounded
+       shutdown): event intake and command intake stop first,
+       then frame production, then the delivery lanes (each join
+       bounded by the transport's send timeout), then the
+       transport itself. Steps run in registration order and
+       each is measured against its declared bound — an overrun
+       is reported honestly, never silently. */
+    openrgb2::OrderlyShutdown shutdown;
+    shutdown.Add("power-monitor",
+                 std::chrono::milliseconds(2000),
+                 [&power_monitor] { power_monitor.Stop(); });
+    shutdown.Add("ipc-listeners",
+                 std::chrono::milliseconds(2000),
+                 [&cmd_listener, &diag_listener]
+                 {
+                     if(cmd_listener)  cmd_listener->Stop();
+                     if(diag_listener) diag_listener->Stop();
+                 });
+    shutdown.Add("ipc-server",
+                 std::chrono::milliseconds(2000),
+                 [&ipc_server]
+                 { if(ipc_server) ipc_server->Stop(); });
+    shutdown.Add("scene-worker",
+                 std::chrono::milliseconds(2000),
+                 [&engine] { engine.Stop(); });
+    /* One in-flight transport send per lane plus join time —
+       bounded by the transport's own send timeout (4 s
+       default); lanes join sequentially. */
+    shutdown.Add("delivery-pipeline",
+                 std::chrono::milliseconds(12000),
+                 [&pipeline] { pipeline->Stop(); });
+    shutdown.Add("sdk-transport",
+                 std::chrono::milliseconds(1000),
+                 [&sdk_client]
+                 { if(sdk_client) sdk_client->Disconnect(); });
+
+    const openrgb2::OrderlyShutdown::Result sd = shutdown.Run();
+    for(const openrgb2::OrderlyShutdown::StepResult& s : sd.steps)
+    {
+        if(!s.within)
+        {
+            std::fprintf(stderr,
+                "openrgb2-engine: shutdown step '%s' overran its "
+                "bound (%lld ms > %lld ms)\n",
+                s.name.c_str(),
+                (long long)std::chrono::duration_cast<
+                    std::chrono::milliseconds>(s.elapsed).count(),
+                (long long)std::chrono::duration_cast<
+                    std::chrono::milliseconds>(s.bound).count());
+        }
+    }
 
     const double elapsed =
         std::chrono::duration<double>(openrgb2::Clock::now() - started)
             .count();
     std::fprintf(stderr,
-        "openrgb2-engine: stopped after %.2f s, %llu scene frames\n",
-        elapsed, (unsigned long long)frames.load());
+        "openrgb2-engine: stopped after %.2f s, %llu scene frames "
+        "(shutdown %lld ms)\n",
+        elapsed, (unsigned long long)frames.load(),
+        (long long)std::chrono::duration_cast<
+            std::chrono::milliseconds>(sd.elapsed).count());
     return 0;
 }
