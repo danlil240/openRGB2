@@ -324,17 +324,17 @@ Dependencies: **0 → 1 → 2 → 3 → 4 → 5 → 6**. Within Milestone 2, qua
 
 **Create:** `src/engine/`, `src/backends/openrgb/`, `src/platform/windows/`, `tests/sdk/`, `tests/engine/`.
 
-- [ ] Move scene evaluation to the engine worker while preserving `EffectEngine::Evaluate`.
-- [ ] Implement the negotiated SDK client, controller enumeration, direct mode, resize/configuration, complete-controller writes, and reconnect.
-- [ ] Test fragmented/coalesced TCP packets, malformed sizes, unsupported versions/modes, and changed controller indices.
+- [x] Move scene evaluation to the engine worker while preserving `EffectEngine::Evaluate`.
+- [x] Implement the negotiated SDK client, controller enumeration, direct mode, resize/configuration, complete-controller writes, and reconnect.
+- [x] Test fragmented/coalesced TCP packets, malformed sizes, unsupported versions/modes, and changed controller indices.
 - [x] Implement per-controller pending-frame replacement, absolute-time sampling, unchanged-frame suppression, and independent budgets. Test blocked wireless alongside fast wired output.
 - [x] Implement exact motherboard mapping, full-group wireless batching, unmapped-color preservation, and DIMM identity resolution.
 - [x] Implement bounded/versioned local IPC and restricted read-only backend metrics.
-- [ ] Add `PlaybackMode`/`PlaybackStatus`, SDK preset selection, and frame suppression while a wireless loop is active. Test unsupported presets and mode/parameter acknowledgement.
-- [ ] Drive the matching effect on other devices from validated playback clock/metadata; test drift correction, clock wrap/reset, stale data, and different endpoint rates without claiming atomic output.
-- [ ] Adapt display/system power monitoring; discard pending frames on display-off/suspend and revalidate on wake.
-- [ ] Implement playback pause/stop, one-time freeze on display-off, and scene restoration on wake/reconnect. Test that stopping maintenance is never used as a cooling-affecting way to stop an animation.
-- [ ] Add atomic profiles, migration, offline bindings, and last-known-good recovery.
+- [x] Add `PlaybackMode`/`PlaybackStatus`, SDK preset selection, and frame suppression while a wireless loop is active. Test unsupported presets and mode/parameter acknowledgement.
+- [x] Drive the matching effect on other devices from validated playback clock/metadata; test drift correction, clock wrap/reset, stale data, and different endpoint rates without claiming atomic output.
+- [x] Adapt display/system power monitoring; discard pending frames on display-off/suspend and revalidate on wake.
+- [x] Implement playback pause/stop, one-time freeze on display-off, and scene restoration on wake/reconnect. Test that stopping maintenance is never used as a cooling-affecting way to stop an animation.
+- [x] Add atomic profiles, migration, offline bindings, and last-known-good recovery.
 
 **Pass:** Offline tests pass; the qualified setup animates without a UI, and UI reconnection does not restart hardware.
 
