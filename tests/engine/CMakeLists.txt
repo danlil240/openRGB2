@@ -30,6 +30,24 @@ engine_suite(shutdown_test)
 # bindings, last-known-good, durable PlaybackMode, scene loader.
 engine_suite(profile_store_test)
 
+# Task 3.9 — ownership: competing-owner classifier, managed-config
+# sole-writer check, single-instance guard, listener-PID lookup.
+engine_suite(ownership_scan_test)
+
+# Task 3.9 — offline end-to-end: the REAL EngineHost composition
+# against the scripted in-process SDK backend (startup -> attach ->
+# enumerate -> bind -> frames -> ordered shutdown).
+add_executable(e2e_fake_backend_test e2e_fake_backend_test.cpp)
+target_link_libraries(e2e_fake_backend_test PRIVATE
+    openrgb2_host)
+target_include_directories(e2e_fake_backend_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(e2e_fake_backend_test PRIVATE NDEBUG)
+add_test(NAME e2e_fake_backend_test COMMAND e2e_fake_backend_test)
+set_tests_properties(e2e_fake_backend_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Task 3.5 — IPC layer. ipc_server_test additionally needs the
 # named-pipe transport + ACL APIs.
 engine_suite(ipc_protocol_test)

@@ -35,6 +35,8 @@ add_library(openrgb2_engine STATIC
     OrderlyShutdown.cpp
     ProfileStore.cpp
     SceneLoader.cpp
+    SingleInstance.cpp
+    OwnershipScan.cpp
     Engine.cpp
     ${CORE_DIR}/scene/SceneTypes.cpp
     ${CORE_DIR}/scene/SceneGraph.cpp
@@ -73,6 +75,26 @@ target_include_directories(openrgb2_engine PRIVATE
 target_compile_definitions(openrgb2_engine PRIVATE
     _IS_USED_MULTITHREAD=0)
 target_link_libraries(openrgb2_engine PUBLIC Threads::Threads)
+if(WIN32)
+    # OwnershipScan: GetExtendedTcpTable for the backend-listener
+    # PID lookup (competing-owner detection, Task 3.9).
+    target_link_libraries(openrgb2_engine PRIVATE iphlpapi)
+endif()
+
+# Engine host (Task 3.9): the full process composition —
+# ownership checks -> SDK attach -> playback/profile/power/
+# scene/IPC wiring -> 60 Hz scene clock -> bounded ordered
+# shutdown. Shared by the executable below and the offline
+# end-to-end suite so both drive ONE startup path.
+add_library(openrgb2_host STATIC
+    EngineHost.cpp)
+target_include_directories(openrgb2_host PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(openrgb2_host PUBLIC
+    openrgb2_engine
+    openrgb2_backend_openrgb
+    openrgb2_ipc
+    openrgb2_platform_windows)
 
 # Standalone engine process. --scene resolves any persisted form
 # through the profile layer (expanded scene JSON, a compact
@@ -87,7 +109,4 @@ target_link_libraries(openrgb2_engine PUBLIC Threads::Threads)
 add_executable(openrgb2-engine
     main.cpp)
 target_link_libraries(openrgb2-engine PRIVATE
-    openrgb2_engine
-    openrgb2_backend_openrgb
-    openrgb2_ipc
-    openrgb2_platform_windows)
+    openrgb2_host)

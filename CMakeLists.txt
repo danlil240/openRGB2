@@ -38,3 +38,6 @@ add_subdirectory(tests/sdk)
 
 # Milestone 1 benchmark producer (opt-in physical runs, offline build)
 add_subdirectory(tools/bench)
+
+# Task 3.9 verification driver (IPC client + SDK save/restore)
+add_subdirectory(tools/engine_ctl)
