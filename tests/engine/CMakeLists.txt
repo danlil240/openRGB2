@@ -99,6 +99,23 @@ set_tests_properties(e2e_lifecycle_test PROPERTIES
     LABELS engine
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Task 5.4 — non-interference: display-off zero writes per
+# lane (incl. a distinct GPU lane asserted separately),
+# parked playback requests across the gate (no wire write,
+# post-wake replay), and missing-binding identity integrity
+# across an engine restart — the REAL EngineHost composition
+# against the in-process fake SDK backend.
+add_executable(e2e_noninterference_test e2e_noninterference_test.cpp)
+target_link_libraries(e2e_noninterference_test PRIVATE
+    openrgb2_host)
+target_include_directories(e2e_noninterference_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(e2e_noninterference_test PRIVATE NDEBUG)
+add_test(NAME e2e_noninterference_test COMMAND e2e_noninterference_test)
+set_tests_properties(e2e_noninterference_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Task 3.5 — IPC layer. ipc_server_test additionally needs the
 # named-pipe transport + ACL APIs.
 engine_suite(ipc_protocol_test)

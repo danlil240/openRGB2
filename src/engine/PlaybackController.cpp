@@ -407,6 +407,30 @@ PlaybackController::Result PlaybackController::RequestImpl(
             PersistLocked();
             early_accept = true;
         }
+        else if(power_gate_ && !force_restore)
+        {
+            /* Parked across the power gate (Task 5.4): the
+               request is already validated above, so record
+               the selection + intent and DO NOT write — the
+               suspend/wake window must see zero hardware
+               writes from the request path, matching the
+               lifecycle's own SetIntendedControl parking.
+               Poll() replays the parked intent through this
+               same validated path the first ungated tick;
+               the latest parked intent wins. */
+            requested_mode_    = mode;
+            requested_control_ =
+                mode == PlaybackMode::AnimationPlayback
+                    ? control : PlaybackControl::Playing;
+            params_            = params;
+            deferred_request_  = true;
+            hold_overridden_   = true;
+            r.accepted = true;
+            r.pending  = true;
+            r.revision = requested_rev_;
+            PersistLocked();
+            early_accept = true;
+        }
         else
         {
             /* Control-only request on an acknowledged upload —
@@ -425,6 +449,7 @@ PlaybackController::Result PlaybackController::RequestImpl(
                 ++epoch_;
                 requested_mode_    = mode;
                 requested_control_ = control;
+                hold_overridden_   = true;   /* user intent */
                 ++next_rev_;
                 requested_rev_ = next_rev_;
                 PersistLocked();
@@ -445,6 +470,7 @@ PlaybackController::Result PlaybackController::RequestImpl(
                 requested_mode_    = mode;
                 requested_control_ =
                     to_animation ? control : PlaybackControl::Playing;
+                hold_overridden_   = true;   /* user intent */
             }
         }
     }
@@ -926,6 +952,49 @@ void PlaybackController::Tick(TimePoint now)
 
 void PlaybackController::Poll(TimePoint now)
 {
+    /*---- Parked-request replay (Task 5.4) ------------------*\
+    || A request recorded while the power gate held re-runs    ||
+    || through the normal validated path on the first ungated  ||
+    || tick — never written across the suspend boundary, never ||
+    || silently dropped (a post-wake rejection is reported in  ||
+    || status_detail_ honestly).                               ||
+    \*---------------------------------------------------------*/
+    {
+        bool            replay  = false;
+        PlaybackMode    mode    = PlaybackMode::LiveEffects;
+        PlaybackControl control = PlaybackControl::Playing;
+        PlaybackParams  params;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if(deferred_request_ && !transition_ && !power_gate_)
+            {
+                deferred_request_ = false;
+                replay            = true;
+                mode              = requested_mode_;
+                control           = requested_control_;
+                params            = params_;
+            }
+        }
+        if(replay)
+        {
+            std::shared_ptr<const studio::SceneDocument> doc;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                doc = deps_.scene ? deps_.scene() : nullptr;
+            }
+            const Result r = RequestImpl(mode, control, params, doc);
+            if(!r.accepted)
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                status_detail_ =
+                    "playback request parked across the power "
+                    "gate failed on replay: " + r.reason;
+            }
+            Changed();
+            return;   /* maintenance continues next tick */
+        }
+    }
+
     /*---- Gather due work ----------------------------------*/
     bool     do_refresh  = false;
     bool     do_clock    = false;
@@ -1183,6 +1252,7 @@ PlaybackController::Result PlaybackController::RequestPowerControl(
     Result r;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        hold_overridden_ = false;   /* lifecycle re-asserts control */
         if(transition_)
         {
             r.reason = "a playback transition is already in progress";
@@ -1236,12 +1306,19 @@ void PlaybackController::SetIntendedControl(PlaybackControl control)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     requested_control_ = control;
+    hold_overridden_   = false;   /* lifecycle re-asserts control */
 }
 
 PlaybackControl PlaybackController::IntendedControl() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return requested_control_;
+}
+
+bool PlaybackController::HoldOverridden() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return hold_overridden_;
 }
 
 void PlaybackController::SetPowerGate(bool gated)
@@ -1432,7 +1509,7 @@ uint64_t PlaybackController::RequestedRevision() const
 bool PlaybackController::AckPending() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return ack_pending_ || transition_;
+    return ack_pending_ || transition_ || deferred_request_;
 }
 
 std::string PlaybackController::Detail() const

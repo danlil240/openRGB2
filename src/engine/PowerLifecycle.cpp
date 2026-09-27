@@ -115,6 +115,21 @@ void PowerLifecycle::ApplyGateAndCapture()
            even when the flag is unchanged (idempotent store). */
         deps_.set_output_paused(gate, gate ? reason : "");
     }
+    if(deps_.playback)
+    {
+        /* Task 5.4: the playback request path parks on the SAME
+           output gate — not just the suspend-only window. An
+           IPC playback Request while output is paused (display
+           off, suspend, or a pending wake restore) must never
+           reach the transport: it is validated, recorded, and
+           parked for post-gate replay. This closes the Task
+           5.3 residual where display-off gated the frame lanes
+           but a direct mode select still crossed the wire.
+           The lifecycle's own control writes (the freeze hold,
+           the wake revalidation's force_restore) are direct
+           calls and remain ungated by design. */
+        deps_.playback->SetPowerGate(gate);
+    }
     if(capture_changed && deps_.set_capture_paused)
     {
         deps_.set_capture_paused(gate);
@@ -419,14 +434,21 @@ void PowerLifecycle::AttemptRestore()
        compare-and-restore sees "Playing", not the frozen hold.
        On a deferred restore the intent reverts to Paused so a
        poll-side convergence can never write ahead of the
-       revalidation ordering. */
+       revalidation ordering.
+       Task 5.4 guard: the un-hold only reverts a hold that is
+       STILL the power-imposed Paused — a transport control the
+       user requested (or parked across the gate) during the
+       off window is the user's intent, not ours to revert. */
     bool flipped = false;
     if(deps_.playback)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         flipped = power_hold_;
     }
-    if(flipped)
+    if(flipped &&
+       deps_.playback->IntendedControl() ==
+           PlaybackControl::Paused &&
+       !deps_.playback->HoldOverridden())
     {
         deps_.playback->SetIntendedControl(PlaybackControl::Playing);
     }
@@ -462,13 +484,18 @@ void PowerLifecycle::AttemptRestore()
                               "revalidation could not complete";
                 }
             }
-            if(flipped)
+            if(flipped &&
+               deps_.playback->IntendedControl() ==
+                   PlaybackControl::Playing &&
+               !deps_.playback->HoldOverridden())
             {
                 /* Deferral or give-up: the intended state stays
                    the hold — a poll-side convergence may never
                    write ahead of the revalidation ordering, and
                    on give-up the device keeps whatever state it
-                   actually has. */
+                   actually has. The revert preserves a user
+                   intent recorded during the window the same
+                   way the un-hold above does (Task 5.4). */
                 deps_.playback->SetIntendedControl(
                     PlaybackControl::Paused);
             }

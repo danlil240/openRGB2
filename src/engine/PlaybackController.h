@@ -207,7 +207,11 @@ public:
     /* The one request entry point (IPC SET_PLAYBACK_MODE):
        mode + transport control + parameters in a single
        serialized transition. Rejected requests carry a short
-       human reason and change nothing. */
+       human reason and change nothing. While the power gate
+       is set the request is validated, recorded, and parked —
+       NEVER written across the suspend/wake boundary (Task
+       5.4): Poll() re-runs it through the same validated path
+       the first ungated tick. */
     Result Request(PlaybackMode mode, PlaybackControl control,
                    const PlaybackParams& params);
 
@@ -230,7 +234,9 @@ public:
        is set (system suspending — Task 3.7) Poll is fully
        parked: no acknowledgement refresh, no clock sampling, no
        transport control, so the controller can never emit a
-       hardware write across a suspend boundary. */
+       hardware write across a suspend boundary. The first
+       ungated tick first replays any request parked while the
+       gate held (Task 5.4). */
     void   Poll(TimePoint now);
 
     /*---- Task 3.7 — power/lifecycle interface ---------------*\
@@ -255,13 +261,25 @@ public:
        display-off during an in-flight upload parks the intent
        so the post-ack do_control convergence lands the hold;
        wake paths set Playing so revalidation compares the
-       intended state, not the frozen one. */
+       intended state, not the frozen one. Lifecycle-owned —
+       calling it clears HoldOverridden (the power side
+       re-asserting control). */
     void   SetIntendedControl(PlaybackControl control);
     PlaybackControl IntendedControl() const;
 
-    /* Parks Poll() (see Poll doc). Set while the system is
-       suspending; cleared by the lifecycle after the post-wake
-       revalidation + restore completes. */
+    /* True when a USER request (Request/OnSceneApplied, never
+       the lifecycle's own control writes) asserted a
+       transport-control intent after the last power-imposed
+       hold — the wake un-hold must never revert a user
+       intent. Cleared by SetIntendedControl and
+       RequestPowerControl. */
+    bool   HoldOverridden() const;
+
+    /* Parks Poll() (see Poll doc) and parks user Request()s —
+       validated + recorded + deferred-replayed on release,
+       never written across the boundary (Task 5.4). Set while
+       the system is suspending; cleared by the lifecycle after
+       the post-wake revalidation + restore completes. */
     void   SetPowerGate(bool gated);
     bool   PowerGate() const;
 
@@ -410,6 +428,14 @@ private:
     PlaybackControl    requested_control_= PlaybackControl::Playing;
     bool               transition_       = false;  /* serialized  */
     bool               power_gate_       = false;  /* suspending  */
+    /* Task 5.4 gate-window bookkeeping: a request validated
+       while power_gate_ held is parked here (never written);
+       Poll() replays it the first ungated tick. */
+    bool               deferred_request_ = false;
+    /* A USER request asserted requested_control_ since the
+       last lifecycle-imposed hold — the wake un-hold must not
+       revert it (Task 5.4). */
+    bool               hold_overridden_  = false;
     uint64_t           epoch_            = 0;      /* request gen */
 
     /* The owned wireless group + its upload geometry. */
