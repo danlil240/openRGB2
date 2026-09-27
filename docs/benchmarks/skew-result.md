@@ -3,7 +3,7 @@
 Status: **measured on the real rig**, 2026-09-27 session. All numbers below
 are *transport-admitted* timing — frames accepted by the SDK socket/backend —
 **never** "displayed". Physical LED timing requires hardware observation
-(camera/photodiode) which is not available; see §6.
+(camera/photodiode) which is not available; see §4.
 
 ## 1. Scope and method
 
@@ -91,11 +91,23 @@ Per-tick spread of transport call/return times across lanes (µs):
 | **All 5 lanes** | **30 fps** | **28/50/68/89** | **177/262/304/322** |
 | All 5 lanes | 60 fps | 15394/15955/30976/31184 | 15385/15965/31013/31221 |
 
-**The headline:** at 30 fps — the maximum rate the wireless transport can
-sustain (~33 admitted/s ceiling) — *all five* controllers receive their
-same-tick frame within **~0.3 ms** of each other. At 60 fps the four
-wired lanes stay within **~0.2–0.3 ms**; the wireless lane is not part of
-the same tick at all — it is on a different effective cadence (see 2.4).
+(The wired-only rows are not a separate harness output — they were
+computed offline by re-running the per-tick spread aggregation over
+lanes 0–3 of the per-send CSVs in `profiles/local/skew-2026-09-27/`:
+`skew-gradient.csv`, `skew-entropy.csv`.)
+
+**The headline:** at 30 fps — within the wireless transport's sustainable
+rate — *all five* controllers receive their same-tick frame within
+**~0.3 ms** of each other. That ceiling is **content-dependent**:
+~33.5 admitted/s for compressible content vs **~24.5/s under entropy**
+(`wireless-result.md`). Only gradient was run at 30 fps (the entropy run
+was 60-fps-only), so this five-lane alignment is established for
+compressible content only — under entropy a 30 fps producer would exceed
+the ~24.5/s wireless ceiling and the lane would presumably drop back to
+the paced cadence of §2.4; that case was not measured (see §4). At 60 fps
+the four wired lanes stay within **~0.2–0.3 ms**; the wireless lane is
+not part of the same tick at all — it is on a different effective cadence
+(see 2.4).
 
 ### 2.4 Wireless pacing lag (structural, not jitter)
 
@@ -104,17 +116,19 @@ At 60 fps the wireless lane completed 645–646 of 1200 ticks (≈54% — the
 its own tick was bimodal: ~0 µs when the budget was already open, else a
 uniform wait up to ~31 ms (p50 ≈ 15.5 ms, p95 ≈ 31 ms). Sequence lag:
 p50 = 0, max = 1 tick — it always sends the *newest* pending frame, never
-a backlog. At 30 fps its tick offset collapses to p50 ≈ 245 µs — the
-budget reopens inside every 33.3 ms tick, so the whole topology is
-aligned to sub-millisecond again.
+a backlog. At 30 fps (gradient — the only 30 fps run; see §2.3's content
+caveat) its tick offset collapses to p50 ≈ 245 µs — the budget reopens
+inside every 33.3 ms tick, so the whole topology is aligned to
+sub-millisecond again.
 
 Backend trace (device-side, the wireless path's closest observable):
 `set_desired` → next RF `upload` gap p50 ≈ 25 ms under saturation
 (includes time behind an in-flight upload); upload duration p50 ≈ 25.7 ms,
 p99 ≈ 35 ms; 2740 uploads, 1 retry, 0 failures; `lock_wait` ≈ 0 (the M2
-decoupling holds). So the wireless group's *physical* update latency is
-dominated by ~26–35 ms of RF serialization — its LEDs are on a ~30 Hz
-device timeline regardless of submit timing.
+decoupling holds). So the wireless group's update latency — as far as
+the RF trace can observe (RF admission, still not light-out) — is
+dominated by ~26–35 ms of RF serialization latency; its LEDs are on a
+~30 Hz device timeline regardless of submit timing.
 
 ### 2.5 Real-engine corroboration
 
@@ -132,19 +146,25 @@ power lifecycle working as designed.
 
 Threshold reasoning: cross-device delay is visually relevant only when
 same-tick transitions land visibly apart — a conservative bound is a
-large fraction of one 60 Hz frame (~8–16 ms); below ~1–2 ms no observer
+large fraction of one 60 Hz frame (~8–16 ms; cf. the plan's
+synchronization acceptance criterion, `IMPLEMENTATION_PLAN.md` §6:
+p95 ≤16.7 ms for 60 FPS-qualified endpoints); below ~1–2 ms no observer
 can distinguish order. Measured:
 
 - **Wired-vs-wired skew: ~0.2–0.3 ms (p99 ≤ 0.31 ms).** ~50× below the
   relevance bound. Nothing to compensate.
-- **Wired-vs-wireless at ≥30 Hz producer rate: sub-millisecond.** The
-  full topology is already aligned when the producer rate is within the
-  wireless ceiling.
+- **Wired-vs-wireless at a producer rate within the wireless ceiling:
+  sub-millisecond** — measured on compressible content at 30 fps. The
+  ceiling itself is content-dependent (~33.5/s compressible vs ~24.5/s
+  entropy, `wireless-result.md`) and entropy at 30 fps was not run, so
+  topology-wide sub-ms alignment is claimed only where the producer
+  rate is within the *applicable* ceiling.
 - **Wired-vs-wireless at 60 fps: ~15–31 ms phase offset** — but this is
-  *structural*: the RF transport admits ~33 uploads/s and each upload
-  serializes ~26–35 ms. The frames already go out as early as physics
-  allows; there is no lead time to give the wireless lane, and delaying
-  the wired lanes would only degrade the fast path to mask a rate
+  *structural*: the RF transport admits ~24.5–33.5 uploads/s depending
+  on content and each upload serializes ~26–35 ms. The frames already
+  go out as early as physics allows; there is no lead time to give the
+  wireless lane, and delaying the wired lanes would only degrade the
+  fast path to mask a rate
   mismatch (wired ~60 Hz vs wireless ~30 Hz effective) that compensation
   cannot remove. The engineered answer to this mismatch is what the
   design already does: per-controller budgets + device-side playback
@@ -166,6 +186,14 @@ lanes that share a slow serial path, or a slow lane whose lag is
   The numbers above end where the backend accepted the bytes; the
   wireless trace extends one step further (RF admission), still not
   light-out.
+- **Entropy content at 30 fps.** The entropy run was 60-fps-only; the
+  five-lane sub-millisecond alignment at 30 fps (§2.3) is measured on
+  compressible content. Under entropy the wireless ceiling drops to
+  ~24.5 admitted/s (`wireless-result.md`) — below a 30 fps producer —
+  so the wireless lane would presumably sit on the paced cadence of
+  §2.4 rather than share the wired ticks. Not measured; the verdict is
+  unaffected either way since both cases are admission ceilings, not
+  schedulable lag.
 - Motherboard 8/16/8 headers and DIMMs (enumeration gaps — see §1).
 - Playback-mode baked-vs-device-loop alignment (a different sync
   mechanism — `PlaybackClockSync`; out of scope for this measurement).
