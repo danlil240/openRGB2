@@ -724,6 +724,15 @@ bool EngineHost::Start(std::string& err)
         ipc_deps.sdk      = sdk_.get();
         ipc_deps.playback = playback_.get();
         ipc_deps.power    = lifecycle_.get();
+        /* Task 4.4 layout verbs: identify and the set_binding
+           create path resolve against live topology — the
+           same source the mapper syncs from. */
+        ipc_deps.snapshots =
+            [this]() -> std::vector<DeviceSnapshot>
+            {
+                return sdk_ ? sdk_->Snapshots()
+                            : std::vector<DeviceSnapshot>{};
+            };
         /* The "Quit All" hook (plan section 4): QUIT flips the
            owner loop's stop flag; the ordered, bounded teardown
            runs in Stop() (OrderlyShutdown). */

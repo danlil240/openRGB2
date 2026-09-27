@@ -11,6 +11,7 @@
 //     when no frame data exists
 
 #include "EngineBridge.h"
+#include "LayoutController.h"
 #include "SceneEditController.h"
 
 #include <QGuiApplication>
@@ -47,6 +48,11 @@ int main(int argc, char** argv)
     ui::SceneEditController scene_edit(&bridge);
     engine.rootContext()->setContextProperty(
         QStringLiteral("sceneEdit"), &scene_edit);
+    /* Task 4.4: the Layout page's controller — empty model, so
+       the page renders its honest no-scene surfaces. */
+    ui::LayoutController layout_ctl(&bridge);
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("layoutCtl"), &layout_ctl);
 
     const QString base = QStringLiteral("qrc:/qt/qml/OpenRGB2/UI/");
     const char*   files[] = {

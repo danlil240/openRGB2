@@ -256,10 +256,58 @@ the one-time loop freeze (`power_hold`), and wake-restore progress.
 **PRESETS** — `{presets:[{id,name,description,needs}]}` — Lighting-view
 preset cards.
 
-**LAYOUT_COMMAND** — reserved verb space for the Milestone-4 Layout view:
-`identify`, `set_orientation`, `set_mirror`, `calibrate_led`, `set_binding`.
-Recognized verbs currently answer `unavailable` ("reserved for the
-Milestone-4 layout engine"); unknown verbs → `bad_request`.
+**LAYOUT_COMMAND** — the Layout view's verb space (plan section 5).
+Every request carries `{verb:"<name>", ...args}`; unknown verbs →
+`bad_request`. Six verbs exist (Task 4.4):
+
+| verb | body | reply (OK) |
+| --- | --- | --- |
+| `identify` | `{controller:<DeviceKey>, zone?:"name", led_index?:int, duration_ms?:int}` | `{identifying:true, controller, zone, led_start, led_count, duration_ms}` |
+| `set_position` | `{object_id, position:{x,y,z}}` | `{object_id, position, revision}` |
+| `set_orientation` | `{object_id, rotation:{x,y,z}}` | `{object_id, rotation, revision}` |
+| `set_mirror` | `{object_id, mirror_of:"id"|""}` | `{object_id, mirror_of, revision}` |
+| `calibrate_led` | `{object_id, emitter_index:int, address:int}` | `{object_id, emitter_index, address, revision}` |
+| `set_binding` | `{object_id, binding:"id"|""[, controller:<DeviceKey>]}` | `{object_id, binding, revision}` |
+
+`identify` is a **transient** operation — it never touches the scene
+document. The engine runs a bounded blink overlay in the frame path
+(device mapper): the identified LED range alternates lit/dark on a
+250 ms half-period over a dark field, through the normal delivery
+lane (budgets and suppression still apply). `zone` names a zone (or
+`controller.zone` carries it); `led_index` selects one LED inside the
+scope; `duration_ms` defaults to 3000 and is clamped to 500–30000;
+`duration_ms:0` cancels → `{identifying:false, cancelled, controller}`.
+Errors: absent/disconnected controller → `unavailable`; bad zone or
+out-of-range index → `bad_request`; a wireless group owned by an
+uploaded animation loop → `unavailable` (one producer per group).
+
+The other five verbs are **scene mutations**: they edit the applied
+SceneDocument through the same apply path as SET_SCENE (LED-address
+validation, effect resolution, revision bump, `scene` event). No
+loaded scene → `unavailable`. Fields:
+
+- `set_position`/`set_orientation` require the full `{x,y,z}` vector
+  (meters / euler XYZ degrees — the document's only rotation
+  convention); partial or non-finite vectors → `bad_request`.
+- `set_mirror` follows the resolver's own semantics: linking makes the
+  object a render-only `linked` copy sharing the target's output —
+  its binding/emitters/verified are cleared (unlink does NOT restore
+  them; UI undo reverts the whole document). Targets must be device
+  objects; self-mirror and chains → `bad_request`. Mirrored fans
+  share the source zone — addressable LED counts never multiply.
+- `calibrate_led` sets an emitter's `address` — an index inside the
+  object's bound zone; `-1` marks it render-only. The bound is the
+  binding's `zone_leds`, else the resolved zone's enumerated count;
+  no bound → `bad_request`. Out-of-range → `bad_request` (the UI
+  range-checks first; the engine is the last boundary).
+- `set_binding` repoints `object.binding` (`""` unbinds). A NEW id
+  requires `controller:<DeviceKey>` and derives the binding's
+  identity (name/vendor/serial/location/type/zone/count) from the
+  live snapshot — absent topology → `unavailable`; clients cannot
+  fabricate controller identities.
+
+`set_position` was added in Task 4.4 alongside the reserved five —
+the Layout view's arrangement editing needed an explicit move op.
 
 **DIAGNOSTICS** — the read-only aggregate view:
 

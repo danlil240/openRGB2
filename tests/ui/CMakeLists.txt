@@ -52,6 +52,13 @@ ui_suite(ui_scene_bridge_test)
 # default vs. migrated-profile Live, scene-scoped param
 # latches.
 ui_suite(ui_playback_test)
+# Task 4.4: the Qt-free layout edit model (items view, op
+# builders' calibration/mirror boundary validation, bounded
+# undo/redo history) + a real EngineBridge + LayoutController
+# over the in-process pipe (exact LAYOUT_COMMAND bodies,
+# scene-event repaint, SET_SCENE undo/redo reverts, refused
+# ops leaving no ghost history).
+ui_suite(ui_layout_test)
 
 # The QML smoke test additionally needs the module's compiled
 # plugin + Qt Quick runtime on its link line.

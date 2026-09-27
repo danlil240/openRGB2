@@ -10,6 +10,8 @@
 
 #include "scene/SceneJson.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <sstream>
 
@@ -226,13 +228,14 @@ nlohmann::json PlaybackStatusToJson(const PlaybackStatus& st)
     });
 }
 
-/* Layout/calibration verbs reserved for Milestone 4 (plan
-   section 5, Layout view). Recognized now, honestly
-   Unavailable — unknown verbs are BadRequest. */
+/* Layout/calibration verbs (Task 4.4 — plan section 5,
+   Layout view; bodies in docs/ipc-protocol.md §5). Unknown
+   verbs are BadRequest. */
 bool IsKnownLayoutVerb(const std::string& verb)
 {
     static const char* kVerbs[] = {
-        "identify",          /* flash a zone for LED identification */
+        "identify",          /* blink a zone for LED identification */
+        "set_position",      /* move an object on the arrangement   */
         "set_orientation",   /* rotate an object's emitter mapping  */
         "set_mirror",        /* link/mirror objects (linked fans)   */
         "calibrate_led",     /* LED address calibration             */
@@ -1033,9 +1036,7 @@ IpcReply EngineService::Dispatch(MsgType type,
             return IpcReply::Fail(ErrCode::BadRequest,
                                   "unknown layout verb '" + verb + "'");
         }
-        return IpcReply::Fail(ErrCode::Unavailable,
-            "layout/calibration verb '" + verb +
-            "' is reserved for the Milestone-4 layout engine");
+        return HandleLayoutCommand(verb, body);
     }
 
     case MsgType::Quit:
@@ -1072,6 +1073,600 @@ IpcReply EngineService::Dispatch(MsgType type,
 /*---------------------------------------------------------*\
 || Diff-driven events                                        ||
 \*---------------------------------------------------------*/
+
+/*---------------------------------------------------------*\
+||| LAYOUT_COMMAND handlers (Task 4.4)                        ||
+|||                                                            ||
+|||   identify        — transient: the mapper's bounded       ||
+|||                     blink overlay, resolved against the   ||
+|||                     LIVE topology (never persisted, never ||
+|||                     a scene mutation).                    ||
+|||   set_position / set_orientation / set_mirror /           ||
+|||   calibrate_led / set_binding — scene-document edits:     ||
+|||                     copy -> mutate -> ApplySceneDocument, ||
+|||                     the ONE apply path SET_SCENE uses, so ||
+|||                     validation, revision, the scene       ||
+|||                     event, and the mapper re-bind are     ||
+|||                     identical.                            ||
+\*---------------------------------------------------------*/
+
+namespace
+{
+
+bool Vec3FromJson(const nlohmann::json& j, studio::Vec3& out)
+{
+    if(!j.is_object())
+    {
+        return false;
+    }
+    const auto num = [&j](const char* k, float& v)
+    {
+        const auto it = j.find(k);
+        if(it == j.end() || !it->is_number())
+        {
+            return false;
+        }
+        const double d = it->get<double>();
+        if(!std::isfinite(d))
+        {
+            return false;
+        }
+        v = (float)d;
+        return true;
+    };
+    return num("x", out.x) && num("y", out.y) && num("z", out.z);
+}
+
+/* A DeviceKey field-set check — same bounded bad_request the
+   DELIVERY_STATS controller filter applies. */
+bool KeyFieldsOk(const nlohmann::json& cj)
+{
+    if(!cj.is_object())
+    {
+        return false;
+    }
+    static const char* kFields[] = {
+        "device", "serial", "location", "zone"
+    };
+    for(const char* f : kFields)
+    {
+        const auto it = cj.find(f);
+        if(it != cj.end() && !it->is_string())
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+const DeviceSnapshot* FindSnapshot(
+    const std::vector<DeviceSnapshot>& snaps,
+    const DeviceKey& key)
+{
+    for(const DeviceSnapshot& s : snaps)
+    {
+        if(s.key.device   == key.device &&
+           s.key.serial   == key.serial &&
+           s.key.location == key.location)
+        {
+            return &s;
+        }
+    }
+    return nullptr;
+}
+
+/* Zone name -> absolute offset inside the complete-controller
+   buffer (zone order = enumeration order). */
+bool ZoneOffset(const DeviceSnapshot& snap, const std::string& zone,
+                uint32_t& start, uint32_t& count)
+{
+    uint32_t off = 0;
+    for(const ZoneSnapshot& z : snap.zones)
+    {
+        if(z.name == zone)
+        {
+            start = off;
+            count = z.led_count;
+            return true;
+        }
+        off += z.led_count;
+    }
+    return false;
+}
+
+} /* anonymous namespace */
+
+std::vector<DeviceSnapshot> EngineService::LayoutSnapshots() const
+{
+    if(deps_.snapshots)
+    {
+        return deps_.snapshots();
+    }
+    if(deps_.sdk)
+    {
+        return deps_.sdk->Snapshots();
+    }
+    return {};
+}
+
+IpcReply EngineService::HandleLayoutCommand(
+    const std::string& verb, const nlohmann::json& body)
+{
+    if(verb == "identify")
+    {
+        return HandleIdentify(body);
+    }
+    return HandleLayoutMutate(verb, body);
+}
+
+IpcReply EngineService::HandleIdentify(const nlohmann::json& body)
+{
+    /* {controller:<DeviceKey>, zone?:"<zone name>",
+       led_index?:int, duration_ms?:int} */
+    if(!body.is_object() || !KeyFieldsOk(body.value("controller",
+                                                   nlohmann::json())))
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "identify requires {controller:<DeviceKey>} with "
+            "string fields");
+    }
+    if(!deps_.mapper)
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "no device mapper is wired on this engine");
+    }
+    DeviceKey key = KeyFromJson(body["controller"]);
+
+    /* Zone selection: the top-level "zone" field, else the
+       controller key's own zone field carries the name. */
+    std::string zone_name = key.zone;
+    {
+        const auto zit = body.find("zone");
+        if(zit != body.end())
+        {
+            if(!zit->is_string())
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "zone must be a string");
+            }
+            zone_name = zit->get<std::string>();
+        }
+    }
+    key.zone.clear();   /* the overlay key is controller-level */
+
+    /* duration_ms: 0 = cancel; default 3000; bounded
+       500..30000 so a stale request can't pin an override. */
+    int64_t duration_ms = 3000;
+    {
+        const auto dit = body.find("duration_ms");
+        if(dit != body.end())
+        {
+            if(!dit->is_number_integer())
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "duration_ms must be an integer");
+            }
+            duration_ms = dit->get<int64_t>();
+        }
+    }
+    if(duration_ms == 0)
+    {
+        const bool was = deps_.mapper->CancelIdentify(key);
+        return IpcReply::Success(MsgType::Ok,
+            nlohmann::json::object({
+                { "identifying", false                 },
+                { "cancelled",   was                   },
+                { "controller",  KeyToJson(key)        },
+            }));
+    }
+    if(duration_ms < 0)
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "duration_ms must be >= 0");
+    }
+    duration_ms = std::max<int64_t>(500,
+                    std::min<int64_t>(duration_ms, 30000));
+
+    /* Resolve against the LIVE topology — identify exists to
+       find hardware, so a stale/absent key is honest
+       Unavailable, not a silent no-op. (The snapshot vector
+       must outlive the pointer — bind it, never dangle into
+       a temporary.) */
+    const std::vector<DeviceSnapshot> snaps = LayoutSnapshots();
+    const DeviceSnapshot* snap = FindSnapshot(snaps, key);
+    if(snap == nullptr)
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "controller '" + key.device +
+            "' is not in the current topology");
+    }
+    if(snap->connection != ConnectionState::Connected)
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "controller '" + snap->name + "' is not connected");
+    }
+    /* An uploaded loop owns the wireless group — identification
+       frames would only be suppressed at the lane, so the
+       honest answer is Unavailable (Task 3.6: one producer
+       per group). */
+    if(deps_.playback && deps_.playback->OwnsGroup(key))
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "an uploaded animation loop owns '" + snap->name +
+            "' — identification frames are suppressed while "
+            "it is active");
+    }
+
+    uint32_t start = 0;
+    uint32_t count = snap->LedCount();
+    if(!zone_name.empty() &&
+       !ZoneOffset(*snap, zone_name, start, count))
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "controller '" + snap->name +
+            "' has no zone '" + zone_name + "'");
+    }
+
+    const auto lit = body.find("led_index");
+    if(lit != body.end())
+    {
+        if(!lit->is_number_integer() || lit->get<int64_t>() < 0)
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "led_index must be a non-negative integer");
+        }
+        const int64_t idx = lit->get<int64_t>();
+        if((uint64_t)idx >= count)
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "led_index " + std::to_string(idx) +
+                " is out of range (" + std::to_string(count) +
+                " LEDs in scope)");
+        }
+        start += (uint32_t)idx;
+        count  = 1;
+    }
+
+    std::string err;
+    if(!deps_.mapper->StartIdentify(key, start, count,
+            std::chrono::milliseconds(duration_ms), Clock::now(),
+            err))
+    {
+        return IpcReply::Fail(ErrCode::BadRequest, err);
+    }
+    return IpcReply::Success(MsgType::Ok,
+        nlohmann::json::object({
+            { "identifying", true                   },
+            { "controller",  KeyToJson(key)         },
+            { "zone",        zone_name              },
+            { "led_start",   start                  },
+            { "led_count",   count                  },
+            { "duration_ms", duration_ms            },
+        }));
+}
+
+IpcReply EngineService::HandleLayoutMutate(
+    const std::string& verb, const nlohmann::json& body)
+{
+    if(!body.is_object() ||
+       !body.value("object_id", nlohmann::json()).is_string() ||
+       body["object_id"].get<std::string>().empty())
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            verb + " requires {object_id:<string>}");
+    }
+    const std::string oid = body["object_id"].get<std::string>();
+
+    std::shared_ptr<const studio::SceneDocument> cur = Scene();
+    if(!cur)
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "no scene is loaded — apply a scene before "
+            "layout edits");
+    }
+    auto doc = std::make_shared<studio::SceneDocument>(*cur);
+    studio::SceneObject* obj = studio::FindObject(*doc, oid);
+    if(obj == nullptr)
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "unknown scene object '" + oid + "'");
+    }
+
+    nlohmann::json detail = nlohmann::json::object();
+    detail["object_id"] = oid;
+
+    if(verb == "set_position")
+    {
+        /* {object_id, position:{x,y,z}} — meters, all three
+           required (a partial vector silently dropping an
+           axis is how arrangements corrupt). */
+        studio::Vec3 p;
+        const auto it = body.find("position");
+        if(it == body.end() || !Vec3FromJson(*it, p))
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "set_position requires position:{x,y,z} "
+                "finite numbers");
+        }
+        obj->transform.position = p;
+        detail["position"] = *it;
+    }
+    else if(verb == "set_orientation")
+    {
+        /* {object_id, rotation:{x,y,z}} — euler XYZ degrees,
+           the document's only rotation convention. */
+        studio::Vec3 r;
+        const auto it = body.find("rotation");
+        if(it == body.end() || !Vec3FromJson(*it, r))
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "set_orientation requires rotation:{x,y,z} "
+                "finite degrees");
+        }
+        obj->transform.rotation_deg = r;
+        detail["rotation"] = *it;
+    }
+    else if(verb == "set_mirror")
+    {
+        /* {object_id, mirror_of} — "" unlinks. Linking follows
+           the resolver's own semantics (SceneResolver): the
+           copy becomes Linked, loses its binding/emitters/
+           verified flag, and shares the source's output —
+           never a second writer, never multiplied LEDs. */
+        const auto it = body.find("mirror_of");
+        if(it == body.end() || !it->is_string())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "set_mirror requires {mirror_of:<object id>} "
+                "(\"\" unlinks)");
+        }
+        const std::string target = it->get<std::string>();
+        if(target.empty())
+        {
+            if(obj->kind != studio::ObjectKind::Linked)
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "object '" + oid + "' is not linked");
+            }
+            /* Unlink restores Device kind; the emitters and
+               binding the link consumed are NOT restored —
+               reverting the whole document (the Layout
+               view's undo) is the honest inverse. */
+            obj->kind      = studio::ObjectKind::Device;
+            obj->mirror_of.clear();
+        }
+        else
+        {
+            if(obj->kind != studio::ObjectKind::Device &&
+               obj->kind != studio::ObjectKind::Linked)
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "object '" + oid + "' (" +
+                    std::string(
+                        obj->kind == studio::ObjectKind::Group
+                            ? "group" : "decor") +
+                    ") cannot be mirrored — only device "
+                    "objects link");
+            }
+            const studio::SceneObject* src =
+                studio::FindObject(*doc, target);
+            if(src == nullptr)
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "mirror target '" + target +
+                    "' does not exist");
+            }
+            if(target == oid)
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "an object cannot mirror itself");
+            }
+            /* SceneGraph forbids mirror chains — the target
+               must own output, i.e. be a Device object. */
+            if(src->kind != studio::ObjectKind::Device)
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "mirror target '" + target +
+                    "' is not a device object (mirror chains "
+                    "are not allowed)");
+            }
+            obj->kind      = studio::ObjectKind::Linked;
+            obj->mirror_of = target;
+            obj->binding.clear();
+            obj->layout.clear();
+            obj->emitters.clear();
+            obj->verified  = false;
+        }
+        detail["mirror_of"] = target;
+    }
+    else if(verb == "calibrate_led")
+    {
+        /* {object_id, emitter_index:int, address:int} —
+           address is an index inside the object's BOUND zone;
+           -1 marks the emitter render-only. The bound comes
+           from the binding's declared zone_leds, else the
+           resolved zone's enumerated count. */
+        if(obj->kind != studio::ObjectKind::Device)
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "calibrate_led targets device objects — '" +
+                oid + "' is not one");
+        }
+        const auto eit = body.find("emitter_index");
+        const auto ait = body.find("address");
+        if(eit == body.end() || !eit->is_number_integer() ||
+           ait == body.end() || !ait->is_number_integer())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "calibrate_led requires integer "
+                "emitter_index and address");
+        }
+        const int64_t ei = eit->get<int64_t>();
+        const int64_t ad = ait->get<int64_t>();
+        if(ei < 0 || (size_t)ei >= obj->emitters.size())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "emitter_index " + std::to_string(ei) +
+                " out of range (object '" + oid + "' has " +
+                std::to_string(obj->emitters.size()) +
+                " emitters)");
+        }
+        uint32_t zone_leds = 0;
+        if(!obj->binding.empty())
+        {
+            for(const studio::DeviceBinding& b : doc->bindings)
+            {
+                if(b.id == obj->binding)
+                {
+                    zone_leds = b.zone_leds;
+                    break;
+                }
+            }
+        }
+        if(zone_leds == 0 && deps_.mapper && !obj->binding.empty())
+        {
+            /* The persisted binding didn't declare a count —
+               the resolved zone's enumerated count is the
+               next honest bound. */
+            ZonePlacement zp;
+            if(deps_.mapper->BoundZone(obj->binding, zp))
+            {
+                zone_leds = zp.led_count;
+            }
+        }
+        if(ad < -1)
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "address must be >= -1 (-1 = render-only)");
+        }
+        if(ad >= 0)
+        {
+            if(zone_leds == 0)
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "object '" + oid +
+                    "' has no bound zone LED count — assign "
+                    "a binding before calibrating addresses");
+            }
+            if((uint64_t)ad >= zone_leds)
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "address " + std::to_string(ad) +
+                    " out of range (zone has " +
+                    std::to_string(zone_leds) + " LEDs)");
+            }
+        }
+        obj->emitters[(size_t)ei].address = (int)ad;
+        detail["emitter_index"] = ei;
+        detail["address"]       = ad;
+    }
+    else if(verb == "set_binding")
+    {
+        /* {object_id, binding:"<id>"|""[, controller:
+           <DeviceKey>]} — repoint at an existing binding,
+           clear with "", or CREATE a binding whose identity
+           is derived from a live snapshot (the engine writes
+           the identity fields — a client can never fabricate
+           a controller). */
+        const auto bit = body.find("binding");
+        if(bit == body.end() || !bit->is_string())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "set_binding requires {binding:<id>} "
+                "(\"\" unbinds)");
+        }
+        if(obj->kind != studio::ObjectKind::Device)
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "set_binding targets device objects — '" +
+                oid + "' is not one");
+        }
+        const std::string bid = bit->get<std::string>();
+        if(bid.empty())
+        {
+            obj->binding.clear();
+        }
+        else
+        {
+            bool exists = false;
+            for(const studio::DeviceBinding& b : doc->bindings)
+            {
+                if(b.id == bid)
+                {
+                    exists = true;
+                    break;
+                }
+            }
+            if(!exists)
+            {
+                /* New binding: identity must come from a live
+                   snapshot — missing topology is honest
+                   Unavailable, never a guessed identity. */
+                if(!KeyFieldsOk(body.value("controller",
+                                           nlohmann::json())))
+                {
+                    return IpcReply::Fail(ErrCode::BadRequest,
+                        "unknown binding '" + bid +
+                        "' — set_binding needs "
+                        "{controller:<DeviceKey>} to create "
+                        "it from a live snapshot");
+                }
+                const DeviceKey ck =
+                    KeyFromJson(body["controller"]);
+                const std::vector<DeviceSnapshot> snaps =
+                    LayoutSnapshots();
+                const DeviceSnapshot* snap =
+                    FindSnapshot(snaps, ck);
+                if(snap == nullptr)
+                {
+                    return IpcReply::Fail(ErrCode::Unavailable,
+                        "controller '" + ck.device +
+                        "' is not in the current topology — "
+                        "a binding cannot be created for it");
+                }
+                uint32_t zstart = 0, zleds = snap->LedCount();
+                std::string zone = ck.zone;
+                if(!zone.empty() &&
+                   !ZoneOffset(*snap, zone, zstart, zleds))
+                {
+                    return IpcReply::Fail(ErrCode::BadRequest,
+                        "controller '" + snap->name +
+                        "' has no zone '" + zone + "'");
+                }
+                if(zone.empty() && !snap->zones.empty())
+                {
+                    zone  = snap->zones[0].name;
+                    zleds = snap->zones[0].led_count;
+                }
+                studio::DeviceBinding b;
+                b.id              = bid;
+                b.controller_name = snap->name;
+                b.vendor          = snap->vendor;
+                b.serial          = ck.serial;
+                b.location        = ck.location;
+                b.device_type     = snap->device_type;
+                b.zone_name       = zone;
+                b.zone_leds       = zleds;
+                doc->bindings.push_back(std::move(b));
+            }
+            obj->binding = bid;
+        }
+        detail["binding"] = bid;
+    }
+    else
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+                              "unknown layout verb '" + verb + "'");
+    }
+
+    std::string err;
+    if(!ApplySceneDocument(doc, err))
+    {
+        return IpcReply::Fail(ErrCode::BadRequest, err);
+    }
+    detail["revision"] = SceneRevision();
+    return IpcReply::Success(MsgType::Ok, std::move(detail));
+}
 
 void EngineService::PollEvents(TimePoint now)
 {

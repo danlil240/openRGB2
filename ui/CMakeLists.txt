@@ -63,6 +63,10 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/SceneEditModel.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/SceneEditController.h
         ${CMAKE_SOURCE_DIR}/src/ui/SceneEditController.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/LayoutEditModel.h
+        ${CMAKE_SOURCE_DIR}/src/ui/LayoutEditModel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/LayoutController.h
+        ${CMAKE_SOURCE_DIR}/src/ui/LayoutController.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/ProfileLibrary.h
         ${CMAKE_SOURCE_DIR}/src/ui/ProfileLibrary.cpp)
 

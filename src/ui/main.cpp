@@ -12,6 +12,7 @@
 |\*---------------------------------------------------------*/
 
 #include "EngineBridge.h"
+#include "LayoutController.h"
 #include "SceneEditController.h"
 
 #include <QGuiApplication>
@@ -47,12 +48,17 @@ int main(int argc, char** argv)
     /* The Lighting view's scene-edit session — owns the working
        document, the save flow, and the named-scene library. */
     openrgb2::ui::SceneEditController scene_edit(&bridge);
+    /* The Layout view's edit session — arrangement ops ride
+       LAYOUT_COMMAND, undo/redo reverts via SET_SCENE. */
+    openrgb2::ui::LayoutController layout_ctl(&bridge);
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"),
                                              &bridge);
     engine.rootContext()->setContextProperty(QStringLiteral("sceneEdit"),
                                              &scene_edit);
+    engine.rootContext()->setContextProperty(QStringLiteral("layoutCtl"),
+                                             &layout_ctl);
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed,
         &app, [] { QCoreApplication::exit(-1); },

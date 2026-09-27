@@ -10,8 +10,10 @@
 ||   - playback mode + status  (GET_/SET_PLAYBACK_MODE)     ||
 ||   - delivery stats          (GET_DELIVERY_STATS)         ||
 ||   - presets                 (GET_PRESETS)                ||
-||   - layout/calibration      (LAYOUT_COMMAND — reserved   ||
-||     verb space, honestly Unavailable until M4)           ||
+||   - layout/calibration      (LAYOUT_COMMAND — Task 4.4: ||
+||     identify drives the mapper's bounded blink overlay;||
+||     the scene-mutation verbs apply through the shared    ||
+||     scene-apply path)                                    ||
 ||   - engine/connection state (GET_STATE)                  ||
 ||   - diagnostics             (DIAG_GET — also the only    ||
 ||     verb on the read-only diagnostics channel)           ||
@@ -67,6 +69,14 @@ public:
         DeliveryPipeline*   pipeline = nullptr;   /* stats/queues */
         DeviceMapper*       mapper   = nullptr;   /* re-bind      */
         sdk::OpenRgbClient* sdk      = nullptr;   /* topology     */
+
+        /* Topology snapshot source for the layout verbs
+           (identify's controller resolution, set_binding's
+           snapshot-derived identity). When set it wins over
+           deps.sdk->Snapshots() — the same seam
+           playback_caps provides, so offline tests drive the
+           handlers without an SDK client. */
+        std::function<std::vector<DeviceSnapshot>()> snapshots;
 
         /* Task 3.6 playback controller — when set, it is the
            authoritative playback state machine: SET_PLAYBACK_
@@ -178,6 +188,18 @@ private:
     TimePoint           last_frame_status_{};
 
     void   Emit(const std::string& kind, const nlohmann::json& data);
+    /* Task 4.4 LAYOUT_COMMAND surface (docs/ipc-protocol.md
+       §5): identify drives the mapper's bounded blink
+       overlay; the other verbs mutate the applied scene
+       document through the ONE apply path
+       (ApplySceneDocument — same validation, revision bump,
+       and scene event as SET_SCENE). */
+    IpcReply       HandleLayoutCommand(const std::string& verb,
+                                       const nlohmann::json& body);
+    IpcReply       HandleIdentify(const nlohmann::json& body);
+    IpcReply       HandleLayoutMutate(const std::string& verb,
+                                      const nlohmann::json& body);
+    std::vector<DeviceSnapshot> LayoutSnapshots() const;
     nlohmann::json SceneJsonLocked() const;
     nlohmann::json PlaybackJson() const;
     nlohmann::json PowerJson() const;
