@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// Main — application shell: left navigation over the four
-// section-5 views, an honest connection banner (unreachable /
-// connecting / connected / degraded), and a Quit action that
-// only closes the UI — the engine keeps running (plan
-// section 4, UI independence).
+// Main — application shell (Task 4.8): left navigation over
+// the five section-5 views, an honest connection banner
+// (unreachable / connecting / connected / degraded), and
+// UI-only preference persistence (window geometry + last
+// view via uiPrefs — engine-owned state is NEVER stored
+// here; it returns through WELCOME + subscription replay).
+// Closing this window only closes the UI — the engine keeps
+// running; engine shutdown lives on Settings → Quit All
+// (a confirmed IPC QUIT, plan section 4 UI independence).
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
@@ -27,14 +31,99 @@ ApplicationWindow {
     readonly property string connState:
         typeof bridge !== "undefined" ? bridge.connectionState
                                       : "disconnected"
+    /* uiPrefs is injected by main.cpp (a UiSettings). Tests
+       that only load the shell for composition checks may
+       leave it out — every use is guarded so absence renders
+       as defaults, never a crash. */
+    readonly property bool prefsUp:
+        typeof uiPrefs !== "undefined" && uiPrefs !== null
 
     property int currentView: 0
 
-    /* Ctrl+1..4 view switching — keyboard access. */
+    Component.onCompleted: {
+        if(root.prefsUp) {
+            if(uiPrefs.restoreLastView)
+                root.currentView =
+                    Math.max(0, Math.min(4, uiPrefs.lastView));
+            if(uiPrefs.windowWidth >= root.minimumWidth
+               && uiPrefs.windowHeight >= root.minimumHeight) {
+                root.width  = uiPrefs.windowWidth;
+                root.height = uiPrefs.windowHeight;
+            }
+            if(uiPrefs.windowX >= 0 && uiPrefs.windowY >= 0) {
+                root.x = uiPrefs.windowX;
+                root.y = uiPrefs.windowY;
+            }
+        }
+    }
+    /* Geometry + last view are UI-owned — saved on close and
+       on view change (write-through; QSettings batches the
+       platform write). */
+    onCurrentViewChanged:
+        if(root.prefsUp)
+            uiPrefs.lastView = root.currentView;
+    onClosing: function(close) {
+        if(root.prefsUp)
+            uiPrefs.saveGeometry(root.x, root.y,
+                                 root.width, root.height);
+    }
+
+    /* A text editor owns Ctrl+Z/Ctrl+Y for its own undo —
+       the app-level layout undo must not shadow it. */
+    function textEditingActive() {
+        let item = root.activeFocusItem;
+        while(item) {
+            if(item.hasOwnProperty("selectedText")
+               && item.hasOwnProperty("cursorPosition"))
+                return true;
+            item = item.parent;
+        }
+        return false;
+    }
+
+    /* Ctrl+1..5 view switching — keyboard access. */
     Shortcut { sequence: "Ctrl+1"; onActivated: root.currentView = 0 }
     Shortcut { sequence: "Ctrl+2"; onActivated: root.currentView = 1 }
     Shortcut { sequence: "Ctrl+3"; onActivated: root.currentView = 2 }
     Shortcut { sequence: "Ctrl+4"; onActivated: root.currentView = 3 }
+    Shortcut { sequence: "Ctrl+5"; onActivated: root.currentView = 4 }
+    /* Ctrl+S saves the Lighting working copy — commits any
+       focused field's uncommitted text first (same path as
+       the on-screen Save button). */
+    Shortcut {
+        sequence: "Ctrl+S"
+        enabled: root.currentView === 1
+                 && typeof sceneEdit !== "undefined"
+                 && !sceneEdit.saving
+        onActivated: lightingPage.commitPendingEdits()
+    }
+    /* Ctrl+Z / Ctrl+Shift+Z (+Ctrl+Y) drive the Layout undo
+       timeline — only while the Layout view is up and no
+       text field owns the keys. */
+    Shortcut {
+        sequence: "Ctrl+Z"
+        enabled: root.currentView === 2
+                 && typeof layoutCtl !== "undefined"
+                 && layoutCtl.canUndo
+                 && !root.textEditingActive()
+        onActivated: layoutCtl.undo()
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+Z"
+        enabled: root.currentView === 2
+                 && typeof layoutCtl !== "undefined"
+                 && layoutCtl.canRedo
+                 && !root.textEditingActive()
+        onActivated: layoutCtl.redo()
+    }
+    Shortcut {
+        sequence: "Ctrl+Y"
+        enabled: root.currentView === 2
+                 && typeof layoutCtl !== "undefined"
+                 && layoutCtl.canRedo
+                 && !root.textEditingActive()
+        onActivated: layoutCtl.redo()
+    }
 
     RowLayout {
         anchors.fill: parent
@@ -67,28 +156,39 @@ ApplicationWindow {
                 }
 
                 NavButton {
+                    objectName: "navDashboard"
                     width: parent.width
                     text: qsTr("Dashboard")
                     selected: root.currentView === 0
                     onClicked: root.currentView = 0
                 }
                 NavButton {
+                    objectName: "navLighting"
                     width: parent.width
                     text: qsTr("Lighting")
                     selected: root.currentView === 1
                     onClicked: root.currentView = 1
                 }
                 NavButton {
+                    objectName: "navLayout"
                     width: parent.width
                     text: qsTr("Layout")
                     selected: root.currentView === 2
                     onClicked: root.currentView = 2
                 }
                 NavButton {
+                    objectName: "navDevices"
                     width: parent.width
                     text: qsTr("Devices && Diagnostics")
                     selected: root.currentView === 3
                     onClicked: root.currentView = 3
+                }
+                NavButton {
+                    objectName: "navSettings"
+                    width: parent.width
+                    text: qsTr("Settings")
+                    selected: root.currentView === 4
+                    onClicked: root.currentView = 4
                 }
 
                 Item { width: 1; height: Theme.spaceM }
@@ -180,6 +280,8 @@ ApplicationWindow {
                     }
                     AppButton {
                         id: reconnectBtn
+                        objectName: "reconnectButton"
+                        Accessible.name: qsTr("Reconnect to the engine")
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Reconnect")
                         visible: typeof bridge !== "undefined"
@@ -195,9 +297,10 @@ ApplicationWindow {
                 currentIndex: root.currentView
 
                 DashboardPage {}
-                LightingPage {}
+                LightingPage { id: lightingPage }
                 LayoutPage {}
                 DevicesPage {}
+                SettingsPage {}
             }
         }
     }

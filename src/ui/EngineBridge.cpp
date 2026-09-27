@@ -741,7 +741,12 @@ QVariantMap EngineBridge::playbackView() const
     out.insert(QStringLiteral("control"),         control);
     out.insert(QStringLiteral("upload"),          upload);
     out.insert(QStringLiteral("phase"),           phase);
-    out.insert(QStringLiteral("phase_detail"),    detail);
+    /* Detail belongs to the state it described — a failure
+       reason must not linger beside a fresh "applying" the
+       next request already started (Task 4.8 minor). */
+    out.insert(QStringLiteral("phase_detail"),
+               phase == QLatin1String("failed")
+                   ? detail : QString());
     out.insert(QStringLiteral("unavailable_reason"), reason);
     out.insert(QStringLiteral("animation_available"),
                caps.value(QStringLiteral("animation_playback"))

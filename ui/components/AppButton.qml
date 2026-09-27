@@ -16,6 +16,8 @@ Button {
     padding: Theme.spaceM
     focusPolicy: Qt.StrongFocus
     activeFocusOnTab: true
+    Accessible.name: root.text
+    Accessible.role: Accessible.Button
 
     contentItem: Text {
         text: root.text

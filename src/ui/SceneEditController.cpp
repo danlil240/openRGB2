@@ -8,6 +8,7 @@
 
 #include "EngineBridge.h"
 #include "JsonVariant.h"
+#include "UiSettings.h"
 
 #include <algorithm>
 
@@ -209,17 +210,28 @@ void SceneEditController::OnSceneChanged()
     if(sname != last_scene_name_)
     {
         last_scene_name_ = sname;
-        if(param_speed_touched_ || param_reverse_touched_ ||
-           param_color_touched_ || param_speed_ != 100 ||
-           param_reverse_ ||
+        const bool had_state =
+            param_speed_touched_ || param_reverse_touched_ ||
+            param_color_touched_ || param_speed_ != 100 ||
+            param_reverse_ ||
+            param_color_ != QLatin1String("#FF0000");
+        param_speed_           = 100;
+        param_reverse_         = false;
+        param_color_           = QStringLiteral("#FF0000");
+        param_speed_touched_   = false;
+        param_reverse_touched_ = false;
+        param_color_touched_   = false;
+        /* Task 4.8: after the scene-scope reset, restore the
+           params this UI last sent for THIS scene name — the
+           wire reports revisions, not values, so this store
+           is the only honest seed a UI restart has. */
+        RestoreSceneParams(
+            QString::fromStdString(sname));
+        if(had_state || param_speed_touched_ ||
+           param_reverse_touched_ || param_color_touched_ ||
+           param_speed_ != 100 || param_reverse_ ||
            param_color_ != QLatin1String("#FF0000"))
         {
-            param_speed_           = 100;
-            param_reverse_         = false;
-            param_color_           = QStringLiteral("#FF0000");
-            param_speed_touched_   = false;
-            param_reverse_touched_ = false;
-            param_color_touched_   = false;
             emit paramsChanged();
         }
     }
@@ -319,6 +331,67 @@ void SceneEditController::TouchWorking()
     emit presetSupportChanged();
     emit dirtyChanged();
     emit conflictChanged();
+}
+
+void SceneEditController::setUiSettings(UiSettings* prefs)
+{
+    ui_settings_ = prefs;
+}
+
+void SceneEditController::PersistSceneParams()
+{
+    if(ui_settings_ == nullptr)
+    {
+        return;
+    }
+    const QString sname =
+        QString::fromStdString(last_scene_name_);
+    if(sname.isEmpty())
+    {
+        return;   /* unnamed scenes key on a doc hash —
+                     nothing stable to hang the memory on */
+    }
+    QVariantMap p;
+    p.insert(QStringLiteral("speed"),           param_speed_);
+    p.insert(QStringLiteral("reverse"),         param_reverse_);
+    p.insert(QStringLiteral("color"),           param_color_);
+    p.insert(QStringLiteral("touched_speed"),
+             param_speed_touched_);
+    p.insert(QStringLiteral("touched_reverse"),
+             param_reverse_touched_);
+    p.insert(QStringLiteral("touched_color"),
+             param_color_touched_);
+    ui_settings_->SetSceneParams(sname, p);
+}
+
+void SceneEditController::RestoreSceneParams(
+    const QString& sceneName)
+{
+    if(ui_settings_ == nullptr || sceneName.isEmpty())
+    {
+        return;
+    }
+    const QVariantMap p = ui_settings_->SceneParams(sceneName);
+    if(p.isEmpty())
+    {
+        return;
+    }
+    param_speed_   = p.value(QStringLiteral("speed"),
+                             100).toInt();
+    param_reverse_ = p.value(QStringLiteral("reverse"),
+                             false).toBool();
+    const QString c = p.value(QStringLiteral("color"))
+                          .toString();
+    if(SceneEditModel::IsHexColor(c.toStdString()))
+    {
+        param_color_ = c;
+    }
+    param_speed_touched_ =
+        p.value(QStringLiteral("touched_speed")).toBool();
+    param_reverse_touched_ =
+        p.value(QStringLiteral("touched_reverse")).toBool();
+    param_color_touched_ =
+        p.value(QStringLiteral("touched_color")).toBool();
 }
 
 bool SceneEditController::setPreset(const QString& id)
@@ -660,6 +733,9 @@ int SceneEditController::sendPlaybackParams(int speed, bool reverse,
     {
         return 0;    /* nothing touched — nothing sent */
     }
+    /* The last-sent set is the UI's seed for the next session
+       — persist it under the applied scene's name (Task 4.8). */
+    PersistSceneParams();
     return bridge_->setPlaybackMode(RequestedMode(),
                                     CurrentControl(), params);
 }
@@ -682,6 +758,10 @@ void SceneEditController::noteParamTouched(const QString& field)
     {
         param_color_touched_ = true;
     }
+    /* Persist eagerly on the touch itself — the touched set
+       is the restart seed, and a touch can precede a request
+       that fails or a session that ends before one goes. */
+    PersistSceneParams();
 }
 
 /*---------------------------------------------------------*\

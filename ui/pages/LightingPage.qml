@@ -56,6 +56,21 @@ Item {
     property int frameEvents: 0
     property double previewFps: 0
 
+    /* nameField sync sentinel — the last model name the
+       field was shown (see the field's comment). */
+    property string syncedSceneName: ""
+
+    /* uiPrefs presence guard — tests may omit the store. */
+    readonly property bool prefsUp:
+        typeof uiPrefs !== "undefined" && uiPrefs !== null
+
+    Component.onCompleted:
+        if(root.prefsUp) {
+            palH.value = uiPrefs.paletteHue;
+            palS.value = uiPrefs.paletteSat;
+            palV.value = uiPrefs.paletteVal;
+        }
+
     Connections {
         target: typeof bridge !== "undefined" ? bridge : null
         function onFrameStatusChanged() { root.frameEvents++ }
@@ -197,6 +212,9 @@ Item {
                             modelData.needs || ""
 
                         activeFocusOnTab: true
+                        Accessible.name: qsTr("Preset %1")
+                            .arg(modelData.name || pid || "")
+                        Accessible.role: Accessible.Button
                         /* !selected like the MouseArea: re-picking
                            the already-selected preset is a no-op
                            that must not disarm the pending
@@ -309,8 +327,28 @@ Item {
                                 && (modeKey === "animation_playback"
                                     ? root.pv.animation_available !== false
                                     : root.pv.live_available !== false)
-                            border.color: requested ? Theme.accent : Theme.border
-                            border.width: requested ? 2 : 1
+                            /* Keyboard parity with the MouseArea:
+                               Tab reaches usable cards, Space/Enter
+                               requests the mode, the focus ring is
+                               visible. */
+                            activeFocusOnTab: usable
+                            Accessible.name: qsTr("Playback mode: %1")
+                                .arg(modelData.title)
+                            Accessible.role: Accessible.Button
+                            Keys.onPressed: e => {
+                                if(e.key === Qt.Key_Space
+                                   || e.key === Qt.Key_Return
+                                   || e.key === Qt.Key_Enter) {
+                                    if(usable && root.editorUp
+                                       && !requested)
+                                        sceneEdit.requestMode(modeKey);
+                                    e.accepted = true;
+                                }
+                            }
+                            border.color: requested ? Theme.accent
+                                          : activeFocus ? Theme.accent
+                                          : Theme.border
+                            border.width: requested || activeFocus ? 2 : 1
 
                             Column {
                                 spacing: Theme.spaceXS
@@ -755,13 +793,19 @@ Item {
                             Column {
                                 Layout.fillWidth: true
                                 spacing: Theme.spaceS
+                                /* Palette position is a UI-owned
+                                   preference (Task 4.8): seeded
+                                   once from uiPrefs, written back
+                                   on each move. */
                                 AppSlider {
                                     id: palH
                                     width: parent.width
                                     from: 0; to: 1; stepSize: 0.001
                                     value: 0.55
                                     enabled: root.liveControlsEnabled
-                                    Accessible.name: qsTr("hue")
+                                    Accessible.name: qsTr("palette hue")
+                                    onMoved: if(root.prefsUp)
+                                        uiPrefs.paletteHue = value;
                                 }
                                 AppSlider {
                                     id: palS
@@ -769,7 +813,9 @@ Item {
                                     from: 0; to: 1; stepSize: 0.001
                                     value: 0.6
                                     enabled: root.liveControlsEnabled
-                                    Accessible.name: qsTr("saturation")
+                                    Accessible.name: qsTr("palette saturation")
+                                    onMoved: if(root.prefsUp)
+                                        uiPrefs.paletteSat = value;
                                 }
                                 AppSlider {
                                     id: palV
@@ -777,7 +823,9 @@ Item {
                                     from: 0; to: 1; stepSize: 0.001
                                     value: 1.0
                                     enabled: root.liveControlsEnabled
-                                    Accessible.name: qsTr("brightness")
+                                    Accessible.name: qsTr("palette brightness")
+                                    onMoved: if(root.prefsUp)
+                                        uiPrefs.paletteVal = value;
                                 }
                             }
                             AppButton {
@@ -844,6 +892,7 @@ Item {
                             }
                             AppSlider {
                                 id: brightSlider
+                                Accessible.name: qsTr("scene brightness")
                                 Layout.fillWidth: true
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0; to: 100; stepSize: 1
@@ -875,6 +924,7 @@ Item {
                             }
                             AppSlider {
                                 id: fxSpeedSlider
+                                Accessible.name: qsTr("effect speed")
                                 Layout.fillWidth: true
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0.05; to: 4.0; stepSize: 0.05
@@ -906,6 +956,7 @@ Item {
                             }
                             AppSlider {
                                 id: fxIntSlider
+                                Accessible.name: qsTr("effect intensity")
                                 Layout.fillWidth: true
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0; to: 1.0; stepSize: 0.01
@@ -979,6 +1030,8 @@ Item {
                             }
                             AppSlider {
                                 id: upSpeedSlider
+                                objectName: "upSpeedSlider"
+                                Accessible.name: qsTr("uploaded preset speed")
                                 Layout.fillWidth: true
                                 enabled: root.editorUp && parent.enabled
                                          && sceneEdit.presetSupport.speed === true
@@ -1069,6 +1122,7 @@ Item {
                                 Layout.fillWidth: true
                                 AppSlider {
                                     id: upH
+                                    Accessible.name: qsTr("uploaded preset color hue")
                                     width: parent.width
                                     from: 0; to: 1; stepSize: 0.001; value: 0
                                     enabled: root.editorUp && root.engineUp
@@ -1083,6 +1137,7 @@ Item {
                                 }
                                 AppSlider {
                                     id: upS
+                                    Accessible.name: qsTr("uploaded preset color saturation")
                                     width: parent.width
                                     from: 0; to: 1; stepSize: 0.001; value: 1
                                     enabled: upH.enabled
@@ -1094,6 +1149,7 @@ Item {
                                 }
                                 AppSlider {
                                     id: upV
+                                    Accessible.name: qsTr("uploaded preset color brightness")
                                     width: parent.width
                                     from: 0; to: 1; stepSize: 0.001; value: 1
                                     enabled: upH.enabled
@@ -1293,6 +1349,7 @@ Item {
                                     AppSlider {
                                         id: sensSlider
                                         objectName: "audioSensitivity"
+                                        Accessible.name: qsTr("audio sensitivity")
                                         Layout.fillWidth: true
                                         from: 25; to: 200; stepSize: 1
                                         enabled: inputRow.usable
@@ -1340,6 +1397,7 @@ Item {
                                     ComboBox {
                                         id: dispCombo
                                         objectName: "screenDisplay"
+                                        Accessible.name: qsTr("screen input display")
                                         Layout.fillWidth: true
                                         enabled: inputRow.usable && count > 0
                                         model: reactiveCard.reactiveDisplays
@@ -1485,10 +1543,23 @@ Item {
                             TextField {
                                 id: nameField
                                 objectName: "nameField"
+                                Accessible.name: qsTr("Scene name")
                                 Layout.fillWidth: true
                                 enabled: root.editorUp
                                 placeholderText: qsTr("name this scene")
-                                text: root.editorUp ? sceneEdit.sceneName : ""
+                                /* No text: binding — an imperative
+                                   assignment would kill it forever
+                                   (Task 4.8 minor). Instead the page
+                                   tracks syncedSceneName: the last
+                                   model name this field was shown.
+                                   When the model's name moves OFF
+                                   that value (discard, reload,
+                                   remote apply, a refused edit's
+                                   revert) the field follows it —
+                                   focused or not — while edits the
+                                   model never saw (uncommitted
+                                   typing) survive unrelated
+                                   workingChanged churn. */
                                 onEditingFinished: if(root.editorUp)
                                     sceneEdit.setSceneName(text)
                                 color: Theme.textPrimary
@@ -1503,10 +1574,20 @@ Item {
                                 Connections {
                                     target: root.editorUp ? sceneEdit : null
                                     function onWorkingChanged() {
-                                        if(!nameField.activeFocus
-                                           && nameField.text !== sceneEdit.sceneName)
-                                            nameField.text = sceneEdit.sceneName;
+                                        const want = root.editorUp
+                                            ? sceneEdit.sceneName : "";
+                                        if(want !== root.syncedSceneName) {
+                                            root.syncedSceneName = want;
+                                            if(nameField.text !== want)
+                                                nameField.text = want;
+                                        }
                                     }
+                                }
+                                Component.onCompleted: {
+                                    const want = root.editorUp
+                                        ? sceneEdit.sceneName : "";
+                                    root.syncedSceneName = want;
+                                    text = want;
                                 }
                             }
                             AppButton {
@@ -1622,6 +1703,11 @@ Item {
                                 return qsTr("Unsaved changes — nothing reaches the engine until you save.");
                             if(sceneEdit.saveError !== "")
                                 return qsTr("The last save failed — your edits are still here.");
+                            /* The bar is also visible for the ONLY-
+                               uncommitted-field-text case — say so
+                               instead of lying "Scene saved." */
+                            if(nameField.text !== sceneEdit.sceneName)
+                                return qsTr("The scene name has uncommitted text — press Save to keep it.");
                             return qsTr("Scene saved.");
                         }
                         color: (root.editorUp && sceneEdit.conflict)

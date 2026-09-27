@@ -165,9 +165,15 @@ nlohmann::json SceneEditModel::NewDocument()
 
 void SceneEditModel::LoadApplied(const nlohmann::json& doc_or_null)
 {
-    const bool changed = (baseline_ != doc_or_null);
+    /* Dirty MUST be sampled against the OLD baseline —
+       checking after the overwrite would read every clean
+       working copy as dirty (it can't equal a baseline it
+       never saw), and a remote apply would always surface
+       as a conflict instead of being adopted. */
+    const bool was_dirty = Dirty();
+    const bool changed   = (baseline_ != doc_or_null);
     baseline_ = doc_or_null;
-    if(!Dirty())
+    if(!was_dirty)
     {
         /* No pending edits — the applied document IS the
            working copy. */
@@ -279,13 +285,28 @@ bool SceneEditModel::SetPreset(const std::string& id,
 bool SceneEditModel::SetName(const std::string& name,
                              std::string& err)
 {
-    if(name.size() > 128)
+    /* Trim — a name is what the user sees, and leading or
+       trailing whitespace would silently hide it in every
+       list it appears in. Reject empties: a nameless scene
+       can't be found or spoken about (Task 4.8 minor). */
+    std::string trimmed = name;
+    const std::size_t b = trimmed.find_first_not_of(" \t\r\n");
+    const std::size_t e = trimmed.find_last_not_of(" \t\r\n");
+    trimmed = (b == std::string::npos)
+                  ? std::string()
+                  : trimmed.substr(b, e - b + 1);
+    if(trimmed.empty())
+    {
+        err = "scene name is empty";
+        return false;
+    }
+    if(trimmed.size() > 128)
     {
         err = "scene name over 128 characters";
         return false;
     }
     EnsureWorking();
-    working_["name"] = name;
+    working_["name"] = trimmed;
     return true;
 }
 

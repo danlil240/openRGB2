@@ -78,6 +78,32 @@ bool BindingMatchesSnapshot(const QVariantMap& binding,
     {
         return false;
     }
+    /* A binding scoped to a named zone must not resolve to a
+       controller that doesn't carry it — a zone the
+       topology lacks is unresolved, not loosely matched
+       (Task 4.8 minor). */
+    const QString zname =
+        binding.value(QStringLiteral("zone_name")).toString();
+    if(!zname.isEmpty())
+    {
+        bool has_zone = false;
+        for(const QVariant& zv :
+            snap.value(QStringLiteral("zones")).toList())
+        {
+            if(NameMatches(
+                   zname,
+                   zv.toMap().value(QStringLiteral("name"))
+                       .toString()))
+            {
+                has_zone = true;
+                break;
+            }
+        }
+        if(!has_zone)
+        {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -630,7 +656,17 @@ void DiagnosticsController::AppendEvent(const QString& kind,
     {
         event_log_.removeFirst();
     }
-    emit eventLogChanged();
+    /* Coalesced emission — every append this turn lands in
+       ONE eventLogChanged, so a burst doesn't rebuild the
+       QML tail once per event. */
+    if(!log_signal_pending_)
+    {
+        log_signal_pending_ = true;
+        QMetaObject::invokeMethod(this, [this] {
+            log_signal_pending_ = false;
+            emit eventLogChanged();
+        }, Qt::QueuedConnection);
+    }
 }
 
 void DiagnosticsController::clearEventLog()

@@ -53,6 +53,7 @@ qt_add_qml_module(openrgb2_ui
         pages/DevicesPage.qml
         pages/LayoutPage.qml
         pages/LightingPage.qml
+        pages/SettingsPage.qml
     SOURCES
         ${CMAKE_SOURCE_DIR}/src/ui/EngineBridge.h
         ${CMAKE_SOURCE_DIR}/src/ui/EngineBridge.cpp
@@ -70,7 +71,9 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/DiagnosticsController.h
         ${CMAKE_SOURCE_DIR}/src/ui/DiagnosticsController.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/ProfileLibrary.h
-        ${CMAKE_SOURCE_DIR}/src/ui/ProfileLibrary.cpp)
+        ${CMAKE_SOURCE_DIR}/src/ui/ProfileLibrary.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/UiSettings.h
+        ${CMAKE_SOURCE_DIR}/src/ui/UiSettings.cpp)
 
 set_target_properties(openrgb2_ui PROPERTIES AUTOMOC ON)
 

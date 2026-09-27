@@ -25,6 +25,8 @@ ItemDelegate {
     implicitHeight: content.implicitHeight + 2 * Theme.spaceS
     focusPolicy: Qt.StrongFocus
     activeFocusOnTab: true
+    Accessible.name: qsTr("Group %1").arg(root.label)
+    Accessible.role: Accessible.CheckBox
 
     readonly property color dotColor: {
         if(!verified || state === "unbound")

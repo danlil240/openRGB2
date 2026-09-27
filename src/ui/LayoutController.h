@@ -37,6 +37,7 @@
 #include "LayoutEditModel.h"
 
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QTimer>
 #include <QVariantList>
@@ -103,12 +104,15 @@ class LayoutController : public QObject
        "identify acknowledged", or the engine's error. */
     Q_PROPERTY(QString statusText READ statusText
                    NOTIFY statusTextChanged)
-    /* The active identification target as last acknowledged —
-       {key:{device,serial,location}, zone, led_start,
-       led_count, duration_ms}; empty when none/cancelled/
-       expired (a single-shot timer mirrors the engine-side
-       duration — the blink end has no push event). */
-    Q_PROPERTY(QVariantMap identifying READ identifying
+    /* The ACTIVE identifications as last acknowledged — a
+       list because a second controller's overlay doesn't
+       replace the first's (Task 4.8 minor): each entry is
+       the reply body {controller:{device,serial,location},
+       zone, led_start, led_count, duration_ms} plus a local
+       deadline_ms the pruning timer clears against (the
+       blink end has no push event). Empty when none/
+       cancelled/expired. */
+    Q_PROPERTY(QVariantList identifying READ identifying
                    NOTIFY identifyingChanged)
 
 public:
@@ -163,6 +167,11 @@ public:
                              int durationMs);
     Q_INVOKABLE int cancelIdentify(
         const QVariantMap& controllerKey);
+    /* The active identify entry for ONE controller key, or
+       an empty map — per-row UI (Stop button, status text)
+       needs its own target, not the whole list. */
+    Q_INVOKABLE QVariantMap identifyingFor(
+        const QVariantMap& controllerKey) const;
 
     Q_INVOKABLE void reload();   /* GET_SCENE pull */
 
@@ -185,7 +194,7 @@ public:
     QString      lastError() const;
     QString      lastErrorSource() const;
     QString      statusText() const;
-    QVariantMap  identifying() const;
+    QVariantList identifying() const;
 
     LayoutEditModel& ModelForTesting() { return model_; }
 
@@ -210,6 +219,11 @@ private:
                       const QString& source = QString());
     void SetStatus(const QString& s);
     QString UniqueBindingId(const QString& base) const;
+    /* Identify bookkeeping — entries keyed by controller;
+       the timer sweeps expired deadlines (the engine's
+       blink end has no push event). */
+    static QString IdentifyTag(const QVariantMap& key);
+    void           PruneIdentifies();
 
     EngineBridge*   bridge_;
     LayoutEditModel model_;
@@ -217,7 +231,7 @@ private:
     QString         last_error_;
     QString         last_error_source_;
     QString         status_text_;
-    QVariantMap     identifying_;
+    QVariantList    identifying_;
 
     /* Single-flight mutation tracking: undo/redo/apply all
        serialize through here so the recorded before/after
@@ -233,15 +247,15 @@ private:
     Pending         pending_;
 
     /* Identify replies are informational only (transient op,
-       no history) — tracked just to surface the outcome.
-       cancelIdentify() uses the same slot: its {identifying:
-       false} reply clears identifying_ like an expiry. */
-    int             pending_identify_id_ = 0;
+       no history) — every in-flight correlate lands here so
+       a cancel and a start can't cross each other's replies. */
+    QSet<int>       pending_identify_ids_;
 
-    /* The engine's overlay expires on its own clock with no
-       push event — this single-shot clears the local banner
-       (Stop button / "identifying" text) when the blink ends,
-       one half-period of slack after duration_ms. */
+    /* The engine's overlays expire on their own clock with
+       no push event — this repeating sweep drops each local
+       entry past its acknowledged duration (plus one
+       half-period of slack), running only while the list is
+       non-empty. */
     QTimer          identify_timer_;
 };
 

@@ -15,6 +15,7 @@
 #include "EngineBridge.h"
 #include "LayoutController.h"
 #include "SceneEditController.h"
+#include "UiSettings.h"
 
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
@@ -56,6 +57,12 @@ int main(int argc, char** argv)
        derived rate/ownership/conflict views over the bridge
        stores plus the redacted export bundle (Task 4.7). */
     openrgb2::ui::DiagnosticsController diag_ctl(&bridge);
+    /* UI-only preferences (Task 4.8): window geometry, last
+       view, palette position, and per-scene playback-param
+       seeds. Engine state is never persisted here — restart
+       state comes back over WELCOME + subscription replay. */
+    openrgb2::ui::UiSettings ui_prefs;
+    scene_edit.setUiSettings(&ui_prefs);
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"),
@@ -66,6 +73,8 @@ int main(int argc, char** argv)
                                              &layout_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("diagCtl"),
                                              &diag_ctl);
+    engine.rootContext()->setContextProperty(QStringLiteral("uiPrefs"),
+                                             &ui_prefs);
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed,
         &app, [] { QCoreApplication::exit(-1); },

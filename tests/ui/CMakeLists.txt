@@ -12,7 +12,7 @@
 #                        degraded state must render
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS
-    Core Gui Qml Quick QuickControls2)
+    Core Gui Qml Quick QuickControls2 Test)
 
 # Qt's DLLs live outside the build tree; prepend the Qt bin dir
 # to PATH for the test processes only.
@@ -74,6 +74,15 @@ ui_suite(ui_reactive_test)
 # journal, and the redacted export bundle. A real EngineBridge
 # + DiagnosticsController over the in-process pipe.
 ui_suite(ui_diagnostics_test)
+
+# Task 4.8: the hardening suite — Quit-All issues IPC QUIT and
+# reads the ordered reply; an engine restart mid-edit keeps
+# the working copy while the restored session reports ENGINE
+# truth and emits no ghost mutations; rejected/lost saves keep
+# edits with honest errors; a 400-event flood measures bounded
+# control-request latency; UiSettings round-trip + bound;
+# ProfileLibrary failed-write rollback; stale phase_detail.
+ui_suite(ui_hardening_test)
 
 # The QML smoke test additionally needs the module's compiled
 # plugin + Qt Quick runtime on its link line.
@@ -140,3 +149,35 @@ set_tests_properties(qml_diagnostics_test PROPERTIES
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${QT_BIN_DIR}")
+
+# Task 4.8: the real shell headless — Tab/Space focus chain,
+# Ctrl+1..5 view switching, Ctrl+S focused-commit save,
+# accessible-name resolution, theme contrast (WCAG ratios),
+# nameField remote-sync, and Quit-All driving an actual IPC
+# QUIT to window close. Registered at 1.00 plus the three
+# scale factors under QT_SCALE_FACTOR 1.25 / 1.5 / 2.0 —
+# the same binary asserts the min-size contract under each
+# scale pass.
+add_executable(qml_hardening_test qml_hardening_test.cpp)
+target_link_libraries(qml_hardening_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    openrgb2_ipc_wire
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Test)
+target_include_directories(qml_hardening_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(qml_hardening_test PRIVATE NDEBUG)
+set_target_properties(qml_hardening_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(qml_hardening_test)
+foreach(scale 1.00 1.25 1.50 2.00)
+    string(REPLACE "." "_" scale_tag "${scale}")
+    add_test(NAME qml_hardening_test_scale${scale_tag}
+             COMMAND qml_hardening_test)
+    set_tests_properties(qml_hardening_test_scale${scale_tag}
+        PROPERTIES
+        LABELS ui
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:${QT_BIN_DIR};QT_SCALE_FACTOR=set:${scale}")
+endforeach()

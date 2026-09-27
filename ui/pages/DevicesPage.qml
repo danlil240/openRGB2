@@ -15,6 +15,7 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Dialogs
+import QtQuick.Window
 import OpenRGB2.UI.theme
 import OpenRGB2.UI.components
 
@@ -43,11 +44,25 @@ Item {
     }
 
     /* The refresh cadence lives in the controller — active
-       while this view is on screen (StackLayout visibility). */
-    Component.onCompleted:
-        if(root.hasCtl) { diagCtl.active = root.visible }
-    onVisibleChanged:
-        if(root.hasCtl) { diagCtl.active = root.visible }
+       while this view is on screen AND the window is shown:
+       a minimized/hidden window doesn't poll (Task 4.8
+       minor — polling work nobody can see isn't honest
+       "auto-refresh"). */
+    function syncDiagActive() {
+        const w = Window.window;
+        const shown = !w
+                      || (w.visible
+                          && w.visibility !== Window.Minimized);
+        if(root.hasCtl)
+            diagCtl.active = root.visible && shown;
+    }
+    Component.onCompleted: syncDiagActive()
+    onVisibleChanged: syncDiagActive()
+    Connections {
+        target: Window.window
+        function onVisibleChanged()    { root.syncDiagActive(); }
+        function onVisibilityChanged() { root.syncDiagActive(); }
+    }
 
     Flickable {
         anchors.fill: parent

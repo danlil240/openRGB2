@@ -636,17 +636,31 @@ static bool ServeOnce(Server& s, uint32_t wait_ms = 15)
             const std::string verb = body.value("verb", "");
             if(verb == "identify")
             {
-                s.srv.SendMsg(MsgType::Ok, m.request_id,
-                    nlohmann::json::object({
-                        { "identifying", true },
-                        { "controller",  body["controller"] },
-                        { "zone", body.value("zone",
-                                             std::string()) },
-                        { "led_start", 40 },
-                        { "led_count", 1 },
-                        { "duration_ms",
-                          body.value("duration_ms", 3000) },
-                    }));
+                /* duration_ms:0 is a cancel — the real engine
+                   answers {identifying:false,cancelled} */
+                if(body.value("duration_ms", 0) == 0)
+                {
+                    s.srv.SendMsg(MsgType::Ok, m.request_id,
+                        nlohmann::json::object({
+                            { "identifying", false },
+                            { "cancelled",   true },
+                            { "controller",  body["controller"] },
+                        }));
+                }
+                else
+                {
+                    s.srv.SendMsg(MsgType::Ok, m.request_id,
+                        nlohmann::json::object({
+                            { "identifying", true },
+                            { "controller",  body["controller"] },
+                            { "zone", body.value("zone",
+                                                 std::string()) },
+                            { "led_start", 40 },
+                            { "led_count", 1 },
+                            { "duration_ms",
+                              body.value("duration_ms", 3000) },
+                        }));
+                }
             }
             else if(s.fail_next)
             {
@@ -894,15 +908,16 @@ static void BridgeTests()
         QString reply_type;
         QString reply_msg;
         int     reply_id = 0;
-        QObject::connect(&bridge, &EngineBridge::replyReceived,
-            [&](int id, const QString& type,
-                const QVariantMap& b)
-            {
-                reply_id   = id;
-                reply_type = type;
-                reply_msg  = b.value(QStringLiteral("message"))
-                                 .toString();
-            });
+        const QMetaObject::Connection reply_conn =
+            QObject::connect(&bridge, &EngineBridge::replyReceived,
+                [&](int id, const QString& type,
+                    const QVariantMap& b)
+                {
+                    reply_id   = id;
+                    reply_type = type;
+                    reply_msg  = b.value(QStringLiteral("message"))
+                                     .toString();
+                });
         QVariantMap hostile;
         hostile.insert(QStringLiteral("object_id"),
                        QStringLiteral("fan0"));
@@ -929,6 +944,10 @@ static void BridgeTests()
         /* and the controller never counted it as an applied
            edit — no ghost undo entry either */
         CHECK(!ctl.busy());
+        /* The lambda captures dead stack refs past this
+           block — later replies (identify) MUST NOT reach
+           it. */
+        QObject::disconnect(reply_conn);
     }
 
     /*---- linking a mirrored copy ----------------------------*/
@@ -997,6 +1016,33 @@ static void BridgeTests()
         CHECK(s.last_layout_body["duration_ms"].get<int>()
               == 4000);
         CHECK(ctl.undoCount() == undo_before); /* never history */
+
+        /* Task 4.8: a SECOND controller's overlay doesn't
+           displace the first's — the list tracks both, and
+           each stays individually cancellable. */
+        QVariantMap key2;
+        key2.insert(QStringLiteral("device"),
+                    QStringLiteral("Lian Li: SL Wireless B"));
+        key2.insert(QStringLiteral("serial"),
+                    QStringLiteral("112233445566"));
+        key2.insert(QStringLiteral("location"),
+                    QStringLiteral("Wireless: 11:22:33:44:55:66"));
+        const int req2 = ctl.identify(key2, QString(), -1, 4000);
+        CHECK(req2 > 0 && req2 != req);
+        CHECK(PumpBoth(s, [&] {
+            return ctl.identifying().size() == 2;
+        }));
+        CHECK(!ctl.identifyingFor(key).isEmpty());
+        CHECK(!ctl.identifyingFor(key2).isEmpty());
+
+        /* Cancel A — its row alone clears. */
+        CHECK(ctl.cancelIdentify(key) > 0);
+        CHECK(PumpBoth(s, [&] {
+            return ctl.identifying().size() == 1;
+        }));
+        CHECK(ctl.identifyingFor(key).isEmpty());
+        CHECK(!ctl.identifyingFor(key2).isEmpty());
+        CHECK(ctl.undoCount() == undo_before);
     }
 
     bridge.stop();
@@ -1004,6 +1050,7 @@ static void BridgeTests()
 
 int main(int argc, char** argv)
 {
+    std::setbuf(stdout, nullptr);
     QCoreApplication app(argc, argv);
 
     std::printf("-- model\n");

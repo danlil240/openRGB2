@@ -14,6 +14,8 @@ ItemDelegate {
     implicitHeight: 40
     focusPolicy: Qt.StrongFocus
     activeFocusOnTab: true
+    Accessible.name: root.text
+    Accessible.role: Accessible.Button
 
     contentItem: Text {
         text: root.text

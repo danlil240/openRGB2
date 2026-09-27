@@ -17,6 +17,8 @@ ItemDelegate {
     implicitWidth: 30; implicitHeight: 30
     focusPolicy: Qt.StrongFocus
     activeFocusOnTab: true
+    Accessible.name: qsTr("palette color %1").arg(root.swatch)
+    Accessible.role: Accessible.Button
 
     onClicked: root.picked(String(root.swatch))
 

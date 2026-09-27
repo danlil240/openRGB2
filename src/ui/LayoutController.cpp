@@ -9,6 +9,8 @@
 #include "EngineBridge.h"
 #include "JsonVariant.h"
 
+#include <QDateTime>
+
 namespace openrgb2
 {
 namespace ui
@@ -26,16 +28,13 @@ LayoutController::LayoutController(EngineBridge* bridge,
     connect(bridge_, &EngineBridge::replyReceived,
             this, &LayoutController::OnReplyReceived);
 
-    /* Engine-side expiry is authoritative — the timer only
-       drops the stale banner (the blink itself already
-       ended). The acknowledged duration plus one half-period
-       of slack keeps it visible through the last phase. */
-    identify_timer_.setSingleShot(true);
-    connect(&identify_timer_, &QTimer::timeout, this, [this] {
-        identifying_ = QVariantMap{};
-        emit identifyingChanged();
-        SetStatus(QStringLiteral("identification ended"));
-    });
+    /* Engine-side expiry is authoritative — the sweep only
+       drops stale banners (the blinks themselves already
+       ended). Each entry carries its acknowledged duration
+       plus one half-period of slack as deadline_ms. */
+    identify_timer_.setInterval(250);
+    connect(&identify_timer_, &QTimer::timeout, this,
+            &LayoutController::PruneIdentifies);
 
     connect(bridge_, &EngineBridge::engineLost, this, [this] {
         /* The pending entry is a live request — an engine loss
@@ -50,10 +49,13 @@ LayoutController::LayoutController(EngineBridge* bridge,
             pending_ = Pending{};
             emit busyChanged();
         }
-        pending_identify_id_ = 0;
+        pending_identify_ids_.clear();
         identify_timer_.stop();
-        identifying_ = QVariantMap{};
-        emit identifyingChanged();
+        if(!identifying_.isEmpty())
+        {
+            identifying_ = QVariantList{};
+            emit identifyingChanged();
+        }
         SetLastError(QStringLiteral("engine connection lost"),
                      QStringLiteral("connection"));
         emit itemsChanged();
@@ -94,39 +96,59 @@ void LayoutController::OnReplyReceived(int id,
                                        const QVariantMap& body)
 {
     const bool ok = (type == QLatin1String("OK"));
-    if(id == pending_identify_id_ && id != 0)
+    if(id != 0 && pending_identify_ids_.remove(id))
     {
-        pending_identify_id_ = 0;
         if(ok)
         {
             const bool active =
                 body.value(QStringLiteral("identifying"))
                     .toBool();
+            const QString tag = IdentifyTag(
+                body.value(QStringLiteral("controller"))
+                    .toMap());
+            /* Rekey the entry on this controller — a second
+               identify on ANOTHER controller adds a row
+               rather than clobbering the first's banner. */
+            for(int i = identifying_.size() - 1; i >= 0; --i)
+            {
+                if(IdentifyTag(
+                       identifying_[i].toMap().value(
+                           QStringLiteral("controller"))
+                           .toMap()) == tag)
+                {
+                    identifying_.removeAt(i);
+                }
+            }
             if(active)
             {
-                identifying_ = body;
-                emit identifyingChanged();
+                QVariantMap entry = body;
                 /* No push arrives when the blink ends — the
-                   banner clears on the acknowledged duration
+                   entry clears on the acknowledged duration
                    (plus one 250 ms half-period of slack). */
-                identify_timer_.start(
-                    (int)body.value(
-                             QStringLiteral("duration_ms"))
-                        .toLongLong() + 250);
+                entry.insert(
+                    QStringLiteral("deadline_ms"),
+                    QDateTime::currentMSecsSinceEpoch() +
+                        body.value(
+                            QStringLiteral("duration_ms"))
+                            .toLongLong() + 250);
+                identifying_.push_back(entry);
+                identify_timer_.start();
                 SetStatus(QStringLiteral(
                               "identifying controller…"));
             }
             else
             {
-                /* Cancel acknowledgement — clear like an
-                   expiry: the reply still carries the key,
+                /* Cancel acknowledgement — drop the row like
+                   an expiry: the reply still carries the key,
                    which must NOT read as an active banner. */
-                identify_timer_.stop();
-                identifying_ = QVariantMap{};
-                emit identifyingChanged();
                 SetStatus(QStringLiteral(
                               "identification cleared"));
             }
+            if(identifying_.isEmpty())
+            {
+                identify_timer_.stop();
+            }
+            emit identifyingChanged();
         }
         else
         {
@@ -522,7 +544,7 @@ int LayoutController::identify(const QVariantMap& controllerKey,
                      QStringLiteral("connection"));
         return 0;
     }
-    pending_identify_id_ = req;
+    pending_identify_ids_.insert(req);
     return req;
 }
 
@@ -538,12 +560,64 @@ int LayoutController::cancelIdentify(
     {
         return 0;
     }
-    /* Route the cancel reply through the same pending slot —
+    /* Route the cancel reply through the same pending set —
        its {identifying:false} acknowledgement clears the
-       banner like an expiry (it used to be dropped, leaving
-       identifying_ stuck active). */
-    pending_identify_id_ = req;
+       row like an expiry. */
+    pending_identify_ids_.insert(req);
     return req;
+}
+
+QString LayoutController::IdentifyTag(const QVariantMap& key)
+{
+    /* device+serial+location — the key triple the engine
+       uses to name a controller. */
+    return key.value(QStringLiteral("device")).toString() +
+           QLatin1Char('\x1f') +
+           key.value(QStringLiteral("serial")).toString() +
+           QLatin1Char('\x1f') +
+           key.value(QStringLiteral("location")).toString();
+}
+
+QVariantMap LayoutController::identifyingFor(
+    const QVariantMap& controllerKey) const
+{
+    const QString tag = IdentifyTag(controllerKey);
+    for(const QVariant& v : identifying_)
+    {
+        const QVariantMap e = v.toMap();
+        if(IdentifyTag(
+               e.value(QStringLiteral("controller")).toMap())
+           == tag)
+        {
+            return e;
+        }
+    }
+    return QVariantMap();
+}
+
+void LayoutController::PruneIdentifies()
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    bool changed = false;
+    for(int i = identifying_.size() - 1; i >= 0; --i)
+    {
+        if(now >= identifying_[i].toMap().value(
+                      QStringLiteral("deadline_ms"))
+                      .toLongLong())
+        {
+            identifying_.removeAt(i);
+            changed = true;
+        }
+    }
+    if(changed)
+    {
+        emit identifyingChanged();
+        SetStatus(QStringLiteral("identification ended"));
+    }
+    if(identifying_.isEmpty())
+    {
+        identify_timer_.stop();
+    }
 }
 
 void LayoutController::reload()
@@ -714,7 +788,7 @@ QString LayoutController::statusText() const
     return status_text_;
 }
 
-QVariantMap LayoutController::identifying() const
+QVariantList LayoutController::identifying() const
 {
     return identifying_;
 }

@@ -200,6 +200,10 @@ private:
     QVariantList   unresolved_;
     QVariantMap    ownership_;
     QVariantList   event_log_;
+    /* One change signal per event-loop turn — a wire burst
+       rebuilds the QML tail once, not once per event
+       (Task 4.8 minor). */
+    bool           log_signal_pending_ = false;
     QString        last_export_;
     QString        export_error_;
 

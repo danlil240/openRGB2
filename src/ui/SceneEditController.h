@@ -44,6 +44,7 @@ namespace ui
 {
 
 class EngineBridge;
+class UiSettings;
 
 class SceneEditController : public QObject
 {
@@ -122,6 +123,14 @@ class SceneEditController : public QObject
 public:
     explicit SceneEditController(EngineBridge* bridge,
                                  QObject* parent = nullptr);
+
+    /* The shell's UI-pref store (Task 4.8) — optional; when
+       attached, the per-scene uploaded-preset params the wire
+       can't read back are persisted + restored by scene name
+       (UI-side memory only — engine state stays engine-owned).
+       Without it the session-scoped latches behave exactly
+       as before. */
+    void setUiSettings(UiSettings* prefs);
 
     /*---- scene edits (pending until save) ------------------*/
     Q_INVOKABLE bool setPreset(const QString& id);
@@ -231,10 +240,17 @@ private:
     void        SetSaveError(const QString& e,
                              const QString& source = QString());
     QVariantMap ResolveGroupHints(const DeviceGroup& g) const;
+    /* Persist/restore the touched trackers for the applied
+       scene's name through ui_settings_ (Task 4.8 — the
+       wire reports revisions, not values, so the UI's
+       last-sent set is the only honest seed a restart has). */
+    void        PersistSceneParams();
+    void        RestoreSceneParams(const QString& sceneName);
 
     EngineBridge*   bridge_;
     SceneEditModel  model_;
     ProfileLibrary  library_;
+    UiSettings*     ui_settings_ = nullptr;
 
     int             pending_save_id_ = 0;
     bool            saving_          = false;

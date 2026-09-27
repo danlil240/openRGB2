@@ -278,6 +278,49 @@ Item {
                                     id: d
                                     property var o: modelData
                                     property bool dragging: false
+                                    /* Keyboard parity with drag
+                                       (Task 4.8): Tab reaches the
+                                       object, arrows nudge it
+                                       through the SAME moveObject
+                                       path (applied, undoable,
+                                       engine-acknowledged — a
+                                       refused nudge snaps back like
+                                       a refused drag), Space/Enter
+                                       selects. */
+                                    activeFocusOnTab:
+                                        root.editable && visible
+                                    Accessible.name:
+                                        qsTr("Layout object %1")
+                                            .arg(d.o.label || d.o.id)
+                                    Accessible.role: Accessible.Button
+                                    Keys.onPressed: e => {
+                                        const step =
+                                            (e.modifiers
+                                             & Qt.ShiftModifier)
+                                            ? 0.01 : 0.1;
+                                        var nx = d.o.x, nz = d.o.z;
+                                        switch(e.key) {
+                                        case Qt.Key_Left:  nx -= step; break;
+                                        case Qt.Key_Right: nx += step; break;
+                                        case Qt.Key_Up:    nz -= step; break;
+                                        case Qt.Key_Down:  nz += step; break;
+                                        case Qt.Key_Space:
+                                        case Qt.Key_Return:
+                                        case Qt.Key_Enter:
+                                            if(root.editable)
+                                                layoutCtl.select(d.o.id);
+                                            e.accepted = true;
+                                            return;
+                                        default:
+                                            return;
+                                        }
+                                        if(root.editable) {
+                                            layoutCtl.select(d.o.id);
+                                            layoutCtl.moveObject(
+                                                d.o.id, nx, nz);
+                                        }
+                                        e.accepted = true;
+                                    }
                                     visible: o.visible
                                              && o.kind !== "group"
                                     width: Math.max(10, o.w * view.s)
@@ -299,13 +342,15 @@ Item {
                                                  ? Theme.accentMuted
                                                  : Theme.surfaceHover
                                         border.width:
-                                            root.ctlUp
-                                            && layoutCtl.selectedId
-                                               === d.o.id ? 2 : 1
+                                            (root.ctlUp
+                                             && layoutCtl.selectedId
+                                                === d.o.id)
+                                            || d.activeFocus ? 2 : 1
                                         border.color:
-                                            root.ctlUp
-                                            && layoutCtl.selectedId
-                                               === d.o.id
+                                            (root.ctlUp
+                                             && layoutCtl.selectedId
+                                                === d.o.id)
+                                            || d.activeFocus
                                             ? Theme.accent
                                             : d.o.state === "missing"
                                               || d.o.state === "ambiguous"
@@ -416,7 +461,7 @@ Item {
                             anchors.top: canvasRect.bottom
                             anchors.topMargin: Theme.spaceS
                             width: parent.width
-                            text: qsTr("Top view, meters. Drag objects to arrange — edits apply immediately and are undoable. Linked copies (LINK) share their source's output.")
+                            text: qsTr("Top view, meters. Drag objects to arrange — or Tab to an object and nudge with the arrow keys (Shift for fine steps). Edits apply immediately and are undoable (Ctrl+Z / Ctrl+Shift+Z). Linked copies (LINK) share their source's output.")
                             color: Theme.textDisabled
                             font.pixelSize: Theme.fontSizeSmall
                             wrapMode: Text.WordWrap
@@ -583,6 +628,7 @@ Item {
                             }
                             ComboBox {
                                 id: linkPick
+                                Accessible.name: qsTr("mirror source")
                                 visible: layoutCtl.selectedItem
                                          .kind === "device"
                                 width: parent.width
@@ -626,6 +672,7 @@ Item {
                             width: parent.width - 2 * Theme.spaceL
                             ComboBox {
                                 id: bindPick
+                                Accessible.name: qsTr("scene binding")
                                 width: parent.width
                                 model: root.ctlUp
                                        ? layoutCtl.bindings : []
@@ -666,6 +713,7 @@ Item {
                             }
                             ComboBox {
                                 id: ctrlPick
+                                Accessible.name: qsTr("live controller to bind")
                                 width: parent.width
                                 textRole: "label"
                                 model: {
@@ -758,6 +806,9 @@ Item {
                                         }
                                         TextField {
                                             id: addrField
+                                            Accessible.name:
+                                                qsTr("emitter %1 LED address")
+                                                    .arg(modelData.index)
                                             Layout.fillWidth: true
                                             text: String(
                                                 modelData.address)
@@ -885,6 +936,8 @@ Item {
                                 spacing: Theme.spaceS
                                 ComboBox {
                                     id: zonePick
+                                    Accessible.name:
+                                        qsTr("identify zone")
                                     Layout.preferredWidth: 220
                                     property var zones:
                                         ["(" + qsTr("whole controller")
@@ -896,6 +949,8 @@ Item {
                                 }
                                 TextField {
                                     id: ledField
+                                    Accessible.name:
+                                        qsTr("identify LED index")
                                     Layout.preferredWidth: 120
                                     placeholderText: qsTr("led #")
                                     inputMethodHints:
@@ -912,6 +967,8 @@ Item {
                                 }
                                 TextField {
                                     id: durField
+                                    Accessible.name:
+                                        qsTr("identify duration milliseconds")
                                     Layout.preferredWidth: 90
                                     text: "3000"
                                     inputMethodHints:
@@ -966,11 +1023,22 @@ Item {
                                     }
                                 }
                                 AppButton {
+                                    /* Per-controller: a SECOND
+                                       controller's identify doesn't
+                                       displace this row's state
+                                       (Task 4.8). */
+                                    Accessible.name: qsTr("Stop identifying %1").arg(
+                                        snap.name || snap.key.device || "")
                                     text: qsTr("Stop")
+                                    /* naming the list first keeps
+                                       the binding subscribed to
+                                       identifyingChanged */
                                     enabled: root.ctlUp
                                         && root.engineUp
                                         && layoutCtl.identifying
-                                           .controller
+                                                  .length >= 0
+                                        && layoutCtl.identifyingFor(
+                                               snap.key).controller
                                            !== undefined
                                     onClicked: layoutCtl.cancelIdentify(
                                         snap.key)
@@ -1006,22 +1074,24 @@ Item {
                             }
                         }
                     }
-                    Text {
-                        visible: root.ctlUp
-                                 && layoutCtl.identifying.controller
-                                    !== undefined
-                        text: root.ctlUp
-                            ? qsTr("identifying %1 %2 (%3 LEDs, %4 ms)")
-                                .arg(layoutCtl.identifying.controller
-                                     .device || "")
-                                .arg(layoutCtl.identifying.zone || "")
-                                .arg(layoutCtl.identifying.led_count
-                                     || 0)
-                                .arg(layoutCtl.identifying.duration_ms
-                                     || 0)
-                            : ""
-                        color: Theme.accent
-                        font.pixelSize: Theme.fontSizeSmall
+                    /* One line per active overlay — concurrent
+                       identifies on different controllers each
+                       stay visible (Task 4.8). */
+                    Repeater {
+                        model: root.ctlUp ? layoutCtl.identifying : []
+                        delegate: Text {
+                            required property var modelData
+                            Accessible.name: text
+                            text: qsTr("identifying %1 %2 (%3 LEDs, %4 ms)")
+                                .arg(modelData.controller
+                                     ? (modelData.controller.device || "")
+                                     : "")
+                                .arg(modelData.zone || "")
+                                .arg(modelData.led_count || 0)
+                                .arg(modelData.duration_ms || 0)
+                            color: Theme.accent
+                            font.pixelSize: Theme.fontSizeSmall
+                        }
                     }
                     EmptyState {
                         visible: !root.engineUp

@@ -202,13 +202,23 @@ bool ProfileLibrary::saveProfile(const QString& name,
     }
     EnsureLoaded();
 
-    /* Replace same-name (profiles are keyed by name). */
+    /* Replace same-name (profiles are keyed by name). Keep
+       the displaced entry so a failed write can put it back —
+       memory must never claim a file state it didn't reach
+       (Task 4.8 minor). */
+    bool          replaced   = false;
+    nlohmann::json displaced;
+    std::size_t   displaced_at = 0;
     for(auto it = scenes_.begin(); it != scenes_.end(); ++it)
     {
         if(it->value("name", std::string()) ==
            trimmed.toStdString())
         {
+            displaced    = *it;
+            displaced_at =
+                (std::size_t)(it - scenes_.begin());
             scenes_.erase(it);
+            replaced = true;
             break;
         }
     }
@@ -233,6 +243,12 @@ bool ProfileLibrary::saveProfile(const QString& name,
     {
         /* Keep the store consistent with the file. */
         scenes_.erase(std::prev(scenes_.end()));
+        if(replaced)
+        {
+            scenes_.insert(scenes_.begin() +
+                               (ptrdiff_t)displaced_at,
+                           displaced);
+        }
         SetError(err);
         return false;
     }
@@ -257,11 +273,16 @@ QVariantMap ProfileLibrary::profileDocument(const QString& name)
 bool ProfileLibrary::removeProfile(const QString& name)
 {
     EnsureLoaded();
-    bool found = false;
+    bool          found = false;
+    nlohmann::json removed;
+    std::size_t   removed_at = 0;
     for(auto it = scenes_.begin(); it != scenes_.end(); ++it)
     {
         if(it->value("name", std::string()) == name.toStdString())
         {
+            removed    = *it;
+            removed_at =
+                (std::size_t)(it - scenes_.begin());
             scenes_.erase(it);
             found = true;
             break;
@@ -274,6 +295,11 @@ bool ProfileLibrary::removeProfile(const QString& name)
     QString err;
     if(!Persist(err))
     {
+        /* The file kept the entry — put it back so memory
+           and disk stay the same library (Task 4.8 minor). */
+        scenes_.insert(scenes_.begin() +
+                           (ptrdiff_t)removed_at,
+                       removed);
         SetError(err);
         return false;
     }
