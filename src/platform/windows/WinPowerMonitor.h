@@ -4,8 +4,8 @@
 |||   Qt-free Windows display/system power monitor for the ||
 |||   engine (Task 3.7 — adapts the preserved plugin's      ||
 |||   DisplayPowerMonitor approach,                         ||
-|||   C:\Users\daniel\tools\openrgb-unified\plugins\       ||
-|||   DesktopLightingStudio\output\DisplayPowerMonitor.*).  ||
+|||   openrgb-unified/plugins/DesktopLightingStudio/       ||
+|||   output/DisplayPowerMonitor.*).                        ||
 |||                                                           ||
 |||   A console engine has no window/message pump, so the   ||
 |||   monitor owns a dedicated thread hosting a private     ||

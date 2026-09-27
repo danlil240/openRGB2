@@ -178,6 +178,13 @@ std::string ProcessImagePath(uint32_t pid)
 || Classifier (pure)                                        ||
 \*---------------------------------------------------------*/
 
+/* PARITY CONTRACT: packaging/windows/start-openrgb2.ps1 mirrors
+   these exact rules (rule tokens + owner labels). The packaging
+   suite mechanically enforces it — T1 in
+   tests/packaging/package_lifecycle_tests.ps1 extracts the token
+   and owner sets from BOTH files and fails on any drift. Keep the
+   literal spellings (`Contains(...)`, `name == "..."`,
+   `f.owner = "..."`) in the shapes the test extracts. */
 std::vector<OwnerFinding> ClassifyOwners(
     const std::vector<ProcessEntry>& processes,
     uint32_t self_pid,

@@ -66,12 +66,12 @@ static std::vector<uint8_t> MakeControllerBlob(uint32_t* mode_direct_len,
     w.U32(4);                                   /* placeholder data_size */
 
     w.U32(2);                                   /* device type */
-    w.Str("Lian Li Wireless 66:e1");
+    w.Str("Lian Li Wireless 00:01");
     w.Str("Lian Li");
     w.Str("Lian Li Wireless Fan Group");
     w.Str("");
-    w.Str("9B:10:76:E5:66:E1");
-    w.Str("Wireless: 9B:10:76:E5:66:E1");
+    w.Str("02:00:00:00:00:01");
+    w.Str("Wireless: 02:00:00:00:00:01");
 
     w.U16(2);                                   /* num_modes */
     w.U32(1);                                   /* active_mode */
@@ -121,11 +121,11 @@ static void TestParseControllerData()
           "protocol-4 controller blob parses");
 
     CHECK(c.type == 2, "device type decodes");
-    CHECK(c.name == "Lian Li Wireless 66:e1", "device name decodes");
+    CHECK(c.name == "Lian Li Wireless 00:01", "device name decodes");
     CHECK(c.vendor == "Lian Li", "vendor decodes");
     CHECK(c.description == "Lian Li Wireless Fan Group", "description decodes");
-    CHECK(c.serial == "9B:10:76:E5:66:E1", "serial decodes");
-    CHECK(c.location == "Wireless: 9B:10:76:E5:66:E1", "location decodes");
+    CHECK(c.serial == "02:00:00:00:00:01", "serial decodes");
+    CHECK(c.location == "Wireless: 02:00:00:00:00:01", "location decodes");
     CHECK(c.active_mode == 1, "active mode index decodes");
 
     CHECK(c.modes.size() == 2, "both modes decode");
@@ -236,12 +236,12 @@ static void TestRawModeRoundTrip()
     Writer w;
     w.U32(4);        /* data_size placeholder */
     w.U32(2);
-    w.Str("Lian Li Wireless 66:e1");
+    w.Str("Lian Li Wireless 00:01");
     w.Str("Lian Li");
     w.Str("Lian Li Wireless Fan Group");
     w.Str("");
-    w.Str("9B:10:76:E5:66:E1");
-    w.Str("Wireless: 9B:10:76:E5:66:E1");
+    w.Str("02:00:00:00:00:01");
+    w.Str("Wireless: 02:00:00:00:00:01");
     w.U16(1);
     w.U32(0);
     w.buf.insert(w.buf.end(), c.modes[0].raw.begin(), c.modes[0].raw.end());

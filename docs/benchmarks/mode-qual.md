@@ -22,7 +22,7 @@ reconnect recovery, and multi-minute playback clock-drift measurement.
 | --- | --- | --- | --- |
 | 1 | Gigabyte AORUS GeForce RTX 5080 MASTER ICE (GPU) | 26 | live + baked playback frames |
 | 2 | Gigabyte X870E AORUS ELITE WIFI7 ICE (motherboard) | 2 | live + baked playback frames |
-| 3 | UNI FAN SL V3 Wireless 66:E1 (Lian Li wireless group, serial `9B:10:76:E5:66:E1`) | 120 | live + uploaded playback (owned lane) |
+| 3 | UNI FAN SL V3 Wireless 66:E1 (Lian Li wireless group, serial on file in `profiles/local/`) | 120 | live + uploaded playback (owned lane) |
 | 4 | Logitech G512 RGB Mechanical Gaming Keyboard | 108 | live + baked playback frames |
 | 5 | Razer Basilisk V3 Pro (Wired) | 13 | live + baked playback frames |
 

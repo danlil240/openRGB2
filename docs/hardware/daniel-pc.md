@@ -46,7 +46,7 @@ Motherboard headers are configured as **8 / 16 / 8**.
 - Competing RGB owners (L-Connect, GCC, Synapse, Logitech G Hub, stock
   OpenRGB) must be detected and handled explicitly — never killed silently.
 - The old Desktop Lighting Studio path (preserved project
-  `C:\Users\daniel\tools\openrgb-unified`) is read-only source of record;
+  `C:\Users\<user>\tools\openrgb-unified`) is read-only source of record;
   never modify or reset it.
 
 ## Revalidation checklist (authorized hardware session)

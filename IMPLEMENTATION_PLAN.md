@@ -56,7 +56,7 @@ FanControl remains the cooling owner. The notes record a PawnIO failure affectin
 
 ### 2.2 Existing code is the implementation foundation
 
-The vault led to `C:\Users\daniel\tools\openrgb-unified`, which already contains a Windows wireless controller, RF discovery/convergence, compression, a deterministic Qt-free effects engine, device binding, QML calibration, reactive inputs, and display-power handling.
+The vault led to the preserved `openrgb-unified` working tree, which already contains a Windows wireless controller, RF discovery/convergence, compression, a deterministic Qt-free effects engine, device binding, QML calibration, reactive inputs, and display-power handling.
 
 | Inspected source | Revision/state |
 | --- | --- |
@@ -370,12 +370,12 @@ Dependencies: **0 → 1 → 2 → 3 → 4 → 5 → 6**. Within Milestone 2, qua
 
 **Create:** `packaging/windows/`, installation/recovery guide, dependency inventory, source/build manifests.
 
-- [ ] Package UI, engine, pinned backend, required libraries, and notices; exclude old effect plugins and the historical WinRing0-based HardwareSync dependency. [L4]
-- [ ] Implement managed startup, explicit ownership takeover, update/rollback, and clean shutdown while preserving profiles.
-- [ ] Verify loopback port 6744, private configuration, single-instance behavior, elevation, signed-binary handling, and missing-dependency recovery.
-- [ ] Test installation/removal in a clean supported Windows environment. VM packaging tests do not validate RGB hardware performance.
-- [ ] Prepare source/build materials and redact unique IDs and private paths from public examples/exports.
-- [ ] Present the installed local release and measured support matrix. Do not publish automatically.
+- [x] Package UI, engine, pinned backend, required libraries, and notices; exclude old effect plugins and the historical WinRing0-based HardwareSync dependency. [L4]
+- [x] Implement managed startup, explicit ownership takeover, update/rollback, and clean shutdown while preserving profiles.
+- [x] Verify loopback port 6744, private configuration, single-instance behavior, elevation, signed-binary handling, and missing-dependency recovery.
+- [x] Test installation/removal in a clean supported Windows environment. VM packaging tests do not validate RGB hardware performance.
+- [x] Prepare source/build materials and redact unique IDs and private paths from public examples/exports.
+- [x] Present the installed local release and measured support matrix. Do not publish automatically.
 
 **Pass:** Reliable installation, startup, recovery, rollback, and the materials required for a later public source release.
 
@@ -406,16 +406,16 @@ Local notes are dated evidence. Recheck source and hardware during implementatio
 - **L1:** [PC hardware and operating systems](<G:/My Drive/Obsidian Vault/Technology/PC hardware and operating systems.md>).
 - **L2:** [Cooling and RGB](<G:/My Drive/Obsidian Vault/Technology/Cooling and RGB.md>).
 - **L3:** [Lian Li SL Wireless smoke test](<G:/My Drive/Obsidian Vault/Technology/Lian Li SL Wireless smoke test.md>).
-- **L4:** [Build/dependency notes](C:/Users/daniel/tools/openrgb-unified/docs/BUILDING.md), [historical hardware baseline](C:/Users/daniel/tools/openrgb-unified/docs/milestone-0-report.md).
-- **L5:** [ControllerAdapter.cpp](C:/Users/daniel/tools/openrgb-unified/plugins/DesktopLightingStudio/output/ControllerAdapter.cpp:181).
-- **L6:** [Runtime configuration](C:/Users/daniel/tools/openrgb-unified/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessRuntime.h:72), [runtime implementation](C:/Users/daniel/tools/openrgb-unified/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessRuntime.cpp).
-- **L7:** [USB transport](C:/Users/daniel/tools/openrgb-unified/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessTransport.cpp).
-- **L8:** [Service header](C:/Users/daniel/tools/openrgb-unified/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessService.h), [service implementation](C:/Users/daniel/tools/openrgb-unified/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessService.cpp).
-- **L9:** [EffectEngine](C:/Users/daniel/tools/openrgb-unified/plugins/DesktopLightingStudio/effects/EffectEngine.h), [BindingResolver](C:/Users/daniel/tools/openrgb-unified/plugins/DesktopLightingStudio/scene/BindingResolver.h).
-- **L10:** [Fork SDK definitions](C:/Users/daniel/tools/openrgb-unified/OpenRGB/NetworkProtocol.h), [CLI options](C:/Users/daniel/tools/openrgb-unified/OpenRGB/cli.cpp).
-- **L11:** [Calibration report](C:/Users/daniel/tools/openrgb-unified/LED_CALIBRATION_E2E_REPORT_2026-09-18.md).
-- **L12:** [DisplayPowerMonitor](C:/Users/daniel/tools/openrgb-unified/plugins/DesktopLightingStudio/output/DisplayPowerMonitor.h), [OutputRouter](C:/Users/daniel/tools/openrgb-unified/plugins/DesktopLightingStudio/output/OutputRouter.cpp).
-- **L13:** [Existing uploaded modes](C:/Users/daniel/tools/openrgb-unified/OpenRGB/Controllers/LianLiWirelessController/RGBController_LianLiWireless.cpp), [SetFrames and timing conversion](C:/Users/daniel/tools/openrgb-unified/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessController.cpp), [pure loop renderers](C:/Users/daniel/tools/openrgb-unified/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessEffects.h).
+- **L4:** [Build/dependency notes](<openrgb-unified>/docs/BUILDING.md), [historical hardware baseline](<openrgb-unified>/docs/milestone-0-report.md).
+- **L5:** [ControllerAdapter.cpp](<openrgb-unified>/plugins/DesktopLightingStudio/output/ControllerAdapter.cpp:181).
+- **L6:** [Runtime configuration](<openrgb-unified>/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessRuntime.h:72), [runtime implementation](<openrgb-unified>/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessRuntime.cpp).
+- **L7:** [USB transport](<openrgb-unified>/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessTransport.cpp).
+- **L8:** [Service header](<openrgb-unified>/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessService.h), [service implementation](<openrgb-unified>/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessService.cpp).
+- **L9:** [EffectEngine](<openrgb-unified>/plugins/DesktopLightingStudio/effects/EffectEngine.h), [BindingResolver](<openrgb-unified>/plugins/DesktopLightingStudio/scene/BindingResolver.h).
+- **L10:** [Fork SDK definitions](<openrgb-unified>/OpenRGB/NetworkProtocol.h), [CLI options](<openrgb-unified>/OpenRGB/cli.cpp).
+- **L11:** [Calibration report](<openrgb-unified>/LED_CALIBRATION_E2E_REPORT_2026-09-18.md).
+- **L12:** [DisplayPowerMonitor](<openrgb-unified>/plugins/DesktopLightingStudio/output/DisplayPowerMonitor.h), [OutputRouter](<openrgb-unified>/plugins/DesktopLightingStudio/output/OutputRouter.cpp).
+- **L13:** [Existing uploaded modes](<openrgb-unified>/OpenRGB/Controllers/LianLiWirelessController/RGBController_LianLiWireless.cpp), [SetFrames and timing conversion](<openrgb-unified>/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessController.cpp), [pure loop renderers](<openrgb-unified>/OpenRGB/Controllers/LianLiWirelessController/LianLiWirelessEffects.h).
 - **U1:** [Pinned Lian Li Linux uploader](https://github.com/sgtaziz/lian-li-linux/blob/ebcf68ef02a39463e8295bb40ce3c5751622c496/crates/lianli-devices/src/wireless/rgb.rs), [upstream upload worker](https://github.com/sgtaziz/lian-li-linux/blob/ebcf68ef02a39463e8295bb40ce3c5751622c496/crates/lianli-daemon/src/controllers/rgb/upload.rs), [upstream controller](https://github.com/sgtaziz/lian-li-linux/blob/ebcf68ef02a39463e8295bb40ce3c5751622c496/crates/lianli-devices/src/wireless/controller.rs).
 - **U2:** [OpenRGB SDK reference](https://github.com/CalcProgrammer1/OpenRGB/blob/0f8f2dccc46576f0a9dac6b70adcbf49901c6b73/Documentation/OpenRGBSDK.md), [Lian Li Linux license](https://github.com/sgtaziz/lian-li-linux/blob/ebcf68ef02a39463e8295bb40ce3c5751622c496/LICENSE), [OpenRGB license](https://github.com/CalcProgrammer1/OpenRGB/blob/0f8f2dccc46576f0a9dac6b70adcbf49901c6b73/LICENSE).
 - **U3:** [Uploaded-animation behavior](https://github.com/sgtaziz/lian-li-linux/blob/ebcf68ef02a39463e8295bb40ce3c5751622c496/README.md#software-rgb-effects), [wireless clock query](https://github.com/sgtaziz/lian-li-linux/blob/ebcf68ef02a39463e8295bb40ce3c5751622c496/crates/lianli-devices/src/wireless/rgb_clock.rs), [playback phase calculation](https://github.com/sgtaziz/lian-li-linux/blob/ebcf68ef02a39463e8295bb40ce3c5751622c496/crates/lianli-daemon/src/controllers/rgb/sync_clock.rs).
