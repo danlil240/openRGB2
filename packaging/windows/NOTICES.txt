@@ -1,0 +1,83 @@
+=====================================================================
+ OpenRGB2 — Third-Party Notices and License Manifest
+=====================================================================
+
+This package contains the OpenRGB2 application, the pinned
+wireless-enabled OpenRGB backend, and their runtime dependencies.
+License texts referenced below are in the licenses/ directory.
+
+---------------------------------------------------------------------
+1. OpenRGB2 application (openrgb2-ui.exe, openrgb2-engine.exe,
+   openrgb2-ctl.exe, presets/)
+---------------------------------------------------------------------
+License: GNU General Public License v2.0 or later
+         (SPDX-License-Identifier: GPL-2.0-or-later)
+Text:    licenses/GPL-2.0.txt
+
+The application source contains code ported from
+sgtaziz/lian-li-linux (Lian Li SL Wireless protocol and uploader),
+which is MIT licensed:
+Text:    licenses/MIT-lian-li-linux.txt
+Source:  https://github.com/sgtaziz/lian-li-linux
+         (pinned at ebcf68ef02a39463e8295bb40ce3c5751622c496)
+
+The engine statically embeds tinyuz (MIT license, housisong) for
+playback-loop compression:
+Text:    licenses/MIT-tinyuz.txt
+
+---------------------------------------------------------------------
+2. Pinned backend: OpenRGB (backend/OpenRGB.exe)
+---------------------------------------------------------------------
+License: GNU General Public License v2.0 or later
+Text:    licenses/GPL-2.0.txt
+Source:  https://github.com/CalcProgrammer1/OpenRGB
+         via the danlil240/OpenRGB fork, branch lianli-wireless,
+         revision 53a477eab8d14b0bc49aeb40e3d569cbcb16a377
+         (see vendor/provenance/MANIFEST.md in the source tree).
+
+The backend's LianLiWirelessController sources were likewise ported
+in part from sgtaziz/lian-li-linux (MIT — see above).
+
+---------------------------------------------------------------------
+3. Qt 6.8.3 runtime (Qt6*.dll and the platforms/, styles/,
+   imageformats/, iconengines/, qml/ plugin directories)
+---------------------------------------------------------------------
+License: GNU Lesser General Public License v3.0 (LGPL-3.0), which
+         incorporates the terms of GPL-3.0
+Texts:   licenses/LGPL-3.0.txt, licenses/GPL-3.0.txt
+Source:  https://www.qt.io / https://download.qt.io
+Note:    Qt is dynamically linked. You may replace the Qt DLLs with
+         your own build of Qt 6.8.x (LGPL relinking right). Qt
+         source code is available from the Qt Project; object/source
+         offers for the OpenRGB2 side are provided with the source
+         release of this project.
+
+---------------------------------------------------------------------
+4. Backend hardware-access dependencies (backend/)
+---------------------------------------------------------------------
+- libusb-1.0.dll      — libusb 1.0.27, LGPL-2.1-or-later
+                        (licenses/LGPL-2.1.txt)
+- hidapi-hotplug.dll  — hidapi (hotplug fork); multi-licensed
+                        GPLv3 / BSD-style / original HIDAPI license;
+                        used here under GPLv3 (licenses/GPL-3.0.txt).
+                        Upstream: https://github.com/libusb/hidapi
+- PawnIOLib.dll + *.bin PawnIO modules — PawnIO drivers/modules
+                        (BSD-2-Clause). Upstream:
+                        https://github.com/namazso/PawnIO
+- dxcompiler.dll, dxil.dll — Microsoft DirectX Shader Compiler
+                        (LLVM Release license / MIT-style).
+                        Upstream: https://github.com/microsoft/DirectXShaderCompiler
+
+---------------------------------------------------------------------
+5. Microsoft Visual C++ runtime (vcruntime140*.dll, msvcp140*.dll)
+---------------------------------------------------------------------
+Redistributed under the Microsoft Visual Studio redistributable
+license terms (distributable code, Visual Studio 2022 BuildTools).
+
+---------------------------------------------------------------------
+Excluded components (project packaging rules)
+---------------------------------------------------------------------
+The following are deliberately NOT shipped: legacy OpenRGB effect
+plugins, the historical WinRing0-based HardwareSync dependency, and
+the installed L-Connect yuz.dll. The staging script verifies their
+absence and fails the package if any appear.
