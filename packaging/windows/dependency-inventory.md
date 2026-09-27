@@ -39,7 +39,7 @@ v143. `dumpbin /dependents` output below is from the Release build.
 | Binary | Built by | Direct DLL deps (non-OS) |
 | --- | --- | --- |
 | `openrgb2-ui.exe` | `cmake --build build --config Release`, output `build/src/ui/Release/` | Qt6Core, Qt6Gui, Qt6Qml, Qt6QuickControls2 + MSVC CRT. QML imports (QtQuick, QtQuick.Controls, QtQuick.Dialogs, QtQuick.Layouts, QtQuick.Window) resolved by `windeployqt --qmldir ui/` — pulls the QtQuick/Controls/Dialogs/Layouts QML module tree under `qml/` plus Qt6Quick*, Qt6QuickControls2*, Qt6QuickDialogs2*, Qt6QuickLayouts, Qt6QuickTemplates2, Qt6Qml*, Qt6Svg, Qt6OpenGL, Qt6LabsFolderListModel, Qt6QuickEffects/Shapes |
-| `openrgb2-engine.exe` | same build, `build/src/engine/Release/` | Qt-free. OS DLLs only (WS2_32, IPHLPAPI, USER32, GDI32, ole32, ADVAPI32) + MSVC CRT (MSVCP140, VCRUNTIME140, VCRUNTIME140_1). tinyuz + divsufsort statically compiled in (`vendor/OpenRGB/dependencies/tinyuz`, MIT) |
+| `openrgb2-engine.exe` | same build, `build/src/engine/Release/` | Qt-free. OS DLLs only (WS2_32, IPHLPAPI, USER32, GDI32, ole32, ADVAPI32) + MSVC CRT (MSVCP140, VCRUNTIME140, VCRUNTIME140_1). tinyuz (`vendor/OpenRGB/dependencies/tinyuz`) + libdivsufsort (`vendor/OpenRGB/dependencies/HDiffPatch/libHDiffPatch/HDiff/private_diff/libdivsufsort`) statically compiled in (both MIT) |
 | `openrgb2-ctl.exe` | same build, `build/tools/engine_ctl/Release/` | Qt-free. WS2_32 + MSVC CRT |
 
 Stale duplicates of the two exes exist at `build/Release/` from an
@@ -47,8 +47,12 @@ older layout — the script deliberately sources only the
 `build/src/*/Release/` and `build/tools/*/Release/` outputs.
 
 Statically-linked third-party code in the engine/core: nlohmann-json
-single header (`vendor/OpenRGB/dependencies/json`, MIT), tinyuz
-(MIT, housisong), divsufsort (MIT). No DLLs — listed for provenance
+single header (`vendor/OpenRGB/dependencies/json`, MIT, Niels Lohmann —
+text `licenses/MIT-nlohmann-json.txt`), tinyuz (MIT, housisong —
+`licenses/MIT-tinyuz.txt`), libdivsufsort (MIT, Yuta Mori —
+`licenses/MIT-divsufsort.txt`; vendored inside HDiffPatch). All three
+are also statically compiled into `backend/OpenRGB.exe` per
+`vendor/OpenRGB/OpenRGB.pro`. No DLLs — listed for provenance
 completeness.
 
 ## 2. Pinned backend (vendor/OpenRGB — GPL-2.0-or-later)
@@ -68,10 +72,16 @@ Direct deps (`dumpbin /dependents`):
 | Qt6Core5Compat, Qt6OpenGL, Qt6Svg | Qt 6.8.3, recipe's manual extras + qsvg plugin dep | LGPL-3.0 |
 | libusb-1.0.dll | `dependencies/libusb-1.0.27` (VS2019 MS64 dll) | LGPL-2.1+ |
 | hidapi-hotplug.dll | `dependencies/hidapi-hotplug-win/x64` | GPLv3 / BSD / orig. (choice — GPLv3 here) |
-| PawnIOLib.dll | `dependencies/PawnIO` | BSD-2-Clause |
-| *.bin (SmbusPIIX4, SmbusI801, SmbusIntelSkylakeIMC, SmbusNCT6793, LpcIO, LedsValve) | `dependencies/PawnIO/modules` — PawnIO driver modules (replaced WinRing0) | BSD-2-Clause |
-| dxcompiler.dll, dxil.dll | DirectX Shader Compiler, pinned in the vendor deploy tree | LLVM Release (MIT-style) |
+| PawnIOLib.dll | `dependencies/PawnIO` ([namazso/PawnIO](https://github.com/namazso/PawnIO)) | LGPL-2.1-or-later |
+| *.bin (SmbusPIIX4, SmbusI801, SmbusIntelSkylakeIMC, SmbusNCT6793, LpcIO, LedsValve) | `dependencies/PawnIO/modules` — PawnIO hardware-access modules (replaced WinRing0), upstream [namazso/PawnIO.Modules](https://github.com/namazso/PawnIO.Modules) | LGPL-2.1-or-later |
+| dxcompiler.dll, dxil.dll | DirectX Shader Compiler, pinned in the vendor deploy tree | LLVM Release License (UIUC/NCSA) — text in `licenses/LLVM-Release-DXShaderCompiler.txt` |
 | MSVC CRT | VS2022 BuildTools redist | MS redist license |
+
+The PawnIO **kernel driver** (`PawnIO.sys`, namazso/PawnIO) is
+GPL-2.0-or-later with a linking exception and is **not shipped** —
+the user installs it separately (`vendor/OpenRGB/Documentation/
+SMBusAccess.md`); only the LGPL-2.1 user-mode library and module
+blobs are bundled.
 
 Qt plugin subdirs under `backend/` (`platforms/qwindows.dll`,
 `styles/qmodernwindowsstyle.dll`, `imageformats/q*.dll`,
@@ -112,7 +122,8 @@ without a preinstalled redist (missing-dependency recovery [plan §6]).
 | WinRing0-based HardwareSync | `WinRing0*` names; `HardwareSync` in file names |
 | Installed L-Connect `yuz.dll` | exact `yuz.dll` name (tinyuz is compiled in statically — no DLL must ship) |
 | Backend user state | `OpenRGB.json`, `*.log` under `backend/` |
-| Debug Qt runtime | `Qt6*d.dll` names |
+| User-local profiles | `profiles/local/` absent (gitignored user state) |
+| Debug Qt runtime | `Qt6*d.dll` names (release Qt modules ending in `d` would false-positive — allowlist in script if ever shipped) |
 
 Also asserted present: the three app exes, `backend/OpenRGB.exe`,
 Qt6Core+Qt6Widgets (backend) and Qt6Core+Qt6QuickControls2+`qml/`

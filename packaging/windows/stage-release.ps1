@@ -230,11 +230,19 @@ if(-not $VerifyOnly) {
     }
     Remove-Item -Force -ErrorAction SilentlyContinue `
         (Join-Path $OutDir "presets\*.cpp"), (Join-Path $OutDir "presets\*.h")
-    if(Test-Path (Join-Path $RepoRoot "profiles\daniel-pc.json")) {
-        Copy-Tree (Join-Path $RepoRoot "profiles") (Join-Path $OutDir "profiles")
+    # Stage committed topology profiles whenever the dir holds at
+    # least one *.json -- not keyed on a specific filename, so a
+    # profile rename can't silently drop them.
+    $profilesSrc  = Join-Path $RepoRoot "profiles"
+    $profileFiles = @(Get-ChildItem $profilesSrc -Filter *.json -File -ErrorAction SilentlyContinue)
+    if($profileFiles.Count -ge 1) {
+        Copy-Tree $profilesSrc (Join-Path $OutDir "profiles")
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $OutDir "profiles\local")
+        Info "preset library + committed profiles staged ($($profileFiles.Count) profile(s))"
+    } else {
+        Write-Host "WARNING: no committed profiles under $profilesSrc -- package ships without profiles/" -ForegroundColor Yellow
+        Info "preset library staged"
     }
-    Info "preset library + committed profiles staged"
 
     #--------------------------------------------------------------#
     # Notices + licenses                                            #
@@ -244,7 +252,9 @@ if(-not $VerifyOnly) {
     Info "NOTICES.txt + license texts staged"
 
     #--------------------------------------------------------------#
-    # Source/build manifest                                         #
+    # Source/build manifest -- collected now, but only WRITTEN after #
+    # the verification pass below succeeds, so a failed package can  #
+    # never carry an "exclusions_verified" claim.                    #
     #--------------------------------------------------------------#
     $gitRev = ""
     try { $gitRev = (& git -C $RepoRoot rev-parse HEAD 2>$null).Trim() } catch {}
@@ -298,9 +308,7 @@ if(-not $VerifyOnly) {
         )
         files = $files
     }
-    ($manifest | ConvertTo-Json -Depth 6) |
-        Set-Content -Encoding UTF8 (Join-Path $OutDir "manifest.json")
-    Info "manifest.json written ($($files.Count) files)"
+    Info "manifest content collected ($($files.Count) files) -- written after verification"
 }
 
 #--------------------------------------------------------------------#
@@ -325,9 +333,11 @@ $required = @(
     "presets\devices",
     "presets\effects",
     "NOTICES.txt",
-    "licenses",
-    "manifest.json"
+    "licenses"
 )
+# manifest.json is only written AFTER this verification passes (see
+# below); when re-checking an existing tree it must already be there.
+if($VerifyOnly) { $required += "manifest.json" }
 $missing = @()
 foreach($r in $required) {
     if(-not (Test-Path (Join-Path $OutDir $r))) { $missing += $r }
@@ -379,15 +389,36 @@ $forbidden += $all | Where-Object { -not $_.PSIsContainer -and $_.Name -match '(
 $forbidden += $all | Where-Object {
     $_.Name -match '^(OpenRGB\.json|.*\.log)$' -and $_.FullName -match '\\backend\\'
 }
-# 5. Debug Qt runtime DLLs (Qt6*d.dll).
+# 4b. Gitignored user-local profiles must not leak into the package
+#     (same class of assert as backend\OpenRGB.json above).
 $forbidden += $all | Where-Object {
-    -not $_.PSIsContainer -and $_.Name -match '^Qt6\w*d\.dll$'
+    $_.FullName -match '\\profiles\\local(\\|$)'
+}
+# 5. Debug Qt runtime DLLs. Qt debug builds are '<module>d.dll'
+#    (Qt6Cored.dll). A RELEASE Qt module whose name ends in 'd'
+#    would false-positive -- allowlist such names here if ever staged.
+$qtReleaseNamesEndingInD = @()   # e.g. @('Qt6Xyzd.dll') for a release DLL
+$forbidden += $all | Where-Object {
+    -not $_.PSIsContainer -and
+    $_.Name -match '^Qt6\w*d\.dll$' -and
+    $qtReleaseNamesEndingInD -notcontains $_.Name
 }
 
 if($forbidden.Count -gt 0) {
     Write-Host "FORBIDDEN package members:" -ForegroundColor Red
     $forbidden | ForEach-Object { Write-Host "  $($_.FullName)" -ForegroundColor Red }
     Fail "package contains excluded components (effect plugins / WinRing0 / yuz.dll / debug DLLs / user state)"
+}
+
+# Verification passed -- only now is it truthful to stamp the manifest
+# with exclusions_verified and ship it inside the package.
+if(-not $VerifyOnly) {
+    ($manifest | ConvertTo-Json -Depth 6) |
+        Set-Content -Encoding UTF8 (Join-Path $OutDir "manifest.json")
+    if(-not (Test-Path (Join-Path $OutDir "manifest.json"))) {
+        Fail "manifest.json was not written"
+    }
+    Info "manifest.json written ($($files.Count) files) after verification passed"
 }
 
 Write-Host "PACKAGE OK: $OutDir" -ForegroundColor Green

@@ -3,9 +3,10 @@
 Reproducible staging of the local release tree. No hand-assembled
 folders: `stage-release.ps1` copies build outputs, runs `windeployqt`
 from the pinned Qt, stages the pinned vendored backend, drops the
-license notices, writes a SHA-256 `manifest.json`, then verifies the
-result — failing if required files are missing or excluded components
-appear.
+license notices, verifies the result — failing if required files are
+missing or excluded components appear — and only then writes the
+SHA-256 `manifest.json` (so a failed package can't carry an
+`exclusions_verified` claim).
 
 ## Usage
 

@@ -25,6 +25,16 @@ The engine statically embeds tinyuz (MIT license, housisong) for
 playback-loop compression:
 Text:    licenses/MIT-tinyuz.txt
 
+Third-party code statically compiled into the application binaries
+(no separate DLLs shipped):
+
+- nlohmann/json single-include header v3.11.3 (MIT, Niels Lohmann)
+  Text:    licenses/MIT-nlohmann-json.txt
+  Source:  https://github.com/nlohmann/json
+- libdivsufsort (MIT, Yuta Mori), vendored inside HDiffPatch
+  Text:    licenses/MIT-divsufsort.txt
+  Source:  https://github.com/y-256/libdivsufsort
+
 ---------------------------------------------------------------------
 2. Pinned backend: OpenRGB (backend/OpenRGB.exe)
 ---------------------------------------------------------------------
@@ -37,6 +47,10 @@ Source:  https://github.com/CalcProgrammer1/OpenRGB
 
 The backend's LianLiWirelessController sources were likewise ported
 in part from sgtaziz/lian-li-linux (MIT — see above).
+
+The backend also statically embeds nlohmann/json, tinyuz and
+libdivsufsort (MIT — texts above; vendored under
+vendor/OpenRGB/dependencies/).
 
 ---------------------------------------------------------------------
 3. Qt 6.8.3 runtime (Qt6*.dll and the platforms/, styles/,
@@ -61,11 +75,24 @@ Note:    Qt is dynamically linked. You may replace the Qt DLLs with
                         GPLv3 / BSD-style / original HIDAPI license;
                         used here under GPLv3 (licenses/GPL-3.0.txt).
                         Upstream: https://github.com/libusb/hidapi
-- PawnIOLib.dll + *.bin PawnIO modules — PawnIO drivers/modules
-                        (BSD-2-Clause). Upstream:
+- PawnIOLib.dll        — PawnIO user-mode library, LGPL-2.1-or-later
+                        (licenses/LGPL-2.1.txt). Upstream:
                         https://github.com/namazso/PawnIO
+- *.bin PawnIO modules — PawnIO hardware-access modules
+                        (SmbusPIIX4, SmbusI801, SmbusIntelSkylakeIMC,
+                        SmbusNCT6793, LpcIO, LedsValve),
+                        LGPL-2.1-or-later (licenses/LGPL-2.1.txt).
+                        Upstream: https://github.com/namazso/PawnIO.Modules
+                        Note: the PawnIO kernel driver itself is
+                        GPL-2.0-or-later with a linking exception and
+                        is NOT bundled — it is installed separately by
+                        the user (see vendor/OpenRGB/Documentation/
+                        SMBusAccess.md). These .bin modules run on that
+                        driver via the Pawn interface.
 - dxcompiler.dll, dxil.dll — Microsoft DirectX Shader Compiler
-                        (LLVM Release license / MIT-style).
+                        (LLVM Release License, University of
+                        Illinois/NCSA Open Source License).
+                        Text: licenses/LLVM-Release-DXShaderCompiler.txt
                         Upstream: https://github.com/microsoft/DirectXShaderCompiler
 
 ---------------------------------------------------------------------
