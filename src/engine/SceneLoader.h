@@ -7,12 +7,17 @@
 |||   workspace layer, not only raw expanded JSON.         ||
 |||                                                           ||
 |||   Accepted forms, in detection order:                  ||
+|||   - any document with an object "scene" member: the    ||
+|||     legacy host-settings blob {"scene":..., "inputs":  ||
+|||     ...} AND the on-disk v1/v2 expanded workspace      ||
+|||     {"schema_version":<3, "scene":{...},               ||
+|||     "definitions":...} — StudioConfig::FromJson        ||
+|||     hard-rejects both, so ConfigMigration::            ||
+|||     MigrateLegacySettings runs FIRST, then the same    ||
+|||     workspace->scene resolve                          ||
 |||   - compact workspace studio.json: "schema_version"    ||
 |||     present -> StudioConfig::FromJson + SceneResolver  ||
 |||     through the device-type registry                   ||
-|||   - legacy host-settings blob {"scene":..., "inputs":  ||
-|||     ...} -> ConfigMigration::MigrateLegacySettings     ||
-|||     -> the same workspace->scene resolve               ||
 |||   - expanded SceneDocument: "version" 1/2 ->           ||
 |||     SceneJson::FromJson (the core schema; v1 upgrades  ||
 |||     in place like the file store did)                  ||

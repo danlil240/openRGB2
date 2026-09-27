@@ -259,9 +259,12 @@ bool ReadFile(const std::string& path, std::string& out)
     return true;
 }
 
-/* Parse + validate (+migrate) one document body. */
+/* Parse + validate (+migrate) one document body. Non-fatal
+   notes (e.g. an unrecognised legacy mode mapped to
+   live_effects) are collected in `warns` — never dropped. */
 bool ParseState(const std::string& bytes, EngineState& out,
-                std::vector<std::string>& errs, bool& migrated)
+                std::vector<std::string>& errs,
+                std::vector<std::string>& warns, bool& migrated)
 {
     const nlohmann::json j =
         nlohmann::json::parse(bytes, nullptr, false);
@@ -270,7 +273,7 @@ bool ParseState(const std::string& bytes, EngineState& out,
         errs.push_back("root: not valid JSON");
         return false;
     }
-    return EngineStateFromJson(j, out, &errs, nullptr, &migrated);
+    return EngineStateFromJson(j, out, &errs, &warns, &migrated);
 }
 
 } /* anonymous namespace */
@@ -787,14 +790,15 @@ ProfileStore::LoadResult ProfileStore::Load() const
 
     std::string              bytes;
     EngineState              state;
-    std::vector<std::string> errs;
+    std::vector<std::string> errs, warns;
     bool                     migrated = false;
     if(ReadFile(path_, bytes) &&
-       ParseState(bytes, state, errs, migrated))
+       ParseState(bytes, state, errs, warns, migrated))
     {
         result.status   = migrated ? LoadStatus::Migrated
                                    : LoadStatus::Loaded;
         result.state    = std::move(state);
+        result.warnings = std::move(warns);
         return result;
     }
     if(bytes.empty() && errs.empty())
@@ -812,16 +816,17 @@ ProfileStore::LoadResult ProfileStore::Load() const
     if(std::filesystem::exists(LkgPath(), ec))
     {
         EngineState              backup;
-        std::vector<std::string> berrs;
+        std::vector<std::string> berrs, bwarns;
         std::string              bbytes;
         bool                     bmig = false;
         if(ReadFile(LkgPath(), bbytes) &&
-           ParseState(bbytes, backup, berrs, bmig))
+           ParseState(bbytes, backup, berrs, bwarns, bmig))
         {
-            result.status = LoadStatus::Recovered;
-            result.state  = std::move(backup);
-            result.error  = primary_err +
-                            " restored the last-known-good copy";
+            result.status   = LoadStatus::Recovered;
+            result.state    = std::move(backup);
+            result.warnings = std::move(bwarns);
+            result.error    = primary_err +
+                              " restored the last-known-good copy";
             return result;
         }
         result.error = primary_err +
@@ -877,10 +882,10 @@ bool ProfileStore::Save(const EngineState& state, std::string& err) const
     {
         std::string              cur;
         EngineState              cur_state;
-        std::vector<std::string> cerrs;
+        std::vector<std::string> cerrs, cwarns;
         bool                     cmig = false;
         if(ReadFile(path_, cur) &&
-           ParseState(cur, cur_state, cerrs, cmig))
+           ParseState(cur, cur_state, cerrs, cwarns, cmig))
         {
             if(!WriteAtomic(LkgPath() + ".tmp", LkgPath(), cur, err))
             {

@@ -86,25 +86,19 @@ bool LoadSceneDocument(const std::string& path,
 
     std::vector<std::string> errors;
 
-    /*---- Compact workspace (studio.json, schema v3) --------*/
-    if(j.contains("schema_version"))
-    {
-        studio::StudioDocument ws;
-        if(!studio::FromJson(j, ws, &errors, warnings))
-        {
-            err = "workspace document failed to load: " +
-                  JoinErrors(errors);
-            return false;
-        }
-        return ResolveWorkspace(ws, registry, out, err, warnings);
-    }
-
-    /*---- Legacy host-settings blob {"scene":...,"inputs":...}*\
-    || The old project's settings form — migrated forward       ||
-    || through the same ConfigMigration path the file store    ||
-    || ran (extracted types layer over a COPY of the device    ||
-    || registry). A migrated scene has no playback selection:  ||
-    || it lands as Live effects, never uploaded playback.      ||
+    /*---- Anything with an object "scene" member is a      ||
+    ||   PRE-v3 form — both the host-settings blob          ||
+    ||   {"scene":...,"inputs":...} and the on-disk v1/v2   ||
+    ||   expanded workspace {"schema_version":<3,           ||
+    ||   "scene":{...},"definitions":...}. StudioConfig's   ||
+    ||   FromJson hard-rejects BOTH ("scene" is a removed   ||
+    ||   member, schema_version < 3 is unsupported), so the ||
+    ||   legacy check must run BEFORE the v3 branch — the   ||
+    ||   same MigrateLegacySettings path the old file store ||
+    ||   ran (extracted types layer over a COPY of the      ||
+    ||   device registry). A migrated scene has no playback ||
+    ||   selection: it lands as Live effects, never         ||
+    ||   uploaded playback.                                 ||
     \*---------------------------------------------------------*/
     if(studio::HasLegacySettings(j))
     {
@@ -128,6 +122,22 @@ bool LoadSceneDocument(const std::string& path,
             }
         }
         return ResolveWorkspace(ws, reg, out, err, warnings);
+    }
+
+    /*---- Compact workspace (studio.json, schema v3) --------*\
+    || Only reached when no "scene" member exists — a v1/v2   ||
+    || expanded workspace was already claimed above.         ||
+    \*---------------------------------------------------------*/
+    if(j.contains("schema_version"))
+    {
+        studio::StudioDocument ws;
+        if(!studio::FromJson(j, ws, &errors, warnings))
+        {
+            err = "workspace document failed to load: " +
+                  JoinErrors(errors);
+            return false;
+        }
+        return ResolveWorkspace(ws, registry, out, err, warnings);
     }
 
     /*---- Expanded SceneDocument (core schema, v1/v2) --------*\

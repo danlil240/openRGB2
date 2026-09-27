@@ -29,6 +29,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -198,7 +199,9 @@ static void TestMigration()
               .get<std::string>() == "keep me");
 
     /* An unrecognised legacy mode migrates to Live (safe),
-       with a warning — never to playback. */
+       with a warning — never to playback. The warning must
+       actually reach the caller (review fix: warnings were
+       silently dropped by ParseState). */
     WriteText(Path("odd-mode.json"),
               "{ \"scenes\": [ { \"scene\": \"name:x\", "
               "               \"mode\": \"turbo\" } ] }");
@@ -207,6 +210,13 @@ static void TestMigration()
     CHECK(ol.status == ProfileStore::LoadStatus::Migrated);
     CHECK(ol.state.scenes.size() == 1);
     CHECK(ol.state.scenes[0].mode == PlaybackMode::LiveEffects);
+    CHECK(!ol.warnings.empty());
+    if(!ol.warnings.empty())
+    {
+        CHECK(ol.warnings[0].find("turbo") != std::string::npos);
+        CHECK(ol.warnings[0].find("live_effects")
+              != std::string::npos);
+    }
 
     /* A newer schema is rejected — no silent downgrade. */
     WriteText(Path("future.json"),
@@ -671,6 +681,61 @@ static void TestSceneLoader()
     CHECK(LoadSceneDocument(leg_path, reg, doc, err, &warnings));
     CHECK(doc != nullptr);
 
+    /* The on-disk v1/v2 expanded workspace — schema_version < 3
+       with a "scene" member + "definitions" (the real format
+       written by the old project's ConfigStore, e.g.
+       studio.v2.backup.json). StudioConfig::FromJson rejects
+       this outright, so detection must route it to the
+       migration path (review fix). */
+    const std::string v2_path = Path("studio.v2.json");
+    WriteText(v2_path, R"json({
+        "schema_version": 2,
+        "name": "v2 desk",
+        "definitions": { "devices": [], "effects": [] },
+        "inputs": { "audio": false, "keys": false,
+                    "screen": false, "screen_index": 0,
+                    "sens_pct": 100, "decay_pct": 100 },
+        "output": { "brightness": 1.0, "live_on_startup": false },
+        "scene": {
+            "version": 2,
+            "name": "v2-scene",
+            "bindings": [
+                { "id": "b1", "controller_name": "Mini Fan",
+                  "vendor": "Test", "zone_name": "ring",
+                  "zone_leds": 1 }
+            ],
+            "objects": [
+                { "id": "fan0", "kind": "device", "binding": "b1",
+                  "geometry": "fan_ring", "label": "Fan",
+                  "verified": true,
+                  "emitters": [
+                      { "address": 0, "group": "ring",
+                        "pos": { "x": 0.0, "y": 0.0, "z": 0.0 } }
+                  ] }
+            ]
+        }
+    })json");
+    doc.reset();
+    warnings.clear();
+    CHECK(LoadSceneDocument(v2_path, reg, doc, err, &warnings));
+    CHECK(doc != nullptr);
+    if(doc)
+    {
+        /* Migration + re-resolution produced the device object
+           bound to b1 — live_only stays false (never silently
+           armed). */
+        bool found = false;
+        for(const studio::SceneObject& o : doc->objects)
+        {
+            if(o.kind == studio::ObjectKind::Device &&
+               o.binding == "b1")
+            {
+                found = true;
+            }
+        }
+        CHECK(found);
+    }
+
     /* Garbage is rejected honestly, not blanked. */
     const std::string bad_path = Path("bad.json");
     WriteText(bad_path, "{ not json");
@@ -694,6 +759,29 @@ int main()
     TestBoundaryValidation();
     TestDurablePlaybackMode();
     TestSceneLoader();
+
+    /* Opt-in manual check: point OPENRGB2_SCENE_FILE at a real
+       scene/workspace file (e.g. a studio.v2.backup.json) to
+       verify LoadSceneDocument against it. No-op when unset —
+       the suite itself stays hermetic. */
+    if(const char* extra = std::getenv("OPENRGB2_SCENE_FILE"))
+    {
+        if(*extra)
+        {
+            studio::PresetRegistry reg;
+            std::shared_ptr<studio::SceneDocument> d;
+            std::string err;
+            std::vector<std::string> warns;
+            const bool ok =
+                LoadSceneDocument(extra, reg, d, err, &warns);
+            std::printf("scene-file %s: %s (%u objects, %u warnings%s%s)\n",
+                extra, ok ? "ok" : "FAILED",
+                d ? (unsigned int)d->objects.size() : 0u,
+                (unsigned int)warns.size(),
+                ok ? "" : ", err: ", ok ? "" : err.c_str());
+            CHECK(ok);
+        }
+    }
 
     fs::remove_all(g_tmp, ec);
     std::printf("%d checks, %d failures\n", checks, failures);
