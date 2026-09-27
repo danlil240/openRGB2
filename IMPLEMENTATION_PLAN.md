@@ -370,12 +370,12 @@ Dependencies: **0 → 1 → 2 → 3 → 4 → 5 → 6**. Within Milestone 2, qua
 
 **Create:** `packaging/windows/`, installation/recovery guide, dependency inventory, source/build manifests.
 
-- [ ] Package UI, engine, pinned backend, required libraries, and notices; exclude old effect plugins and the historical WinRing0-based HardwareSync dependency. [L4]
-- [ ] Implement managed startup, explicit ownership takeover, update/rollback, and clean shutdown while preserving profiles.
-- [ ] Verify loopback port 6744, private configuration, single-instance behavior, elevation, signed-binary handling, and missing-dependency recovery.
-- [ ] Test installation/removal in a clean supported Windows environment. VM packaging tests do not validate RGB hardware performance.
-- [ ] Prepare source/build materials and redact unique IDs and private paths from public examples/exports.
-- [ ] Present the installed local release and measured support matrix. Do not publish automatically.
+- [x] Package UI, engine, pinned backend, required libraries, and notices; exclude old effect plugins and the historical WinRing0-based HardwareSync dependency. [L4]
+- [x] Implement managed startup, explicit ownership takeover, update/rollback, and clean shutdown while preserving profiles.
+- [x] Verify loopback port 6744, private configuration, single-instance behavior, elevation, signed-binary handling, and missing-dependency recovery.
+- [x] Test installation/removal in a clean supported Windows environment. VM packaging tests do not validate RGB hardware performance.
+- [x] Prepare source/build materials and redact unique IDs and private paths from public examples/exports.
+- [x] Present the installed local release and measured support matrix. Do not publish automatically.
 
 **Pass:** Reliable installation, startup, recovery, rollback, and the materials required for a later public source release.
 
