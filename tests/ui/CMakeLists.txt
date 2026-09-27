@@ -1,0 +1,61 @@
+# UI tests (Milestone 4) — CTest label `ui`.
+#
+#   ui_wire_client_test  wire-level client protocol against a
+#                        scripted in-process server channel
+#                        (fragmentation, malformed, resync,
+#                        version mismatch, disconnect)
+#   ui_bridge_test       the QObject bridge: connect/drop/
+#                        reconnect + bounded backoff over a
+#                        QCoreApplication loop
+#   qml_smoke_test       headless QML load of the shell and all
+#                        four pages with no engine — the honest
+#                        degraded state must render
+
+find_package(Qt6 6.8 REQUIRED COMPONENTS
+    Core Gui Qml Quick QuickControls2)
+
+# Qt's DLLs live outside the build tree; prepend the Qt bin dir
+# to PATH for the test processes only.
+get_target_property(_qtcore_loc Qt6::Core LOCATION)
+get_filename_component(QT_BIN_DIR "${_qtcore_loc}" DIRECTORY)
+
+function(ui_suite NAME)
+    add_executable(${NAME} ${NAME}.cpp)
+    target_link_libraries(${NAME} PRIVATE
+        openrgb2_ui
+        openrgb2_ipc)
+    target_include_directories(${NAME} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/src/ui)
+    target_compile_definitions(${NAME} PRIVATE NDEBUG)
+    set_target_properties(${NAME} PROPERTIES AUTOMOC ON)
+    add_test(NAME ${NAME} COMMAND ${NAME})
+    set_tests_properties(${NAME} PROPERTIES
+        LABELS ui
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:${QT_BIN_DIR}")
+endfunction()
+
+ui_suite(ui_wire_client_test)
+ui_suite(ui_bridge_test)
+
+# The QML smoke test additionally needs the module's compiled
+# plugin + Qt Quick runtime on its link line.
+add_executable(qml_smoke_test qml_smoke_test.cpp)
+target_link_libraries(qml_smoke_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+target_include_directories(qml_smoke_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(qml_smoke_test PRIVATE NDEBUG)
+set_target_properties(qml_smoke_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(qml_smoke_test)
+add_test(NAME qml_smoke_test COMMAND qml_smoke_test)
+set_tests_properties(qml_smoke_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
