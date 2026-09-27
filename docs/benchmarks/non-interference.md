@@ -60,7 +60,10 @@ Fixes (this commit):
 
 - `DeliveryPipeline::DrainDue()` — early return when `output_paused_`
   (`src/engine/DeliveryPipeline.cpp`); `LaneRun()` sleeps while
-  paused; `SetOutputPaused` drops pending frames.
+  paused; `SetOutputPaused` only asserts the flag/reason and wakes
+  the lanes — the pending-frame discard is
+  `PowerLifecycle::DropAllLanes` → `DeliveryPipeline::DropPending`,
+  run inside the same `ApplyEvent` step.
 - `EngineHost::PollOnce` — lifecycle poll runs before playback poll,
   so wake restore revalidates before output resumes; custom-mode
   upkeep is skipped while gated (Task 5.3).
@@ -83,7 +86,7 @@ Fixes (this commit):
 
 | Window | Result |
 | --- | --- |
-| 15 s display off, live scene streaming all 5 lanes | `transport_completed` delta **+0 on every lane incl. the GPU**; submissions +31/lane (worker keeps producing — gate-discarded, +7165 rejected backlog) |
+| 15 s display off, live scene streaming all 5 lanes | `transport_completed` delta **+0 on every lane incl. the GPU** — the authoritative no-write claim; the worker kept producing (stats deltas over the window: `submitted` +31/lane — admitted lane frames, counted at the ungated edges; the gate-discarded work lands in `rejected`, +7165, never in `submitted`) |
 | `set-playback animation_playback` issued while off | reply `{applied:false, pending:true, requested_mode:animation_playback}`; 4 s later `transport_completed` delta **+0 aggregate** |
 | Display on (`SC_MONITORPOWER -1` + input wake) | parked request replays: `mode:animation_playback, upload:active, control:playing`, `pending:false`, `detail:null` — every upload byte strictly post-wake |
 

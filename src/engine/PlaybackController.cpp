@@ -449,7 +449,17 @@ PlaybackController::Result PlaybackController::RequestImpl(
                 ++epoch_;
                 requested_mode_    = mode;
                 requested_control_ = control;
-                hold_overridden_   = true;   /* user intent */
+                if(!force_restore)
+                {
+                    /* USER intent only — the lifecycle's own
+                       force_restore write is not a user request
+                       and must not mark the hold overridden
+                       (HoldOverridden contract); otherwise a
+                       mid-failing wake restore would wrongly
+                       block the deferral-revert in
+                       PowerLifecycle::AttemptRestore. */
+                    hold_overridden_ = true;
+                }
                 ++next_rev_;
                 requested_rev_ = next_rev_;
                 PersistLocked();
@@ -470,7 +480,10 @@ PlaybackController::Result PlaybackController::RequestImpl(
                 requested_mode_    = mode;
                 requested_control_ =
                     to_animation ? control : PlaybackControl::Playing;
-                hold_overridden_   = true;   /* user intent */
+                if(!force_restore)
+                {
+                    hold_overridden_ = true;   /* user intent only */
+                }
             }
         }
     }
