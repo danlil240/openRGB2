@@ -27,6 +27,14 @@ EngineBridge::EngineBridge(QObject* parent)
         return ipc::ConnectNamedPipeChannel(pipe_name_.toStdString(),
                                             2000, err);
     };
+
+    /* playbackView is derived from the playback + connection
+       stores — any update to either recomputes the honest
+       applied/requested phase for every bound view. */
+    connect(this, &EngineBridge::playbackChanged,
+            this, &EngineBridge::playbackViewChanged);
+    connect(this, &EngineBridge::connectionChanged,
+            this, &EngineBridge::playbackViewChanged);
 }
 
 EngineBridge::~EngineBridge()
@@ -591,6 +599,149 @@ QVariantList EngineBridge::snapshots() const      { return snapshots_; }
 QVariantMap EngineBridge::connection() const      { return connection_; }
 QVariantMap EngineBridge::scene() const           { return scene_; }
 QVariantMap EngineBridge::playback() const        { return playback_; }
+
+/*---------------------------------------------------------*\
+|||| playbackView — the honest applied-vs-requested view    ||
+|||| of the PLAYBACK body (docs/ipc-protocol.md §5):        ||
+|||| requested_mode is the recorded selection, applied_mode ||
+|||| is status.mode (moves only on backend ack), pending    ||
+|||| covers wire-pending OR a requested/applied mismatch,   ||
+|||| and phase is the single display token. Every cadence/  ||
+|||| sync/physical field passes through what the wire       ||
+|||| reports — unmeasured stays unmeasured, never a         ||
+|||| fabricated FPS number (plan section 5).                ||
+\*---------------------------------------------------------*/
+QVariantMap EngineBridge::playbackView() const
+{
+    const QVariantMap st =
+        playback_.value(QStringLiteral("status")).toMap();
+    const QVariantMap caps =
+        playback_.value(QStringLiteral("capabilities")).toMap();
+    const QVariantMap phys =
+        st.value(QStringLiteral("physical")).toMap();
+
+    const QString requested =
+        playback_.value(QStringLiteral("requested_mode")).toString();
+    const QString applied =
+        st.value(QStringLiteral("mode")).toString();
+    const QString upload =
+        st.value(QStringLiteral("upload")).toString();
+    const QString control =
+        st.value(QStringLiteral("control")).toString();
+    const QString detail =
+        playback_.value(QStringLiteral("detail")).toString();
+    const QString reason =
+        playback_.value(QStringLiteral("unavailable_reason")).toString();
+    const QString sdk =
+        connection_.value(QStringLiteral("state")).toString();
+
+    const bool wire_pending =
+        playback_.value(QStringLiteral("pending")).toBool();
+    const bool mismatch = !requested.isEmpty() && !applied.isEmpty()
+                          && requested != applied;
+    const bool pending = wire_pending || mismatch;
+
+    /* Phase precedence — the most honest headline first:
+       a dead/reconnecting backend link outranks everything
+       (a pending ack cannot land across it), an in-flight
+       transition outranks the last FAILED state (a new
+       request supersedes it), and a requested/applied
+       mismatch is still "applying" — never "applied" before
+       the revision confirms. */
+    QString phase;
+    if(!sdk.isEmpty() && sdk != QLatin1String("connected"))
+    {
+        phase = QStringLiteral("reconnecting");
+    }
+    else if(wire_pending)
+    {
+        phase = QStringLiteral("applying");
+    }
+    else if(upload == QLatin1String("failed"))
+    {
+        phase = QStringLiteral("failed");
+    }
+    else if(applied.isEmpty())
+    {
+        phase = QStringLiteral("unknown");
+    }
+    else if(mismatch)
+    {
+        phase = QStringLiteral("applying");
+    }
+    else if(applied == QLatin1String("animation_playback"))
+    {
+        phase = upload == QLatin1String("uploading")
+                    ? QStringLiteral("uploading")
+                    : QStringLiteral("active");
+    }
+    else
+    {
+        phase = QStringLiteral("live");
+    }
+
+    /* Configured (NOT measured) loop cadence — the shared
+       loop builder's effective geometry the engine reports. */
+    const int    frame_count =
+        st.value(QStringLiteral("effective_frame_count")).toInt();
+    const double frame_interval =
+        st.value(QStringLiteral("effective_frame_interval_s"))
+            .toDouble();
+    const double cycle =
+        frame_count > 0 && frame_interval > 0.0
+            ? frame_count * frame_interval : 0.0;
+    const double configured_hz =
+        frame_interval > 0.0 ? 1.0 / frame_interval : 0.0;
+
+    /* Physical measurement — only what the wire reports. */
+    const double  pint =
+        phys.value(QStringLiteral("frame_interval_s")).toDouble();
+    const QString prov =
+        phys.value(QStringLiteral("provenance")).toString();
+    const bool measured = pint > 0.0 && !prov.isEmpty() &&
+                          prov != QLatin1String("unknown");
+
+    QVariantMap out;
+    out.insert(QStringLiteral("requested_mode"),  requested);
+    out.insert(QStringLiteral("applied_mode"),    applied);
+    out.insert(QStringLiteral("wire_pending"),    wire_pending);
+    out.insert(QStringLiteral("pending"),         pending);
+    out.insert(QStringLiteral("control"),         control);
+    out.insert(QStringLiteral("upload"),          upload);
+    out.insert(QStringLiteral("phase"),           phase);
+    out.insert(QStringLiteral("phase_detail"),    detail);
+    out.insert(QStringLiteral("unavailable_reason"), reason);
+    out.insert(QStringLiteral("animation_available"),
+               caps.value(QStringLiteral("animation_playback"))
+                   .toBool());
+    out.insert(QStringLiteral("live_available"),
+               caps.value(QStringLiteral("live_effects"))
+                   .toBool());
+    out.insert(QStringLiteral("sdk_state"),       sdk);
+    out.insert(QStringLiteral("requested_revision"),
+               playback_.value(QStringLiteral("requested_revision")));
+    out.insert(QStringLiteral("preset_revision"),
+               st.value(QStringLiteral("preset_revision")));
+    out.insert(QStringLiteral("parameter_revision"),
+               st.value(QStringLiteral("parameter_revision")));
+    out.insert(QStringLiteral("frame_count"),      frame_count);
+    out.insert(QStringLiteral("frame_interval_s"), frame_interval);
+    out.insert(QStringLiteral("cycle_s"),          cycle);
+    out.insert(QStringLiteral("configured_hz"),    configured_hz);
+    out.insert(QStringLiteral("sync"),
+               st.value(QStringLiteral("sync")).toString());
+    out.insert(QStringLiteral("clock_sample_s"),
+               st.value(QStringLiteral("clock_sample_s")));
+    out.insert(QStringLiteral("clock_uncertainty_s"),
+               st.value(QStringLiteral("clock_uncertainty_s")));
+    out.insert(QStringLiteral("physical_measured"), measured);
+    out.insert(QStringLiteral("physical_frame_interval_s"), pint);
+    out.insert(QStringLiteral("physical_cycle_s"),
+               phys.value(QStringLiteral("cycle_s")));
+    out.insert(QStringLiteral("physical_provenance"), prov);
+    return out;
+}
+
 QVariantMap EngineBridge::frameStatus() const     { return frame_status_; }
 QVariantMap EngineBridge::deliveryStats() const   { return delivery_stats_; }
 QVariantList EngineBridge::presets() const        { return presets_; }

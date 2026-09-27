@@ -82,7 +82,10 @@ Item {
                     }
                 }
 
-                /* Playback */
+                /* Playback — the same honest phase the Lighting
+                   view reports (EngineBridge::playbackView):
+                   Uploading / Active / Reconnecting / Failed /
+                   pending-never-applied-early. */
                 Card {
                     title: qsTr("PLAYBACK")
                     Layout.fillWidth: true
@@ -92,29 +95,47 @@ Item {
                             text: {
                                 if(!root.engineUp)
                                     return qsTr("offline");
-                                const st = bridge.playback.status;
-                                if(bridge.playback.pending)
-                                    return qsTr("applying…");
-                                if(st && st.control)
-                                    return st.control;
-                                if(st && st.upload)
-                                    return st.upload;
-                                return qsTr("unknown");
+                                switch(bridge.playbackView.phase) {
+                                case "reconnecting": return qsTr("reconnecting");
+                                case "applying":     return qsTr("applying…");
+                                case "failed":       return qsTr("failed");
+                                case "uploading":    return qsTr("uploading");
+                                case "active":       return qsTr("active");
+                                case "live":         return qsTr("live");
+                                default:             return qsTr("unknown");
+                                }
                             }
                             tone: !root.engineUp ? "neutral"
-                                : bridge.playback.pending ? "warn"
-                                : (bridge.playback.status
-                                   && bridge.playback.status.control === "playing")
-                                  ? "ok" : "neutral"
+                                : bridge.playbackView.phase === "failed"
+                                  ? "bad"
+                                : bridge.playbackView.phase === "reconnecting"
+                                       || bridge.playbackView.phase === "applying"
+                                  ? "warn"
+                                : bridge.playbackView.phase === "active"
+                                       || bridge.playbackView.phase === "live"
+                                  ? "ok"
+                                : bridge.playbackView.phase === "uploading"
+                                  ? "accent" : "neutral"
                         }
                         Text {
-                            text: root.engineUp
-                                  ? (bridge.playback.requested_mode === "animation_playback"
-                                     ? qsTr("Animation playback")
-                                     : bridge.playback.requested_mode === "live_effects"
-                                       ? qsTr("Live effects")
-                                       : qsTr("mode unknown"))
-                                  : ""
+                            text: {
+                                if(!root.engineUp)
+                                    return "";
+                                const v = bridge.playbackView;
+                                const label = m =>
+                                    m === "animation_playback"
+                                        ? qsTr("Animation playback")
+                                        : qsTr("Live effects");
+                                if(!v.applied_mode)
+                                    return qsTr("mode unknown");
+                                if(v.requested_mode
+                                   && v.requested_mode !== v.applied_mode)
+                                    return qsTr("on device: %1 · requested: %2")
+                                        .arg(label(v.applied_mode))
+                                        .arg(label(v.requested_mode));
+                                return qsTr("on device: %1")
+                                    .arg(label(v.applied_mode));
+                            }
                             color: Theme.textSecondary
                             font.pixelSize: Theme.fontSizeSmall
                         }

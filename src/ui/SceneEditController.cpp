@@ -47,6 +47,27 @@ QVariantMap JObj(const nlohmann::json& j)
     return JsonToVariant(j).toMap();
 }
 
+/* The normalized playback-preset id a document names in
+   effect.preset ("" when it names none) — compares cleanly
+   against pending_default_preset_ regardless of the id
+   style the document carries. */
+std::string DocPresetId(const nlohmann::json& doc)
+{
+    if(doc.is_object())
+    {
+        const auto e = doc.find("effect");
+        if(e != doc.end() && e->is_object())
+        {
+            const auto p = e->find("preset");
+            if(p != e->end() && p->is_string())
+            {
+                return NormalizePresetId(p->get<std::string>());
+            }
+        }
+    }
+    return std::string();
+}
+
 } /* anonymous namespace */
 
 SceneEditController::SceneEditController(EngineBridge* bridge,
@@ -62,6 +83,14 @@ SceneEditController::SceneEditController(EngineBridge* bridge,
     connect(bridge_, &EngineBridge::engineLost,
             this, [this](const QString& reason)
             {
+                /* Correlators die with the session — a stale
+                   pending_save_id_/echo revision must never
+                   collide with request ids the NEXT session
+                   hands out, and a pending new-instance
+                   default has no session left to fire in. */
+                pending_save_id_       = 0;
+                pending_echo_revision_ = 0;
+                pending_default_preset_.clear();
                 if(saving_)
                 {
                     /* The reply can never arrive — surface the
@@ -135,6 +164,65 @@ void SceneEditController::OnSceneChanged()
     {
         model_.LoadApplied(doc);
     }
+
+    /* New-instance default (plan section 3.4; the Task 3.6
+       ruling assigns the user-facing default to the UI): an
+       explicit uploaded-preset pick armed the latch — once
+       the APPLIED document actually names that preset
+       (capability validation runs engine-side against the
+       applied scene, never the pending working copy) and the
+       recorded selection isn't already animation, request
+       Animation playback. One-shot: it fires here or dies on
+       a reverted pick — a remote apply that coincidentally
+       names the same preset is indistinguishable and the
+       default it produces is identical anyway. Existing/
+       migrated scenes never reach this code: nothing else
+       arms the latch. */
+    if(!pending_default_preset_.isEmpty())
+    {
+        if(NormalizePresetId(model_.PresetId()) !=
+           pending_default_preset_.toStdString())
+        {
+            pending_default_preset_.clear();   /* pick reverted */
+        }
+        else if(DocPresetId(model_.Baseline()) ==
+                pending_default_preset_.toStdString())
+        {
+            pending_default_preset_.clear();
+            if(RequestedMode() !=
+               QLatin1String("animation_playback"))
+            {
+                requestMode(QStringLiteral("animation_playback"));
+            }
+        }
+    }
+
+    /* Deferred minor from 4.2: the param touched latches are
+       scene-scoped — the engine keys persisted selections on
+       the scene name, so a NEW applied name resets them (and
+       the trackers back to defaults, the only seed the wire
+       offers) — a param touched in one scene can never ride
+       into another's requests. */
+    const std::string sname =
+        JStr(model_.Baseline(), "name").toStdString();
+    if(sname != last_scene_name_)
+    {
+        last_scene_name_ = sname;
+        if(param_speed_touched_ || param_reverse_touched_ ||
+           param_color_touched_ || param_speed_ != 100 ||
+           param_reverse_ ||
+           param_color_ != QLatin1String("#FF0000"))
+        {
+            param_speed_           = 100;
+            param_reverse_         = false;
+            param_color_           = QStringLiteral("#FF0000");
+            param_speed_touched_   = false;
+            param_reverse_touched_ = false;
+            param_color_touched_   = false;
+            emit paramsChanged();
+        }
+    }
+
     emit sceneChanged();
     emit workingChanged();
     emit groupsChanged();
@@ -232,11 +320,33 @@ void SceneEditController::TouchWorking()
 
 bool SceneEditController::setPreset(const QString& id)
 {
+    /* The scene-creation default (plan section 3.4 first-
+       release rules; the Task 3.6 ruling assigns the
+       user-facing default to the UI): picking one of the
+       three uploaded presets for a NEW instance arms the
+       Animation-playback default — it fires in
+       OnSceneChanged once the engine has APPLIED a scene
+       naming the preset. Existing/migrated scenes stay
+       Live: profile loads (LoadWorking) and remote applies
+       never arm the latch. */
+    const std::string prev = NormalizePresetId(model_.PresetId());
     std::string err;
     if(!model_.SetPreset(id.toStdString(), err))
     {
         SetSaveError(QString::fromStdString(err));
         return false;
+    }
+    PlaybackPresetInfo info;
+    const std::string picked =
+        NormalizePresetId(id.toStdString());
+    if(PlaybackPresetFromName(id.toStdString(), info) &&
+       picked != prev)
+    {
+        pending_default_preset_ = QString::fromStdString(picked);
+    }
+    else
+    {
+        pending_default_preset_.clear();
     }
     SetSaveError(QString());
     TouchWorking();
@@ -376,6 +486,9 @@ void SceneEditController::save()
 
 void SceneEditController::discardEdits()
 {
+    /* Discarding reverts the working copy — the preset pick
+       that armed the new-instance default is gone with it. */
+    pending_default_preset_.clear();
     model_.DiscardEdits();
     TouchWorking();
 }
@@ -442,6 +555,15 @@ int SceneEditController::requestMode(const QString& mode)
        mode != QLatin1String("animation_playback"))
     {
         return 0;
+    }
+    /* An explicit Live pick while the new-instance default is
+       armed disarms it — the user's stated choice wins over
+       the pending default. An explicit Animation pick leaves
+       it armed as the retry net: a request rejected before
+       the scene applies still defaults on apply. */
+    if(mode == QLatin1String("live_effects"))
+    {
+        pending_default_preset_.clear();
     }
     /* Always carry the CURRENT control — the wire defaults an
        omitted control to "playing", which would silently
@@ -582,6 +704,11 @@ bool SceneEditController::loadProfile(const QString& name)
                          .arg(name));
         return false;
     }
+    /* A staged profile is an EXISTING scene instance — it
+       keeps the engine's persisted selection (Live effects
+       for migrated profiles), never the new-instance
+       animation default. */
+    pending_default_preset_.clear();
     model_.LoadWorking(VariantToJson(doc));
     SetSaveError(QString());
     emit dirtyChanged();

@@ -23,8 +23,26 @@ Item {
         typeof bridge !== "undefined" && bridge.connected
     readonly property bool editorUp:
         typeof sceneEdit !== "undefined"
-    readonly property string requestedMode:
-        engineUp ? (bridge.playback.requested_mode || "") : ""
+
+    /* Derived playback view (EngineBridge::playbackView) —
+       requested_mode is the recorded selection, applied_mode
+       is what the backend acknowledged, and phase is the
+       honest headline: reconnecting / applying / failed /
+       uploading / active / live / unknown. */
+    readonly property var pv:
+        engineUp ? bridge.playbackView : ({})
+    readonly property string requestedMode: pv.requested_mode || ""
+    readonly property string appliedMode:   pv.applied_mode   || ""
+    readonly property bool animationRequested:
+        requestedMode === "animation_playback"
+    readonly property bool animationApplied:
+        appliedMode === "animation_playback"
+    /* Supported-control filtering (plan §3.4): while the
+       uploaded loop owns output, only the preset's own
+       controls apply — palette/layer/scene-multiplier
+       controls are live-effects only this release. */
+    readonly property bool liveControlsEnabled:
+        editorUp && !animationRequested
 
     /*---- tracked uploaded-preset params (UI-side; the wire
            reports revisions, not values — so the last-sent
@@ -204,10 +222,14 @@ Item {
                 }
 
                 /*---- Playback mode selector --------------------
-                   Spec wording verbatim. Capability-gated —
-                   animation_playback is honest about scenes
-                   that can't upload.                       */
+                   Spec wording verbatim, beside the selected
+                   effect. Capability-gated — the border marks
+                   the REQUESTED selection and the pill marks
+                   what the device actually runs, so a pending
+                   transition never reports applied before the
+                   engine confirms it.                      */
                 RowLayout {
+                    objectName: "modeSelector"
                     width: parent.width - 2 * col.padding
                     spacing: Theme.spaceL
 
@@ -227,13 +249,18 @@ Item {
 
                         Card {
                             Layout.fillWidth: true
+                            readonly property string modeKey: modelData.key
+                            readonly property bool requested:
+                                root.requestedMode === modeKey
+                            readonly property bool applied:
+                                root.appliedMode === modeKey
                             readonly property bool usable:
                                 root.engineUp
-                                && bridge.playback.capabilities
-                                && bridge.playback.capabilities[modelData.key] !== false
-                            border.color: root.requestedMode === modelData.key
-                                          ? Theme.accent : Theme.border
-                            border.width: root.requestedMode === modelData.key ? 2 : 1
+                                && (modeKey === "animation_playback"
+                                    ? root.pv.animation_available !== false
+                                    : root.pv.live_available !== false)
+                            border.color: requested ? Theme.accent : Theme.border
+                            border.width: requested ? 2 : 1
 
                             Column {
                                 spacing: Theme.spaceXS
@@ -253,88 +280,256 @@ Item {
                                 }
                                 Text {
                                     visible: root.engineUp && !usable
-                                    text: bridge.playback.unavailable_reason
+                                    text: root.pv.unavailable_reason
                                           || qsTr("not available for this scene")
                                     color: Theme.warn
                                     font.pixelSize: Theme.fontSizeSmall
                                     wrapMode: Text.WordWrap
                                     width: parent.width
                                 }
+                                /* The applied truth — "on device"
+                                   only where the engine confirmed
+                                   it; a requested-but-unconfirmed
+                                   pick reads "applying…", never
+                                   "selected". */
                                 StatusPill {
-                                    visible: root.requestedMode === modelData.key
-                                    text: bridge.playback.pending
-                                          ? qsTr("applying…")
-                                          : qsTr("selected")
-                                    tone: bridge.playback.pending ? "warn" : "accent"
+                                    visible: requested || applied
+                                    text: applied ? qsTr("on device")
+                                                  : qsTr("applying…")
+                                    tone: applied ? "ok" : "warn"
                                 }
                             }
 
                             MouseArea {
                                 anchors.fill: parent
                                 enabled: usable && root.editorUp
-                                         && root.requestedMode !== modelData.key
+                                         && !requested
                                 cursorShape: enabled ? Qt.PointingHandCursor
                                                      : Qt.ArrowCursor
-                                onClicked: sceneEdit.requestMode(modelData.key)
+                                onClicked: sceneEdit.requestMode(modeKey)
                             }
                         }
                     }
                 }
 
+                /* Transition honesty — a mode switch visibly
+                   interrupts output while the engine confirms it. */
+                Text {
+                    width: parent.width - 2 * col.padding
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.warn
+                    visible: root.engineUp && text !== ""
+                    text: {
+                        if(!root.engineUp)
+                            return "";
+                        if(root.pv.phase === "failed")
+                            return root.pv.phase_detail
+                                   || qsTr("the last mode transition failed");
+                        if(root.pv.phase === "reconnecting")
+                            return qsTr("The engine's link to the backend is down — playback output may be stale while it reconnects.");
+                        if(root.pv.phase === "applying" && root.animationRequested)
+                            return qsTr("Switching to Animation playback — live output on the fan group is suppressed until the uploaded loop is confirmed on device.");
+                        if(root.pv.phase === "applying")
+                            return qsTr("Returning to Live effects — the uploaded loop is replaced with a freshly evaluated frame when the engine confirms.");
+                        return "";
+                    }
+                }
+                Text {
+                    width: parent.width - 2 * col.padding
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.textSecondary
+                    visible: root.engineUp && root.animationApplied
+                             && root.pv.phase !== "applying"
+                    text: qsTr("The uploaded loop owns the fan group — palette, layer, and scene-multiplier controls below are disabled while it runs. Other devices play the matching effect.")
+                }
+
                 /* Upload / transport state — Uploading, Active,
-                   Failed, paused/stopped as the engine reports. */
+                   Reconnecting, or Failed (plan section 5) plus
+                   the honest requested-vs-applied split. */
                 Card {
                     title: qsTr("PLAYBACK STATE")
+                    objectName: "playbackStateCard"
                     width: parent.width - 2 * col.padding
                     visible: root.engineUp
 
-                    RowLayout {
+                    Column {
                         width: parent.width
-                        spacing: Theme.spaceL
+                        spacing: Theme.spaceM
 
-                        StatusPill {
-                            text: {
-                                const st = bridge.playback.status;
-                                if(bridge.playback.pending)
-                                    return qsTr("applying…");
-                                if(st && st.upload && st.upload !== "none")
-                                    return st.upload;
-                                if(st && st.control)
-                                    return st.control;
-                                return qsTr("unknown");
+                        RowLayout {
+                            width: parent.width
+                            spacing: Theme.spaceL
+
+                            StatusPill {
+                                objectName: "playbackPhasePill"
+                                text: {
+                                    switch(root.pv.phase) {
+                                    case "reconnecting": return qsTr("Reconnecting");
+                                    case "applying":     return qsTr("Applying…");
+                                    case "failed":       return qsTr("Failed");
+                                    case "uploading":    return qsTr("Uploading");
+                                    case "active":       return qsTr("Active");
+                                    case "live":         return qsTr("Live");
+                                    default:             return qsTr("unknown");
+                                    }
+                                }
+                                tone: {
+                                    switch(root.pv.phase) {
+                                    case "reconnecting": return "warn";
+                                    case "applying":     return "warn";
+                                    case "failed":       return "bad";
+                                    case "uploading":    return "accent";
+                                    case "active":       return "ok";
+                                    case "live":         return "ok";
+                                    default:             return "neutral";
+                                    }
+                                }
                             }
-                            tone: {
-                                const st = bridge.playback.status;
-                                if(bridge.playback.pending)
-                                    return "warn";
-                                if(st && st.upload === "failed")
-                                    return "bad";
-                                if(st && st.control === "playing")
-                                    return "ok";
-                                return "neutral";
+                            Column {
+                                Layout.fillWidth: true
+                                spacing: Theme.spaceXS
+                                Text {
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    color: Theme.textSecondary
+                                    text: {
+                                        const label = m =>
+                                            m === "animation_playback"
+                                                ? qsTr("Animation playback")
+                                                : qsTr("Live effects");
+                                        if(root.requestedMode && root.appliedMode
+                                           && root.requestedMode !== root.appliedMode)
+                                            return qsTr("requested: %1 · on device: %2 — waiting for the engine to confirm")
+                                                .arg(label(root.requestedMode))
+                                                .arg(label(root.appliedMode));
+                                        if(!root.appliedMode)
+                                            return qsTr("on device: unknown — no playback status reported yet");
+                                        const app = label(root.appliedMode);
+                                        if(!root.animationApplied)
+                                            return qsTr("on device: %1").arg(app);
+                                        const c = root.pv.control;
+                                        if(c === "paused")
+                                            return qsTr("on device: %1 · paused — a sampled frame is held").arg(app);
+                                        if(c === "stopped")
+                                            return qsTr("on device: %1 · stopped — output replaced with black").arg(app);
+                                        return qsTr("on device: %1").arg(app);
+                                    }
+                                }
+                                Text {
+                                    visible: !!root.pv.phase_detail
+                                    text: root.pv.phase_detail || ""
+                                    color: Theme.bad
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
+                                }
+                            }
+                            Repeater {
+                                model: [
+                                    { key: "playing", label: qsTr("Play") },
+                                    { key: "paused",  label: qsTr("Pause") },
+                                    { key: "stopped", label: qsTr("Stop") }
+                                ]
+                                AppButton {
+                                    /* Transport control only exists
+                                       for an uploaded loop — the
+                                       engine forces Playing in live
+                                       mode, so offering pause there
+                                       would fake a dead button. */
+                                    visible: root.animationRequested
+                                             || root.animationApplied
+                                    text: modelData.label
+                                    enabled: root.editorUp && root.engineUp
+                                             && root.animationApplied
+                                             && root.pv.phase !== "applying"
+                                             && root.pv.control !== modelData.key
+                                    onClicked: sceneEdit.setPlaybackControl(modelData.key)
+                                }
                             }
                         }
+
                         Text {
-                            visible: !!bridge.playback.detail
-                            text: bridge.playback.detail || ""
-                            color: Theme.bad
+                            visible: root.animationRequested || root.animationApplied
+                            text: qsTr("Pause holds a sampled frame · Stop replaces playback with black · closing the UI does not interrupt the loop.")
+                            color: Theme.textDisabled
                             font.pixelSize: Theme.fontSizeSmall
                             wrapMode: Text.WordWrap
-                            Layout.fillWidth: true
+                            width: parent.width
                         }
-                        Item { Layout.fillWidth: true }
-                        Repeater {
-                            model: [
-                                { key: "playing", label: qsTr("Play") },
-                                { key: "paused",  label: qsTr("Pause") },
-                                { key: "stopped", label: qsTr("Stop") }
-                            ]
-                            AppButton {
-                                text: modelData.label
-                                enabled: root.editorUp && root.engineUp
-                                         && bridge.playback.status
-                                         && bridge.playback.status.control !== modelData.key
-                                onClicked: sceneEdit.setPlaybackControl(modelData.key)
+
+                        /* Wire cadence + sync — exactly what
+                           PLAYBACK reports, labelled for what it
+                           is: configured geometry, a validated-
+                           clock sync state, a separately recorded
+                           physical measurement, and (in live
+                           mode) the transport-accepted interval.
+                           Never a presentation-FPS claim. */
+                        Column {
+                            width: parent.width
+                            spacing: Theme.spaceXS
+                            visible: root.animationApplied
+                                     || root.appliedMode === "live_effects"
+
+                            Text {
+                                visible: root.animationApplied && root.pv.frame_count > 0
+                                text: qsTr("configured loop: %1 frames · %2 ms/frame · ≈%3 s cycle — configured rate, not a measured display rate")
+                                    .arg(root.pv.frame_count)
+                                    .arg((root.pv.frame_interval_s * 1000).toFixed(3))
+                                    .arg(root.pv.cycle_s.toFixed(2))
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                                wrapMode: Text.WordWrap
+                                width: parent.width
+                            }
+                            Text {
+                                visible: root.animationApplied
+                                text: {
+                                    const s = root.pv.sync || "unknown";
+                                    if(s === "unknown")
+                                        return qsTr("synchronization: unavailable — no validated clock source");
+                                    const u = root.pv.clock_uncertainty_s || 0;
+                                    return u > 0
+                                        ? qsTr("synchronization: %1 · clock uncertainty ±%2 ms")
+                                            .arg(s).arg((u * 1000).toFixed(1))
+                                        : qsTr("synchronization: %1").arg(s);
+                                }
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                                wrapMode: Text.WordWrap
+                                width: parent.width
+                            }
+                            Text {
+                                visible: root.animationApplied
+                                text: root.pv.physical_measured
+                                      ? qsTr("physical playback: %1 ms/frame · %2 s cycle · %3")
+                                        .arg((root.pv.physical_frame_interval_s * 1000).toFixed(2))
+                                        .arg((root.pv.physical_cycle_s || 0).toFixed(2))
+                                        .arg(root.pv.physical_provenance)
+                                      : qsTr("physical playback: not measured")
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                                wrapMode: Text.WordWrap
+                                width: parent.width
+                            }
+                            Text {
+                                visible: root.appliedMode === "live_effects"
+                                text: {
+                                    const ag = root.engineUp
+                                               ? bridge.frameStatus.aggregate
+                                               : undefined;
+                                    if(ag && ag.mean_interval_s > 0)
+                                        return qsTr("live delivery ≈ %1 updates/s — transport-accepted interval (%2), not display FPS")
+                                            .arg((1 / ag.mean_interval_s).toFixed(1))
+                                            .arg(ag.provenance || "unknown");
+                                    return qsTr("live delivery: no transport counters yet");
+                                }
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                                wrapMode: Text.WordWrap
+                                width: parent.width
                             }
                         }
                     }
@@ -449,6 +644,20 @@ Item {
                     Column {
                         spacing: Theme.spaceM
 
+                        /* Supported-control filtering (plan
+                           §3.4): while Animation playback is
+                           selected the uploaded loop owns
+                           output — arbitrary palettes/layers
+                           are live-effects only this release. */
+                        Text {
+                            visible: root.animationRequested
+                            text: qsTr("Disabled while Animation playback is selected — the uploaded preset's own controls above are all it supports; palette colors apply to Live effects scenes.")
+                            color: Theme.warn
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                            width: parent.width
+                        }
+
                         /* Current group colors — real document
                            values, not placeholders. */
                         Flow {
@@ -501,7 +710,7 @@ Item {
                                     width: parent.width
                                     from: 0; to: 1; stepSize: 0.001
                                     value: 0.55
-                                    enabled: root.editorUp
+                                    enabled: root.liveControlsEnabled
                                     Accessible.name: qsTr("hue")
                                 }
                                 AppSlider {
@@ -509,7 +718,7 @@ Item {
                                     width: parent.width
                                     from: 0; to: 1; stepSize: 0.001
                                     value: 0.6
-                                    enabled: root.editorUp
+                                    enabled: root.liveControlsEnabled
                                     Accessible.name: qsTr("saturation")
                                 }
                                 AppSlider {
@@ -517,14 +726,14 @@ Item {
                                     width: parent.width
                                     from: 0; to: 1; stepSize: 0.001
                                     value: 1.0
-                                    enabled: root.editorUp
+                                    enabled: root.liveControlsEnabled
                                     Accessible.name: qsTr("brightness")
                                 }
                             }
                             AppButton {
                                 text: qsTr("Apply to selected")
                                 primary: true
-                                enabled: root.editorUp
+                                enabled: root.liveControlsEnabled
                                 onClicked: sceneEdit.setGroupColor(
                                     Qt.hsva(palH.value, palS.value,
                                             palV.value, 1).toString())
@@ -544,7 +753,7 @@ Item {
                                 model: Theme.paletteSwatches
                                 PaletteSwatch {
                                     swatch: modelData
-                                    enabled: root.editorUp
+                                    enabled: root.liveControlsEnabled
                                     onPicked: hex => sceneEdit.setGroupColor(hex)
                                 }
                             }
@@ -565,6 +774,15 @@ Item {
                     Column {
                         spacing: Theme.spaceM
 
+                        Text {
+                            visible: root.animationRequested
+                            text: qsTr("Disabled while Animation playback is selected — these multipliers drive the live scene evaluation the uploaded loop replaces.")
+                            color: Theme.warn
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                            width: parent.width
+                        }
+
                         RowLayout {
                             width: parent.width
                             spacing: Theme.spaceL
@@ -577,7 +795,7 @@ Item {
                             AppSlider {
                                 id: brightSlider
                                 Layout.fillWidth: true
-                                enabled: root.editorUp && sceneEdit.hasWorking
+                                enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0; to: 100; stepSize: 1
                                 onMoved: if(root.editorUp)
                                     sceneEdit.setBrightness(value / 100)
@@ -608,7 +826,7 @@ Item {
                             AppSlider {
                                 id: fxSpeedSlider
                                 Layout.fillWidth: true
-                                enabled: root.editorUp && sceneEdit.hasWorking
+                                enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0.05; to: 4.0; stepSize: 0.05
                                 onMoved: if(root.editorUp)
                                     sceneEdit.setEffectSpeed(value)
@@ -639,7 +857,7 @@ Item {
                             AppSlider {
                                 id: fxIntSlider
                                 Layout.fillWidth: true
-                                enabled: root.editorUp && sceneEdit.hasWorking
+                                enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0; to: 1.0; stepSize: 0.01
                                 onMoved: if(root.editorUp)
                                     sceneEdit.setEffectIntensity(value)
@@ -687,12 +905,22 @@ Item {
                             wrapMode: Text.WordWrap
                             width: parent.width
                         }
+                        Text {
+                            visible: root.animationRequested
+                                     && root.pv.phase === "applying"
+                            text: qsTr("The mode transition is in flight — parameter edits resume when the engine confirms.")
+                            color: Theme.textDisabled
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                            width: parent.width
+                        }
 
                         RowLayout {
                             width: parent.width
                             spacing: Theme.spaceL
                             enabled: root.engineUp
-                                     && root.requestedMode === "animation_playback"
+                                     && root.animationRequested
+                                     && root.pv.phase !== "applying"
                             Text {
                                 text: qsTr("Speed")
                                 color: Theme.textSecondary
@@ -748,7 +976,8 @@ Item {
                             CheckBox {
                                 id: dirCheck
                                 enabled: root.editorUp && root.engineUp
-                                         && root.requestedMode === "animation_playback"
+                                         && root.animationRequested
+                                         && root.pv.phase !== "applying"
                                          && sceneEdit.presetSupport.direction === true
                                 text: qsTr("reverse")
                                 onToggled: if(enabled) {
@@ -793,7 +1022,8 @@ Item {
                                     width: parent.width
                                     from: 0; to: 1; stepSize: 0.001; value: 0
                                     enabled: root.editorUp && root.engineUp
-                                             && root.requestedMode === "animation_playback"
+                                             && root.animationRequested
+                                             && root.pv.phase !== "applying"
                                              && sceneEdit.presetSupport.color === true
                                     onMoved: {
                                         if(root.editorUp)

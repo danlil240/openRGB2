@@ -245,13 +245,31 @@ private:
        parameter revisions, not values, so untouched fields
        have nothing honest to send — omitting them lets the
        engine preserve its recorded per-scene value instead
-       of being clobbered by the UI defaults. */
+       of being clobbered by the UI defaults. A NEW applied
+       scene (the engine keys persisted selections on the
+       scene name) resets the latches and trackers — a param
+       touched in one scene never rides into another. */
     int             param_speed_           = 100;
     bool            param_reverse_         = false;
     QString         param_color_           = QStringLiteral("#FF0000");
     bool            param_speed_touched_   = false;
     bool            param_reverse_touched_ = false;
     bool            param_color_touched_   = false;
+    std::string     last_scene_name_;
+
+    /* The scene-creation default latch (plan section 3.4
+       first-release rules; the Task 3.6 ruling assigns the
+       user-facing default to the UI): an explicit pick of
+       one of the three uploaded presets arms it, and it
+       fires ONE animation_playback request once the engine
+       has APPLIED a scene actually naming that preset —
+       capability validation runs against the applied
+       document, not the pending working copy. Normalized
+       preset id; "" = unarmed. Loading a profile, discarding
+       the pick, picking a different preset, or explicitly
+       requesting Live effects all disarm it, so existing/
+       migrated scenes can never flip silently. */
+    QString         pending_default_preset_;
 };
 
 } /* namespace ui */

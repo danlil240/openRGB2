@@ -46,6 +46,12 @@ ui_suite(ui_bridge_test)
 # retention, supported-param filtering).
 ui_suite(ui_scene_edit_test)
 ui_suite(ui_scene_bridge_test)
+# Task 4.3: playback selector + mode behavior — request ->
+# pending -> acked state machine, capability/reason mirror,
+# failed/reconnecting surfaces, new-instance animation
+# default vs. migrated-profile Live, scene-scoped param
+# latches.
+ui_suite(ui_playback_test)
 
 # The QML smoke test additionally needs the module's compiled
 # plugin + Qt Quick runtime on its link line.

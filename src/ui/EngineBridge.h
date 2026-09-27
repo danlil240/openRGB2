@@ -68,6 +68,23 @@ class EngineBridge : public QObject
     Q_PROPERTY(QVariantMap scene READ scene NOTIFY sceneChanged)
     Q_PROPERTY(QVariantMap playback READ playback
                    NOTIFY playbackChanged)
+    /* Derived playback view (Task 4.3) — the honest
+       applied-vs-requested state the pages bind to, composed
+       once here from the playback + connection stores so
+       every view reports the SAME truth:
+       - requested_mode is the recorded UI selection
+       - applied_mode is status.mode, which only moves on
+         backend acknowledgement — "applied" is never
+         reported before the wire confirms it
+       - pending stays true while an ack is in flight OR the
+         two modes disagree
+       - phase is the single display token (reconnecting /
+         applying / failed / uploading / active / live /
+         unknown)
+       - cadence/sync/physical fields are pass-throughs of
+         what PLAYBACK reports — nothing physical is invented */
+    Q_PROPERTY(QVariantMap playbackView READ playbackView
+                   NOTIFY playbackViewChanged)
     Q_PROPERTY(QVariantMap frameStatus READ frameStatus
                    NOTIFY frameStatusChanged)
     Q_PROPERTY(QVariantMap deliveryStats READ deliveryStats
@@ -122,6 +139,7 @@ public:
     QVariantMap connection() const;
     QVariantMap scene() const;
     QVariantMap playback() const;
+    QVariantMap playbackView() const;
     QVariantMap frameStatus() const;
     QVariantMap deliveryStats() const;
     QVariantList presets() const;
@@ -149,6 +167,7 @@ signals:
     void connectionChanged();
     void sceneChanged();
     void playbackChanged();
+    void playbackViewChanged();
     void frameStatusChanged();
     void deliveryStatsChanged();
     void presetsChanged();
