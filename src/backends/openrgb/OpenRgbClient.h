@@ -100,15 +100,18 @@ public:
     bool Enumerate();
 
     /* Lightweight refresh for mode/state acknowledgement
-       (the playback task): re-fetches every known
-       controller's data block WITHOUT bumping the topology
-       generation — pending frames stay valid. Only
-       mode/speed/direction/color fields and last-enumerated
-       colors are updated in place; a structural difference
-       (device identity, zone layout, LED counts, device
-       count) falls through to the full EnumerateLocked path
-       and bumps the generation. False when disconnected or
-       the fetch fails (connection marked broken). */
+       (the playback task) and slow periodic topology
+       revalidation (the owner loop): re-fetches the
+       controller count + every known controller's data block
+       WITHOUT bumping the topology generation — pending
+       frames stay valid. Only mode/speed/direction/color
+       fields and last-enumerated colors are updated in
+       place; a structural difference (device identity, zone
+       layout, LED counts, device count — including an added
+       or removed device, caught by the count) falls through
+       to the full EnumerateLocked path and bumps the
+       generation. False when disconnected or the fetch fails
+       (connection marked broken). */
     bool RefreshStatus();
 
     /* Last server-reported mode state for `controller` —

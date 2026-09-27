@@ -63,6 +63,7 @@
 #include "WinPowerMonitor.h"
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
@@ -89,6 +90,29 @@ struct EngineHostOptions
     uint16_t    sdk_port    = 6744;
     std::function<std::unique_ptr<sdk::IStreamTransport>()>
         transport_factory;
+
+    /* Task 5.3 reconnect policy. The client's bounded backoff
+       latches to Disconnected after max_attempts (a longer
+       backend outage would otherwise leave the engine
+       permanently detached — nothing else re-arms it). The
+       owner loop re-arms with a ReconnectNow() no more often
+       than sdk_reprobe — retries stay bounded while a
+       backend that returns late still re-attaches. Both are
+       injectable so the offline suite can exhaust and
+       re-probe in milliseconds. */
+    sdk::ReconnectBackoff   sdk_backoff;
+    std::chrono::milliseconds sdk_reprobe{ 30000 };
+
+    /* Task 5.3: periodic topology revalidation. SDK <= v4 has
+       no async device events, so a controller vanishing
+       mid-session is only detected by re-fetching — without
+       this, stale positional dev-index mappings misroute
+       frames to a shifted controller until the transport
+       next breaks. RefreshStatus keeps the generation on
+       data-only change and bumps it on structural change
+       (unplug/replug), which obsoletes stale in-flight
+       frames and resyncs the lanes. */
+    std::chrono::milliseconds sdk_topology_poll{ 2000 };
 
     /* IPC surface (docs/ipc-protocol.md). Pipe names are
        overridable so a test never touches the well-known
@@ -198,6 +222,10 @@ private:
        persist the selection through the profile store. */
     void OnReactiveChanged();
 
+    /* Task 5.3: re-arms the SDK reconnect schedule after the
+       client's bounded backoff latches to Disconnected. */
+    void ReprobeSdk(TimePoint now);
+
     EngineHostOptions        opts_;
     SingleInstanceGuard      instance_;
     OwnershipReport          ownership_;
@@ -221,6 +249,8 @@ private:
 
     std::atomic<uint64_t>                    frames_{ 0 };
     std::atomic<bool>                        capture_paused_{ false };
+    TimePoint                                last_reprobe_{};
+    TimePoint                                last_topology_poll_{};
     std::map<DeviceKey, uint64_t>            custom_mode_done_;
     bool                                     started_ = false;
     OrderlyShutdown::Result                  shutdown_result_;
