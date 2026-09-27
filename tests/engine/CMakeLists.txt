@@ -62,6 +62,23 @@ set_tests_properties(e2e_fake_backend_test PROPERTIES
     LABELS engine
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Task 5.2 — mode qualification: rapid mode/parameter storm
+# (no wedge, no lost requests, pending always resolves),
+# disconnect during an uploaded-playback apply (honest
+# failure, never silent partial success), and reconnect
+# recovery — the REAL EngineHost composition against the
+# in-process fake backend.
+add_executable(e2e_mode_qual_test e2e_mode_qual_test.cpp)
+target_link_libraries(e2e_mode_qual_test PRIVATE
+    openrgb2_host)
+target_include_directories(e2e_mode_qual_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(e2e_mode_qual_test PRIVATE NDEBUG)
+add_test(NAME e2e_mode_qual_test COMMAND e2e_mode_qual_test)
+set_tests_properties(e2e_mode_qual_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Task 3.5 — IPC layer. ipc_server_test additionally needs the
 # named-pipe transport + ACL APIs.
 engine_suite(ipc_protocol_test)

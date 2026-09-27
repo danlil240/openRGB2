@@ -1128,16 +1128,26 @@ void PlaybackController::Poll(TimePoint now)
                     }
                 }
             }
-            std::lock_guard<std::mutex> lock(mutex_);
-            if(!found)
+            bool failed = false;
             {
-                MarkFailedLocked("the wireless group disappeared");
-                Changed();
+                std::lock_guard<std::mutex> lock(mutex_);
+                if(!found)
+                {
+                    MarkFailedLocked(
+                        "the wireless group disappeared");
+                    failed = true;
+                }
+                else
+                {
+                    wireless_gen_  = snap.topology_generation;
+                    wireless_leds_ = snap.LedCount();
+                }
             }
-            else
+            if(failed)
             {
-                wireless_gen_  = snap.topology_generation;
-                wireless_leds_ = snap.LedCount();
+                /* Changed() re-locks mutex_ to fetch the dep —
+                   it must never run under the lock. */
+                Changed();
             }
         }
     }
