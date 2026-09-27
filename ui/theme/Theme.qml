@@ -35,6 +35,17 @@ QtObject {
     readonly property color bad:           "#E5534B"
     readonly property color neutral:       "#8494A5"
 
+    /*---- Lighting palette ------------------------------------
+       The scene-palette quick picks offered next to the HSV
+       controls on the Lighting page. These are design tokens
+       like everything else here — the ONLY hex literals in
+       the module outside this file are wire colors arriving
+       from the engine ("#RRGGBB" strings). */
+    readonly property var paletteSwatches: [
+        "#7FCFFF", "#BDE6FF", "#F2F5F8", "#4CC38A",
+        "#E0A458", "#E5534B", "#9B6BD3", "#1E6FD9"
+    ]
+
     /*---- Typography -----------------------------------------*/
     readonly property int fontSizeSmall:   12
     readonly property int fontSizeBody:    14

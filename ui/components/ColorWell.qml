@@ -8,7 +8,7 @@ import OpenRGB2.UI.theme
 Rectangle {
     id: root
 
-    property color swatch: "#000000"
+    property color swatch: "black"
     property string label: ""
 
     implicitWidth:  row.implicitWidth

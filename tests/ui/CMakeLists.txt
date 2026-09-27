@@ -39,6 +39,13 @@ endfunction()
 
 ui_suite(ui_wire_client_test)
 ui_suite(ui_bridge_test)
+# Task 4.2: the scene-edit model builds the SET_SCENE body and
+# owns the named-scene library file; the bridge suite drives a
+# real EngineBridge + SceneEditController over an in-process
+# wire pipe (edit -> SET_SCENE -> refresh, save-failure
+# retention, supported-param filtering).
+ui_suite(ui_scene_edit_test)
+ui_suite(ui_scene_bridge_test)
 
 # The QML smoke test additionally needs the module's compiled
 # plugin + Qt Quick runtime on its link line.

@@ -43,8 +43,11 @@ qt_add_qml_module(openrgb2_ui
         components/Card.qml
         components/ColorWell.qml
         components/EmptyState.qml
+        components/FrameStrip.qml
+        components/GroupChip.qml
         components/NavButton.qml
         components/PageHeader.qml
+        components/PaletteSwatch.qml
         components/StatusPill.qml
         pages/DashboardPage.qml
         pages/DevicesPage.qml
@@ -55,7 +58,13 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/EngineBridge.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/EngineWireClient.h
         ${CMAKE_SOURCE_DIR}/src/ui/EngineWireClient.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/JsonVariant.h)
+        ${CMAKE_SOURCE_DIR}/src/ui/JsonVariant.h
+        ${CMAKE_SOURCE_DIR}/src/ui/SceneEditModel.h
+        ${CMAKE_SOURCE_DIR}/src/ui/SceneEditModel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/SceneEditController.h
+        ${CMAKE_SOURCE_DIR}/src/ui/SceneEditController.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ProfileLibrary.h
+        ${CMAKE_SOURCE_DIR}/src/ui/ProfileLibrary.cpp)
 
 set_target_properties(openrgb2_ui PROPERTIES AUTOMOC ON)
 

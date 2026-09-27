@@ -135,6 +135,17 @@ bool EngineWireClient::SendRequest(ipc::MsgType type,
        a wedged peer. Bounded: a full queue refuses honestly. */
     {
         std::lock_guard<std::mutex> lock(out_mu_);
+        /* Re-check under the queue mutex: the session can die
+           between the live_ test above and this enqueue (finish()
+           drains the queue under the same lock). Without the
+           re-check a request could land in the queue after the
+           session ended — counted as dropped but reported to the
+           caller as sent. */
+        if(!live_.load() || !writer_up_.load())
+        {
+            err = "session ended";
+            return false;
+        }
         if(out_queue_.size() >= options_.max_outbound_queue)
         {
             dropped_writes_.fetch_add(1);
@@ -279,10 +290,21 @@ EngineWireClient::EndReason EngineWireClient::Run(
                           "stopped during handshake");
         }
         if(welcome.contains("negotiated_version") &&
-           welcome["negotiated_version"].is_number())
+           (welcome["negotiated_version"].is_number_integer() ||
+            welcome["negotiated_version"].is_number_unsigned()))
         {
-            negotiated_.store(
-                welcome["negotiated_version"].get<uint16_t>());
+            /* get<uint16_t>() on an out-of-range value throws
+               (nlohmann out_of_range) — a hostile/buggy peer must
+               fail the handshake, never the process. */
+            const long long nv =
+                welcome["negotiated_version"].get<long long>();
+            if(nv < 0 || nv > 0xFFFF)
+            {
+                return finish(EndReason::HandshakeFailed,
+                              "WELCOME negotiated_version out of "
+                              "range");
+            }
+            negotiated_.store((uint16_t)nv);
         }
         else
         {
@@ -291,6 +313,23 @@ EngineWireClient::EndReason EngineWireClient::Run(
         if(negotiated_.load() == 0)
         {
             negotiated_.store(msg.version);
+        }
+        /* The diagnostics pipe answers every verb with
+           read_only — a session that negotiated there can never
+           serve this client's requests. Refuse it up front
+           instead of degrading into a stream of read_only
+           errors (docs/ipc-protocol.md §6). */
+        {
+            /* value() with a string default throws type_error on a
+               wrong-typed field — guard the lookup instead. */
+            const auto ch_it = welcome.find("channel");
+            if(ch_it != welcome.end() && ch_it->is_string() &&
+               ch_it->get<std::string>() == "diagnostics")
+            {
+                return finish(EndReason::HandshakeFailed,
+                              "connected to the read-only "
+                              "diagnostics pipe");
+            }
         }
         /* The writer owns the pipe from here: SUBSCRIBE and every
            later request enqueue to it — SendRequest callers never

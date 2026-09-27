@@ -16,20 +16,6 @@ Item {
     readonly property bool engineUp:
         typeof bridge !== "undefined" && bridge.connected
 
-    /* Downsamples a colors[] wire array to at most maxN entries
-       so a 120-LED strip stays one compact row. */
-    function sampled(colors, maxN) {
-        if(!colors || colors.length === 0)
-            return [];
-        if(colors.length <= maxN)
-            return colors;
-        const step = colors.length / maxN;
-        const out = [];
-        for(let i = 0; i < maxN; ++i)
-            out.push(colors[Math.floor(i * step)]);
-        return out;
-    }
-
     function deviceNameFor(key) {
         if(!key)
             return "controller";
@@ -235,17 +221,8 @@ Item {
                                 color: Theme.textSecondary
                                 font.pixelSize: Theme.fontSizeSmall
                             }
-                            Row {
-                                spacing: 1
-                                Repeater {
-                                    model: root.sampled(modelData.colors, 64)
-                                    Rectangle {
-                                        width: 10; height: 16
-                                        color: modelData || "#000000"
-                                        border.color: Theme.border
-                                        border.width: 0
-                                    }
-                                }
+                            FrameStrip {
+                                colors: modelData.colors || []
                             }
                         }
                     }

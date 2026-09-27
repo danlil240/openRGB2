@@ -12,6 +12,7 @@
 |\*---------------------------------------------------------*/
 
 #include "EngineBridge.h"
+#include "SceneEditController.h"
 
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
@@ -43,10 +44,15 @@ int main(int argc, char** argv)
     {
         bridge.setPipeName(pipe);
     }
+    /* The Lighting view's scene-edit session — owns the working
+       document, the save flow, and the named-scene library. */
+    openrgb2::ui::SceneEditController scene_edit(&bridge);
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"),
                                              &bridge);
+    engine.rootContext()->setContextProperty(QStringLiteral("sceneEdit"),
+                                             &scene_edit);
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed,
         &app, [] { QCoreApplication::exit(-1); },
