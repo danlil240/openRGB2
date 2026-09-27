@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -52,6 +53,10 @@ public:
         return nlohmann::json::object({{"service", "scripted"}});
     }
 
+    /* When set, Dispatch throws — models a handler bug; the
+       session layer must convert it into a bounded ERROR. */
+    bool throw_on_dispatch = false;
+
     IpcReply Dispatch(MsgType type,
                       const nlohmann::json& body) override
     {
@@ -59,6 +64,10 @@ public:
         {
             std::lock_guard<std::mutex> lock(m_);
             dispatched_.push_back(type);
+        }
+        if(throw_on_dispatch)
+        {
+            throw std::runtime_error("injected handler failure");
         }
         if(type == MsgType::DiagGet)
         {
@@ -231,6 +240,11 @@ int main()
         CHECK(c.RecvMsg(m, 5000));
         CHECK(m.type == MsgType::Pong);
         CHECK(m.request_id == 21);
+        /* Resync bytes land in Stats() at session teardown —
+           close the peer to surface them deterministically
+           (relying on the session's read deadline to fire
+           before WaitFor's own window is a race). */
+        c.CloseInbound();
         CHECK(WaitFor([&]
             { return server.Stats().resync_bytes >= 20; }));
     }
@@ -478,6 +492,100 @@ int main()
         c1.Hello();
         CHECK(c1.RecvMsg(m, 5000));
         CHECK(m.type == MsgType::Welcome);
+    }
+
+    /*---- session cap is per channel kind --------------------*/
+    {
+        IpcServerOptions opts;
+        opts.max_connections = 1;
+        ScriptedService svc;
+        IpcServer server(svc, opts);
+        TestClient cmd;
+        CHECK(server.Serve(cmd.MakeChannel(), ChannelKind::Command));
+        /* command pipe saturated — diagnostics is NOT starved:
+           each channel kind gets its own cap (doc §bounds) */
+        TestClient diag;
+        CHECK(server.Serve(diag.MakeChannel(),
+                           ChannelKind::Diagnostics));
+        diag.Hello();
+        Message m;
+        CHECK(diag.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Welcome);
+        diag.SendMsg(MsgType::DiagGet, 85, nlohmann::json::object());
+        CHECK(diag.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Diagnostics);
+        /* a second session of the SAME kind is still refused */
+        TestClient cmd2;
+        CHECK(!server.Serve(cmd2.MakeChannel(),
+                            ChannelKind::Command));
+        CHECK(cmd2.RecvMsg(m, 5000));
+        CHECK(IsError(m, ErrCode::Busy));
+        TestClient diag2;
+        CHECK(!server.Serve(diag2.MakeChannel(),
+                            ChannelKind::Diagnostics));
+        CHECK(diag2.RecvMsg(m, 5000));
+        CHECK(IsError(m, ErrCode::Busy));
+        CHECK(server.Stats().refused_busy == 2);
+    }
+
+    /*---- HELLO with wrong-typed fields: bounded error -------*/
+    {
+        ScriptedService svc;
+        IpcServer server(svc);
+        TestClient c;
+        server.Serve(c.MakeChannel(), ChannelKind::Command);
+        /* {"min_version":"x"} — nlohmann::value() would throw
+           type_error through the session thread. Must be a
+           bounded ERROR, never std::terminate. */
+        c.SendMsg(MsgType::Hello, 0,
+                  nlohmann::json::object(
+                      {{"client_name", "bad"},
+                       {"min_version", "x"}}));
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(IsError(m, ErrCode::Malformed));
+        CHECK(WaitFor([&] { return c.State()->server_closed; }));
+        CHECK(server.Stats().rejected_hellos == 1);
+
+        /* array-valued version field — same treatment */
+        TestClient c2;
+        server.Serve(c2.MakeChannel(), ChannelKind::Command);
+        c2.SendMsg(MsgType::Hello, 0,
+                   nlohmann::json::object(
+                       {{"max_version",
+                         nlohmann::json::array({1})}}));
+        CHECK(c2.RecvMsg(m, 5000));
+        CHECK(IsError(m, ErrCode::Malformed));
+
+        /* the engine is alive — a clean client still
+           handshakes */
+        TestClient c3;
+        CHECK(server.Serve(c3.MakeChannel(), ChannelKind::Command));
+        c3.Hello();
+        CHECK(c3.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Welcome);
+    }
+
+    /*---- throwing handler: bounded error, session survives --*/
+    {
+        ScriptedService svc;
+        svc.throw_on_dispatch = true;
+        IpcServer server(svc);
+        TestClient c;
+        server.Serve(c.MakeChannel(), ChannelKind::Command);
+        c.Hello();
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+
+        c.SendMsg(MsgType::GetState, 86, nlohmann::json::object());
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(IsError(m, ErrCode::Internal));
+        CHECK(m.request_id == 86);
+        /* the session thread survived — still serving */
+        c.SendMsg(MsgType::Ping, 87, nlohmann::json::object());
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Pong);
+        CHECK(m.request_id == 87);
     }
 
     /*---- ACL intent -----------------------------------------*/

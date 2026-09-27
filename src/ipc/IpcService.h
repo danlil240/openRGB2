@@ -10,10 +10,16 @@
 ||                                                           ||
 ||   Contract for implementers: every handler MUST be      ||
 ||   non-blocking — dispatch runs on the session's reader  ||
-||   thread and a wedged handler wedges the client. The    ||
-||   per-command bound (plan section 6) is enforced by     ||
-||   construction: handlers only touch in-memory engine    ||
-||   state.                                                  ||
+||   thread and there is NO enforced dispatch deadline    ||
+||   (a thread cannot be safely timed out or cancelled     ||
+||   mid-call). The per-command bound (plan section 6) is  ||
+||   enforced by construction only: handlers must touch    ||
+||   in-memory engine state, never I/O or unbounded        ||
+||   waits. Honest residual: a future blocking handler     ||
+||   pins its OWN session — one bounded slot — never       ||
+||   other sessions or the engine. An exception escaping   ||
+||   Dispatch is caught by the session layer and answered  ||
+||   with a bounded ERROR; a throwing handler is a bug.    ||
 ||                                                           ||
 ||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 \*---------------------------------------------------------*/

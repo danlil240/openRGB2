@@ -87,9 +87,22 @@ int main()
         /* the pending scene applies on the next worker tick */
         CHECK(engine.Worker().Step(Clock::now()));
         CHECK(engine.Worker().HasScene());
-        /* scene event emitted on apply */
+        /* scene event emitted on apply — and its data is the
+           full SCENE pull body, the documented contract
+           (docs/ipc-protocol.md §7: event data matches the
+           corresponding pull body) */
         CHECK(!events.empty());
         CHECK(events.back().kind == event_kind::kScene);
+        {
+            const nlohmann::json& evd = events.back().data;
+            CHECK(evd.contains("loaded"));
+            CHECK(evd["loaded"].get<bool>() == true);
+            CHECK(evd["revision"].get<uint64_t>() == 1);
+            CHECK(evd.contains("applied_revision"));
+            CHECK(evd.contains("playing"));
+            CHECK(evd["document"]["name"].get<std::string>()
+                  == "ipc-test");
+        }
 
         r = svc.Dispatch(MsgType::GetScene,
                          nlohmann::json::object());
@@ -198,6 +211,18 @@ int main()
                      {"location", ""}})}}));
         CHECK(r.code == ErrCode::Ok);
         CHECK(r.body["found"].get<bool>() == false);
+
+        /* wrong-typed controller fields: bounded bad_request —
+           never a type_error through the session thread */
+        r = svc.Dispatch(MsgType::GetDeliveryStats,
+            nlohmann::json::object({
+                {"controller", nlohmann::json::object(
+                                   {{"device", 5}})}}));
+        CHECK(r.code == ErrCode::BadRequest);
+
+        r = svc.Dispatch(MsgType::GetDeliveryStats,
+            nlohmann::json::object({{"controller", "x"}}));
+        CHECK(r.code == ErrCode::BadRequest);
     }
 
     /*---- state + diagnostics ---------------------------------*/
@@ -236,6 +261,11 @@ int main()
 
         r = svc.Dispatch(MsgType::LayoutCommand,
                          nlohmann::json::object());
+        CHECK(r.code == ErrCode::BadRequest);
+
+        /* wrong-typed verb — bounded bad_request, no throw */
+        r = svc.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({{"verb", 5}}));
         CHECK(r.code == ErrCode::BadRequest);
     }
 

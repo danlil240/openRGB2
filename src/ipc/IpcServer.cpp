@@ -113,10 +113,13 @@ bool IpcServer::Serve(std::unique_ptr<IIpcChannel> channel,
     std::shared_ptr<Session> s;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        /* The cap is PER CHANNEL KIND (docs/ipc-protocol.md:
+           "concurrent sessions per pipe") — a flooded command
+           pipe must never starve the diagnostics pipe. */
         size_t alive = 0;
         for(const std::shared_ptr<Session>& it : sessions_)
         {
-            if(!it->dead.load())
+            if(!it->dead.load() && it->kind == kind)
             {
                 ++alive;
             }
@@ -152,8 +155,39 @@ bool IpcServer::Serve(std::unique_ptr<IIpcChannel> channel,
         return false;
     }
 
-    s->reader_thread = std::thread(&IpcServer::ReaderMain, this, s);
-    s->writer_thread = std::thread(&IpcServer::WriterMain, this, s);
+    /* Thread construction is bounded too: std::thread throws
+       under resource exhaustion — the session is torn down
+       cleanly and the refusal counted; no escaping
+       exception. */
+    try
+    {
+        s->reader_thread =
+            std::thread(&IpcServer::ReaderMain, this, s);
+        s->writer_thread =
+            std::thread(&IpcServer::WriterMain, this, s);
+    }
+    catch(...)
+    {
+        s->stop.store(true);
+        s->channel->Close();
+        s->out_cv.notify_all();
+        if(s->reader_thread.joinable())
+        {
+            s->reader_thread.join();
+        }
+        if(s->writer_thread.joinable())
+        {
+            s->writer_thread.join();
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            sessions_.erase(
+                std::remove(sessions_.begin(), sessions_.end(), s),
+                sessions_.end());
+            ++stats_.refused_busy;
+        }
+        return false;
+    }
     return true;
 }
 
@@ -430,36 +464,78 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
             }
             else
             {
-                const long long min_v =
-                    body.value("min_version", (long long)kProtocolVersion);
-                const long long max_v =
-                    body.value("max_version", (long long)kProtocolVersion);
-                const long long neg =
-                    std::min<long long>(max_v, kProtocolVersion);
-                if(neg < min_v || neg < 1)
+                /* Wrong-typed version fields are malformed
+                   input, not a crash: nlohmann::value() throws
+                   type_error on non-numbers, and an exception
+                   escaping a std::thread entry is
+                   std::terminate — the whole engine process.
+                   Extract defensively instead. */
+                const auto ver_field = [](const nlohmann::json& b,
+                                          const char* key,
+                                          long long& out) -> bool
                 {
-                    send_error(0, ErrCode::VersionMismatch,
-                        "no common protocol version (client [" +
-                        std::to_string(min_v) + "," +
-                        std::to_string(max_v) + "], server " +
-                        std::to_string(kProtocolVersion) + ")");
+                    const auto it = b.find(key);
+                    if(it == b.end())
+                    {
+                        out = (long long)kProtocolVersion;
+                        return true;
+                    }
+                    if(!it->is_number_integer()
+                       && !it->is_number_unsigned())
+                    {
+                        return false;
+                    }
+                    out = it->get<long long>();
+                    return true;
+                };
+                long long min_v = 0, max_v = 0;
+                if(!ver_field(body, "min_version", min_v)
+                   || !ver_field(body, "max_version", max_v))
+                {
+                    send_error(0, ErrCode::Malformed,
+                        "HELLO min_version/max_version must be "
+                        "integers");
                 }
                 else
                 {
-                    negotiated = (uint16_t)neg;
-                    nlohmann::json welcome = service_.OnWelcome();
-                    if(welcome.is_discarded() || !welcome.is_object())
+                    const long long neg =
+                        std::min<long long>(max_v, kProtocolVersion);
+                    if(neg < min_v || neg < 1)
                     {
-                        welcome = nlohmann::json::object();
+                        send_error(0, ErrCode::VersionMismatch,
+                            "no common protocol version (client [" +
+                            std::to_string(min_v) + "," +
+                            std::to_string(max_v) + "], server " +
+                            std::to_string(kProtocolVersion) + ")");
                     }
-                    welcome["server_version"]      = kProtocolVersion;
-                    welcome["negotiated_version"]  = negotiated;
-                    welcome["channel"] =
-                        s->kind == ChannelKind::Diagnostics
-                            ? "diagnostics" : "command";
-                    welcome["max_body_bytes"]      = kMaxBodyBytes;
-                    ok = send(EncodeMessage(MsgType::Welcome, 0,
-                                               welcome));
+                    else
+                    {
+                        negotiated = (uint16_t)neg;
+                        nlohmann::json welcome;
+                        try
+                        {
+                            welcome = service_.OnWelcome();
+                        }
+                        catch(...)
+                        {
+                            /* A throwing service loses its
+                               welcome fields, not the engine. */
+                            welcome = nlohmann::json::object();
+                        }
+                        if(welcome.is_discarded()
+                           || !welcome.is_object())
+                        {
+                            welcome = nlohmann::json::object();
+                        }
+                        welcome["server_version"]     = kProtocolVersion;
+                        welcome["negotiated_version"] = negotiated;
+                        welcome["channel"] =
+                            s->kind == ChannelKind::Diagnostics
+                                ? "diagnostics" : "command";
+                        welcome["max_body_bytes"]     = kMaxBodyBytes;
+                        ok = send(EncodeMessage(MsgType::Welcome, 0,
+                                                   welcome));
+                    }
                 }
             }
         }
@@ -654,6 +730,19 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
                         kinds.push_back(e.get<std::string>());
                     }
                 }
+                else
+                {
+                    /* events present but neither "all" nor an
+                       array — reject, don't silently treat as
+                       an empty subscription. */
+                    if(!reply_err(ErrCode::BadRequest,
+                        "events must be \"all\" or an array "
+                        "of kind names"))
+                    {
+                        goto done;
+                    }
+                    continue;
+                }
                 std::set<std::string> bad;
                 for(const std::string& k : kinds)
                 {
@@ -705,8 +794,18 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
             for(const std::string& k : kinds_now)
             {
                 nlohmann::json snap;
-                if(service_.SnapshotEvent(k, snap) &&
-                   !snap.is_discarded())
+                bool           have = false;
+                try
+                {
+                    have = service_.SnapshotEvent(k, snap)
+                           && !snap.is_discarded();
+                }
+                catch(...)
+                {
+                    have = false;   /* a throwing service loses
+                                       only this push */
+                }
+                if(have)
                 {
                     const std::vector<uint8_t> ev =
                         EncodeMessage(MsgType::Event, 0,
@@ -733,7 +832,12 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
         }
 
         /* Service dispatch — handlers are non-blocking by
-           contract (IpcService.h). */
+           contract (IpcService.h). The try/catch is NOT a
+           formality: an exception escaping a std::thread
+           entry is std::terminate, i.e. the whole engine
+           process — and untrusted bodies reach nlohmann
+           accessors that throw type_error on wrong types.
+           The boundary is enforced here, not trusted. */
         {
             const nlohmann::json body = msg.Body();
             if(body.is_discarded())
@@ -745,7 +849,29 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
                 }
                 continue;
             }
-            IpcReply r = service_.Dispatch(msg.type, body);
+            IpcReply r;
+            try
+            {
+                r = service_.Dispatch(msg.type, body);
+            }
+            catch(const nlohmann::json::exception& e)
+            {
+                /* Input-shape failure inside the handler —
+                   bounded bad_request, session survives. */
+                r = IpcReply::Fail(ErrCode::BadRequest,
+                    std::string("request body rejected: ")
+                    + e.what());
+            }
+            catch(const std::exception& e)
+            {
+                r = IpcReply::Fail(ErrCode::Internal,
+                    std::string("handler error: ") + e.what());
+            }
+            catch(...)
+            {
+                r = IpcReply::Fail(ErrCode::Internal,
+                                   "handler error");
+            }
             if(r.code != ErrCode::Ok)
             {
                 /* ERROR body = {code,error,message} plus any

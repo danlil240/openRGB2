@@ -89,10 +89,21 @@ DeviceKey KeyFromJson(const nlohmann::json& j)
     DeviceKey k;
     if(j.is_object())
     {
-        k.device   = j.value("device",   std::string());
-        k.serial   = j.value("serial",   std::string());
-        k.location = j.value("location", std::string());
-        k.zone     = j.value("zone",     std::string());
+        /* Client input: wrong-typed fields become empty — the
+           caller validates the result. nlohmann::value() would
+           throw type_error straight through the session
+           thread (std::terminate = the whole engine). */
+        const auto field = [&j](const char* key) -> std::string
+        {
+            const auto it = j.find(key);
+            return (it != j.end() && it->is_string())
+                       ? it->get<std::string>()
+                       : std::string();
+        };
+        k.device   = field("device");
+        k.serial   = field("serial");
+        k.location = field("location");
+        k.zone     = field("zone");
     }
     return k;
 }
@@ -300,10 +311,10 @@ bool EngineService::ApplySceneDocument(
         }
         scene_ = doc;
     }
-    Emit(event_kind::kScene, nlohmann::json::object({
-        { "revision", revision  },
-        { "name",     doc->name },
-    }));
+    /* The event carries the full SCENE body — the documented
+       contract is that event data matches the corresponding
+       pull body (docs/ipc-protocol.md §7). */
+    Emit(event_kind::kScene, SceneJsonLocked());
     return true;
 }
 
@@ -702,8 +713,39 @@ IpcReply EngineService::Dispatch(MsgType type,
     }
 
     case MsgType::GetDeliveryStats:
+    {
+        /* A controller filter must be a DeviceKey object with
+           string fields — wrong-typed input is a bounded
+           bad_request, not a thrown type_error. */
+        if(body.is_object() && body.contains("controller"))
+        {
+            const nlohmann::json& cj = body["controller"];
+            bool key_ok = cj.is_object();
+            if(key_ok)
+            {
+                static const char* kFields[] = {
+                    "device", "serial", "location", "zone"
+                };
+                for(const char* f : kFields)
+                {
+                    const auto it = cj.find(f);
+                    if(it != cj.end() && !it->is_string())
+                    {
+                        key_ok = false;
+                        break;
+                    }
+                }
+            }
+            if(!key_ok)
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "controller must be a DeviceKey object "
+                    "with string fields");
+            }
+        }
         return IpcReply::Success(MsgType::DeliveryStats,
                                  DeliveryStatsJson(body));
+    }
 
     case MsgType::GetState:
         return IpcReply::Success(MsgType::State, StateJson());
@@ -726,14 +768,18 @@ IpcReply EngineService::Dispatch(MsgType type,
 
     case MsgType::LayoutCommand:
     {
+        /* value() with a json default can't throw; the
+           is_string() guard keeps get<>() from ever seeing a
+           wrong-typed verb. */
         const std::string verb =
-            body.is_object()
-                ? body.value("verb", std::string())
+            (body.is_object()
+             && body.value("verb", nlohmann::json()).is_string())
+                ? body["verb"].get<std::string>()
                 : std::string();
         if(verb.empty())
         {
             return IpcReply::Fail(ErrCode::BadRequest,
-                                  "LAYOUT_COMMAND requires {verb}");
+                "LAYOUT_COMMAND requires {verb:<string>}");
         }
         if(!IsKnownLayoutVerb(verb))
         {

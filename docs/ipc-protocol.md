@@ -47,9 +47,10 @@ Bounds (plan section 6 — everything is bounded):
 | HELLO deadline | 5 s from connect |
 | Write deadline | 5 s per outbound message |
 | Requests per second per connection | 128 (1 s windows) |
-| Concurrent sessions per pipe | 8 |
+| Concurrent sessions per pipe | 8 (independent caps — a full command pipe cannot starve diagnostics) |
 | Queued events per session | 64 (per-kind latest-wins, oldest evicted) |
 | Resync scan | ≤ 4 MiB skipped per message |
+| Per-command dispatch | by contract — see note below |
 
 ## 2. Handshake
 
@@ -109,6 +110,22 @@ without closing:
 Stable `code` values: `1` malformed, `2` too_large, `3` version_mismatch,
 `4` expected_hello, `5` unknown_command, `6` bad_request, `7` unavailable,
 `8` read_only, `9` rate_limited, `10` busy, `11` internal.
+
+Two more robustness guarantees worth knowing:
+
+- **Exceptions can never take the engine down.** Request dispatch,
+  the handshake parse, and the initial-event snapshot are each
+  wrapped — a handler throwing on malformed client input becomes
+  `ERROR(bad_request)` (JSON-shape failures) or `ERROR(internal)`
+  (anything else) and the connection survives.
+- **Per-command bound is contractual, not enforced.** `Dispatch`
+  runs inline on the session's reader thread and there is no
+  handler deadline — a thread cannot be safely cancelled
+  mid-call. Handlers are required to be non-blocking
+  (in-memory engine state only; `src/ipc/IpcService.h`). If a
+  future handler ever blocks, the blast radius is its own
+  session (one of ≤8 slots): other sessions, the event writer,
+  and the engine are unaffected.
 
 ## 4. Message catalogue (command channel)
 
@@ -247,9 +264,10 @@ matches the corresponding pull body:
 | `connection` | `sdk` object | SDK link state change |
 | `frame_status` | `{aggregate, controllers:[{key,sequence,colors,stats}]}` | ≤ 1 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses |
 
-Unknown kind names in `events` → `bad_request`. Queue overflow drops the
-oldest queued event (counted in `ipc.events_dropped`); a queued event of a
-kind is replaced by a newer one rather than appended.
+An `events` field that is neither `"all"` nor an array of strings, or any
+unknown kind name → `bad_request` (subscription unchanged). Queue overflow
+drops the oldest queued event (counted in `ipc.events_dropped`); a queued
+event of a kind is replaced by a newer one rather than appended.
 
 ## 8. Notes for implementers
 
