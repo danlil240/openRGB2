@@ -18,6 +18,7 @@
 #include "DeliveryPipeline.h"
 #include "DeviceMapper.h"
 #include "Engine.h"
+#include "PlaybackController.h"
 #include "SceneWorker.h"
 
 #include "EngineService.h"
@@ -278,18 +279,177 @@ int main(int argc, char** argv)
         SyncLanes(*pipeline, *sdk_client);
     }
 
+    /* Playback-mode state machine (Task 3.6): owns the
+       LiveEffects <-> AnimationPlayback contract — per-scene
+       persisted selection, lane suppression (one producer per
+       wireless group), SDK preset select, revision-based
+       acknowledgement, pause/stop transport control, and the
+       baked wired timeline that follows the validated
+       wireless clock (no backend clock channel exists over
+       the SDK wire, so clock_sample stays unset and sync is
+       honestly reported as unavailable). All backend access
+       goes through injected deps. */
+    openrgb2::PlaybackController::Deps pdeps;
+    pdeps.snapshots =
+        [&sdk_client]() -> std::vector<openrgb2::DeviceSnapshot>
+        {
+            return sdk_client ? sdk_client->Snapshots()
+                              : std::vector<openrgb2::DeviceSnapshot>{};
+        };
+    pdeps.wired_targets =
+        [&sdk_client, &mapper]() -> std::vector<openrgb2::DeviceSnapshot>
+        {
+            std::vector<openrgb2::DeviceSnapshot> out;
+            if(!sdk_client)
+            {
+                return out;
+            }
+            const std::vector<openrgb2::DeviceKey> bound =
+                mapper.BoundControllers();
+            for(const openrgb2::DeviceSnapshot& s :
+                sdk_client->Snapshots())
+            {
+                if(!openrgb2::IsWirelessGroupController(s) &&
+                   s.connection ==
+                       openrgb2::ConnectionState::Connected &&
+                   std::find(bound.begin(), bound.end(), s.key) !=
+                       bound.end())
+                {
+                    out.push_back(s);
+                }
+            }
+            return out;
+        };
+    pdeps.select_mode =
+        [&sdk_client](const openrgb2::DeviceKey& k,
+                      const std::string& name,
+                      const openrgb2::PlaybackModePatch& p,
+                      std::string& err)
+        {
+            if(!sdk_client)
+            {
+                err = "no SDK transport configured";
+                return false;
+            }
+            openrgb2::sdk::ModePatch mp;
+            mp.has_speed     = p.has_speed;     mp.speed     = p.speed;
+            mp.has_direction = p.has_direction; mp.direction = p.direction;
+            mp.has_colors    = p.has_colors;    mp.colors    = p.colors;
+            if(!sdk_client->SelectMode(k, name, mp))
+            {
+                err = sdk_client->LastError();
+                return false;
+            }
+            return true;
+        };
+    pdeps.active_mode =
+        [&sdk_client](const openrgb2::DeviceKey& k,
+                      openrgb2::BackendModeReport& rep)
+        {
+            if(!sdk_client)
+            {
+                return false;
+            }
+            int32_t           idx = -1;
+            openrgb2::sdk::SdkMode m;
+            if(!sdk_client->ActiveMode(k, idx, &m))
+            {
+                return false;
+            }
+            rep.valid     = true;
+            rep.name      = m.name;
+            rep.speed     = m.speed;
+            rep.direction = m.direction;
+            rep.colors    = m.colors;
+            return true;
+        };
+    pdeps.refresh_status =
+        [&sdk_client](std::string& err)
+        {
+            if(!sdk_client)
+            {
+                err = "no SDK transport configured";
+                return false;
+            }
+            if(!sdk_client->RefreshStatus())
+            {
+                err = sdk_client->LastError();
+                return false;
+            }
+            return true;
+        };
+    pdeps.set_custom_mode =
+        [&sdk_client](const openrgb2::DeviceKey& k, std::string& err)
+        {
+            if(!sdk_client)
+            {
+                err = "no SDK transport configured";
+                return false;
+            }
+            if(!sdk_client->SetCustomMode(k))
+            {
+                err = sdk_client->LastError();
+                return false;
+            }
+            return true;
+        };
+    pdeps.direct_submit =
+        [&sdk_client](const openrgb2::RgbFrame& f)
+        {
+            /* Pause-hold / stop-black bypass the suppressed
+               lane — the controller is the one producer. */
+            return sdk_client
+                ? sdk_client->SubmitLatest(f)
+                : openrgb2::SubmitResult::Reject(
+                      "no SDK transport configured");
+        };
+    pdeps.wired_submit =
+        [&pipeline](const openrgb2::RgbFrame& f)
+        { return pipeline->SubmitLatest(f); };
+    pdeps.set_suppressed =
+        [&pipeline](const openrgb2::DeviceKey& k, bool s,
+                    const std::string& r)
+        { pipeline->SetSuppressed(k, s, r); };
+    pdeps.drop_pending =
+        [&pipeline](const openrgb2::DeviceKey& k)
+        { return pipeline->DropPending(k); };
+    pdeps.reset_delivered =
+        [&pipeline](const openrgb2::DeviceKey& k)
+        { pipeline->ResetDeliveredState(k); };
+    pdeps.wait_idle =
+        [&pipeline](const openrgb2::DeviceKey& k,
+                    openrgb2::Clock::duration timeout)
+        { return pipeline->WaitIdle(k, timeout); };
+    /* clock_sample intentionally unset: the backend's
+       GroupStatus/RgbClockSnapshot is in-process state not
+       exposed over the SDK wire, and no backend diagnostics
+       pipe exists yet — sync reports honest Unknown/Stale. */
+    openrgb2::PlaybackController playback(std::move(pdeps));
+
     /* Every evaluated scene frame is split into per-controller
        complete-controller frames and handed to the pipeline via
-       the engine's submitLatest sink. */
+       the engine's submitLatest sink. While an uploaded loop
+       owns the output, live submissions to OTHER controllers
+       are skipped (Tick produces the matching baked frames);
+       submissions to the suppressed wireless group still run
+       so the lane's rejection — never a silent drop — is
+       exercised on every tick. */
     std::atomic<uint64_t> frames{ 0 };
     engine.Worker().SetFrameCallback(
-        [&engine, &mapper, &frames](const openrgb2::EvaluatedFrame& eval)
+        [&engine, &mapper, &frames, &playback](
+            const openrgb2::EvaluatedFrame& eval)
         {
             ++frames;
+            const bool owns = playback.PlaybackOwnsWired();
             for(const openrgb2::RgbFrame& frame : mapper.MapFrame(eval))
             {
+                if(owns && !playback.OwnsGroup(frame.controller))
+                {
+                    continue;
+                }
                 engine.SubmitLatest(frame);
             }
+            playback.Tick(eval.sample_time);
         });
 
     if(!effects_dir.empty())
@@ -307,6 +467,7 @@ int main(int argc, char** argv)
     ipc_deps.pipeline = pipeline.get();
     ipc_deps.mapper   = &mapper;
     ipc_deps.sdk      = sdk_client.get();
+    ipc_deps.playback = &playback;
     openrgb2::ipc::EngineService ipc_service(engine, ipc_deps);
 
     std::unique_ptr<openrgb2::ipc::IpcServer>         ipc_server;
@@ -414,6 +575,10 @@ int main(int argc, char** argv)
                controllers get lanes without a restart. */
             SyncLanes(*pipeline, *sdk_client);
 
+            /* Playback maintenance: acknowledgement polling,
+               clock sampling, topology re-resolution. */
+            playback.Poll(openrgb2::Clock::now());
+
             const std::vector<openrgb2::DeviceSnapshot> snaps =
                 sdk_client->Snapshots();
             mapper.SyncDevices(snaps);
@@ -430,6 +595,13 @@ int main(int argc, char** argv)
                 {
                     continue;
                 }
+                /* An uploaded loop owns this group — asserting
+                   Direct mode here would stomp it (Task 3.6:
+                   one producer per wireless group). */
+                if(playback.OwnsGroup(key))
+                {
+                    continue;
+                }
                 uint64_t& done = custom_mode_done[key];
                 if(done != snap_it->topology_generation)
                 {
@@ -439,6 +611,10 @@ int main(int argc, char** argv)
                     }
                 }
             }
+        }
+        else
+        {
+            playback.Poll(openrgb2::Clock::now());
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }

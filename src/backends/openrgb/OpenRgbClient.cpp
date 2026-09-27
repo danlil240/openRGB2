@@ -398,6 +398,120 @@ bool OpenRgbClient::Enumerate()
 ||| Reconnect schedule                                        |
 \*---------------------------------------------------------*/
 
+bool OpenRgbClient::RefreshStatus()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(state_ != ConnectionState::Connected)
+    {
+        last_error_ = "not connected";
+        return false;
+    }
+    try
+    {
+        bool structural = false;
+        std::vector<std::pair<DeviceKey, SdkController>> fresh;
+        fresh.reserve(devices_.size());
+        for(const auto& entry : devices_)
+        {
+            const std::vector<uint8_t> data =
+                Request(entry.second.index, kPktControllerData,
+                        BuildControllerDataRequest(protocol_version_),
+                        kPktControllerData);
+            SdkController c;
+            if(!ParseControllerData(data.data(), data.size(),
+                                    protocol_version_, c))
+            {
+                last_error_ = "malformed controller data on refresh";
+                return false;
+            }
+            /* A different identity or a changed zone/LED layout
+               at an expected index means the topology moved —
+               take the full re-enumeration path so the
+               generation bump invalidates stale frames. */
+            if(MakeKey(c) != entry.first ||
+               (int32_t)c.type != entry.second.snap.device_type ||
+               c.zones.size() != entry.second.snap.zones.size())
+            {
+                structural = true;
+            }
+            else
+            {
+                for(size_t z = 0; z < c.zones.size(); ++z)
+                {
+                    if(c.zones[z].leds_count !=
+                       entry.second.snap.zones[z].led_count)
+                    {
+                        structural = true;
+                        break;
+                    }
+                }
+            }
+            fresh.emplace_back(entry.first, std::move(c));
+        }
+        if(structural)
+        {
+            /* Same path as Enumerate() — a genuine topology
+               change must obsolete in-flight work. */
+            std::string err;
+            if(!EnumerateLocked(err))
+            {
+                last_error_ = err;
+                return false;
+            }
+            return true;
+        }
+        /* In-place refresh: mode/parameter state and the
+           last-enumerated colors only — the generation (and
+           therefore every pending frame) stays valid. */
+        for(auto& pair : fresh)
+        {
+            DeviceRecord& rec    = devices_.at(pair.first);
+            SdkController& c     = pair.second;
+            rec.snap.active_mode = (int32_t)c.active_mode;
+            rec.modes            = c.modes;
+            rec.snap.modes.clear();
+            for(const SdkMode& m : c.modes)
+            {
+                rec.snap.modes.push_back(m.name);
+            }
+            rec.snap.colors.clear();
+            rec.snap.colors.reserve(c.colors.size());
+            for(const uint32_t packed : c.colors)
+            {
+                rec.snap.colors.push_back(FromSceneColor(packed));
+            }
+        }
+        DrainPending();
+    }
+    catch(const TransportError& e)
+    {
+        MarkBrokenLocked(e.what(), Clock::now());
+        return false;
+    }
+    return true;
+}
+
+bool OpenRgbClient::ActiveMode(const DeviceKey& controller,
+                               int32_t& mode_index,
+                               SdkMode* mode) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = devices_.find(controller);
+    if(it == devices_.end())
+    {
+        return false;
+    }
+    mode_index = it->second.snap.active_mode;
+    if(mode && mode_index >= 0 &&
+       (size_t)mode_index < it->second.modes.size())
+    {
+        SdkMode m = it->second.modes[(size_t)mode_index];
+        m.raw.clear();       /* callers get parsed fields only */
+        *mode = std::move(m);
+    }
+    return true;
+}
+
 void OpenRgbClient::MarkBrokenLocked(const std::string& reason,
                                      TimePoint now)
 {
@@ -597,6 +711,19 @@ bool OpenRgbClient::SetCustomMode(const DeviceKey& controller)
 bool OpenRgbClient::SelectMode(const DeviceKey& controller,
                                const std::string& name, int32_t speed)
 {
+    ModePatch patch;
+    if(speed >= 0)
+    {
+        patch.has_speed = true;
+        patch.speed     = (uint32_t)speed;
+    }
+    return SelectMode(controller, name, patch);
+}
+
+bool OpenRgbClient::SelectMode(const DeviceKey& controller,
+                               const std::string& name,
+                               const ModePatch& patch)
+{
     std::lock_guard<std::mutex> lock(mutex_);
     const auto dev = devices_.find(controller);
     if(dev == devices_.end() || state_ != ConnectionState::Connected)
@@ -623,10 +750,9 @@ bool OpenRgbClient::SelectMode(const DeviceKey& controller,
     }
 
     std::vector<uint8_t> raw = dev->second.modes[mode_index].raw;
-    if(speed >= 0 &&
-       !PatchModeSpeed(raw, protocol_version_, (uint32_t)speed))
+    if(!PatchModeParams(raw, protocol_version_, patch))
     {
-        last_error_ = "cannot patch mode speed";
+        last_error_ = "cannot patch mode parameters";
         return false;
     }
 
@@ -641,7 +767,11 @@ bool OpenRgbClient::SelectMode(const DeviceKey& controller,
         MarkBrokenLocked(e.what(), Clock::now());
         return false;
     }
-    dev->second.snap.active_mode = mode_index;
+    /* snap.active_mode is deliberately NOT patched here: it is
+       the last server-reported value (Enumerate/RefreshStatus),
+       which is the playback task's honest applied-mode
+       acknowledgement — an optimistic write would fabricate a
+       confirmation the backend never sent. */
     return true;
 }
 

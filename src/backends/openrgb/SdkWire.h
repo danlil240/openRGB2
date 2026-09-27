@@ -115,7 +115,9 @@ struct SdkMode
     uint32_t             speed_min  = 0;
     uint32_t             speed_max  = 0;
     uint32_t             speed      = 0;
+    uint32_t             direction  = 0;
     uint32_t             color_mode = 0;
+    std::vector<uint32_t> colors;     /* mode-specific colors   */
     /* Raw serialized description at the negotiated protocol
        version — replayed verbatim by UPDATEMODE. */
     std::vector<uint8_t> raw;
@@ -185,6 +187,28 @@ std::vector<uint8_t> BuildResizeZoneBody(int32_t zone_index,
 \*---------------------------------------------------------*/
 bool PatchModeSpeed(std::vector<uint8_t>& raw, uint32_t version,
                     uint32_t speed);
+
+/*---------------------------------------------------------*\
+||| ModePatch — the playback-mode parameter patch: speed,  ||
+||| direction, and mode-specific colors inside a raw mode  ||
+||| description (UPDATEMODE replays the whole blob, so the  ||
+||| applied parameters ride the same packet). Unset fields ||
+||| keep the enumerated value. Colors replace the whole    ||
+||| tail — the mode description's variable-length colors   ||
+||| list is always last (verified layout in SdkWire.cpp).  ||
+\*---------------------------------------------------------*/
+struct ModePatch
+{
+    bool                  has_speed     = false;   uint32_t speed     = 0;
+    bool                  has_direction = false;   uint32_t direction = 0;
+    bool                  has_colors    = false;
+    std::vector<uint32_t> colors;
+};
+
+/* Returns false on malformed input (bad name field or a
+   blob shorter than the protocol-version layout requires). */
+bool PatchModeParams(std::vector<uint8_t>& raw, uint32_t version,
+                     const ModePatch& patch);
 
 } /* namespace sdk */
 } /* namespace openrgb2 */

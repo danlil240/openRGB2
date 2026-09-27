@@ -286,6 +286,20 @@ enum class SyncHealth
     Stale,
 };
 
+/* Transport control inside animation playback (plan
+   section 3.4 lifecycle): Playing = the uploaded loop owns
+   the group; Paused = a sampled frame is held; Stopped =
+   playback replaced with black. LiveEffects status always
+   reports Playing. */
+enum class PlaybackControl
+{
+    Playing,
+    Paused,
+    Stopped,
+};
+
+const char* PlaybackControlName(PlaybackControl c);
+
 /* Separately recorded physical playback measurement. */
 struct PlaybackMeasurement
 {
@@ -297,9 +311,10 @@ struct PlaybackMeasurement
 struct PlaybackStatus
 {
     PlaybackMode  mode               = PlaybackMode::LiveEffects;
-    uint64_t      preset_revision    = 0; /* selected preset identity   */
+    uint64_t      preset_revision    = 0; /* applied preset revision    */
     uint64_t      parameter_revision = 0; /* applied parameter revision */
     UploadState   upload             = UploadState::None;
+    PlaybackControl control          = PlaybackControl::Playing;
 
     /* Effective on-device playback geometry after qualification. */
     uint32_t      effective_frame_count      = 0;

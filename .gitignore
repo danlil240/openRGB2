@@ -14,6 +14,9 @@ compile_commands.json
 # Local user state: resolved hardware identities, session records
 profiles/local/
 
+# Vendored backend runtime state (config written by a live backend run)
+vendor/OpenRGB/OpenRGB.json
+
 # Qt generated
 *.pro.user
 *.pro.user.*

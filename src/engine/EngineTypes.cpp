@@ -131,6 +131,17 @@ bool PlaybackModeFromName(const std::string& name, PlaybackMode& out)
     return false;
 }
 
+const char* PlaybackControlName(PlaybackControl c)
+{
+    switch(c)
+    {
+    case PlaybackControl::Playing: return "playing";
+    case PlaybackControl::Paused:  return "paused";
+    case PlaybackControl::Stopped: return "stopped";
+    }
+    return "playing";
+}
+
 bool PlaybackModeSupported(PlaybackMode mode, const PlaybackCapabilities& caps)
 {
     switch(mode)

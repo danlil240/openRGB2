@@ -161,6 +161,7 @@ namespace
         {
             return false;
         }
+        out.direction = direction;
 
         uint16_t num_colors = 0;
         if(!c.U16(num_colors))
@@ -174,6 +175,7 @@ namespace
             {
                 return false;
             }
+            out.colors.push_back(color);
         }
 
         const uint8_t* end = c.Mark();
@@ -381,6 +383,71 @@ bool PatchModeSpeed(std::vector<uint8_t>& raw, uint32_t version,
         return false;
     }
     memcpy(raw.data() + off, &speed, 4);
+    return true;
+}
+
+bool PatchModeParams(std::vector<uint8_t>& raw, uint32_t version,
+                     const ModePatch& patch)
+{
+    /* Layout mirrors ParseMode / GetModeDescriptionData:
+       name(u16+bytes), value, flags, speed_min, speed_max,
+       [v3+] brightness_min/max, colors_min/max, speed,
+       [v3+] brightness, direction, color_mode,
+       num_colors(u16), colors(u32 each) — always last. */
+    if(raw.size() < 2)
+    {
+        return false;
+    }
+    uint16_t name_len = 0;
+    memcpy(&name_len, raw.data(), 2);
+
+    size_t off = 2 + name_len + 16;   /* name, value, flags, speed_min/max */
+    if(version >= 3)
+    {
+        off += 8;                     /* brightness_min/max                */
+    }
+    off += 8;                         /* colors_min, colors_max            */
+    if(off + 4 > raw.size())
+    {
+        return false;
+    }
+    if(patch.has_speed)
+    {
+        memcpy(raw.data() + off, &patch.speed, 4);
+    }
+    off += 4;                         /* speed                             */
+    if(version >= 3)
+    {
+        off += 4;                     /* brightness                        */
+    }
+    if(off + 4 > raw.size())
+    {
+        return false;
+    }
+    if(patch.has_direction)
+    {
+        memcpy(raw.data() + off, &patch.direction, 4);
+    }
+    off += 4;                         /* direction                         */
+    off += 4;                         /* color_mode                        */
+    if(off + 2 > raw.size())
+    {
+        return false;
+    }
+    if(patch.has_colors)
+    {
+        /* The colors list is the last field — replace the tail
+           wholesale so the count always matches the data. */
+        const uint16_t n = (uint16_t)patch.colors.size();
+        raw.resize(off);
+        const size_t at = raw.size();
+        raw.resize(at + 2 + n * 4);
+        memcpy(raw.data() + at, &n, 2);
+        for(uint16_t i = 0; i < n; ++i)
+        {
+            memcpy(raw.data() + at + 2 + i * 4, &patch.colors[i], 4);
+        }
+    }
     return true;
 }
 

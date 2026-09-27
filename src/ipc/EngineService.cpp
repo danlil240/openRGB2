@@ -115,6 +115,34 @@ std::string ColorHex(RgbColor c)
     return buf;
 }
 
+bool ParseHexColor(const std::string& s, RgbColor& out)
+{
+    if(s.size() != 7 || s[0] != '#')
+    {
+        return false;
+    }
+    const auto nib = [](char ch) -> int
+    {
+        if(ch >= '0' && ch <= '9') return ch - '0';
+        if(ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+        if(ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+        return -1;
+    };
+    int v[6];
+    for(int i = 0; i < 6; ++i)
+    {
+        v[i] = nib(s[i + 1]);
+        if(v[i] < 0)
+        {
+            return false;
+        }
+    }
+    out = RgbColor{ (uint8_t)(v[0] * 16 + v[1]),
+                    (uint8_t)(v[2] * 16 + v[3]),
+                    (uint8_t)(v[4] * 16 + v[5]) };
+    return true;
+}
+
 nlohmann::json ColorsToJson(const std::vector<RgbColor>& colors)
 {
     nlohmann::json out = nlohmann::json::array();
@@ -180,6 +208,7 @@ nlohmann::json PlaybackStatusToJson(const PlaybackStatus& st)
         { "preset_revision",   st.preset_revision            },
         { "parameter_revision",st.parameter_revision         },
         { "upload",            UploadStateName(st.upload)    },
+        { "control",           PlaybackControlName(st.control)},
         { "effective_frame_count",
                                st.effective_frame_count      },
         { "effective_frame_interval_s",
@@ -233,6 +262,13 @@ EngineService::EngineService(Engine& engine, Deps deps,
     : engine_(engine), deps_(std::move(deps)), options_(options),
       started_(Clock::now())
 {
+    /* The controller classifies against the APPLIED scene —
+       the service owns the document, so it provides it. */
+    if(deps_.playback)
+    {
+        deps_.playback->SetSceneProvider(
+            [this]() { return Scene(); });
+    }
 }
 
 void EngineService::SetEventSink(
@@ -280,19 +316,27 @@ bool EngineService::ApplySceneDocument(
     /* Resolve the effect stack the persisted document intends:
        the inline layer stack when present, otherwise the named
        preset through the effect-look registry (same contract
-       as the --scene CLI path). */
+       as the --scene CLI path). A playback-preset name
+       (Spectrum Cycle / Rainbow Wave / Breathing) is also
+       valid: it has no registry layer stack — live fallback
+       renders the document's base colors while Animation
+       playback drives the real preset (Task 3.6). */
     std::vector<studio::EffectLayer> layers = doc->effect.layers;
     if(layers.empty() && !doc->effect.preset.empty())
     {
-        if(!studio::FindPreset(doc->effect.preset))
+        if(!studio::FindPreset(doc->effect.preset) &&
+           !IsPlaybackPresetName(doc->effect.preset))
         {
             err = "unknown preset '" + doc->effect.preset + "'";
             return false;
         }
-        layers = studio::BuildPreset(doc->effect.preset,
-                                     doc->effect.seed);
-        studio::ApplyGlobalParams(layers, doc->effect.speed,
-                                  doc->effect.intensity);
+        if(studio::FindPreset(doc->effect.preset))
+        {
+            layers = studio::BuildPreset(doc->effect.preset,
+                                         doc->effect.seed);
+            studio::ApplyGlobalParams(layers, doc->effect.speed,
+                                      doc->effect.intensity);
+        }
     }
 
     uint64_t revision;
@@ -311,6 +355,12 @@ bool EngineService::ApplySceneDocument(
         }
         scene_ = doc;
     }
+    /* The persisted per-scene playback selection is restored
+       against the NEW document's capabilities (Task 3.6). */
+    if(deps_.playback)
+    {
+        deps_.playback->OnSceneApplied(doc);
+    }
     /* The event carries the full SCENE body — the documented
        contract is that event data matches the corresponding
        pull body (docs/ipc-protocol.md §7). */
@@ -322,6 +372,12 @@ uint64_t EngineService::SceneRevision() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return scene_revision_;
+}
+
+std::shared_ptr<const studio::SceneDocument> EngineService::Scene() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return scene_;
 }
 
 /*---------------------------------------------------------*\
@@ -353,24 +409,53 @@ nlohmann::json EngineService::SceneJsonLocked() const
 nlohmann::json EngineService::PlaybackJson() const
 {
     PlaybackCapabilities caps;
-    caps.live_effects       = true;
-    caps.animation_playback = false;
-    if(deps_.playback_caps)
+    PlaybackMode         requested;
+    PlaybackStatus       status;
+    uint64_t             requested_rev = 0;
+    bool                 pending       = false;
+    std::string          unavailable_reason;
+    std::string          status_detail;
+    if(deps_.playback)
     {
-        caps = deps_.playback_caps();
+        /* The controller is authoritative: applied status,
+           pending ack, and the scene-classified capability. */
+        caps      = deps_.playback->Caps();
+        requested = deps_.playback->RequestedMode();
+        status    = deps_.playback->Status();
+        requested_rev = deps_.playback->RequestedRevision();
+        pending       = deps_.playback->AckPending();
+        unavailable_reason = deps_.playback->SceneCaps().reason;
+        status_detail = deps_.playback->Detail();
     }
-    PlaybackMode requested;
+    else
     {
+        caps.live_effects       = true;
+        caps.animation_playback = false;
+        if(deps_.playback_caps)
+        {
+            caps = deps_.playback_caps();
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         requested = requested_mode_;
+        status    = engine_.Status();
     }
     return nlohmann::json::object({
-        { "requested_mode", PlaybackModeName(requested) },
+        { "requested_mode",     PlaybackModeName(requested) },
+        { "requested_revision", requested_rev             },
+        { "pending",            pending                   },
+        { "unavailable_reason",
+          unavailable_reason.empty()
+              ? nlohmann::json(nullptr)
+              : nlohmann::json(unavailable_reason)        },
+        { "detail",
+          status_detail.empty()
+              ? nlohmann::json(nullptr)
+              : nlohmann::json(status_detail)             },
         { "capabilities", nlohmann::json::object({
             { "live_effects",       caps.live_effects       },
             { "animation_playback", caps.animation_playback },
         })},
-        { "status", PlaybackStatusToJson(engine_.Status()) },
+        { "status", PlaybackStatusToJson(status) },
     });
 }
 
@@ -682,6 +767,106 @@ IpcReply EngineService::Dispatch(MsgType type,
             return IpcReply::Fail(ErrCode::BadRequest,
                                   "unknown playback mode '" + name + "'");
         }
+
+        /* Optional transport control: "playing" (default) |
+           "paused" (sampled hold) | "stopped" (black). */
+        PlaybackControl control = PlaybackControl::Playing;
+        {
+            const auto it = body.find("control");
+            if(it != body.end())
+            {
+                if(!it->is_string())
+                {
+                    return IpcReply::Fail(ErrCode::BadRequest,
+                        "control must be \"playing\"|\"paused\""
+                        "|\"stopped\"");
+                }
+                const std::string c = it->get<std::string>();
+                if(c == "paused")      control = PlaybackControl::Paused;
+                else if(c == "stopped") control = PlaybackControl::Stopped;
+                else if(c != "playing")
+                {
+                    return IpcReply::Fail(ErrCode::BadRequest,
+                        "unknown playback control '" + c + "'");
+                }
+            }
+        }
+
+        /* Optional preset parameters (animation playback):
+           {speed:int, reverse:bool, color:"#RRGGBB"}. */
+        PlaybackParams params;
+        {
+            const auto it = body.find("params");
+            if(it != body.end())
+            {
+                if(!it->is_object())
+                {
+                    return IpcReply::Fail(ErrCode::BadRequest,
+                        "params must be an object");
+                }
+                const nlohmann::json& p = *it;
+                const auto pj = p.find("speed");
+                if(pj != p.end())
+                {
+                    if(!pj->is_number_integer())
+                    {
+                        return IpcReply::Fail(ErrCode::BadRequest,
+                            "params.speed must be an integer");
+                    }
+                    params.speed = pj->get<int32_t>();
+                }
+                const auto rj = p.find("reverse");
+                if(rj != p.end())
+                {
+                    if(!rj->is_boolean())
+                    {
+                        return IpcReply::Fail(ErrCode::BadRequest,
+                            "params.reverse must be a boolean");
+                    }
+                    params.reverse = rj->get<bool>();
+                }
+                const auto cj = p.find("color");
+                if(cj != p.end())
+                {
+                    if(!cj->is_string() ||
+                       !ParseHexColor(cj->get<std::string>(),
+                                      params.color))
+                    {
+                        return IpcReply::Fail(ErrCode::BadRequest,
+                            "params.color must be \"#RRGGBB\"");
+                    }
+                }
+            }
+        }
+
+        if(deps_.playback)
+        {
+            /* The real transition: suppression, SDK select,
+               revision acknowledgement (Task 3.6). */
+            const PlaybackController::Result r =
+                deps_.playback->Request(mode, control, params);
+            if(!r.accepted)
+            {
+                return IpcReply::Fail(ErrCode::Unavailable,
+                                      r.reason);
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                requested_mode_ = mode;
+            }
+            Emit(event_kind::kPlayback, PlaybackJson());
+            /* status.mode only moves when the backend reports
+               the applied revision — "pending" is the honest
+               state until then. */
+            return IpcReply::Success(MsgType::Ok,
+                nlohmann::json::object({
+                    { "requested_mode", PlaybackModeName(mode) },
+                    { "applied",        !r.pending             },
+                    { "pending",        r.pending              },
+                    { "revision",       r.revision             },
+                }));
+        }
+
         PlaybackCapabilities caps;
         caps.live_effects       = true;
         caps.animation_playback = false;
@@ -701,9 +886,8 @@ IpcReply EngineService::Dispatch(MsgType type,
             requested_mode_ = mode;
         }
         Emit(event_kind::kPlayback, PlaybackJson());
-        /* Honest: the request is recorded; applying it to
-           hardware is Task 3.6 — status.mode is the APPLIED
-           state and only moves on acknowledgement. */
+        /* No controller wired: the request is recorded;
+           status.mode is the APPLIED state. */
         return IpcReply::Success(MsgType::Ok,
             nlohmann::json::object({
                 { "requested_mode", PlaybackModeName(mode) },

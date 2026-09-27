@@ -99,6 +99,30 @@ public:
        Connected. */
     bool Enumerate();
 
+    /* Lightweight refresh for mode/state acknowledgement
+       (the playback task): re-fetches every known
+       controller's data block WITHOUT bumping the topology
+       generation — pending frames stay valid. Only
+       mode/speed/direction/color fields and last-enumerated
+       colors are updated in place; a structural difference
+       (device identity, zone layout, LED counts, device
+       count) falls through to the full EnumerateLocked path
+       and bumps the generation. False when disconnected or
+       the fetch fails (connection marked broken). */
+    bool RefreshStatus();
+
+    /* Last server-reported mode state for `controller` —
+       updated by Enumerate()/RefreshStatus(). `mode_index`
+       is the enumerated active_mode; `mode` (when non-null)
+       receives the parsed active-mode description (name,
+       speed, direction, colors — no raw blob). This is the
+       applied-mode acknowledgement the playback task polls:
+       SDK sends are fire-and-forget, so the re-fetched value
+       is the only honest "backend applied it" signal. */
+    bool ActiveMode(const DeviceKey& controller,
+                    int32_t& mode_index,
+                    SdkMode* mode = nullptr) const;
+
     /* Reconnect schedule state. Poll(now) checks socket liveness
        while Connected (a peer close starts the schedule), and
        performs the next due attempt while Reconnecting. After
@@ -147,6 +171,12 @@ public:
        the enumerated speed_min/max range). */
     bool SelectMode(const DeviceKey& controller, const std::string& name,
                     int32_t speed = -1);
+
+    /* UPDATEMODE with the full parameter patch (playback
+       presets: speed, direction, mode-specific colors).
+       Fields not set in `patch` keep the enumerated values. */
+    bool SelectMode(const DeviceKey& controller, const std::string& name,
+                    const ModePatch& patch);
 
     /* RESIZEZONE: resizes the zone named `zone_name` (resolved
        by name). Call Enumerate() afterwards — topology changed. */

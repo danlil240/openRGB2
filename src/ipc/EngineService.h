@@ -35,6 +35,7 @@
 #include "DeviceMapper.h"
 #include "Engine.h"
 #include "OpenRgbClient.h"
+#include "PlaybackController.h"
 
 #include "effects/Presets.h"
 #include "scene/SceneTypes.h"
@@ -66,10 +67,18 @@ public:
         DeviceMapper*       mapper   = nullptr;   /* re-bind      */
         sdk::OpenRgbClient* sdk      = nullptr;   /* topology     */
 
-        /* Playback capability source — Task 3.6 plugs in the
-           real preset-qualified capabilities; the default is
-           live-effects only, so animation_playback requests
-           get an honest Unavailable. */
+        /* Task 3.6 playback controller — when set, it is the
+           authoritative playback state machine: SET_PLAYBACK_
+           MODE runs the real transition (suppression, SDK
+           select, revision acknowledgement), capabilities are
+           classified from the applied scene, and scene
+           applies restore the persisted selection. */
+        PlaybackController* playback = nullptr;
+
+        /* Playback capability source — fallback when no
+           controller is wired (tests, bare engine): the
+           default is live-effects only, so animation_playback
+           requests get an honest Unavailable. */
         std::function<PlaybackCapabilities()> playback_caps;
 
         /* IPC-side queue/counter source (IpcServer::Stats) —
@@ -102,6 +111,7 @@ public:
             std::shared_ptr<const studio::SceneDocument> doc,
             std::string& err);
     uint64_t SceneRevision() const;
+    std::shared_ptr<const studio::SceneDocument> Scene() const;
 
     /* Diff-driven event emission for the push channel: call
        periodically (~500 ms) from the engine's owner loop.

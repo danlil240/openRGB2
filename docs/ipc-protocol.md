@@ -138,7 +138,7 @@ Request → reply. `request_id` echoes.
 | 0x0101 | GET_SCENE | `{}` | SCENE |
 | 0x0102 | SET_SCENE | `{document:<SceneDocument>}` | OK `{revision,name}` |
 | 0x0103 | GET_PLAYBACK | `{}` | PLAYBACK |
-| 0x0104 | SET_PLAYBACK_MODE | `{mode}` | OK `{requested_mode,applied:false,pending:true}` |
+| 0x0104 | SET_PLAYBACK_MODE | `{mode, control?, params?}` | OK `{requested_mode,applied,pending,revision?}` / ERROR |
 | 0x0105 | GET_DELIVERY_STATS | `{}` or `{controller:{device,serial,location}}` | DELIVERY_STATS |
 | 0x0106 | GET_STATE | `{}` | STATE |
 | 0x0107 | LAYOUT_COMMAND | `{verb, ...args}` | OK / ERROR |
@@ -182,9 +182,14 @@ emits a `scene` event.
 
 ```json
 { "requested_mode": "live_effects"|"animation_playback",
+  "requested_revision": 0,
+  "pending": false,
+  "unavailable_reason": null,
+  "detail": null,
   "capabilities": {"live_effects": true, "animation_playback": false},
   "status": { "mode": ..., "preset_revision": 0, "parameter_revision": 0,
     "upload": "none|uploading|active|failed",
+    "control": "playing|paused|stopped",
     "effective_frame_count": 0, "effective_frame_interval_s": 0,
     "clock_sample_s": 0, "clock_uncertainty_s": 0,
     "sync": "unknown|healthy|degraded|stale",
@@ -194,8 +199,28 @@ emits a `scene` event.
 `requested_mode` is the recorded UI selection (persisted per scene);
 `status.mode` is the APPLIED mode and only moves on backend
 acknowledgement — UI shows pending until they agree (plan section 4).
+`pending` is true while a transition or backend acknowledgement is in
+flight; `requested_revision` is the request generation the client can
+poll against `status.parameter_revision`. `unavailable_reason` carries
+the scene-capability reason animation is unavailable for the loaded
+scene; `detail` carries the last transition/ack/control failure.
 Unsupported modes → `unavailable` with reason; unknown names →
 `bad_request`.
+
+SET_PLAYBACK_MODE accepts `mode` plus optional `control`
+(`"playing"` default | `"paused"` sampled-hold | `"stopped"` black) and
+optional `params` `{speed:int, reverse:bool, color:"#RRGGBB"}` applied
+to the uploaded preset (speed 10..200, direction for Rainbow Wave,
+color for Breathing). Animation playback is limited to the three
+uploaded presets — `Spectrum Cycle`, `Rainbow Wave`, `Breathing` —
+which a scene selects by naming one of them in `effect.preset` (SDK
+names and `snake_case` ids both accepted). While an uploaded loop owns
+the Lian Li wireless group, live frames to that group are rejected by
+the delivery lane (counted as suppressed, never silently dropped);
+wired controllers keep receiving matching baked frames sampled from
+the same preset/timeline. Reply `applied:false/pending:true` means the
+mode change was accepted and serialized; `status.mode` follows when the
+backend reports it.
 
 **DELIVERY_STATS** — `{available, aggregate, pending, controllers:[{key,
 stats, pending, colors, budget_ms}]}`; per-controller form adds

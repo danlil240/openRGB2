@@ -105,6 +105,40 @@ public:
     \*---------------------------------------------------------*/
     SubmitResult SubmitLatest(const RgbFrame& frame) override;
 
+    /*---- Producer suppression (plan 3.4/6) -----------------*\
+    | While a wireless uploaded loop owns a controller's     |
+    | lights there must be exactly ONE RGB producer for it:  |
+    | SetSuppressed(key, true, reason) makes BOTH Submit-    |
+    | Latest and SubmitReliable reject with the reason — a   |
+    | queued live frame can never overwrite a newly uploaded |
+    | loop. Suppressed lanes still accept DropPending and    |
+    | drain nothing; playback-control writes (pause-hold,    |
+    | stop-black) bypass the lane entirely via the transport |
+    | — the playback controller is the owning producer.      |
+    | DropPending clears both slots (returns frames dropped) |
+    | so transition-queued work is invalidated.              |
+    | ResetDeliveredState clears the lane's delivered-state  |
+    | memory (has_sent/colors, NOT the sequence guard): the  |
+    | next live frame delivers immediately and can never be  |
+    | suppressed by pre-playback delivered state — a stale   |
+    | delivered-state memory surviving a same-generation     |
+    | reconnect cannot eat the fresh complete-group frame on |
+    | return to live (Task 3.6 transition ordering).         |
+    | InFlight counts sends popped for delivery but not yet  |
+    | completed — WaitIdle blocks (bounded) until the lane   |
+    | has no pending and no in-flight work, so a mode change |
+    | is serialized behind the last live send.               |
+    \*---------------------------------------------------------*/
+    void   SetSuppressed(const DeviceKey& controller,
+                         bool suppressed,
+                         std::string reason = "");
+    bool   IsSuppressed(const DeviceKey& controller) const;
+    size_t DropPending(const DeviceKey& controller);
+    void   ResetDeliveredState(const DeviceKey& controller);
+    size_t InFlight(const DeviceKey& controller) const;
+    bool   WaitIdle(const DeviceKey& controller,
+                    Clock::duration timeout);
+
     /* The reliable static-state convergence path (plan 3.3 —
        kept distinct from replaceable live frames): same
        validation, but the frame is NEVER suppressed by
@@ -183,6 +217,15 @@ private:
 
         RgbFrame              live;         bool has_live     = false;
         RgbFrame              reliable;     bool has_reliable = false;
+
+        /* Producer suppression + in-flight accounting (the
+           playback mode task). in_flight counts sends popped
+           for delivery — including the unlocked transport
+           call — so WaitIdle can serialize a mode change
+           behind the last live send. */
+        bool                  suppressed = false;
+        std::string           suppress_reason;
+        uint32_t              in_flight  = 0;
 
         /* Delivered-state memory — suppression and staleness. */
         bool                  has_sent      = false;

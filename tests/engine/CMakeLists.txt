@@ -17,6 +17,11 @@ engine_suite(scene_worker_test)
 engine_suite(delivery_pipeline_test)
 engine_suite(device_mapping_test)
 
+# Task 3.6 — playback mode integration + cross-device sync.
+engine_suite(playback_mode_test)
+set_tests_properties(playback_mode_test PROPERTIES
+    ENVIRONMENT "DLS_EFFECT_DIR=${CMAKE_SOURCE_DIR}/src/core/presets/effects")
+
 # Task 3.5 — IPC layer. ipc_server_test additionally needs the
 # named-pipe transport + ACL APIs.
 engine_suite(ipc_protocol_test)

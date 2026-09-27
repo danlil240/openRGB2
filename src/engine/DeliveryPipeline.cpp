@@ -212,6 +212,20 @@ SubmitResult DeliveryPipeline::SubmitLatest(const RgbFrame& frame)
     }
     Lane& lane = *it->second;
 
+    if(lane.suppressed)
+    {
+        /* An uploaded playback loop owns this group — live
+           frames are rejected with the reason, never silently
+           dropped (plan section 3.4: one RGB producer per
+           wireless group). */
+        ++lane.stats.rejected;
+        ++aggregate_.rejected;
+        return SubmitResult::Reject(
+            lane.suppress_reason.empty()
+                ? "controller owned by uploaded playback"
+                : lane.suppress_reason);
+    }
+
     const SubmitResult valid = Validate(lane, frame);
     if(valid.status == SubmitStatus::Rejected)
     {
@@ -259,6 +273,18 @@ SubmitResult DeliveryPipeline::SubmitReliable(const RgbFrame& frame)
     }
     Lane& lane = *it->second;
 
+    if(lane.suppressed)
+    {
+        /* Reliable convergence is still an RGB producer — the
+           single-producer rule applies to it too. */
+        ++lane.stats.rejected;
+        ++aggregate_.rejected;
+        return SubmitResult::Reject(
+            lane.suppress_reason.empty()
+                ? "controller owned by uploaded playback"
+                : lane.suppress_reason);
+    }
+
     const SubmitResult valid = Validate(lane, frame);
     if(valid.status == SubmitStatus::Rejected)
     {
@@ -290,9 +316,131 @@ SubmitResult DeliveryPipeline::SubmitReliable(const RgbFrame& frame)
 || Delivery                                                 |
 \*---------------------------------------------------------*/
 
+void DeliveryPipeline::SetSuppressed(const DeviceKey& controller,
+                                     bool suppressed,
+                                     std::string reason)
+{
+    std::shared_ptr<Lane> lane;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = lanes_.find(controller);
+        if(it == lanes_.end())
+        {
+            return;
+        }
+        it->second->suppressed      = suppressed;
+        it->second->suppress_reason = std::move(reason);
+        lane = it->second;
+    }
+    lane->cv.notify_all();   /* let WaitIdle/waits re-evaluate */
+}
+
+bool DeliveryPipeline::IsSuppressed(const DeviceKey& controller) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = lanes_.find(controller);
+    return it != lanes_.end() && it->second->suppressed;
+}
+
+size_t DeliveryPipeline::DropPending(const DeviceKey& controller)
+{
+    std::shared_ptr<Lane> lane;
+    size_t dropped = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = lanes_.find(controller);
+        if(it == lanes_.end())
+        {
+            return 0;
+        }
+        lane = it->second;
+        dropped = size_t(lane->has_live) + size_t(lane->has_reliable);
+        lane->has_live     = false;
+        lane->has_reliable = false;
+    }
+    lane->cv.notify_all();
+    return dropped;
+}
+
+void DeliveryPipeline::ResetDeliveredState(const DeviceKey& controller)
+{
+    std::shared_ptr<Lane> lane;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = lanes_.find(controller);
+        if(it == lanes_.end())
+        {
+            return;
+        }
+        lane = it->second;
+        /* Delivered-state memory is stale across a mode
+           transition: the uploaded loop changed the device's
+           colors without touching this lane. Clear it so the
+           first frame back on live is never suppressed — the
+           sequence guard (max_seq) intentionally survives: it
+           is per generation, not per delivered frame. */
+        lane->has_sent      = false;
+        lane->last_sent_seq = 0;
+        lane->last_colors.clear();
+    }
+    lane->cv.notify_all();
+}
+
+size_t DeliveryPipeline::InFlight(const DeviceKey& controller) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = lanes_.find(controller);
+    return it == lanes_.end() ? 0 : it->second->in_flight;
+}
+
+bool DeliveryPipeline::WaitIdle(const DeviceKey& controller,
+                                Clock::duration timeout)
+{
+    /* Bounded wait for "no pending and nothing inside a
+       transport send" — mode changes serialize behind the
+       last live send so a queued or in-flight frame cannot
+       overwrite a newly uploaded loop. */
+    const TimePoint deadline = Clock::now() + timeout;
+    std::shared_ptr<Lane> lane;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = lanes_.find(controller);
+        if(it == lanes_.end())
+        {
+            return true;      /* no lane == nothing pending  */
+        }
+        lane = it->second;
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    return lane->cv.wait_until(lock, deadline,
+        [&lane]
+        {
+            return !lane->has_live && !lane->has_reliable &&
+                   lane->in_flight == 0;
+        });
+}
+
 bool DeliveryPipeline::DeliverOne(Lane& lane, RgbFrame frame,
                                   bool reliable, TimePoint now)
 {
+    /* The caller popped this frame and charged in_flight —
+       every exit path clears it (and wakes WaitIdle). */
+    struct FlightGuard
+    {
+        Lane& lane; std::mutex& m;
+        ~FlightGuard()
+        {
+            {
+                std::lock_guard<std::mutex> lock(m);
+                if(lane.in_flight > 0)
+                {
+                    --lane.in_flight;
+                }
+            }
+            lane.cv.notify_all();   /* WaitIdle observes 0    */
+        }
+    } guard{ lane, mutex_ };
+
     /* Unchanged-frame suppression + stale-live drop (live path
        only — reliable convergence is always transmitted). */
     {
@@ -356,6 +504,13 @@ size_t DeliveryPipeline::DrainDue(const DeviceKey& controller,
             return 0;
         }
         lane = it->second;
+        if(lane->suppressed)
+        {
+            /* An uploaded loop owns the group: nothing in this
+               lane may reach the transport until the producer
+               resumes (plan section 3.4 — one producer). */
+            return 0;
+        }
         if(lane->has_reliable)
         {
             frame             = std::move(lane->reliable);
@@ -370,6 +525,10 @@ size_t DeliveryPipeline::DrainDue(const DeviceKey& controller,
             frame          = std::move(lane->live);
             lane->has_live = false;
             have           = true;
+        }
+        if(have)
+        {
+            ++lane->in_flight;   /* cleared inside DeliverOne */
         }
     }
     if(!have)
@@ -504,11 +663,20 @@ void DeliveryPipeline::LaneRun(Lane* lane)
                 {
                     return;
                 }
+                if(lane->suppressed)
+                {
+                    /* Uploaded playback owns the group — pending
+                       work must not deliver until resume (the
+                       controller drops it on transition anyway). */
+                    lane->cv.wait(lock);
+                    continue;
+                }
                 if(lane->has_reliable)
                 {
                     frame              = std::move(lane->reliable);
                     lane->has_reliable = false;
                     reliable           = true;
+                    ++lane->in_flight;  /* cleared in DeliverOne */
                     break;
                 }
                 if(lane->has_live)
@@ -519,6 +687,7 @@ void DeliveryPipeline::LaneRun(Lane* lane)
                     {
                         frame          = std::move(lane->live);
                         lane->has_live = false;
+                        ++lane->in_flight;
                         break;
                     }
                     /* Pending but not yet due — wake exactly at the
