@@ -26,11 +26,15 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace openrgb2
 {
@@ -50,6 +54,12 @@ public:
         uint32_t    write_deadline_ms = 5000;   /* protocol: 5 s per message  */
         uint32_t    read_deadline_ms  = 5000;   /* per-message read bound     */
         uint32_t    keepalive_ms      = 15000;  /* PING cadence; 0 = disabled */
+        /* Bounded outbound queue: SendRequest only encodes + enqueues
+           — a session writer thread does the (deadline-bounded) pipe
+           I/O so callers on a GUI thread are never blocked by a
+           wedged peer. Overflow refuses the request honestly and is
+           counted in DroppedWrites(). */
+        size_t      max_outbound_queue = 64;
     };
 
     struct Handlers
@@ -82,17 +92,25 @@ public:
     /* Full session on the CALLING thread: HELLO -> WELCOME ->
        (optional) SUBSCRIBE {events:"all"} -> read loop until
        Stop(), peer close, or a fatal condition. Takes ownership
-       of `channel` for the duration of the run. */
+       of `channel` for the duration of the run.
+
+       keep_running (optional) is an EXTERNAL cancellation flag the
+       caller owns: the session also ends when it goes false — even
+       if Stop() was issued while the caller was still deciding to
+       start the run. Run never clears it. */
     EndReason Run(std::unique_ptr<ipc::IIpcChannel> channel,
                   const Handlers& handlers,
                   const Options& options,
-                  std::string& detail);
+                  std::string& detail,
+                  const std::atomic<bool>* keep_running = nullptr);
 
-    /* Safe from ANY thread while a session is live. Frames and
-       sends a request; id_out receives the correlator the engine
-       echoes in its reply. False when no session is live, the
-       handshake has not completed, or the serialized body
-       exceeds the 1 MiB bound (encode is bounded too). */
+    /* Safe from ANY thread while a session is live — and FAST: the
+       body is encoded (1 MiB bound enforced) and enqueued; the
+       session writer thread performs the deadline-bounded pipe I/O.
+       id_out receives the correlator the engine echoes in its reply.
+       False when no session is live, the handshake has not
+       completed, the serialized body exceeds the bound, or the
+       bounded outbound queue is full (rejects are counted). */
     bool SendRequest(ipc::MsgType type, const nlohmann::json& body,
                      uint32_t& id_out, std::string& err);
 
@@ -102,21 +120,34 @@ public:
 
     bool     Live() const;
     uint16_t NegotiatedVersion() const;
+    /* Requests refused by the bounded outbound queue plus frames
+       still queued when a session ended — honest loss, never
+       silent. */
+    uint64_t DroppedWrites() const;
 
 private:
-    bool SendFrame(ipc::MsgType type, uint32_t request_id,
-                   const nlohmann::json& body, uint16_t version,
-                   std::string& err);
+    bool Cancelled() const;
+    void WriterMain(std::shared_ptr<ipc::IIpcChannel> ch);
 
     Options               options_;
     std::atomic<bool>     live_{ false };
     std::atomic<bool>     stop_{ false };
+    std::atomic<bool>     writer_up_{ false };
     std::atomic<uint16_t> negotiated_{ 0 };
     std::atomic<uint32_t> next_id_{ 1 };
+    std::atomic<uint64_t> dropped_writes_{ 0 };
 
-    std::mutex                            send_mu_;
+    /* Owned by the Run() caller; null when not supplied. Points at
+       the caller's atomic — valid for the duration of the run. */
+    const std::atomic<bool>* keep_running_ = nullptr;
+
     std::mutex                            ch_mu_;
     std::shared_ptr<ipc::IIpcChannel>     channel_;
+
+    std::mutex                            out_mu_;
+    std::condition_variable               out_cv_;
+    std::deque<std::vector<uint8_t>>      out_queue_;
+    std::thread                           writer_;
 };
 
 } /* namespace ui */

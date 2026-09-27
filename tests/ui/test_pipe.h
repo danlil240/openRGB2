@@ -44,6 +44,11 @@ struct PipeShared
 
     bool a_closed = false;           /* client end closed */
     bool b_closed = false;           /* server end closed */
+
+    /* Client->server wedge: while set, a client-end SendAll
+       waits (deadline-honoring) without moving bytes — models
+       a wedged-but-open engine pipe. */
+    bool wedge_a_send = false;
 };
 
 /*---------------------------------------------------------*\
@@ -126,11 +131,29 @@ public:
     }
 
     IpcIoResult SendAll(const void* data, size_t len,
-                        uint32_t /*deadline_ms*/,
+                        uint32_t deadline_ms,
                         std::string& err) override
     {
         {
-            std::lock_guard<std::mutex> lock(st_->m);
+            std::unique_lock<std::mutex> lock(st_->m);
+            if(a_)
+            {
+                /* Wedged client send: hold the write until the
+                   test releases it — or the caller's deadline /
+                   a close ends it, exactly like a real pipe. */
+                const auto deadline =
+                    std::chrono::steady_clock::now()
+                    + std::chrono::milliseconds(deadline_ms);
+                while(st_->wedge_a_send && !st_->a_closed &&
+                      !st_->b_closed)
+                {
+                    if(st_->cv.wait_until(lock, deadline)
+                       == std::cv_status::timeout)
+                    {
+                        return IpcIoResult::Timeout;
+                    }
+                }
+            }
             if(a_ ? st_->a_closed : st_->b_closed)
             {
                 return IpcIoResult::Closed;
@@ -278,6 +301,17 @@ public:
             }
             rx_.insert(rx_.end(), take.begin(), take.end());
         }
+    }
+
+    /* Wedge/unwedge the client's outbound pipe writes — a
+       peer that accepts nothing without closing. */
+    void SetClientSendWedge(bool on)
+    {
+        {
+            std::lock_guard<std::mutex> lock(st_->m);
+            st_->wedge_a_send = on;
+        }
+        st_->cv.notify_all();
     }
 
     /* Models the engine vanishing: client reads hit Closed. */

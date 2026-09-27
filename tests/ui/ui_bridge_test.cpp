@@ -20,6 +20,7 @@
 #include <QThread>
 #include <QVariantMap>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <functional>
@@ -286,6 +287,117 @@ int main(int argc, char** argv)
         QThread::msleep(60);
         QCoreApplication::processEvents();
         CHECK(fails == after_stop);   /* no further attempts   */
+    }
+
+    /*---- stop() while a connect attempt is in flight --------
+      The factory blocks like ConnectNamedPipeChannel (up to
+      the connect deadline). stop() landing inside that window
+      used to deadlock: the worker ran a full session anyway
+      and join() never returned. Now the worker re-checks and
+      the session's external cancel flag ends it pre-HELLO. */
+    std::printf("-- stop during in-flight connect\n");
+    {
+        ui::EngineBridge bridge;
+        auto             pipe = std::make_shared<TestPipe>();
+        std::atomic<bool> factory_entered{ false };
+        bridge.setChannelFactoryForTesting(
+            [&](std::string& err)
+                -> std::unique_ptr<IIpcChannel>
+            {
+                (void)err;
+                factory_entered.store(true);
+                /* Runs on the WORKER thread — sleeping here is
+                   exactly the window the deadlock needed. */
+                QThread::msleep(400);
+                return pipe->ClientChannel();
+            });
+        bridge.start();
+        CHECK(PumpUntil([&] { return factory_entered.load(); }));
+
+        const auto t0 = std::chrono::steady_clock::now();
+        bridge.stop();              /* joins the worker        */
+        const auto stop_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+        /* Bounded by the factory's own wait — not a hang. */
+        CHECK(stop_ms < 3000);
+
+        /* The aborted attempt must never have put HELLO on the
+           wire — the session died before Run(). */
+        ServerPeer srv = pipe->Peer();
+        Message    m;
+        CHECK(!srv.RecvMsg(m, 300));
+        CHECK(PumpUntil([&] {
+            return bridge.connectionState() == "disconnected";
+        }));
+    }
+
+    /*---- non-object EVENT / reply bodies --------------------
+      .value() on a non-object body throws type_error.302 —
+      on the GUI thread that killed the app. Guarded now:
+      junk surfaces via protocolError, the session lives. */
+    std::printf("-- non-object bodies survive\n");
+    {
+        ui::EngineBridge bridge;
+        auto             pipe = std::make_shared<TestPipe>();
+        std::atomic<int> proto_errors{ 0 };
+        QObject::connect(&bridge, &ui::EngineBridge::protocolError,
+                         [&](const QString&) {
+                             proto_errors.fetch_add(1);
+                         });
+        bridge.setChannelFactoryForTesting(
+            [&](std::string& err)
+                -> std::unique_ptr<IIpcChannel>
+            {
+                (void)err;
+                return pipe->ClientChannel();
+            });
+        ui::EngineWireClient::Options wopts;
+        wopts.keepalive_ms = 0;
+        bridge.setWireOptionsForTesting(wopts);
+        bridge.start();
+
+        ServerPeer srv = pipe->Peer();
+        CHECK(DriveServerHandshake(srv));
+        CHECK(PumpUntil([&] {
+            return bridge.connectionState() == "connected";
+        }));
+        CHECK(AnswerAutoPulls(srv));
+
+        /* Non-object EVENT body — guarded to protocolError. */
+        srv.SendMsg(MsgType::Event, 0,
+                    nlohmann::json::array({ 1, 2, 3 }));
+        CHECK(PumpUntil([&] {
+            return proto_errors.load() >= 1;
+        }));
+
+        /* The session is still alive: a valid event applies. */
+        srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "scene" },
+                { "data", nlohmann::json::object({
+                    { "name", "still-alive" } }) },
+            }));
+        CHECK(PumpUntil([&] {
+            return bridge.scene().value("name").toString()
+                   == "still-alive";
+        }));
+
+        /* Non-object reply body — replyReceived still fires
+           with the correlator; no store is corrupted. */
+        const int gid = bridge.getState();
+        CHECK(gid > 0);
+        Message m;
+        CHECK(srv.RecvMsg(m, 4000));
+        srv.SendMsg(MsgType::State, (uint32_t)gid,
+                    nlohmann::json::array({ "junk" }));
+        QCoreApplication::processEvents(
+            QEventLoop::AllEvents, 50);
+        QThread::msleep(30);
+        QCoreApplication::processEvents();
+        CHECK(bridge.connectionState() == "connected");
+
+        bridge.stop();
     }
 
     std::printf("%d checks, %d failures\n", checks, failures);

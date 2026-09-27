@@ -23,7 +23,7 @@ function(ui_suite NAME)
     add_executable(${NAME} ${NAME}.cpp)
     target_link_libraries(${NAME} PRIVATE
         openrgb2_ui
-        openrgb2_ipc)
+        openrgb2_ipc_wire)
     target_include_directories(${NAME} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/src/ui)

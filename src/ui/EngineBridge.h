@@ -195,7 +195,12 @@ private:
     std::thread               worker_;
     mutable std::mutex        mu_;
     std::condition_variable   wake_cv_;
-    bool                      running_       = false;
+    /* Atomic so the worker can pass it to the wire session as the
+       external cancellation flag: a stop() that lands between the
+       factory returning a channel and wire_.Run() starting still
+       ends the run before HELLO — never a session the owner
+       already asked to die. */
+    std::atomic<bool>         running_{ false };
     bool                      reconnect_req_ = false;
     size_t                    fail_count_    = 0;
     std::atomic<int>          attempts_{ 0 };

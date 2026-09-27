@@ -1,11 +1,20 @@
 /*---------------------------------------------------------*\
 || NamedPipe.cpp                                             ||
 ||                                                           ||
-||   Win32 named-pipe transport + the restricted DACL.     ||
+||   SERVER side of the named-pipe transport: the          ||
+||   restricted DACL (BuildRestrictedSddl /                ||
+||   PipeSecurityAttributes) and NamedPipeListener ->      ||
+||   IpcServer::Serve. The CLIENT side — NamedPipeChannel  ||
+||   + ConnectNamedPipeChannel — lives in                  ||
+||   NamedPipeClient.cpp so codec+transport-only targets   ||
+||   (`openrgb2_ipc_wire`, e.g. the UI process) never      ||
+||   link the server machinery.                            ||
 ||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 \*---------------------------------------------------------*/
 
 #include "NamedPipe.h"
+
+#include "NamedPipeInternal.h"
 
 #include <atomic>
 #include <chrono>
@@ -24,53 +33,8 @@ namespace openrgb2
 namespace ipc
 {
 
-namespace
-{
-
-uint64_t NowMs()
-{
-    return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-}
-
-uint32_t RemainingMs(uint64_t deadline_abs_ms)
-{
-    const uint64_t now = NowMs();
-    if(now >= deadline_abs_ms)
-    {
-        return 0;
-    }
-    return (uint32_t)(deadline_abs_ms - now);
-}
-
-std::string LastErrorText(DWORD e)
-{
-    char buf[256];
-    const DWORD n = FormatMessageA(
-        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-        nullptr, e, 0, buf, sizeof(buf), nullptr);
-    if(n == 0)
-    {
-        return "win32 error " + std::to_string(e);
-    }
-    std::string s(buf, n);
-    while(!s.empty() && (s.back() == '\r' || s.back() == '\n' ||
-                        s.back() == ' '))
-    {
-        s.pop_back();
-    }
-    return s;
-}
-
-/* Puts a connected pipe end into nonblocking-wait byte mode
-   so every I/O can honor a deadline by polling. */
-bool SetNonblockingWait(HANDLE h)
-{
-    DWORD mode = PIPE_READMODE_BYTE | PIPE_NOWAIT;
-    return SetNamedPipeHandleState(h, &mode, nullptr, nullptr) != 0;
-}
-
-} /* anonymous namespace */
+using pipe_detail::LastErrorText;
+using pipe_detail::SetNonblockingWait;
 
 /*---------------------------------------------------------*\
 || Restricted DACL                                          ||
@@ -171,229 +135,6 @@ const std::string& PipeSecurityAttributes::Sddl() const
 bool PipeSecurityAttributes::Ok() const
 {
     return impl_->ok;
-}
-
-/*---------------------------------------------------------*\
-|| NamedPipeChannel                                          ||
-\*---------------------------------------------------------*/
-
-NamedPipeChannel::NamedPipeChannel(void* handle)
-    : handle_(handle)
-{
-}
-
-NamedPipeChannel::~NamedPipeChannel()
-{
-    Close();
-}
-
-bool NamedPipeChannel::IsOpen() const
-{
-    return handle_.load() != nullptr;
-}
-
-void NamedPipeChannel::Close()
-{
-    void* h = handle_.exchange(nullptr);
-    if(h)
-    {
-        /* Cancel any in-flight blocking call before releasing
-           the handle (deadline polls exit on !handle_, but a
-           racing ReadFile must see invalid-handle, not a
-           recycled one — CancelIoEx + close is the safe order
-           for our synchronous-handle use). */
-        CancelIoEx((HANDLE)h, nullptr);
-        CloseHandle((HANDLE)h);
-    }
-}
-
-IpcIoResult NamedPipeChannel::RecvSome(void* buf, size_t max_len,
-                                       size_t& got,
-                                       uint32_t deadline_ms,
-                                       std::string& err)
-{
-    got = 0;
-    const uint64_t deadline_abs = NowMs() + deadline_ms;
-    for(;;)
-    {
-        void* h = handle_.load();
-        if(!h)
-        {
-            return IpcIoResult::Closed;
-        }
-        DWORD avail = 0;
-        if(!PeekNamedPipe((HANDLE)h, nullptr, 0, nullptr,
-                          &avail, nullptr))
-        {
-            const DWORD e = GetLastError();
-            if(e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED
-               || e == ERROR_NO_DATA || e == ERROR_PIPE_LISTENING
-               || e == ERROR_INVALID_HANDLE)
-            {
-                return IpcIoResult::Closed;
-            }
-            err = "PeekNamedPipe: " + LastErrorText(e);
-            return IpcIoResult::Error;
-        }
-        if(avail > 0)
-        {
-            const DWORD want =
-                (DWORD)((avail < max_len) ? avail : max_len);
-            DWORD n = 0;
-            if(!ReadFile((HANDLE)h, buf, want, &n, nullptr))
-            {
-                const DWORD e = GetLastError();
-                if(e == ERROR_BROKEN_PIPE || e == ERROR_NO_DATA
-                   || e == ERROR_PIPE_NOT_CONNECTED)
-                {
-                    return IpcIoResult::Closed;
-                }
-                err = "ReadFile: " + LastErrorText(e);
-                return IpcIoResult::Error;
-            }
-            got = n;
-            return IpcIoResult::Ok;
-        }
-        if(RemainingMs(deadline_abs) == 0)
-        {
-            return IpcIoResult::Timeout;
-        }
-        Sleep(1);
-    }
-}
-
-IpcIoResult NamedPipeChannel::RecvExact(void* buf, size_t len,
-                                        uint32_t deadline_ms,
-                                        std::string& err)
-{
-    uint8_t* out = (uint8_t*)buf;
-    size_t   got = 0;
-    const uint64_t deadline_abs = NowMs() + deadline_ms;
-    while(got < len)
-    {
-        const uint32_t left = RemainingMs(deadline_abs);
-        if(left == 0)
-        {
-            return IpcIoResult::Timeout;
-        }
-        size_t n = 0;
-        const IpcIoResult r =
-            RecvSome(out + got, len - got, n, left, err);
-        if(r != IpcIoResult::Ok)
-        {
-            return r;
-        }
-        got += n;
-    }
-    return IpcIoResult::Ok;
-}
-
-IpcIoResult NamedPipeChannel::SendAll(const void* data, size_t len,
-                                      uint32_t deadline_ms,
-                                      std::string& err)
-{
-    const uint8_t* p = (const uint8_t*)data;
-    size_t   sent = 0;
-    const uint64_t deadline_abs = NowMs() + deadline_ms;
-    while(sent < len)
-    {
-        void* h = handle_.load();
-        if(!h)
-        {
-            return IpcIoResult::Closed;
-        }
-        DWORD n = 0;
-        const DWORD want =
-            (DWORD)((len - sent) > 0x7FFFFFFF ? 0x7FFFFFFF
-                                            : (len - sent));
-        if(!WriteFile((HANDLE)h, p + sent, want, &n, nullptr))
-        {
-            const DWORD e = GetLastError();
-            if(e == ERROR_PIPE_BUSY || e == ERROR_NO_DATA)
-            {
-                /* Nonblocking-wait mode: no room right now —
-                   poll inside the deadline. */
-            }
-            else if(e == ERROR_BROKEN_PIPE
-                    || e == ERROR_PIPE_NOT_CONNECTED
-                    || e == ERROR_INVALID_HANDLE)
-            {
-                return IpcIoResult::Closed;
-            }
-            else
-            {
-                err = "WriteFile: " + LastErrorText(e);
-                return IpcIoResult::Error;
-            }
-        }
-        else
-        {
-            sent += n;
-            if(sent >= len)
-            {
-                break;
-            }
-            if(n == 0)
-            {
-                /* wrote nothing — wait for the peer to drain */
-            }
-        }
-        if(RemainingMs(deadline_abs) == 0)
-        {
-            return IpcIoResult::Timeout;
-        }
-        Sleep(1);
-    }
-    return IpcIoResult::Ok;
-}
-
-/*---------------------------------------------------------*\
-|| Client connect                                            ||
-\*---------------------------------------------------------*/
-
-std::unique_ptr<IIpcChannel> ConnectNamedPipeChannel(
-    const std::string& pipe_name, uint32_t timeout_ms,
-    std::string& err)
-{
-    const uint64_t deadline_abs = NowMs() + timeout_ms;
-    for(;;)
-    {
-        HANDLE h = CreateFileA(pipe_name.c_str(),
-                               GENERIC_READ | GENERIC_WRITE,
-                               0, nullptr, OPEN_EXISTING,
-                               0, nullptr);
-        if(h != INVALID_HANDLE_VALUE)
-        {
-            if(!SetNonblockingWait(h))
-            {
-                err = "SetNamedPipeHandleState: " +
-                      LastErrorText(GetLastError());
-                CloseHandle(h);
-                return nullptr;
-            }
-            return std::unique_ptr<IIpcChannel>(
-                new NamedPipeChannel((void*)h));
-        }
-        const DWORD e = GetLastError();
-        if(e == ERROR_ACCESS_DENIED)
-        {
-            err = "access denied by pipe ACL (engine IPC is "
-                  "restricted to its creating user)";
-            return nullptr;
-        }
-        if(e != ERROR_FILE_NOT_FOUND && e != ERROR_PIPE_BUSY)
-        {
-            err = "CreateFile: " + LastErrorText(e);
-            return nullptr;
-        }
-        if(RemainingMs(deadline_abs) == 0)
-        {
-            err = "pipe not available within " +
-                  std::to_string(timeout_ms) + " ms";
-            return nullptr;
-        }
-        Sleep(5);
-    }
 }
 
 /*---------------------------------------------------------*\
@@ -593,24 +334,6 @@ PipeSecurityAttributes::~PipeSecurityAttributes() { delete impl_; }
 void* PipeSecurityAttributes::Raw() { return nullptr; }
 const std::string& PipeSecurityAttributes::Sddl() const { return impl_->sddl; }
 bool  PipeSecurityAttributes::Ok() const { return false; }
-
-NamedPipeChannel::NamedPipeChannel(void* handle) : handle_(handle) {}
-NamedPipeChannel::~NamedPipeChannel() {}
-bool NamedPipeChannel::IsOpen() const { return false; }
-void NamedPipeChannel::Close() {}
-IpcIoResult NamedPipeChannel::RecvExact(void*, size_t, uint32_t,
-                                        std::string& err)
-{ err = "unsupported platform"; return IpcIoResult::Error; }
-IpcIoResult NamedPipeChannel::RecvSome(void*, size_t, size_t&,
-                                     uint32_t, std::string& err)
-{ err = "unsupported platform"; return IpcIoResult::Error; }
-IpcIoResult NamedPipeChannel::SendAll(const void*, size_t, uint32_t,
-                                      std::string& err)
-{ err = "unsupported platform"; return IpcIoResult::Error; }
-
-std::unique_ptr<IIpcChannel> ConnectNamedPipeChannel(
-    const std::string&, uint32_t, std::string& err)
-{ err = "unsupported platform"; return nullptr; }
 
 struct NamedPipeListener::Impl
 {

@@ -29,6 +29,20 @@ uint16_t EngineWireClient::NegotiatedVersion() const
     return negotiated_.load();
 }
 
+uint64_t EngineWireClient::DroppedWrites() const
+{
+    return dropped_writes_.load();
+}
+
+bool EngineWireClient::Cancelled() const
+{
+    /* A Stop() issued before Run() cleared stop_ — OR the caller's
+       own cancellation flag going false — must end the session;
+       Run() may reset stop_ for reuse, never keep_running_. */
+    return stop_.load() ||
+           (keep_running_ != nullptr && !keep_running_->load());
+}
+
 void EngineWireClient::Stop()
 {
     stop_.store(true);
@@ -44,35 +58,48 @@ void EngineWireClient::Stop()
     {
         ch->Close();
     }
+    out_cv_.notify_all();   /* wake a parked writer so finish()
+                               joins promptly */
 }
 
-bool EngineWireClient::SendFrame(ipc::MsgType type, uint32_t request_id,
-                                 const nlohmann::json& body,
-                                 uint16_t version, std::string& err)
+/*---------------------------------------------------------*\
+| Session writer — drains the bounded outbound queue onto  |
+| the channel. Runs inside the session (started by Run()); |
+| a failed or wedged send closes the channel so the reader |
+| loop ends the session honestly instead of silently       |
+| swallowing requests.                                     |
+\*---------------------------------------------------------*/
+void EngineWireClient::WriterMain(
+    std::shared_ptr<ipc::IIpcChannel> ch)
 {
-    const std::vector<uint8_t> wire =
-        ipc::EncodeMessage(type, request_id, body, version);
-    if(wire.empty())
+    for(;;)
     {
-        err = "encode failed (body over 1 MiB bound)";
-        return false;
+        std::vector<uint8_t> frame;
+        {
+            std::unique_lock<std::mutex> lock(out_mu_);
+            out_cv_.wait(lock, [this] {
+                return !out_queue_.empty() || !live_.load();
+            });
+            if(out_queue_.empty())
+            {
+                break;              /* !live_ and nothing pending */
+            }
+            frame = std::move(out_queue_.front());
+            out_queue_.pop_front();
+        }
+        std::string werr;
+        if(ch->SendAll(frame.data(), frame.size(),
+                       options_.write_deadline_ms, werr)
+               != ipc::IpcIoResult::Ok)
+        {
+            /* Bounded write still failed — the peer is wedged
+               or gone. Closing unblocks the read loop; whatever
+               remains queued is counted as dropped by finish(). */
+            ch->Close();
+            break;
+        }
     }
-    std::shared_ptr<ipc::IIpcChannel> ch;
-    {
-        std::lock_guard<std::mutex> lock(ch_mu_);
-        ch = channel_;
-    }
-    if(!ch)
-    {
-        err = "session closed";
-        return false;
-    }
-    /* Duplex pipe: a concurrent SendAll while the reader polls
-       is safe — guard only against interleaved writes. */
-    std::lock_guard<std::mutex> send_lock(send_mu_);
-    return ch->SendAll(wire.data(), wire.size(),
-                       options_.write_deadline_ms,
-                       err) == ipc::IpcIoResult::Ok;
+    writer_up_.store(false);
 }
 
 bool EngineWireClient::SendRequest(ipc::MsgType type,
@@ -90,11 +117,35 @@ bool EngineWireClient::SendRequest(ipc::MsgType type,
         err = "handshake incomplete";
         return false;
     }
-    const uint32_t id = next_id_.fetch_add(1);
-    if(!SendFrame(type, id, body, ver, err))
+    if(!writer_up_.load())
     {
+        err = "session closing";
         return false;
     }
+    const uint32_t id = next_id_.fetch_add(1);
+    const std::vector<uint8_t> wire =
+        ipc::EncodeMessage(type, id, body, ver);
+    if(wire.empty())
+    {
+        err = "encode failed (body over 1 MiB bound)";
+        return false;
+    }
+    /* Encode + enqueue only — the writer thread owns the pipe
+       write so a caller on a GUI thread can never be blocked by
+       a wedged peer. Bounded: a full queue refuses honestly. */
+    {
+        std::lock_guard<std::mutex> lock(out_mu_);
+        if(out_queue_.size() >= options_.max_outbound_queue)
+        {
+            dropped_writes_.fetch_add(1);
+            err = "outbound queue full (" +
+                  std::to_string(options_.max_outbound_queue) +
+                  " pending) — engine not draining";
+            return false;
+        }
+        out_queue_.push_back(wire);
+    }
+    out_cv_.notify_one();
     id_out = id;
     return true;
 }
@@ -102,16 +153,22 @@ bool EngineWireClient::SendRequest(ipc::MsgType type,
 EngineWireClient::EndReason EngineWireClient::Run(
     std::unique_ptr<ipc::IIpcChannel> channel,
     const Handlers& handlers, const Options& options,
-    std::string& detail)
+    std::string& detail,
+    const std::atomic<bool>* keep_running)
 {
     if(!channel)
     {
         detail = "no channel";
         return EndReason::HandshakeFailed;
     }
+    /* stop_ is cleared for session reuse — a Stop() issued while
+       the caller was preparing this run must NOT be lost, which is
+       why the caller's keep_running flag is consulted alongside
+       (and first). */
     stop_.store(false);
     negotiated_.store(0);
-    options_ = options;
+    options_       = options;
+    keep_running_  = keep_running;
     {
         std::lock_guard<std::mutex> lock(ch_mu_);
         channel_ = std::shared_ptr<ipc::IIpcChannel>(std::move(channel));
@@ -129,9 +186,32 @@ EngineWireClient::EndReason EngineWireClient::Run(
                 channel_.reset();
             }
         }
+        out_cv_.notify_all();
+        if(writer_.joinable())
+        {
+            /* The writer is bounded: parked on the cv it wakes on
+               !live_; mid-send it unwedges on the closed channel
+               or the write deadline. */
+            writer_.join();
+        }
+        {
+            /* Whatever never made it onto the wire is loss the
+               caller can see — count it, never claim it sent. */
+            std::lock_guard<std::mutex> lock(out_mu_);
+            dropped_writes_.fetch_add(out_queue_.size());
+            out_queue_.clear();
+        }
+        keep_running_ = nullptr;
         detail = d;
         return r;
     };
+
+    /* A stop that landed before this Run began — bail before any
+       byte goes on the wire. */
+    if(Cancelled())
+    {
+        return finish(EndReason::Stopped, "stopped before HELLO");
+    }
 
     ipc::IIpcChannel* ch = channel_.get();
 
@@ -168,11 +248,15 @@ EngineWireClient::EndReason EngineWireClient::Run(
             /* version_mismatch / expected_hello / busy — all
                surface honestly; the engine closes after this. */
             const nlohmann::json b = msg.Body();
+            const std::string code =
+                b.is_object() ? b.value("error", std::string("?"))
+                              : std::string("?");
+            const std::string text =
+                b.is_object() ? b.value("message", std::string())
+                              : std::string();
             return finish(EndReason::HandshakeFailed,
-                          "engine refused handshake: " +
-                              b.value("error", std::string("?")) +
-                              " — " +
-                              b.value("message", std::string()));
+                          "engine refused handshake: " + code +
+                              " — " + text);
         }
         if(msg.type != ipc::MsgType::Welcome)
         {
@@ -181,18 +265,39 @@ EngineWireClient::EndReason EngineWireClient::Run(
                               ipc::MsgTypeName(msg.type));
         }
         const nlohmann::json welcome = msg.Body();
-        if(welcome.is_discarded())
+        /* The contract demands a JSON OBJECT body — a discarded
+           parse or any other value kind must fail the handshake,
+           never reach .value() unchecked (it throws). */
+        if(!welcome.is_object())
         {
             return finish(EndReason::HandshakeFailed,
-                          "WELCOME body is not valid JSON");
+                          "WELCOME body is not a JSON object");
         }
-        negotiated_.store(
-            (uint16_t)welcome.value("negotiated_version",
-                                    (int)msg.version));
+        if(Cancelled())
+        {
+            return finish(EndReason::Stopped,
+                          "stopped during handshake");
+        }
+        if(welcome.contains("negotiated_version") &&
+           welcome["negotiated_version"].is_number())
+        {
+            negotiated_.store(
+                welcome["negotiated_version"].get<uint16_t>());
+        }
+        else
+        {
+            negotiated_.store(msg.version);
+        }
         if(negotiated_.load() == 0)
         {
             negotiated_.store(msg.version);
         }
+        /* The writer owns the pipe from here: SUBSCRIBE and every
+           later request enqueue to it — SendRequest callers never
+           touch the channel. */
+        writer_up_.store(true);
+        writer_ = std::thread(&EngineWireClient::WriterMain, this,
+                              channel_);
         live_.store(true);
         if(handlers.onWelcome)
         {
@@ -224,7 +329,7 @@ EngineWireClient::EndReason EngineWireClient::Run(
     auto last_ping = std::chrono::steady_clock::now();
     for(;;)
     {
-        if(stop_.load())
+        if(Cancelled())
         {
             return finish(EndReason::Stopped, "stopped by client");
         }

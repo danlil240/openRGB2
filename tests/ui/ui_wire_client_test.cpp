@@ -21,6 +21,7 @@
 
 #include "test_pipe.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -521,6 +522,261 @@ void Test_OfflineRequest()
     client.Stop();   /* safe with no session */
 }
 
+/*---------------------------------------------------------*\
+||| 7. Non-object / unparseable bodies                       ||
+|||                                                          ||
+||| .value() on a non-object json throws type_error.302 —   ||
+||| before the guards this terminated the client. A non-    ||
+||| object WELCOME must fail the handshake; junk bodies     ||
+||| mid-session must pass through without ending it.        ||
+\*---------------------------------------------------------*/
+std::vector<uint8_t> RawFrame(uint16_t type, uint32_t id,
+                              const std::string& body)
+{
+    std::vector<uint8_t> f;
+    const uint32_t magic = kMagic;
+    for(int i = 0; i < 4; ++i) f.push_back((uint8_t)(magic >> (8 * i)));
+    f.push_back(1); f.push_back(0);                   /* version */
+    f.push_back((uint8_t)(type & 0xFF));
+    f.push_back((uint8_t)((type >> 8) & 0xFF));
+    for(int i = 0; i < 4; ++i) f.push_back((uint8_t)(id >> (8 * i)));
+    for(int i = 0; i < 4; ++i)
+    {
+        f.push_back((uint8_t)((uint32_t)body.size() >> (8 * i)));
+    }
+    f.insert(f.end(), body.begin(), body.end());
+    return f;
+}
+
+void Test_NonObjectWelcome()
+{
+    std::printf("-- non-object WELCOME body\n");
+    auto      st  = std::make_shared<PipeShared>();
+    ServerPeer srv(st);
+    EngineWireClient client;
+    Capture    cap;
+
+    EngineWireClient::EndReason end =
+        EngineWireClient::EndReason::Stopped;
+    std::string detail;
+    std::thread th([&] {
+        end = client.Run(
+            std::unique_ptr<IIpcChannel>(new PipeEnd(st, true)),
+            MakeHandlers(cap),
+            EngineWireClient::Options(), detail);
+    });
+
+    Message m;
+    CHECK(srv.RecvMsg(m, 4000));
+    CHECK(m.type == MsgType::Hello);
+    /* Parses fine, but a JSON array — not the contract's
+       object. Must fail cleanly, not throw. */
+    srv.SendMsg(MsgType::Welcome, 0,
+                nlohmann::json::array({ 1, 2, 3 }));
+    th.join();
+    CHECK(end == EngineWireClient::EndReason::HandshakeFailed);
+    CHECK(cap.welcomes == 0);
+}
+
+void Test_NonObjectSessionBodies()
+{
+    std::printf("-- non-object EVENT/reply bodies mid-session\n");
+    auto      st  = std::make_shared<PipeShared>();
+    ServerPeer srv(st);
+    EngineWireClient client;
+    Capture    cap;
+    EngineWireClient::Options opts;
+    opts.keepalive_ms = 0;
+
+    EngineWireClient::EndReason end =
+        EngineWireClient::EndReason::Stopped;
+    std::string detail;
+    std::thread th([&] {
+        end = client.Run(
+            std::unique_ptr<IIpcChannel>(new PipeEnd(st, true)),
+            MakeHandlers(cap), opts, detail);
+    });
+
+    uint32_t sub_id = 0;
+    CHECK(DriveHandshake(srv, cap, sub_id));
+
+    /* Non-object EVENT body — the wire layer passes it to the
+       handler; the bridge guards it. Neither may throw. */
+    srv.SendMsg(MsgType::Event, 0,
+                nlohmann::json::array({ "junk" }));
+    /* Unparseable body: valid framing, garbage JSON — the
+       reader produces a discarded value. */
+    srv.SendRaw(RawFrame((uint16_t)MsgType::Event, 0,
+                         "{not json"));
+    /* A valid event afterwards proves the stream survived. */
+    srv.SendMsg(MsgType::Event, 0,
+                nlohmann::json::object({
+                    { "kind", "scene" },
+                    { "data", nlohmann::json::object({
+                        { "name", "after" } }) },
+                }));
+    CHECK(WaitFor([&] {
+        std::lock_guard<std::mutex> lock(cap.m);
+        for(const nlohmann::json& e : cap.events)
+        {
+            if(e.is_object() &&
+               e.value("kind", std::string()) == "scene")
+            {
+                return true;
+            }
+        }
+        return false;
+    }));
+    /* The junk bodies were delivered verbatim, never
+       reinterpreted or dropped silently. */
+    {
+        std::lock_guard<std::mutex> lock(cap.m);
+        bool saw_array = false, saw_discarded = false;
+        for(const nlohmann::json& e : cap.events)
+        {
+            if(e.is_array())     { saw_array     = true; }
+            if(e.is_discarded()) { saw_discarded = true; }
+        }
+        CHECK(saw_array);
+        CHECK(saw_discarded);
+    }
+
+    /* Non-object reply body — correlates like any reply. */
+    uint32_t    rid = 0;
+    std::string err;
+    CHECK(client.SendRequest(MsgType::GetState,
+                             nlohmann::json::object(), rid, err));
+    Message m;
+    CHECK(srv.RecvMsg(m, 4000));
+    srv.SendMsg(MsgType::State, rid,
+                nlohmann::json::array({ "not", "an", "object" }));
+    CHECK(WaitFor([&] { return cap.HasReply(rid); }));
+    CHECK(cap.GetReply(rid).body.is_array());
+
+    client.Stop();
+    th.join();
+    CHECK(end == EngineWireClient::EndReason::Stopped);
+}
+
+/*---------------------------------------------------------*\
+||| 8. Queued writes: caller never blocks on the pipe        ||
+|||                                                          ||
+||| SendRequest encodes + enqueues to the bounded outbound  ||
+||| queue — a session writer thread does the pipe I/O. A    ||
+||| wedged send holds the WRITER, never the caller; queue   ||
+||| overflow refuses honestly and is counted.               ||
+\*---------------------------------------------------------*/
+void Test_QueuedWritesUnderWedge()
+{
+    std::printf("-- queued writes under a wedged channel\n");
+    auto      st  = std::make_shared<PipeShared>();
+    ServerPeer srv(st);
+    EngineWireClient client;
+    Capture    cap;
+    EngineWireClient::Options opts;
+    opts.keepalive_ms      = 0;
+    opts.write_deadline_ms = 3000;   /* generous — we control it */
+    opts.max_outbound_queue = 4;
+
+    EngineWireClient::EndReason end =
+        EngineWireClient::EndReason::Stopped;
+    std::string detail;
+    std::thread th([&] {
+        end = client.Run(
+            std::unique_ptr<IIpcChannel>(new PipeEnd(st, true)),
+            MakeHandlers(cap), opts, detail);
+    });
+
+    uint32_t sub_id = 0;
+    CHECK(DriveHandshake(srv, cap, sub_id));
+    srv.SetClientSendWedge(true);    /* peer stops draining    */
+
+    /* The first request must come back FAST — encode + queue
+       only, even though the writer is now parked in SendAll. */
+    uint32_t    rid = 0;
+    std::string err;
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(client.SendRequest(MsgType::GetState,
+                             nlohmann::json::object(), rid, err));
+    const auto enqueue_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+    CHECK(enqueue_ms < 1000);   /* bounded by encode, not I/O */
+
+    Message m;
+    CHECK(!srv.RecvMsg(m, 250));   /* nothing on the wire yet  */
+
+    /* Fill the bounded queue past its cap — overflow refuses
+       with an honest error instead of blocking or growing. */
+    int accepted = 0, refused = 0;
+    for(int i = 0; i < 6; ++i)
+    {
+        uint32_t id = 0;
+        if(client.SendRequest(MsgType::Ping,
+                              nlohmann::json::object(), id, err))
+        {
+            ++accepted;
+        }
+        else
+        {
+            ++refused;
+            CHECK(err.find("queue") != std::string::npos ||
+                  err.find("outbound") != std::string::npos);
+        }
+    }
+    CHECK(refused > 0);
+    CHECK(accepted <= 4);
+    CHECK(client.DroppedWrites() >= 1);
+
+    /* Unwedge: the wedged send completes, the queue drains in
+       order, and every accepted request reaches the wire. */
+    srv.SetClientSendWedge(false);
+    int received = 0;
+    for(int i = 0; i < 1 + accepted; ++i)
+    {
+        if(srv.RecvMsg(m, 4000))
+        {
+            ++received;
+            srv.SendMsg(MsgType::Ok, m.request_id,
+                        nlohmann::json::object());
+        }
+    }
+    CHECK(received == 1 + accepted);
+    CHECK(WaitFor([&] { return cap.HasReply(rid); }));
+
+    client.Stop();
+    th.join();
+    CHECK(end == EngineWireClient::EndReason::Stopped);
+}
+
+/*---------------------------------------------------------*\
+||| 9. External cancellation honored before the run          ||
+|||                                                          ||
+||| A stop flag set BEFORE Run() begins must end it without  ||
+||| a byte on the wire — Run() clears its own stop_ for      ||
+||| reuse, so the caller-owned flag is the authority.       ||
+\*---------------------------------------------------------*/
+void Test_KeepRunningCancel()
+{
+    std::printf("-- keep_running cancel before session start\n");
+    auto      st  = std::make_shared<PipeShared>();
+    ServerPeer srv(st);
+    EngineWireClient client;
+    Capture    cap;
+
+    std::atomic<bool> keep{ false };   /* already cancelled    */
+    std::string detail;
+    const EngineWireClient::EndReason end =
+        client.Run(
+            std::unique_ptr<IIpcChannel>(new PipeEnd(st, true)),
+            MakeHandlers(cap), EngineWireClient::Options(),
+            detail, &keep);
+    CHECK(end == EngineWireClient::EndReason::Stopped);
+
+    Message m;
+    CHECK(!srv.RecvMsg(m, 300));   /* no HELLO ever sent       */
+}
+
 } /* anonymous namespace */
 
 int main()
@@ -531,6 +787,10 @@ int main()
     Test_ResyncAndTooLarge();
     Test_PeerClose();
     Test_OfflineRequest();
+    Test_NonObjectWelcome();
+    Test_NonObjectSessionBodies();
+    Test_QueuedWritesUnderWedge();
+    Test_KeepRunningCancel();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -41,11 +41,11 @@ EngineBridge::~EngineBridge()
 void EngineBridge::start()
 {
     std::lock_guard<std::mutex> lock(mu_);
-    if(running_)
+    if(running_.load())
     {
         return;
     }
-    running_      = true;
+    running_.store(true);
     fail_count_   = 0;
     reconnect_req_ = false;
     worker_ = std::thread(&EngineBridge::WorkerMain, this);
@@ -55,7 +55,7 @@ void EngineBridge::stop()
 {
     {
         std::lock_guard<std::mutex> lock(mu_);
-        running_ = false;
+        running_.store(false);
     }
     wake_cv_.notify_all();
     wire_.Stop();
@@ -83,8 +83,7 @@ void EngineBridge::reconnectNow()
 
 bool EngineBridge::Running() const
 {
-    std::lock_guard<std::mutex> lock(mu_);
-    return running_;
+    return running_.load();
 }
 
 template <typename F> void EngineBridge::Post(F&& f)
@@ -125,6 +124,15 @@ void EngineBridge::WorkerMain()
             fail_count_ = 0;
         }
 
+        /* stop() may have landed while the (blocking, up to the
+           connect deadline) factory was running — never start a
+           session on a bridge that was asked to die. The channel
+           closes on destruction. */
+        if(!Running())
+        {
+            break;
+        }
+
         EngineWireClient::Handlers h;
         h.onWelcome = [this](const nlohmann::json& j)
         {
@@ -147,8 +155,13 @@ void EngineBridge::WorkerMain()
         };
 
         std::string detail;
+        /* &running_ is the session's external cancellation flag:
+           even if stop() raced past every check above, the wire
+           loop honours it before HELLO — no session can outlive
+           the owner's request to stop. */
         const EngineWireClient::EndReason r =
-            wire_.Run(std::move(ch), h, wire_options_, detail);
+            wire_.Run(std::move(ch), h, wire_options_, detail,
+                      &running_);
         Post([this, r, detail] { ApplySessionEnd(r, detail); });
 
         if(!Running())
@@ -196,6 +209,11 @@ bool EngineBridge::BackoffWait()
 
 void EngineBridge::ApplyWelcome(const nlohmann::json& welcome)
 {
+    /* A hostile/buggy body with wrong-typed fields could throw
+       out of json accessors — a malformed push must surface as
+       protocolError, never take down the UI. */
+    try
+    {
     server_info_ = JsonToVariant(welcome).toMap();
     emit serverInfoChanged();
     setConnectionState("connected");
@@ -203,9 +221,13 @@ void EngineBridge::ApplyWelcome(const nlohmann::json& welcome)
     setLastError(QString());
 
     /* WELCOME carries a GET_STATE body — paint immediately;
-       the SUBSCRIBE initial EVENTs refine it right after. */
-    const nlohmann::json state = welcome.value("state",
-                                               nlohmann::json());
+       the SUBSCRIBE initial EVENTs refine it right after.
+       Guarded: a non-object body (array/scalar/discarded parse)
+       must never reach .value() — it throws type_error. */
+    const nlohmann::json state =
+        welcome.is_object()
+            ? welcome.value("state", nlohmann::json())
+            : nlohmann::json();
     if(state.is_object())
     {
         if(state.contains("scene") && state["scene"].is_object())
@@ -234,10 +256,26 @@ void EngineBridge::ApplyWelcome(const nlohmann::json& welcome)
     getPresets();
     getDeliveryStats();
     getState();
+    }
+    catch(const std::exception& e)
+    {
+        emit protocolError(QString::fromStdString(
+            std::string("malformed WELCOME body: ") + e.what()));
+    }
 }
 
 void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
 {
+    /* A non-object EVENT body (array, scalar, discarded parse)
+       is a protocol violation — surface it, never .value() it. */
+    if(!event_body.is_object())
+    {
+        emit protocolError(
+            QStringLiteral("EVENT body is not a JSON object"));
+        return;
+    }
+    try
+    {
     const std::string kind =
         event_body.value("kind", std::string());
     const nlohmann::json data = event_body.value("data",
@@ -246,8 +284,10 @@ void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
     if(kind == ipc::event_kind::kTopology)
     {
         snapshots_ =
-            JsonToVariant(data.value("snapshots",
-                                     nlohmann::json::array()))
+            JsonToVariant(data.is_object()
+                              ? data.value("snapshots",
+                                           nlohmann::json::array())
+                              : nlohmann::json::array())
                 .toList();
         emit snapshotsChanged();
         if(data.contains("connection") &&
@@ -281,11 +321,25 @@ void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
 
     emit eventReceived(QString::fromStdString(kind),
                        JsonToVariant(data).toMap());
+    }
+    catch(const std::exception& e)
+    {
+        emit protocolError(QString::fromStdString(
+            std::string("malformed EVENT body: ") + e.what()));
+    }
 }
 
 void EngineBridge::ApplyReply(uint32_t request_id, ipc::MsgType type,
                               const nlohmann::json& body)
 {
+    /* Reply bodies are objects by contract; anything else skips
+       the store update (still emitted to replyReceived below —
+       the correlator is what callers pair on). The try/catch
+       covers wrong-typed fields inside an object body. */
+    try
+    {
+    if(body.is_object())
+    {
     switch(type)
     {
     case ipc::MsgType::Snapshots:
@@ -339,6 +393,13 @@ void EngineBridge::ApplyReply(uint32_t request_id, ipc::MsgType type,
         break;
     default:
         break;
+    }
+    }
+    }
+    catch(const std::exception& e)
+    {
+        emit protocolError(QString::fromStdString(
+            std::string("malformed reply body: ") + e.what()));
     }
     RecomputeDegraded();
 

@@ -59,12 +59,21 @@ qt_add_qml_module(openrgb2_ui
 
 set_target_properties(openrgb2_ui PROPERTIES AUTOMOC ON)
 
+# Public headers: src/ui for the bridge, src/ipc + the vendored
+# single-header json for EngineWireClient.h's IpcProtocol/json
+# includes. The LINK dependency is PRIVATE — the codec/transport-only
+# openrgb2_ipc_wire target (no IpcServer/EngineService objects, no
+# engine/backend libraries transitively): the UI process must never
+# carry the engine/SDK boundary (plan section 4).
 target_include_directories(openrgb2_ui PUBLIC
-    ${CMAKE_SOURCE_DIR}/src/ui)
+    ${CMAKE_SOURCE_DIR}/src/ui
+    ${CMAKE_SOURCE_DIR}/src/ipc
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies/json)
 
 target_link_libraries(openrgb2_ui PUBLIC
     Qt6::Core
     Qt6::Gui
     Qt6::Qml
     Qt6::Quick
-    openrgb2_ipc)
+PRIVATE
+    openrgb2_ipc_wire)
