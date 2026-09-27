@@ -60,6 +60,14 @@ std::vector<ProcessEntry> EnumerateProcesses();
    listening or lookup unavailable. Read-only (iphlpapi). */
 uint32_t FindTcpListenerPid(uint16_t port);
 
+/* A process's image path (QueryFullProcessImageName). Empty
+   on failure/non-Windows/insufficient access. Read-only —
+   used to locate the backend's own exe dir, whose `plugins`
+   subfolder Windows loads as SYSTEM plugins unconditionally
+   (PluginManager::ScanAndLoadPlugins), i.e. a second
+   plugin-load path beyond <config>/plugins. */
+std::string ProcessImagePath(uint32_t pid);
+
 /*---------------------------------------------------------*\
 || Findings                                                 ||
 \*---------------------------------------------------------*/
@@ -89,13 +97,16 @@ std::vector<OwnerFinding> ClassifyOwners(
 /*---------------------------------------------------------*\
 || Managed-config sole-writer check                         ||
 ||                                                          ||
-|| The backend's private configuration directory (the       ||
-|| --localconfig working directory, plan section 4) is      ||
-|| scanned for scene-producing plugins:                     ||
-||   - <dir>/plugins/**: *.dll / *.so are loadable plugin    ||
-||     binaries (vendor/OpenRGB PluginManager semantics).    ||
-||   - <dir>/OpenRGB.json -> "Plugins"."plugins"[].enabled   ||
-||     is the persisted enable set.                          ||
+|| Two plugin-load paths are scanned for scene-producing    ||
+|| plugins (vendor/OpenRGB PluginManager semantics):         ||
+||   - <config dir>/plugins/** — user plugin binaries; the  ||
+||     persisted enable set is <config dir>/OpenRGB.json -> ||
+||     "Plugins"."plugins"[].enabled.                       ||
+||   - <backend exe dir>/plugins/** — Windows SYSTEM        ||
+||     plugins, loaded unconditionally and defaulting to    ||
+||     enabled on first run: a legacy producer dropped      ||
+||     beside OpenRGB.exe writes scenes even before it is   ||
+||     persisted into OpenRGB.json.                         ||
 || Any enabled plugin is reported (the managed setup runs    ||
 || none); entries matching the legacy Studio/Effects/        ||
 || HardwareSync producers escalate to explicit findings —   ||
@@ -106,13 +117,25 @@ struct ManagedConfigReport
     bool                     config_dir_exists   = false;
     bool                     settings_found      = false;
     bool                     plugins_dir_exists  = false;
-    std::vector<std::string> plugin_binaries;      /* rel paths  */
+    bool                     exe_dir_scanned     = false;
+    std::vector<std::string> plugin_binaries;        /* <cfg>/plugins */
+    std::vector<std::string> system_plugin_binaries; /* <exe>/plugins */
     std::vector<std::string> enabled_plugins;      /* settings   */
     std::vector<std::string> legacy_producers;     /* old writers*/
     std::vector<std::string> findings;             /* human text */
 };
 
-ManagedConfigReport CheckManagedBackendConfig(const std::string& dir);
+/* `dir` is the backend's private configuration directory
+   (the --localconfig working dir; may be empty). `backend_exe_dir`
+   is the directory containing the backend executable — its
+   `plugins` subfolder is the Windows SYSTEM plugin location
+   (PluginManager::ScanAndLoadPlugins loads it unconditionally
+   and defaults new plugins to enabled on first run), i.e. a
+   second scene-writer path beyond <config>/plugins. May be
+   empty when the backend PID/image cannot be resolved. */
+ManagedConfigReport CheckManagedBackendConfig(
+    const std::string& dir,
+    const std::string& backend_exe_dir);
 
 /* The name match for the legacy scene producers — pure
    function shared by both checks above. */

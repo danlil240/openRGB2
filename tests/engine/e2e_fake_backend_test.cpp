@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -165,28 +166,15 @@ static nlohmann::json SceneDoc()
     return doc;
 }
 
-/* Count recorded server events of one packet id. */
-static size_t CountEvents(const sdk_test::FakeSdkServer& s,
+/* Count events inside a locked snapshot (HandleSend appends
+   on lane threads — iterate a copy, never the live vector). */
+static size_t CountEvents(const std::vector<sdk_test::ServerEvent>& ev,
                           uint32_t pkt_id)
 {
     size_t n = 0;
-    for(const sdk_test::ServerEvent& e : s.events)
+    for(const sdk_test::ServerEvent& e : ev)
     {
         if(e.pkt_id == pkt_id) ++n;
-    }
-    return n;
-}
-
-static size_t CountUpdateLeds(const sdk_test::FakeSdkServer& s,
-                            uint32_t dev_id)
-{
-    size_t n = 0;
-    for(const sdk_test::ServerEvent& e : s.events)
-    {
-        if(e.pkt_id == sdk::kPktUpdateLEDs && e.dev_id == dev_id)
-        {
-            ++n;
-        }
     }
     return n;
 }
@@ -229,9 +217,16 @@ int main()
     opts.backend_config_dir = "";   /* not configured here — the
                                        config check is covered by
                                        ownership_scan_test */
+    std::mutex              log_mutex;
     std::vector<std::string> log_lines;
-    opts.log = [&log_lines](const std::string& l)
-    { log_lines.push_back(l); };
+    opts.log = [&log_lines, &log_mutex](const std::string& l)
+    {
+        /* Log() is invoked from the main thread (startup) AND
+           the owner-loop thread (lifecycle/playback) —
+           serialize the append. */
+        std::lock_guard<std::mutex> g(log_mutex);
+        log_lines.push_back(l);
+    };
 
     EngineHost host(std::move(opts));
 
@@ -254,7 +249,7 @@ int main()
     CHECK(client->Snapshots().size() == 2);
     /* Handshake + enumeration reached the wire: SETCLIENTNAME
        lands in the recorded event stream. */
-    CHECK(CountEvents(server, sdk::kPktSetClientName) >= 1);
+    CHECK(server.CountEvents(sdk::kPktSetClientName) >= 1);
 
     /*---- bind ------------------------------------------------*/
     host.PollOnce();
@@ -283,20 +278,22 @@ int main()
 
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(10);
-    while(CountUpdateLeds(server, 0) == 0 &&
+    while(server.CountEvents(sdk::kPktUpdateLEDs, 0) == 0 &&
           std::chrono::steady_clock::now() < deadline)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
-    CHECK(CountUpdateLeds(server, 0) >= 1);
+    CHECK(server.CountEvents(sdk::kPktUpdateLEDs, 0) >= 1);
     CHECK(host.FramesProduced() > 0);
 
     /* The wireless group's write is ONE complete-controller
        UPDATELEDS carrying all 120 LEDs — never three zone
        writes (plan section 4). */
     {
+        const std::vector<sdk_test::ServerEvent> snap =
+            server.SnapshotEvents();
         size_t last_body_leds = 0;
-        for(const sdk_test::ServerEvent& e : server.events)
+        for(const sdk_test::ServerEvent& e : snap)
         {
             if(e.pkt_id == sdk::kPktUpdateLEDs && e.dev_id == 0)
             {
@@ -311,11 +308,11 @@ int main()
     }
     /* The wired controller also animates (its own lane —
        a second controller write, dev_id 1). */
-    CHECK(CountUpdateLeds(server, 1) >= 1);
+    CHECK(server.CountEvents(sdk::kPktUpdateLEDs, 1) >= 1);
 
     /* Custom-mode upkeep ran on bound controllers
        (SETCUSTOMMODE — live output requires direct mode). */
-    CHECK(CountEvents(server, sdk::kPktSetCustomMode) >= 1);
+    CHECK(server.CountEvents(sdk::kPktSetCustomMode) >= 1);
 
     /*---- shutdown ordering -----------------------------------*/
     run.store(false);
@@ -346,9 +343,12 @@ int main()
        ownership_scan_test). */
 
     std::printf("%d checks, %d failures\n", checks, failures);
-    for(const std::string& l : log_lines)
     {
-        std::printf("  | %s\n", l.c_str());
+        std::lock_guard<std::mutex> g(log_mutex);
+        for(const std::string& l : log_lines)
+        {
+            std::printf("  | %s\n", l.c_str());
+        }
     }
     return failures == 0 ? 0 : 1;
 }

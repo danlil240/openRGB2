@@ -249,11 +249,38 @@ void EngineHost::ScanOwners()
             f.exe + ") — " + f.detail);
     }
 
-    if(!opts_.backend_config_dir.empty())
+    /* The managed config's sole-writer check covers BOTH
+       plugin-load paths (plan section 4): <config>/plugins +
+       OpenRGB.json and the Windows system-plugin dir beside
+       the backend exe — resolved from the listener PID's image
+       path. An unreadable image (e.g. the backend runs
+       elevated and we do not) is reported honestly, and the
+       check still runs on whichever scope is known. */
+    std::string backend_exe_dir;
+    if(ownership_.backend_pid != 0)
+    {
+        const std::string img =
+            ProcessImagePath(ownership_.backend_pid);
+        if(!img.empty())
+        {
+            const std::string::size_type p =
+                img.find_last_of("/\\");
+            backend_exe_dir =
+                p == std::string::npos ? img : img.substr(0, p);
+        }
+        else
+        {
+            Log("ownership: backend image path unreadable (pid " +
+                std::to_string(ownership_.backend_pid) +
+                ") — exe-dir plugin scan skipped");
+        }
+    }
+    if(!opts_.backend_config_dir.empty() || !backend_exe_dir.empty())
     {
         ownership_.config_checked = true;
         ownership_.config =
-            CheckManagedBackendConfig(opts_.backend_config_dir);
+            CheckManagedBackendConfig(opts_.backend_config_dir,
+                                      backend_exe_dir);
         for(const std::string& f : ownership_.config.findings)
         {
             Log("managed-config: " + f);

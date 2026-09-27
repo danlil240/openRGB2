@@ -47,6 +47,25 @@ bool Contains(const std::string& haystack, const std::string& needle)
     return haystack.find(needle) != std::string::npos;
 }
 
+/* Lowercase alphanumerics only: real image names arrive as
+   "GigabyteControlCenter.exe", "RGBFusion.exe",
+   "LogiOptionsPlus.exe", "LianLiLightControl.exe" while the
+   product names carry spaces and punctuation — matching on
+   the compact form catches both spellings. */
+std::string Compact(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for(char c : s)
+    {
+        if(std::isalnum((unsigned char)c))
+        {
+            out += (char)std::tolower((unsigned char)c);
+        }
+    }
+    return out;
+}
+
 #ifdef _WIN32
 std::string Narrow(const std::wstring& w)
 {
@@ -132,6 +151,29 @@ uint32_t FindTcpListenerPid(uint16_t port)
     return 0;
 }
 
+std::string ProcessImagePath(uint32_t pid)
+{
+    std::string out;
+#ifdef _WIN32
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                           FALSE, pid);
+    if(h == nullptr)
+    {
+        return out;
+    }
+    wchar_t buf[4096];
+    DWORD n = (DWORD)(sizeof(buf) / sizeof(buf[0]));
+    if(QueryFullProcessImageNameW(h, 0, buf, &n) && n > 0)
+    {
+        out = Narrow(std::wstring(buf, n));
+    }
+    CloseHandle(h);
+#else
+    (void)pid;
+#endif
+    return out;
+}
+
 /*---------------------------------------------------------*\
 || Classifier (pure)                                        ||
 \*---------------------------------------------------------*/
@@ -148,8 +190,9 @@ std::vector<OwnerFinding> ClassifyOwners(
         {
             continue;
         }
-        const std::string exe  = BaseName(p.exe);
-        const std::string name = Lower(exe);
+        const std::string exe     = BaseName(p.exe);
+        const std::string name    = Lower(exe);
+        const std::string compact = Compact(exe);
 
         OwnerFinding f;
         f.exe = exe;
@@ -175,9 +218,8 @@ std::vector<OwnerFinding> ClassifyOwners(
             }
             out.push_back(f);
         }
-        else if(Contains(name, "lconnect") ||
-                Contains(name, "l-connect") ||
-                Contains(name, "lian li"))
+        else if(Contains(compact, "lconnect") ||
+                Contains(compact, "lianli"))
         {
             f.owner    = "L-Connect";
             f.conflict = true;
@@ -185,9 +227,9 @@ std::vector<OwnerFinding> ClassifyOwners(
             out.push_back(f);
         }
         else if(name == "gcc.exe" ||
-                Contains(name, "gigabyte control center") ||
-                Contains(name, "rgb fusion") ||
-                Contains(name, "aorus engine"))
+                Contains(compact, "gigabytecontrolcenter") ||
+                Contains(compact, "rgbfusion") ||
+                Contains(compact, "aorusengine"))
         {
             f.owner    = "Gigabyte Control Center / RGB Fusion";
             f.conflict = true;
@@ -207,7 +249,7 @@ std::vector<OwnerFinding> ClassifyOwners(
         }
         else if(Contains(name, "lghub") ||
                 name == "lcore.exe" ||
-                Contains(name, "logi options"))
+                Contains(compact, "logioptions"))
         {
             f.owner    = "Logitech G Hub / Options";
             f.conflict = true;
@@ -251,94 +293,153 @@ std::vector<OwnerFinding> ClassifyOwners(
 
 bool IsLegacySceneProducerName(const std::string& name)
 {
-    const std::string n = Lower(name);
+    /* Compact form (alnum only) — catches "Desktop Lighting
+       Studio.dll", "DesktopLightingStudio.dll", and
+       "HardwareSync.dll" alike. */
+    const std::string n = Compact(name);
     return Contains(n, "desktoplightingstudio") ||
-           Contains(n, "desktop lighting studio") ||
            Contains(n, "lightingstudio") ||
            Contains(n, "hardwaresync") ||
-           Contains(n, "hardware sync") ||
-           Contains(n, "effectsplugin") ||
-           Contains(n, "effects plugin");
+           Contains(n, "effectsplugin");
 }
 
-ManagedConfigReport CheckManagedBackendConfig(const std::string& dir)
+namespace
+{
+
+/* Loadable plugin binaries under <plugins_dir>, recursively —
+   mirrors PluginManager::ScanAndLoadPluginsFrom's extension
+   filter (.dll/.so/.dylib). Paths are recorded relative to
+   `base` so findings read "plugins/<sub>/<name>.dll". */
+void ScanPluginFiles(const std::filesystem::path& plugins_dir,
+                     const std::filesystem::path& base,
+                     std::vector<std::string>& out)
+{
+    std::error_code ec;
+    for(std::filesystem::recursive_directory_iterator
+            it(plugins_dir, ec), end;
+        !ec && it != end; it.increment(ec))
+    {
+        const std::filesystem::path& p = it->path();
+        if(!it->is_regular_file(ec))
+        {
+            continue;
+        }
+        const std::string ext = Lower(p.extension().string());
+        if(ext != ".dll" && ext != ".so" && ext != ".dylib")
+        {
+            continue;
+        }
+        out.push_back(p.lexically_relative(base).generic_string());
+    }
+}
+
+} /* anonymous namespace */
+
+ManagedConfigReport CheckManagedBackendConfig(
+    const std::string& dir,
+    const std::string& backend_exe_dir)
 {
     ManagedConfigReport rep;
     std::error_code ec;
 
-    if(dir.empty())
+    if(dir.empty() && backend_exe_dir.empty())
     {
         rep.findings.push_back(
-            "no backend config dir configured — sole-writer "
+            "no backend config or exe dir known — sole-writer "
             "check skipped");
         return rep;
     }
 
-    const std::filesystem::path root(dir);
-    rep.config_dir_exists = std::filesystem::is_directory(root, ec);
-    if(!rep.config_dir_exists)
+    if(!dir.empty())
     {
-        rep.findings.push_back("backend config dir '" + dir +
-            "' not found — cannot verify sole scene writer");
-        return rep;
-    }
-
-    /* Persisted plugin enable set: OpenRGB.json -> "Plugins" ->
-       "plugins"[{name, enabled}]. */
-    const std::filesystem::path settings = root / "OpenRGB.json";
-    if(std::filesystem::is_regular_file(settings, ec))
-    {
-        rep.settings_found = true;
-        std::ifstream in(settings);
-        nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
-        if(j.is_discarded())
+        const std::filesystem::path root(dir);
+        rep.config_dir_exists = std::filesystem::is_directory(root, ec);
+        if(!rep.config_dir_exists)
         {
-            rep.findings.push_back(
-                "OpenRGB.json is not parseable — plugin enable "
-                "state unverified");
+            rep.findings.push_back("backend config dir '" + dir +
+                "' not found — cannot verify sole scene writer");
         }
         else
         {
-            const auto pit = j.find("Plugins");
-            if(pit != j.end() && pit->is_object() &&
-               pit->contains("plugins") &&
-               (*pit)["plugins"].is_array())
+            /* Persisted plugin enable set: OpenRGB.json ->
+               "Plugins" -> "plugins"[{name, enabled}]. */
+            const std::filesystem::path settings =
+                root / "OpenRGB.json";
+            if(std::filesystem::is_regular_file(settings, ec))
             {
-                for(const nlohmann::json& e : (*pit)["plugins"])
+                rep.settings_found = true;
+                std::ifstream in(settings);
+                nlohmann::json j =
+                    nlohmann::json::parse(in, nullptr, false);
+                if(j.is_discarded())
                 {
-                    const std::string name =
-                        e.value("name", std::string());
-                    if(e.value("enabled", false) && !name.empty())
+                    rep.findings.push_back(
+                        "OpenRGB.json is not parseable — plugin "
+                        "enable state unverified");
+                }
+                else
+                {
+                    const auto pit = j.find("Plugins");
+                    if(pit != j.end() && pit->is_object() &&
+                       pit->contains("plugins") &&
+                       (*pit)["plugins"].is_array())
                     {
-                        rep.enabled_plugins.push_back(name);
+                        for(const nlohmann::json& e :
+                            (*pit)["plugins"])
+                        {
+                            const std::string name =
+                                e.value("name", std::string());
+                            if(e.value("enabled", false) &&
+                               !name.empty())
+                            {
+                                rep.enabled_plugins.push_back(name);
+                            }
+                        }
                     }
                 }
             }
+
+            /* User plugin binaries under <dir>/plugins. */
+            const std::filesystem::path pdir = root / "plugins";
+            rep.plugins_dir_exists =
+                std::filesystem::is_directory(pdir, ec);
+            if(rep.plugins_dir_exists)
+            {
+                ScanPluginFiles(pdir, root, rep.plugin_binaries);
+            }
         }
     }
-
-    /* Loadable plugin binaries under <dir>/plugins (recursive —
-       mirrors PluginManager::ScanAndLoadPluginsFrom). */
-    const std::filesystem::path pdir = root / "plugins";
-    rep.plugins_dir_exists = std::filesystem::is_directory(pdir, ec);
-    if(rep.plugins_dir_exists)
+    else
     {
-        for(std::filesystem::recursive_directory_iterator
-                it(pdir, ec), end;
-            !ec && it != end; it.increment(ec))
+        rep.findings.push_back(
+            "no backend config dir configured — OpenRGB.json "
+            "enable set unverified");
+    }
+
+    /* Windows SYSTEM plugin path: <backend exe dir>/plugins is
+       loaded by PluginManager::ScanAndLoadPlugins
+       unconditionally, and plugins not yet persisted in
+       OpenRGB.json default to ENABLED on first run — a legacy
+       producer dropped beside OpenRGB.exe is a scene writer
+       before the config file ever records it. */
+    if(!backend_exe_dir.empty())
+    {
+        const std::filesystem::path exedir(backend_exe_dir);
+        if(std::filesystem::is_directory(exedir, ec))
         {
-            const std::filesystem::path& p = it->path();
-            if(!it->is_regular_file(ec))
+            rep.exe_dir_scanned = true;
+            const std::filesystem::path spdir = exedir / "plugins";
+            if(std::filesystem::is_directory(spdir, ec))
             {
-                continue;
+                ScanPluginFiles(spdir, exedir,
+                                rep.system_plugin_binaries);
             }
-            const std::string ext = Lower(p.extension().string());
-            if(ext != ".dll" && ext != ".so")
-            {
-                continue;
-            }
-            rep.plugin_binaries.push_back(
-                p.lexically_relative(root).generic_string());
+        }
+        else
+        {
+            rep.findings.push_back("backend exe dir '" +
+                backend_exe_dir + "' not found — system plugin "
+                "scan skipped");
         }
     }
 
@@ -366,11 +467,33 @@ ManagedConfigReport CheckManagedBackendConfig(const std::string& dir)
                 "remove it from the managed config dir");
         }
     }
-    if(rep.enabled_plugins.empty() && rep.plugin_binaries.empty())
+    for(const std::string& b : rep.system_plugin_binaries)
     {
         rep.findings.push_back(
-            "sole scene writer verified: no enabled plugins in "
-            "the managed backend configuration");
+            "system plugin binary (backend exe dir): " + b);
+        if(IsLegacySceneProducerName(b))
+        {
+            rep.legacy_producers.push_back("system:" + b);
+            rep.findings.push_back("WARNING: system plugin '" + b +
+                "' matches a legacy Studio/Effects producer — "
+                "remove it from the backend's exe-dir plugins "
+                "folder: it loads unconditionally at backend "
+                "startup and defaults to enabled");
+        }
+    }
+    /* "Verified" only when the managed config scope was
+       actually inspected (a missing/unconfigured config dir
+       leaves the OpenRGB.json enable set unverified — the
+       findings above already carry that honestly). */
+    if(rep.config_dir_exists &&
+       rep.enabled_plugins.empty() &&
+       rep.plugin_binaries.empty() &&
+       rep.system_plugin_binaries.empty())
+    {
+        rep.findings.push_back(
+            "sole scene writer verified: no enabled or loadable "
+            "plugins in the managed backend configuration or "
+            "the backend's exe-dir plugins folder");
     }
     return rep;
 }

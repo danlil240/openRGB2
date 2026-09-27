@@ -39,14 +39,23 @@ section 4 ("Process ownership").
    ownership report — an explicit takeover is the operator's decision;
    the engine never kills arbitrary processes. `FanControl.exe` is a
    **notice, not a conflict**: it owns cooling and must keep running.
-4. **Sole scene writer.** Given `--backend-config <dir>` (the backend's
-   private config dir), startup checks `<dir>/OpenRGB.json` for enabled
-   plugins and `<dir>/plugins/` for loadable plugin binaries. Any
-   enabled plugin is reported; anything matching the legacy
-   Studio/Effects/HardwareSync producers is a `WARNING` — those would be
-   a second scene writer in the managed configuration, which section 4
-   forbids. With no plugins enabled/present, the engine is the sole
-   scene writer.
+4. **Sole scene writer.** Two plugin-load paths are checked (the
+   backend loads both):
+   - Given `--backend-config <dir>` (the backend's private config dir),
+     startup checks `<dir>/OpenRGB.json` for enabled plugins and
+     `<dir>/plugins/` for loadable plugin binaries.
+   - Independently of `--backend-config`, when the SDK listener's PID
+     resolves, its image path gives the backend's exe dir — Windows
+     loads `<exe dir>/plugins/` as **system plugins** unconditionally
+     and defaults unknown plugins to enabled on first run, so a legacy
+     producer dropped beside `OpenRGB.exe` is flagged even before it is
+     persisted into `OpenRGB.json`. An unreadable image path (e.g. an
+     elevated backend) is reported and that scope is skipped.
+   Any enabled/loadable plugin is reported; anything matching the
+   legacy Studio/Effects/HardwareSync producers is a `WARNING` — those
+   would be a second scene writer in the managed configuration, which
+   section 4 forbids. With no plugins enabled/present, the engine is
+   the sole scene writer.
 
 ## What the engine does NOT do
 

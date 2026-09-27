@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -112,6 +113,42 @@ public:
     std::vector<FakeController> controllers;
     std::vector<ServerEvent>    events;
 
+    /* Thread-safe views. HandleSend may run on delivery-lane
+       threads (the engine E2E test drives the REAL pipeline),
+       so concurrent readers must go through these accessors
+       rather than iterating `events` directly — the public
+       member stays for the single-threaded tests/sdk suites. */
+    std::vector<ServerEvent> SnapshotEvents() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return events;
+    }
+    size_t CountEvents(uint32_t pkt_id) const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        size_t n = 0;
+        for(const ServerEvent& e : events)
+        {
+            if(e.pkt_id == pkt_id) ++n;
+        }
+        return n;
+    }
+    size_t CountEvents(uint32_t pkt_id, uint32_t dev_id) const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        size_t n = 0;
+        for(const ServerEvent& e : events)
+        {
+            if(e.pkt_id == pkt_id && e.dev_id == dev_id) ++n;
+        }
+        return n;
+    }
+    void ClearEvents()
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        events.clear();
+    }
+
     void HandleSend(FakeStream& stream, const uint8_t* data,
                     size_t len);
 
@@ -122,7 +159,8 @@ public:
         const FakeController& c);
 
 private:
-    PacketParser parser_;
+    PacketParser        parser_;
+    mutable std::mutex  mutex_;
 };
 
 /*---------------------------------------------------------*\
@@ -326,6 +364,12 @@ inline std::vector<uint8_t> FakeSdkServer::BuildControllerBody(
 inline void FakeSdkServer::HandleSend(FakeStream& stream,
                                       const uint8_t* data, size_t len)
 {
+    /* One writer at a time: parser_ and events are shared
+       state. Lane threads serialize through the client's
+       send mutex today, but locking here keeps the fake
+       correct even if a caller reaches it without that
+       ordering (and pairs with the snapshot accessors). */
+    std::lock_guard<std::mutex> g(mutex_);
     std::vector<Packet> requests;
     if(!parser_.Feed(data, len, requests))
     {

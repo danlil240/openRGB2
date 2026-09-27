@@ -53,6 +53,16 @@ static const OwnerFinding* Find(const std::vector<OwnerFinding>& v,
     return nullptr;
 }
 
+static const OwnerFinding* FindPid(const std::vector<OwnerFinding>& v,
+                                   uint32_t pid)
+{
+    for(const OwnerFinding& f : v)
+    {
+        if(f.pid == pid) return &f;
+    }
+    return nullptr;
+}
+
 /*---------------------------------------------------------*\
 || Classifier                                               ||
 \*---------------------------------------------------------*/
@@ -63,11 +73,19 @@ static void TestClassifier()
         { 200, "OpenRGB.exe" },                /* managed       */
         { 300, "OpenRGB.exe" },                /* OTHER install */
         { 400, "LConnectService.exe" },
+        { 401, "L-Connect 3.exe" },
+        { 402, "LianLiLightControl.exe" },     /* real Lian Li  */
         { 500, "GCC.exe" },
+        { 501, "GigabyteControlCenter.exe" },  /* no-space name */
+        { 502, "RGBFusion.exe" },
+        { 503, "AORUSEngine.exe" },
         { 600, "Razer Synapse 3.exe" },
         { 700, "lghub_agent.exe" },
+        { 701, "LogiOptions.exe" },            /* Options+      */
+        { 702, "LogiOptionsPlus.exe" },
         { 800, "FanControl.exe" },
         { 900, "explorer.exe" },               /* ignored       */
+        { 901, "svchost.exe" },                /* ignored       */
         { 999, "SignalRGB.exe" },
     };
 
@@ -91,6 +109,23 @@ static void TestClassifier()
     CHECK(Find(out, "SignalRGB") &&
           Find(out, "SignalRGB")->conflict);
 
+    /* Real (no-space/punctuation) image names must classify the
+       same — the regression coverage for space-bearing needles
+       missing "GigabyteControlCenter.exe"-style names. */
+    CHECK(FindPid(out, 401) && FindPid(out, 401)->owner == "L-Connect");
+    CHECK(FindPid(out, 402) && FindPid(out, 402)->owner == "L-Connect" &&
+          FindPid(out, 402)->conflict);
+    CHECK(FindPid(out, 501) &&
+          FindPid(out, 501)->owner == "Gigabyte Control Center / RGB Fusion");
+    CHECK(FindPid(out, 502) &&
+          FindPid(out, 502)->owner == "Gigabyte Control Center / RGB Fusion");
+    CHECK(FindPid(out, 503) &&
+          FindPid(out, 503)->owner == "Gigabyte Control Center / RGB Fusion");
+    CHECK(FindPid(out, 701) &&
+          FindPid(out, 701)->owner == "Logitech G Hub / Options");
+    CHECK(FindPid(out, 702) &&
+          FindPid(out, 702)->owner == "Logitech G Hub / Options");
+
     /* FanControl is a notice — cooling owner, never a conflict. */
     const OwnerFinding* fc = Find(out, "FanControl");
     CHECK(fc != nullptr && !fc->conflict);
@@ -100,6 +135,7 @@ static void TestClassifier()
     {
         CHECK(f.pid != 100);
         CHECK(f.pid != 900);
+        CHECK(f.pid != 901);
     }
 
     /* With no managed backend listening (pid 0), every OpenRGB
@@ -123,7 +159,8 @@ static void TestManagedConfig()
     std::filesystem::create_directories(dir, ec);
 
     /* Empty dir: no settings, nothing enabled — clean verdict. */
-    ManagedConfigReport clean = CheckManagedBackendConfig(dir.string());
+    ManagedConfigReport clean =
+        CheckManagedBackendConfig(dir.string(), "");
     CHECK(clean.config_dir_exists);
     CHECK(!clean.settings_found);
     CHECK(clean.legacy_producers.empty());
@@ -134,7 +171,8 @@ static void TestManagedConfig()
         std::ofstream f(dir / "OpenRGB.json");
         f << "{ \"Detectors\": {}, \"Server\": {} }";
     }
-    ManagedConfigReport r1 = CheckManagedBackendConfig(dir.string());
+    ManagedConfigReport r1 =
+        CheckManagedBackendConfig(dir.string(), "");
     CHECK(r1.settings_found);
     CHECK(r1.enabled_plugins.empty());
     CHECK(r1.legacy_producers.empty());
@@ -162,7 +200,8 @@ static void TestManagedConfig()
         std::ofstream f2(dir / "plugins" / "readme.txt");
         f2 << "not a plugin";
     }
-    ManagedConfigReport r2 = CheckManagedBackendConfig(dir.string());
+    ManagedConfigReport r2 =
+        CheckManagedBackendConfig(dir.string(), "");
     CHECK(r2.enabled_plugins.size() == 1 &&
           r2.enabled_plugins[0] == "DesktopLightingStudio");
     CHECK(r2.plugin_binaries.size() == 1);
@@ -174,10 +213,62 @@ static void TestManagedConfig()
     }
     CHECK(warned);
 
+    /* Windows SYSTEM plugin path: <backend exe dir>/plugins is
+       loaded unconditionally (PluginManager::ScanAndLoadPlugins)
+       and defaults new plugins to enabled — a legacy producer
+       beside OpenRGB.exe must be flagged even before it is
+       persisted into OpenRGB.json. */
+    const std::filesystem::path exedir =
+        std::filesystem::temp_directory_path(ec) /
+        "openrgb2-owncfg-exedir";
+    std::filesystem::remove_all(exedir, ec);
+    std::filesystem::create_directories(
+        exedir / "plugins" / "system", ec);
+    {
+        std::ofstream f(exedir / "plugins" / "system" /
+                        "LightingStudioFX.dll");
+        f << "fake";
+        std::ofstream f2(exedir / "plugins" / "Benign.dll");
+        f2 << "fake";
+        std::ofstream f3(exedir / "OpenRGB.exe");
+        f3 << "fake";                        /* exe dir marker */
+    }
+    ManagedConfigReport r4 =
+        CheckManagedBackendConfig(dir.string(), exedir.string());
+    CHECK(r4.exe_dir_scanned);
+    CHECK(r4.system_plugin_binaries.size() == 2);
+    /* settings(1) + config dll(1) + system dll(1) = 3. */
+    CHECK(r4.legacy_producers.size() == 3);
+    warned = false;
+    for(const std::string& s : r4.findings)
+    {
+        if(s.find("system plugin") != std::string::npos &&
+           s.find("WARNING") != std::string::npos)
+        {
+            warned = true;
+        }
+    }
+    CHECK(warned);
+
+    /* The exe-dir scan also runs WITHOUT a config dir — the
+       OpenRGB.json enable set is then honestly unverified. */
+    ManagedConfigReport r5 =
+        CheckManagedBackendConfig("", exedir.string());
+    CHECK(r5.exe_dir_scanned);
+    CHECK(r5.system_plugin_binaries.size() == 2);
+    CHECK(!r5.config_dir_exists);
+
+    /* Neither scope known: the check reports the skip. */
+    ManagedConfigReport r6 = CheckManagedBackendConfig("", "");
+    CHECK(!r6.findings.empty() &&
+          r6.legacy_producers.empty());
+
     /* A missing dir reports honestly. */
     ManagedConfigReport r3 =
-        CheckManagedBackendConfig((dir / "nope").string());
+        CheckManagedBackendConfig((dir / "nope").string(), "");
     CHECK(!r3.config_dir_exists && !r3.findings.empty());
+
+    std::filesystem::remove_all(exedir, ec);
 
     /* Name matcher itself. */
     CHECK(IsLegacySceneProducerName("DesktopLightingStudio"));
