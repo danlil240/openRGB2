@@ -235,6 +235,7 @@ bool PlaybackFrameSampler::Key::operator<(const Key& o) const
 
 size_t PlaybackFrameSampler::CachedLoops() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return loops_.size();
 }
 
@@ -254,35 +255,61 @@ std::vector<RgbColor> PlaybackFrameSampler::Sample(
     const Key key{ (int)preset, 0, params.reverse, led_count,
                    frame_count, params.color.r, params.color.g,
                    params.color.b };
-    auto it = loops_.find(key);
-    if(it == loops_.end())
+    std::shared_ptr<const std::vector<uint8_t>> loop;
     {
-        std::vector<uint8_t> rgb;
-        switch(preset)
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = loops_.find(key);
+        if(it == loops_.end())
         {
-        case LianLiWireless::PlaybackPreset::SpectrumCycle:
-            rgb = LianLiWireless::RenderSpectrumCycle(led_count,
-                                                    frame_count);
-            break;
-        case LianLiWireless::PlaybackPreset::RainbowWave:
-            /* Canonical linear layout for wired endpoints — the
-               per-fan order only applies to the wireless group's
-               own upload. */
-            rgb = LianLiWireless::RenderRainbowWave(
-                led_count, frame_count, params.reverse);
-            break;
-        case LianLiWireless::PlaybackPreset::Breathing:
-            rgb = LianLiWireless::RenderBreathing(
-                led_count, frame_count, params.color.r,
-                params.color.g, params.color.b);
-            break;
+            std::vector<uint8_t> rgb;
+            switch(preset)
+            {
+            case LianLiWireless::PlaybackPreset::SpectrumCycle:
+                rgb = LianLiWireless::RenderSpectrumCycle(
+                    led_count, frame_count);
+                break;
+            case LianLiWireless::PlaybackPreset::RainbowWave:
+                /* Canonical linear layout for wired endpoints —
+                   the per-fan order only applies to the wireless
+                   group's own upload. */
+                rgb = LianLiWireless::RenderRainbowWave(
+                    led_count, frame_count, params.reverse);
+                break;
+            case LianLiWireless::PlaybackPreset::Breathing:
+                rgb = LianLiWireless::RenderBreathing(
+                    led_count, frame_count, params.color.r,
+                    params.color.g, params.color.b);
+                break;
+            }
+            it = loops_.emplace(key,
+                std::make_shared<const std::vector<uint8_t>>(
+                    std::move(rgb))).first;
+            lru_.push_back(key);
+            /* Bounded LRU: arbitrary playback colors must not
+               grow engine memory without bound. */
+            while(lru_.size() > kMaxLoops)
+            {
+                loops_.erase(lru_.front());
+                lru_.pop_front();
+            }
         }
-        it = loops_.emplace(key,
-            std::make_shared<const std::vector<uint8_t>>(
-                std::move(rgb))).first;
+        else
+        {
+            /* Most-recent touch. */
+            for(auto li = lru_.begin(); li != lru_.end(); ++li)
+            {
+                if(!(*li < key) && !(key < *li))
+                {
+                    lru_.erase(li);
+                    break;
+                }
+            }
+            lru_.push_back(key);
+        }
+        loop = it->second;
     }
 
-    const std::vector<uint8_t>& rgb = *it->second;
+    const std::vector<uint8_t>& rgb = *loop;
     double p = phase - std::floor(phase);
     if(p < 0.0)
     {

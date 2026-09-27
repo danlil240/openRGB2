@@ -51,6 +51,7 @@
 
 #include "scene/SceneTypes.h"
 
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -267,7 +268,10 @@ private:
     };
 
     /* Per-scene persisted selection (core SceneDocument has
-       no playback field — the engine keeps it). */
+       no playback field — the engine keeps it). Bounded to
+       the most-recent kMaxScenes scenes — an unbounded map
+       would let scene churn grow engine memory forever. */
+    static constexpr size_t kMaxScenes = 32;
     struct PerScene
     {
         PlaybackMode   mode = PlaybackMode::LiveEffects;
@@ -285,9 +289,15 @@ private:
     void   Changed();
 
     static std::string SceneKey(const studio::SceneDocument& doc);
+    void   TouchSceneLocked(const std::string& key);
     static uint32_t    PackColor(RgbColor c);   /* 0x00BBGGRR */
-    PlaybackModePatch  BuildPatchLocked() const;
-    Expect             BuildExpectLocked(const char* mode_name) const;
+    PlaybackModePatch  BuildPatch(
+        LianLiWireless::PlaybackPreset preset,
+        const PlaybackParams& params) const;
+    Expect             BuildExpect(
+        const char* mode_name,
+        LianLiWireless::PlaybackPreset preset,
+        const PlaybackParams& params) const;
 
     Deps               deps_;
     Config             cfg_;
@@ -337,8 +347,10 @@ private:
     TimePoint          last_wired_send_{};
     uint64_t           wired_seq_       = 0;
 
-    /* Per-scene persistence. */
+    /* Per-scene persistence (bounded LRU — scene churn can't
+       grow the engine's memory without limit). */
     std::map<std::string, PerScene> per_scene_;
+    std::deque<std::string>      scene_lru_; /* front=oldest */
     std::string        scene_key_;
 };
 

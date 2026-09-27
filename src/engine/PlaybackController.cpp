@@ -84,6 +84,24 @@ void PlaybackController::Changed()
     }
 }
 
+void PlaybackController::TouchSceneLocked(const std::string& key)
+{
+    for(auto it = scene_lru_.begin(); it != scene_lru_.end(); ++it)
+    {
+        if(*it == key)
+        {
+            scene_lru_.erase(it);
+            break;
+        }
+    }
+    scene_lru_.push_back(key);
+    while(scene_lru_.size() > kMaxScenes)
+    {
+        per_scene_.erase(scene_lru_.front());
+        scene_lru_.pop_front();
+    }
+}
+
 void PlaybackController::PersistLocked()
 {
     if(scene_key_.empty())
@@ -93,6 +111,7 @@ void PlaybackController::PersistLocked()
     PerScene& ps    = per_scene_[scene_key_];
     ps.mode         = requested_mode_;
     ps.params       = params_;
+    TouchSceneLocked(scene_key_);
 }
 
 bool PlaybackController::FindWireless(DeviceSnapshot& out) const
@@ -113,39 +132,43 @@ bool PlaybackController::FindWireless(DeviceSnapshot& out) const
     return false;
 }
 
-PlaybackModePatch PlaybackController::BuildPatchLocked() const
+PlaybackModePatch PlaybackController::BuildPatch(
+    LianLiWireless::PlaybackPreset preset,
+    const PlaybackParams& params) const
 {
     /* Only the controls the preset actually supports are
        patched — other fields keep the enumerated value. */
-    const PlaybackPresetSupport sup = PlaybackPresetControls(preset_);
+    const PlaybackPresetSupport sup = PlaybackPresetControls(preset);
     PlaybackModePatch p;
     if(sup.speed)
     {
         p.has_speed = true;
-        p.speed     = (uint32_t)ClampPlaybackSpeed(params_.speed);
+        p.speed     = (uint32_t)ClampPlaybackSpeed(params.speed);
     }
     if(sup.direction)
     {
         p.has_direction = true;
         /* MODE_DIRECTION_RIGHT == 1 (RGBControllerInterface.h). */
-        p.direction     = params_.reverse ? 1u : 0u;
+        p.direction     = params.reverse ? 1u : 0u;
     }
     if(sup.color)
     {
         p.has_colors = true;
-        p.colors.push_back(PackColor(params_.color));
+        p.colors.push_back(PackColor(params.color));
     }
     return p;
 }
 
-PlaybackController::Expect PlaybackController::BuildExpectLocked(
-    const char* mode_name) const
+PlaybackController::Expect PlaybackController::BuildExpect(
+    const char* mode_name,
+    LianLiWireless::PlaybackPreset preset,
+    const PlaybackParams& params) const
 {
     /* The acknowledgement surface: what RefreshStatus must
        report for the applied revision to land. */
     Expect e;
     e.mode_name = mode_name;
-    const PlaybackPresetSupport sup = PlaybackPresetControls(preset_);
+    const PlaybackPresetSupport sup = PlaybackPresetControls(preset);
     if(sup.speed)
     {
         e.speed = (uint32_t)ClampPlaybackSpeed(params_.speed);
@@ -153,12 +176,12 @@ PlaybackController::Expect PlaybackController::BuildExpectLocked(
     if(sup.direction)
     {
         e.check_direction = true;
-        e.direction       = params_.reverse ? 1u : 0u;
+        e.direction       = params.reverse ? 1u : 0u;
     }
     if(sup.color)
     {
         e.check_color = true;
-        e.color       = PackColor(params_.color);
+        e.color       = PackColor(params.color);
     }
     return e;
 }
@@ -230,6 +253,8 @@ PlaybackController::Result PlaybackController::RequestImpl(
     bool              to_live      = false;
     bool              control_only_req = false;
     std::string       sdk_name;
+    LianLiWireless::PlaybackPreset want_preset =
+        LianLiWireless::PlaybackPreset::SpectrumCycle;
 
     /*---- Validate + plan under the lock -------------------*/
     {
@@ -282,18 +307,11 @@ PlaybackController::Result PlaybackController::RequestImpl(
                            sdk_name + "' on the wireless group";
                 return r;
             }
-            try
-            {
-                geometry_ = EffectiveLoopGeometry(caps.preset,
-                                                  params,
-                                                  wireless.LedCount());
-            }
-            catch(const std::exception& e)
-            {
-                r.reason = e.what();
-                return r;
-            }
-            preset_ = caps.preset;
+            want_preset = caps.preset;
+            /* NOTE: the loop geometry is computed AFTER the
+               lock releases — BuildPlaybackLoop runs the full
+               tinyuz/divsufsort compression for large loops
+               and must never hold mutex_ (blocks Status/Poll). */
         }
 
         /* Idempotent no-op: identical already-applied state. */
@@ -301,10 +319,24 @@ PlaybackController::Result PlaybackController::RequestImpl(
             params.speed   == params_.speed   &&
             params.reverse == params_.reverse &&
             params.color   == params_.color;
-        if(mode == applied_mode_ && !ack_pending_ &&
-           (mode == PlaybackMode::LiveEffects ||
-            (upload_ == UploadState::Active && same_params &&
-             control == control_)))
+        /* Idempotent no-op: identical already-applied state.
+           For Live this additionally requires the lane to be
+           actually released — after a FAILED upload the
+           applied mode reads LiveEffects while the lane is
+           still suppressed; an explicit Live request must
+           then run the real restore path, not swallow
+           silently. */
+        const bool live_is_rest =
+            mode == PlaybackMode::LiveEffects &&
+            applied_mode_ == PlaybackMode::LiveEffects &&
+            upload_ == UploadState::None &&
+            !suppressed_ && !has_wireless_;
+        const bool anim_is_same =
+            mode == PlaybackMode::AnimationPlayback &&
+            applied_mode_ == PlaybackMode::AnimationPlayback &&
+            upload_ == UploadState::Active &&
+            same_params && control == control_;
+        if(!ack_pending_ && (live_is_rest || anim_is_same))
         {
             /* The persisted per-scene selection records THIS
                request — a stale requested_mode_/params_ left
@@ -350,7 +382,6 @@ PlaybackController::Result PlaybackController::RequestImpl(
                cleared together with upload state. */
             to_live      = (mode == PlaybackMode::LiveEffects &&
                             has_wireless_);
-            params_            = params;
             requested_mode_    = mode;
             requested_control_ =
                 to_animation ? control : PlaybackControl::Playing;
@@ -379,8 +410,28 @@ PlaybackController::Result PlaybackController::RequestImpl(
         Changed();
         return r;
     }
+    PlaybackLoopGeometry geometry;
     if(to_animation)
     {
+        /* Build the loop geometry OUTSIDE the mutex —
+           BuildPlaybackLoop runs the full tinyuz/divsufsort
+           compression for large loops and must never hold
+           mutex_ (it would block Status/Poll/Tick reads). */
+        try
+        {
+            geometry = EffectiveLoopGeometry(want_preset,
+                                             params,
+                                             wireless.LedCount());
+        }
+        catch(const std::exception& e)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            transition_    = false;
+            r.reason       = e.what();
+            status_detail_ = r.reason;
+            return r;
+        }
+
         /* One producer: suppress FIRST (subsequent live
            submissions reject with reason), then invalidate
            queued work, then serialize behind the last
@@ -402,11 +453,8 @@ PlaybackController::Result PlaybackController::RequestImpl(
             status_detail_   = r.reason;
             return r;
         }
-        const PlaybackModePatch patch = [this]
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            return BuildPatchLocked();
-        }();
+        const PlaybackModePatch patch =
+            BuildPatch(want_preset, params);
         if(!deps_.select_mode(wireless.key, sdk_name, patch, io_err))
         {
             deps_.set_suppressed(wireless.key, false, "");
@@ -457,6 +505,7 @@ PlaybackController::Result PlaybackController::RequestImpl(
         std::lock_guard<std::mutex> lock(mutex_);
         ++next_rev_;
         requested_rev_ = next_rev_;
+        params_         = params;   /* persisted selection    */
 
         if(to_animation)
         {
@@ -467,7 +516,10 @@ PlaybackController::Result PlaybackController::RequestImpl(
             suppressed_     = true;
             upload_         = UploadState::Uploading;
             status_detail_.clear();
-            expect_         = BuildExpectLocked(sdk_name.c_str());
+            preset_         = want_preset;
+            geometry_       = geometry;
+            expect_         = BuildExpect(sdk_name.c_str(),
+                                          want_preset, params);
             pending_param_rev_ = next_rev_;
             if(applied_mode_ != PlaybackMode::AnimationPlayback)
             {
@@ -554,6 +606,7 @@ void PlaybackController::OnSceneApplied(
         if(it != per_scene_.end())
         {
             choice = it->second;
+            TouchSceneLocked(key);
         }
     }
     /* Re-apply the scene's persisted selection. A scene that
@@ -603,7 +656,7 @@ void PlaybackController::DoControl(PlaybackControl control,
         std::string       name;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            patch = BuildPatchLocked();
+            patch = BuildPatch(preset_, params_);
             name  = PlaybackPresetSdkName(preset_);
         }
         if(!deps_.select_mode(wireless.key, name, patch, err))
@@ -616,7 +669,8 @@ void PlaybackController::DoControl(PlaybackControl control,
             ++next_rev_;
             requested_rev_     = next_rev_;
             pending_param_rev_ = next_rev_;
-            expect_            = BuildExpectLocked(name.c_str());
+            expect_            = BuildExpect(name.c_str(),
+                                             preset_, params_);
             upload_            = UploadState::Uploading;
             ack_pending_       = true;
             ack_deadline_      = now + cfg_.ack_timeout;
@@ -676,6 +730,7 @@ void PlaybackController::DoControl(PlaybackControl control,
         frame.controller          = wireless.key;
         frame.topology_generation = wireless.topology_generation;
         frame.sample_time         = deps_.now();
+        frame.synthetic           = true;
         frame.colors              = std::move(colors);
         const SubmitResult r = deps_.direct_submit(frame);
         if(r.status == SubmitStatus::Rejected)
@@ -695,6 +750,11 @@ void PlaybackController::DoControl(PlaybackControl control,
             frame.controller          = t.key;
             frame.topology_generation = t.topology_generation;
             frame.sample_time         = deps_.now();
+            frame.synthetic           = true;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                frame.sequence = ++wired_seq_;
+            }
             frame.colors.assign(t.LedCount(), RgbColor{0,0,0});
             deps_.wired_submit(frame);
         }
@@ -776,6 +836,7 @@ void PlaybackController::Tick(TimePoint now)
         frame.controller          = t.key;
         frame.topology_generation = t.topology_generation;
         frame.sample_time         = now;
+        frame.synthetic           = true;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             frame.sequence = ++wired_seq_;

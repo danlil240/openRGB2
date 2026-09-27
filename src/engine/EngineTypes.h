@@ -143,6 +143,18 @@ struct RgbFrame
     uint64_t             sequence            = 0;
     TimePoint            sample_time;
     std::vector<RgbColor> colors;
+    /* synthetic: the sequence is NOT in the live producer's
+       per-controller sequence namespace — the frame is
+       produced by an authoritative owner (e.g. playback's
+       baked timeline or a stop-black write) that asserts
+       "this is the intended state now". The pipeline skips
+       the out-of-order admission guard and the stale-seq
+       delivered check for synthetic frames, and never folds
+       their sequence into the lane's live high-water —
+       so a live frame emitted afterwards can never be
+       suppressed by a synthetic sequence. Identical-color
+       suppression still applies. */
+    bool                 synthetic           = false;
 };
 
 /*---------------------------------------------------------*\

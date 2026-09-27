@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace openrgb2;
@@ -324,10 +325,13 @@ static void TestLifecycle()
     CHECK(!rej.reason.empty());
 
     /* Suppression is wireless-group only — the wired lane
-       still accepts. */
+       still accepts. Seq 100 mirrors a lane that already has
+       live history (production max_seq is arbitrarily large —
+       baked frames must not collide with it). */
     const SubmitResult wr =
-        h.pipeline.SubmitLatest(FrameFor(wd, 1, h.Red()));
+        h.pipeline.SubmitLatest(FrameFor(wd, 100, h.Red()));
     CHECK(wr.status == SubmitStatus::Accepted);
+    CHECK(h.pipeline.DrainDue(wd.key, h.now) == 1);
 
     /* Pending until the backend reports the applied mode. */
     CHECK(h.ctl->AckPending());
@@ -359,7 +363,9 @@ static void TestLifecycle()
         CHECK(!(f.controller == ws.key));
     }
 
-    /* Baked wired production: Tick feeds the wired lane. */
+    /* Baked wired production: Tick feeds the wired lane.
+       The lane's live high-water is 100 — baked frames are
+       synthetic, so they deliver regardless of sequence. */
     const size_t before = h.transport.frames.size();
     h.ctl->Tick(h.now);
     CHECK(h.pipeline.DrainDue(wd.key, h.now) == 1);
@@ -367,6 +373,15 @@ static void TestLifecycle()
     const RgbFrame& baked = h.transport.frames.back();
     CHECK(baked.controller == wd.key);
     CHECK(baked.colors.size() == wd.LedCount());
+
+    /* The guard still does its real job: a stale live seq is
+       rejected, a fresh one is admitted — synthetic frames
+       never poisoned the live high-water. */
+    CHECK(h.pipeline.SubmitLatest(FrameFor(wd, 50, h.Red())).status
+          == SubmitStatus::Rejected);
+    CHECK(h.pipeline.SubmitLatest(FrameFor(wd, 101, h.Red())).status
+          == SubmitStatus::Accepted);
+    CHECK(h.pipeline.DrainDue(wd.key, h.now) == 1);
 
     /* Back to live: pending until "Direct" is reported. */
     r = h.ctl->Request(PlaybackMode::LiveEffects,
@@ -615,6 +630,13 @@ static void TestPauseStop()
     h.pipeline.DrainDue(wd.key, h.now);
     CHECK(h.transport.frames.size() == n_wired);
 
+    /* Give the wired lane live history: seq 250 delivered.
+       The stop-black write is synthetic — it must deliver
+       even with a large prior high-water (production lanes
+       always have history). */
+    h.pipeline.SubmitLatest(FrameFor(wd, 250, h.Red()));
+    CHECK(h.pipeline.DrainDue(wd.key, h.now) == 1);
+
     /* Stop: the group goes black (hold frame replaced). */
     r = h.ctl->Request(PlaybackMode::AnimationPlayback,
                        PlaybackControl::Stopped, params);
@@ -795,6 +817,116 @@ static void TestPipelineSuppression()
     CHECK(pipe.WaitIdle(ws.key, std::chrono::milliseconds(10)));
 }
 
+/*---------------------------------------------------------*\
+||| T8: failed upload -> explicit Live restores the lane    ||
+\*---------------------------------------------------------*/
+
+static void TestFailedRestore()
+{
+    Harness h;
+    const DeviceSnapshot ws = WirelessSnap();
+    h.backend.snaps = { ws };
+    h.pipeline.RegisterDevice(ws);
+    h.scene = MakeScene("breath", "breathing");
+    /* Report stays "Direct": the animation ack never lands. */
+    h.backend.report.name  = "Direct";
+    h.backend.report.valid = true;
+
+    PlaybackParams params;
+    h.ctl->Request(PlaybackMode::AnimationPlayback,
+                   PlaybackControl::Playing, params);
+    CHECK(h.pipeline.IsSuppressed(ws.key));
+
+    /* Run the ack clock out — the upload is declared Failed
+       but the lane stays owned (the device may be looping). */
+    h.now += std::chrono::seconds(9);
+    h.Poll();
+    CHECK(h.ctl->Status().upload == UploadState::Failed);
+    CHECK(h.pipeline.IsSuppressed(ws.key));
+    CHECK(h.ctl->Status().mode == PlaybackMode::LiveEffects);
+
+    /* An explicit Live request must NOT hit the idempotent
+       no-op — it restores the lane via the Direct path. */
+    PlaybackController::Result r =
+        h.ctl->Request(PlaybackMode::LiveEffects,
+                       PlaybackControl::Playing, params);
+    CHECK(r.accepted);
+    CHECK(r.pending);                       /* Direct ack    */
+    CHECK(h.backend.custom_calls == 1);
+    h.Poll();
+    CHECK(!h.pipeline.IsSuppressed(ws.key));
+    CHECK(h.ctl->Status().mode == PlaybackMode::LiveEffects);
+    CHECK(h.ctl->Status().upload == UploadState::None);
+    CHECK(h.pipeline.SubmitLatest(FrameFor(ws, 5, h.Red())).status
+          == SubmitStatus::Accepted);
+}
+
+/*---------------------------------------------------------*\
+||| T9: bounded sampler cache + concurrent access           ||
+\*---------------------------------------------------------*/
+
+static void TestSamplerBound()
+{
+    PlaybackFrameSampler s;
+    /* 20 distinct breathing colors -> cache stays bounded. */
+    for(int i = 0; i < 20; ++i)
+    {
+        PlaybackParams p;
+        p.color = RgbColor{ (uint8_t)i, 0, 0 };
+        CHECK(!s.Sample(
+            LianLiWireless::PlaybackPreset::Breathing,
+            p, 16, 8, 0.25).empty());
+    }
+    CHECK(s.CachedLoops() <= 8);
+
+    /* Concurrent find+emplace across threads must be safe —
+       guard is inside the sampler, not the caller's mutex. */
+    PlaybackFrameSampler shared;
+    auto work = [&shared]
+    {
+        for(int i = 0; i < 12; ++i)
+        {
+            PlaybackParams p;
+            p.color   = RgbColor{ (uint8_t)i, 1, 2 };
+            p.reverse = (i % 2) == 0;
+            shared.Sample(
+                LianLiWireless::PlaybackPreset::Breathing,
+                p, 24, 8, 0.5);
+            shared.Sample(
+                LianLiWireless::PlaybackPreset::RainbowWave,
+                p, 24, 8, 0.5);
+        }
+    };
+    std::thread t1(work), t2(work), t3(work);
+    t1.join(); t2.join(); t3.join();
+    CHECK(shared.CachedLoops() <= 8);
+    CHECK(shared.CachedLoops() > 0);
+}
+
+/*---------------------------------------------------------*\
+||| T10: persisted-scene store is bounded                   ||
+\*---------------------------------------------------------*/
+
+static void TestSceneStoreBound()
+{
+    Harness h;
+    const DeviceSnapshot ws = WirelessSnap();
+    h.backend.snaps = { ws };
+    h.pipeline.RegisterDevice(ws);
+    h.backend.report.name  = "Direct";
+    h.backend.report.valid = true;
+
+    /* Apply 40 distinct scenes — the per-scene store stays
+       capped at the most-recent 32. */
+    for(int i = 0; i < 40; ++i)
+    {
+        const std::string name = "scene" + std::to_string(i);
+        h.scene = MakeScene(name, "layers" + name, true);
+        h.ctl->OnSceneApplied(h.scene);
+    }
+    CHECK(h.ctl->PersistedScenes() <= 32);
+}
+
 int main()
 {
     TestLifecycle();
@@ -804,6 +936,9 @@ int main()
     TestPauseStop();
     TestClock();
     TestPipelineSuppression();
+    TestFailedRestore();
+    TestSamplerBound();
+    TestSceneStoreBound();
 
     std::printf("playback_test: %d checks, %d failures\n",
                 checks, failures);

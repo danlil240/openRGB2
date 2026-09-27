@@ -233,16 +233,23 @@ SubmitResult DeliveryPipeline::SubmitLatest(const RgbFrame& frame)
         ++aggregate_.rejected;
         return valid;
     }
-    if(frame.sequence < lane.max_seq)
+    if(!frame.synthetic)
     {
-        /* Obsolete: the producer's sequence is monotonic per
-           controller+generation, so an older sequence can never
-           displace — or follow — a newer admitted frame. */
-        ++lane.stats.rejected;
-        ++aggregate_.rejected;
-        return SubmitResult::Reject("out-of-order sequence");
+        if(frame.sequence < lane.max_seq)
+        {
+            /* Obsolete: the producer's sequence is monotonic per
+               controller+generation, so an older sequence can never
+               displace — or follow — a newer admitted frame. */
+            ++lane.stats.rejected;
+            ++aggregate_.rejected;
+            return SubmitResult::Reject("out-of-order sequence");
+        }
+        lane.max_seq = frame.sequence;
     }
-    lane.max_seq = frame.sequence;
+    /* Synthetic frames (playback-baked, stop-black) bypass the
+       sequence namespace: they are authoritative state from the
+       owning producer and never raise the live high-water — a
+       later live frame cannot be starved by them. */
 
     ++lane.stats.submitted;
     ++aggregate_.submitted;
@@ -446,12 +453,14 @@ bool DeliveryPipeline::DeliverOne(Lane& lane, RgbFrame frame,
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if(!reliable && lane.has_sent &&
-           (frame.sequence < lane.last_sent_seq ||
+           ((!frame.synthetic && frame.sequence < lane.last_sent_seq) ||
             frame.colors == lane.last_colors))
         {
             /* Identical to the delivered state, or older than the
                state already delivered (e.g. a reliable send
-               overtook it): retransmission is suppressed. */
+               overtook it): retransmission is suppressed. A
+               synthetic frame only dedupes on identical colors —
+               its sequence lives outside the live namespace. */
             ++lane.stats.suppressed;
             ++aggregate_.suppressed;
             return false;
@@ -481,7 +490,13 @@ bool DeliveryPipeline::DeliverOne(Lane& lane, RgbFrame frame,
     aggregate_.RecordTransportCompletion(now);
     lane.has_sent      = true;
     lane.last_send     = now;
-    lane.last_sent_seq = frame.sequence;
+    /* A synthetic sequence is outside the live namespace —
+       recording it would let it stale-suppress every future
+       live frame. Live high-water tracking stays live-only. */
+    if(!frame.synthetic)
+    {
+        lane.last_sent_seq = frame.sequence;
+    }
     lane.last_colors   = frame.colors;
     return true;
 }

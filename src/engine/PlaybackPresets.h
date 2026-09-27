@@ -32,8 +32,10 @@
 #include "scene/SceneTypes.h"
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -160,7 +162,9 @@ class PlaybackFrameSampler
 public:
     /* Colors for `led_count` LEDs at loop position `phase`
        (wrapped to [0,1)). Deterministic; identical inputs
-       reproduce the uploaded frame content. */
+       reproduce the uploaded frame content. Thread-safe —
+       called from the scene-worker thread (Tick) and IPC/
+       owner threads (DoControl) concurrently. */
     std::vector<RgbColor> Sample(
         LianLiWireless::PlaybackPreset preset,
         const PlaybackParams& params,
@@ -182,8 +186,13 @@ private:
         uint8_t  r, g, b;           /* breathing color            */
         bool operator<(const Key& o) const;
     };
-    /* One rendered loop: frame_count * led_count * 3 bytes. */
+    /* One rendered loop: frame_count * led_count * 3 bytes —
+       a bounded LRU (kMaxLoops): arbitrary SET_PLAYBACK_MODE
+       colors must not grow engine memory without bound. */
+    static constexpr size_t kMaxLoops = 8;
+    mutable std::mutex           mutex_;
     std::map<Key, std::shared_ptr<const std::vector<uint8_t>>> loops_;
+    std::deque<Key>              lru_;   /* front = oldest      */
 };
 
 } /* namespace openrgb2 */
