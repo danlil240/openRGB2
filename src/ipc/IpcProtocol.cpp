@@ -69,6 +69,7 @@ const std::vector<std::string>& EventKinds()
         event_kind::kPlayback,
         event_kind::kConnection,
         event_kind::kFrameStatus,
+        event_kind::kReactive,
     };
     return kinds;
 }
@@ -91,6 +92,7 @@ const char* MsgTypeName(MsgType t)
     case MsgType::Ping:            return "PING";
     case MsgType::GetPresets:      return "GET_PRESETS";
     case MsgType::Quit:            return "QUIT";
+    case MsgType::ReactiveCommand: return "REACTIVE_COMMAND";
     case MsgType::DiagGet:         return "DIAG_GET";
     case MsgType::Welcome:         return "WELCOME";
     case MsgType::Ok:              return "OK";

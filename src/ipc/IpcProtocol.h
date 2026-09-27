@@ -58,6 +58,7 @@ constexpr const char* kScene       = "scene";         /* applied scene revision 
 constexpr const char* kPlayback    = "playback";      /* playback state changed */
 constexpr const char* kConnection  = "connection";    /* SDK link state         */
 constexpr const char* kFrameStatus = "frame_status";  /* delivery stats/colors  */
+constexpr const char* kReactive    = "reactive";      /* reactive input state   */
 }
 
 /* The set SnapshotEvent/SUBSCRIBE validation knows. */
@@ -90,6 +91,8 @@ enum class MsgType : uint16_t
     Quit             = 0x010c,   /* -> Ok; requests the engine's ordered
                                        shutdown (the "Quit All" hook —
                                        plan section 4)                  */
+    ReactiveCommand  = 0x010d,   /* {verb,args} -> Ok; Task 4.6 reactive
+                                       input controls (audio/screen/key)*/
 
     /*---- diagnostics channel (the only post-HELLO verb) ---*/
     DiagGet          = 0x0300,   /* -> Diagnostics                      */

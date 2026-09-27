@@ -16,7 +16,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 #   cmake -S . -B build -G "Visual Studio 17 2022" -A x64 ^
 #       -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64
 #
-find_package(Qt6 6.8 QUIET COMPONENTS Core)
+find_package(Qt6 6.8 QUIET COMPONENTS
+    Core Gui Qml QmlMeta QmlModels QmlWorkerScript
+    Quick QuickControls2 Network OpenGL)
 if(NOT Qt6_FOUND)
     message(STATUS
         "Qt6 not found (pass -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64). "
@@ -28,6 +30,12 @@ enable_testing()
 # CTest labels defined by the implementation plan (Milestone 0): core, sdk,
 # engine, ui, backend. Targets are added as their milestones land.
 add_subdirectory(src/engine)
+if(Qt6_FOUND)
+    # Milestone 4 — the UI process (OpenRGB2.UI QML module + the
+    # openrgb2-ui executable) and its CTest label.
+    add_subdirectory(ui)
+    add_subdirectory(src/ui)
+endif()
 add_subdirectory(src/backends/openrgb)
 add_subdirectory(src/ipc)
 add_subdirectory(src/platform/windows)
@@ -35,6 +43,9 @@ add_subdirectory(tests/core)
 add_subdirectory(tests/backend)
 add_subdirectory(tests/engine)
 add_subdirectory(tests/sdk)
+if(Qt6_FOUND)
+    add_subdirectory(tests/ui)
+endif()
 
 # Milestone 1 benchmark producer (opt-in physical runs, offline build)
 add_subdirectory(tools/bench)

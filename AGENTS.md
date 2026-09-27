@@ -15,6 +15,9 @@ milestones.
 | `src/backends/openrgb/` | Qt-free OpenRGB SDK v4 client (loopback TCP to the pinned backend) |
 | `src/ipc/` | Versioned/bounded local IPC: restricted named pipes (command + read-only diagnostics), JSON framing — contract in `docs/ipc-protocol.md` |
 | `src/platform/windows/` | Qt-free Win32 platform pieces: display/system power monitor (message-only window feeding `PowerLifecycle` events) |
+| `src/ui/` | The `openrgb2-ui` Qt Quick process: entry point + the C++/QML IPC client bridge (`EngineWireClient` Qt-free wire session, `EngineBridge` QObject for QML) |
+| `ui/` | The `OpenRGB2.UI` QML module: `theme/` design tokens, `components/` reusable controls, `pages/` the four views, `Main.qml` shell |
+| `tests/ui/` | UI suites (CTest label `ui`): wire-client codec tests over an in-process pipe, bridge reconnect/backoff, headless QML smoke loads |
 | `tests/core/` | Qt-free offline regression suites (CTest label `core`) |
 | `tests/backend/` | Offline Lian Li wireless protocol harness (CTest label `backend`) |
 | `tests/engine/` | Qt-free engine + IPC suites (CTest label `engine`) |

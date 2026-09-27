@@ -128,12 +128,25 @@ void DeviceMapper::SyncDevices(
     }
 
     /* Drop emitted state for controllers absent from this
-       enumeration — it can never seed a frame again. */
+       enumeration — it can never seed a frame again. The
+       same rule covers a pending identification overlay: a
+       controller that left the topology is never flashed. */
     for(auto it = emitted_.begin(); it != emitted_.end();)
     {
         if(snapshots_.find(it->first) == snapshots_.end())
         {
             it = emitted_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    for(auto it = identify_.begin(); it != identify_.end();)
+    {
+        if(snapshots_.find(it->first) == snapshots_.end())
+        {
+            it = identify_.erase(it);
         }
         else
         {
@@ -146,10 +159,8 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<RgbFrame> out;
-    if(!doc_)
+    if(doc_)
     {
-        return out;
-    }
 
     /* Collect writes per controller BEFORE assembling frames —
        document order is preserved per zone so overlapping
@@ -248,7 +259,229 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
         st.colors                 = std::move(colors);
         out.push_back(std::move(frame));
     }
+    } /* doc_ */
+
+    /* Identification overlays run with or without a scene —
+       they exist to FIND hardware, so they cannot depend on
+       the very bindings the user is still figuring out. */
+    ApplyIdentify(out, eval.sample_time);
     return out;
+}
+
+/*---------------------------------------------------------*\
+||| LED identification overlay                             ||
+\|*---------------------------------------------------------*/
+
+bool DeviceMapper::StartIdentify(const DeviceKey& controller,
+                                 uint32_t led_start,
+                                 uint32_t led_count,
+                                 Clock::duration duration,
+                                 TimePoint now,
+                                 std::string& err)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto sit = snapshots_.find(controller);
+    if(sit == snapshots_.end())
+    {
+        err = "controller is not in the current topology";
+        return false;
+    }
+    if(led_count == 0)
+    {
+        err = "identify range is empty";
+        return false;
+    }
+    if(led_start + led_count > sit->second.LedCount() ||
+       led_start + led_count < led_start)
+    {
+        err = "identify range exceeds the controller's " +
+              std::to_string(sit->second.LedCount()) + " LEDs";
+        return false;
+    }
+    Identify id;
+    id.led_start = led_start;
+    id.led_count = led_count;
+    id.start     = now;
+    id.until     = now + duration;
+    identify_[controller] = id;
+    return true;
+}
+
+bool DeviceMapper::CancelIdentify(const DeviceKey& controller,
+                                  TimePoint now)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = identify_.find(controller);
+    if(it == identify_.end())
+    {
+        return false;
+    }
+    /* Stamp expiry, never erase outright: the restore frame
+       exists only in ApplyIdentify's expiry branch, so an
+       erased booking with no scene frame following would
+       freeze the blink's last phase on the hardware (round-2
+       review). The stamped entry keeps IdentifyActive() true —
+       the frame path stays awake for the one tick that prunes
+       the booking and emits the restore. Identifying() reports
+       false at once (now >= until); the caller's reply
+       contract is unchanged. */
+    it->second.until = now;
+    return true;
+}
+
+bool DeviceMapper::Identifying(const DeviceKey& controller,
+                               TimePoint now) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = identify_.find(controller);
+    return it != identify_.end() && now < it->second.until;
+}
+
+bool DeviceMapper::IdentifyActive() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    /* Booked, not merely unexpired: an expired entry is still
+       work — ApplyIdentify prunes it and emits the restore
+       frame on the NEXT produced frame, so the idle hook must
+       keep the frame path awake until the map drains. */
+    return !identify_.empty();
+}
+
+void DeviceMapper::ApplyIdentify(std::vector<RgbFrame>& out,
+                                 TimePoint sample_time)
+{
+    /* Called with mutex_ held. Half-period blink: the
+       identified range alternates lit/dark over a dark field
+       so it reads unambiguously next to scene output. */
+    static const RgbColor kLit  { 0xFF, 0xFF, 0xFF };
+    static const RgbColor kDark { 0x00, 0x00, 0x00 };
+    constexpr auto kHalfPeriod = std::chrono::milliseconds(250);
+
+    for(auto it = identify_.begin(); it != identify_.end();)
+    {
+        if(sample_time >= it->second.until)
+        {
+            /* Expiry is honest — but with no scene frame
+               following (no scene loaded, or the controller
+               unmapped) the blink's last phase would FREEZE on
+               the hardware, possibly lit. Emit ONE restore
+               frame on the pre-identify baseline — the same
+               baseline the writes loop uses (last emitted
+               frame for this generation, else the enumerated
+               colors) — then drop the booking. A controller
+               that left or disconnected keeps the obsolete-
+               frame rule: nothing is sent to it. */
+            const DeviceKey& key = it->first;
+            const auto sit = snapshots_.find(key);
+            if(sit != snapshots_.end() &&
+               sit->second.connection == ConnectionState::Connected)
+            {
+                bool have_frame = false;
+                for(const RgbFrame& f : out)
+                {
+                    if(f.controller == key)
+                    {
+                        have_frame = true;   /* the scene writes
+                                                already restored
+                                                the look */
+                        break;
+                    }
+                }
+                if(!have_frame)
+                {
+                    const DeviceSnapshot& snap = sit->second;
+                    const uint32_t led_count = snap.LedCount();
+                    Emitted& st = emitted_[key];
+                    RgbFrame  f;
+                    f.controller          = key;
+                    f.topology_generation =
+                        snap.topology_generation;
+                    f.sample_time         = sample_time;
+                    if(st.generation == snap.topology_generation &&
+                       st.colors.size() == led_count)
+                    {
+                        f.colors = st.colors;
+                    }
+                    else
+                    {
+                        f.colors = snap.colors;
+                        f.colors.resize(led_count);
+                        st.generation = snap.topology_generation;
+                        /* st.seq is NOT reset here: overlay-only
+                           controllers book no generation tag, so
+                           this branch also runs mid-generation —
+                           and the blink frames already spent seqs
+                           in the lane's live space. Only a real
+                           topology change may restart sequences
+                           (the lane's guard resets with it). */
+                    }
+                    f.sequence = ++st.seq;
+                    st.colors  = f.colors;
+                    out.push_back(std::move(f));
+                }
+            }
+            it = identify_.erase(it);
+            continue;
+        }
+        const Identify& id = it->second;
+        const auto sit = snapshots_.find(it->first);
+        if(sit == snapshots_.end() ||
+           sit->second.connection != ConnectionState::Connected)
+        {
+            /* Same obsolete-frame rule as mapped writes —
+               the overlay resumes if the controller returns
+               before expiry. */
+            ++it;
+            continue;
+        }
+        const DeviceSnapshot& snap = sit->second;
+        const bool lit =
+            ((sample_time - id.start) / kHalfPeriod) % 2 == 0;
+
+        RgbFrame* frame = nullptr;
+        for(RgbFrame& f : out)
+        {
+            if(f.controller == it->first)
+            {
+                frame = &f;
+                break;
+            }
+        }
+        if(frame == nullptr)
+        {
+            /* No binding maps here — build the overlay frame
+               from scratch on a dark baseline sized to the
+               enumerated topology. The mapper is this
+               controller's producer, so the frame joins the
+               LIVE sequence space (emitted_) — the lane's
+               out-of-order guard must see every frame it
+               sends, identify or scene. */
+            RgbFrame f;
+            f.controller          = it->first;
+            f.topology_generation = snap.topology_generation;
+            f.sequence            = ++emitted_[it->first].seq;
+            f.sample_time         = sample_time;
+            f.colors.assign(snap.LedCount(), kDark);
+            out.push_back(std::move(f));
+            frame = &out.back();
+        }
+        else
+        {
+            /* The writes loop already stamped this frame's
+               sequence from the same live space — keep it. */
+            std::fill(frame->colors.begin(), frame->colors.end(),
+                      kDark);
+        }
+        const uint32_t end =
+            (uint32_t)std::min<size_t>(
+                frame->colors.size(),
+                (size_t)id.led_start + id.led_count);
+        for(uint32_t i = id.led_start; i < end; ++i)
+        {
+            frame->colors[i] = lit ? kLit : kDark;
+        }
+        ++it;
+    }
 }
 
 bool DeviceMapper::BindingState(const std::string& binding_id,

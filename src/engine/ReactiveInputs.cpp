@@ -1,0 +1,419 @@
+/*---------------------------------------------------------*\
+||| ReactiveInputs.cpp                                        ||
+|||   SPDX-License-Identifier: GPL-2.0-or-later               ||
+\*---------------------------------------------------------*/
+
+#include "ReactiveInputs.h"
+
+#include <algorithm>
+#include <chrono>
+
+namespace openrgb2
+{
+
+namespace
+{
+
+/* Events older than this never reach scene evaluation — the
+   engine-side bound on how long a captured event remains
+   live (the bus additionally caps the queue at 96). */
+constexpr float kEventMaxAgeS = 5.0f;
+
+} /* namespace */
+
+const std::vector<std::string>& ReactiveInputs::InputIds()
+{
+    static const std::vector<std::string> ids =
+        { "audio", "screen", "key" };
+    return ids;
+}
+
+ReactiveInputs::ReactiveInputs(Deps deps)
+    : deps_(std::move(deps))
+{
+    if(deps_.now)
+    {
+        /* Input events must be stamped on the SCENE clock —
+           EvalRipple ages them as `in.t - e.t` against the
+           worker's epoch, so the bus shares the provider. */
+        std::function<double()> now = deps_.now;
+        bus_.SetNow(
+            [now]()
+            {
+                return static_cast<float>(now());
+            });
+    }
+
+    if(deps_.source_factory)
+    {
+        for(const std::string& id : InputIds())
+        {
+            Slot* s = Find(id);
+            if(s != nullptr)
+                s->source = deps_.source_factory(id);
+        }
+    }
+}
+
+ReactiveInputs::~ReactiveInputs()
+{
+    Shutdown();
+}
+
+ReactiveInputs::Slot* ReactiveInputs::Find(const std::string& id)
+{
+    if(id == "audio")  return &audio_;
+    if(id == "screen") return &screen_;
+    if(id == "key")    return &key_;
+    return nullptr;
+}
+
+void ReactiveInputs::Changed()
+{
+    if(suppress_changed_)
+        return;
+    if(deps_.changed)
+        deps_.changed();
+}
+
+bool ReactiveInputs::SetEnabled(const std::string& id,
+                                bool enabled, std::string& err)
+{
+    std::unique_lock<std::mutex> lock(mutex_);
+    Slot* s = Find(id);
+    if(s == nullptr)
+    {
+        err = "unknown reactive input: " + id;
+        return false;
+    }
+    if(!s->source)
+    {
+        err = id + " input is not available on this system";
+        return false;
+    }
+    /* Serialize transitions per input: while a Start/Stop is
+       in flight with the mutex dropped, a concurrent command
+       for THIS slot waits on transition_cv_, then applies on
+       the settled state. A disable issued mid-enable stops
+       the source right after it starts — last command wins
+       in arrival order, and two commands can never both be
+       inside the source's thread lifecycle at once (the
+       TOCTOU that could double-spawn a capture thread is
+       closed). */
+    while(s->busy)
+        transition_cv_.wait(lock);
+
+    if(s->enabled == enabled && (!enabled || s->source->Running()))
+        return true; /* idempotent */
+
+    s->busy = true;
+    if(enabled)
+    {
+        /* Params + the pause gate land BEFORE Start: the
+           source's synchronous pre-flight then probes the
+           real configuration (the right display index; a
+           paused screen source skips its grab) and a starting
+           source never comes up on defaults — the restore
+           path records them on the slot for exactly this. */
+        s->source->SetPaused(paused_);
+        s->source->SetSensitivity(s->sensitivity);
+        s->source->SetScreenIndex(s->screen_index);
+
+        /* Start OUTSIDE the manager mutex — the pre-flight
+           probe + thread spawn may block on device init
+           (WASAPI, hook install). `busy` keeps concurrent
+           commands serialized while the lock is dropped. */
+        lock.unlock();
+        bool ok = false;
+        try
+        {
+            ok = s->source->Start(&bus_);
+        }
+        catch(...)
+        {
+            /* A throwing Start (thread-create system_error,
+               bad_alloc inside the probe) must not wedge the
+               slot: busy left set would block every later
+               command on transition_cv_ forever AND hang
+               Shutdown(). Release waiters, leave the slot
+               honestly disabled, then propagate — the IPC
+               boundary still answers Internal and the session
+               survives (IpcServer's dispatch catch). */
+            lock.lock();
+            s->busy    = false;
+            s->enabled = false;
+            transition_cv_.notify_all();
+            err = s->source->Status();
+            if(err.empty())
+                err = id + " input threw during start";
+            lock.unlock();
+            Changed();
+            throw;
+        }
+        lock.lock();
+        s->busy = false;
+        transition_cv_.notify_all();
+        if(!ok)
+        {
+            s->enabled = false;
+            err        = s->source->Status();
+            if(err.empty())
+                err = id + " input failed to start";
+            lock.unlock();
+            Changed();
+            return false;
+        }
+        /* Pause/params landing while the mutex was dropped
+           during Start() updated manager state but skipped
+           the not-yet-running source (SetPaused/
+           SetSensitivity/SetScreenIndex only push when
+           Running()) — replay the persisted slot state so a
+           change in the start window is never lost: a missed
+           unpause would be a dead-but-enabled input, a missed
+           pause would keep the sampler grabbing while
+           displays sleep. */
+        s->source->SetPaused(paused_);
+        s->source->SetSensitivity(s->sensitivity);
+        s->source->SetScreenIndex(s->screen_index);
+        s->enabled = true;
+    }
+    else
+    {
+        s->enabled = false;
+        /* Stop OUTSIDE the mutex — Stop() joins the capture
+           thread. After it returns nothing captures for a
+           disabled input. */
+        lock.unlock();
+        try
+        {
+            s->source->Stop();
+        }
+        catch(...)
+        {
+            /* Same unwedging as the Start path — the slot is
+               already honestly disabled; release waiters and
+               let the IPC boundary report Internal. */
+            lock.lock();
+            s->busy = false;
+            transition_cv_.notify_all();
+            lock.unlock();
+            Changed();
+            throw;
+        }
+        lock.lock();
+        s->busy = false;
+        transition_cv_.notify_all();
+    }
+
+    lock.unlock();
+    Changed();
+    return true;
+}
+
+bool ReactiveInputs::SetSensitivity(const std::string& id,
+                                    float s, std::string& err)
+{
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Slot* slot = Find(id);
+        if(slot == nullptr)
+        {
+            err = "unknown reactive input: " + id;
+            return false;
+        }
+        if(id != "audio")
+        {
+            err = id + " input has no sensitivity parameter";
+            return false;
+        }
+        slot->sensitivity =
+            std::clamp(s, kSensitivityMin, kSensitivityMax);
+        if(slot->source && slot->source->Running())
+            slot->source->SetSensitivity(slot->sensitivity);
+    }
+    /* Persist + notify like every other externally visible
+       change — the slider debounce lands here. */
+    Changed();
+    return true;
+}
+
+bool ReactiveInputs::SetScreenIndex(int index, std::string& err)
+{
+    if(index < 0)
+    {
+        err = "screen_index must be >= 0";
+        return false;
+    }
+    if(deps_.enumerate_displays)
+    {
+        const std::vector<ReactiveDisplay> displays =
+            deps_.enumerate_displays();
+        if(!displays.empty() &&
+           index >= static_cast<int>(displays.size()))
+        {
+            err = "display index out of range";
+            return false;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        screen_.screen_index = index;
+        if(screen_.source && screen_.source->Running())
+            screen_.source->SetScreenIndex(index);
+    }
+    Changed();
+    return true;
+}
+
+void ReactiveInputs::SetPaused(bool paused)
+{
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(paused_ == paused)
+            return;
+        paused_ = paused;
+        for(Slot* s : { &audio_, &screen_, &key_ })
+        {
+            if(s->source && s->source->Running())
+                s->source->SetPaused(paused);
+        }
+    }
+    Changed();
+}
+
+bool ReactiveInputs::Paused() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return paused_;
+}
+
+std::shared_ptr<const studio::InputState>
+ReactiveInputs::Snapshot()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto state = std::make_shared<studio::InputState>();
+    if(paused_)
+        return state; /* display-off/suspend: NOTHING feeds
+                         the scene — the gate the Task 3.7
+                         atomic was waiting for */
+
+    *state = bus_.Snapshot(kEventMaxAgeS);
+    return state;
+}
+
+std::vector<ReactiveInputStatus> ReactiveInputs::Status() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ReactiveInputStatus> out;
+    out.reserve(3);
+    for(const std::string& id : InputIds())
+    {
+        const Slot* s = nullptr;
+        if(id == "audio")       s = &audio_;
+        else if(id == "screen") s = &screen_;
+        else                    s = &key_;
+
+        ReactiveInputStatus st;
+        st.id           = id;
+        st.available    = s->source != nullptr;
+        st.enabled      = s->enabled;
+        st.paused       = paused_;
+        st.sensitivity  = s->sensitivity;
+        st.screen_index = s->screen_index;
+        if(s->source)
+        {
+            st.running = s->source->Running();
+            st.status  = s->source->Status();
+        }
+        else
+        {
+            st.status = id + " input is not available on this system";
+        }
+        out.push_back(st);
+    }
+    return out;
+}
+
+std::vector<ReactiveDisplay> ReactiveInputs::Displays() const
+{
+    if(deps_.enumerate_displays)
+        return deps_.enumerate_displays();
+    return {};
+}
+
+std::vector<ReactiveInputs::PersistedInput>
+ReactiveInputs::PersistedState() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<PersistedInput> out;
+    for(const std::string& id : InputIds())
+    {
+        const Slot* s = nullptr;
+        if(id == "audio")       s = &audio_;
+        else if(id == "screen") s = &screen_;
+        else                    s = &key_;
+
+        PersistedInput p;
+        p.id           = id;
+        /* Record only slots that are actually running —
+           enabled-but-dead persists as disabled so a restart
+           retries a once-failing source honestly instead of
+           silently pinning it on. */
+        p.enabled      = s->enabled && s->source &&
+                         s->source->Running();
+        p.sensitivity  = s->sensitivity;
+        p.screen_index = s->screen_index;
+        out.push_back(p);
+    }
+    return out;
+}
+
+void ReactiveInputs::Restore(
+    const std::vector<PersistedInput>& saved)
+{
+    suppress_changed_ = true;
+    try
+    {
+        for(const PersistedInput& p : saved)
+        {
+            std::string err;
+            /* params before enable so a starting source gets
+               the recorded values, not the defaults */
+            SetSensitivity(p.id, p.sensitivity, err);
+            if(p.id == "screen")
+                SetScreenIndex(p.screen_index, err);
+            if(p.enabled)
+                SetEnabled(p.id, true, err); /* a source that
+                    fails simply stays disabled — Status() is
+                    the honest record */
+        }
+    }
+    catch(...)
+    {
+        /* A throwing source must not pin suppress_changed_
+           forever — restore still aborts (the exception
+           propagates) but later changes keep emitting. */
+        suppress_changed_ = false;
+        throw;
+    }
+    suppress_changed_ = false;
+}
+
+void ReactiveInputs::Shutdown()
+{
+    std::unique_lock<std::mutex> lock(mutex_);
+    for(Slot* s : { &audio_, &screen_, &key_ })
+    {
+        /* Never Stop() underneath an in-flight Start() —
+           wait for the transition to settle first (same
+           serialization SetEnabled uses). */
+        while(s->busy)
+            transition_cv_.wait(lock);
+        s->enabled = false;
+        if(s->source)
+            s->source->Stop();
+    }
+}
+
+} /* namespace openrgb2 */

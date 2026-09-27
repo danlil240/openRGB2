@@ -10,8 +10,10 @@
 ||   - playback mode + status  (GET_/SET_PLAYBACK_MODE)     ||
 ||   - delivery stats          (GET_DELIVERY_STATS)         ||
 ||   - presets                 (GET_PRESETS)                ||
-||   - layout/calibration      (LAYOUT_COMMAND — reserved   ||
-||     verb space, honestly Unavailable until M4)           ||
+||   - layout/calibration      (LAYOUT_COMMAND — Task 4.4: ||
+||     identify drives the mapper's bounded blink overlay;||
+||     the scene-mutation verbs apply through the shared    ||
+||     scene-apply path)                                    ||
 ||   - engine/connection state (GET_STATE)                  ||
 ||   - diagnostics             (DIAG_GET — also the only    ||
 ||     verb on the read-only diagnostics channel)           ||
@@ -37,6 +39,7 @@
 #include "OpenRgbClient.h"
 #include "PlaybackController.h"
 #include "PowerLifecycle.h"
+#include "ReactiveInputs.h"
 
 #include "effects/Presets.h"
 #include "scene/SceneTypes.h"
@@ -68,6 +71,14 @@ public:
         DeviceMapper*       mapper   = nullptr;   /* re-bind      */
         sdk::OpenRgbClient* sdk      = nullptr;   /* topology     */
 
+        /* Topology snapshot source for the layout verbs
+           (identify's controller resolution, set_binding's
+           snapshot-derived identity). When set it wins over
+           deps.sdk->Snapshots() — the same seam
+           playback_caps provides, so offline tests drive the
+           handlers without an SDK client. */
+        std::function<std::vector<DeviceSnapshot>()> snapshots;
+
         /* Task 3.6 playback controller — when set, it is the
            authoritative playback state machine: SET_PLAYBACK_
            MODE runs the real transition (suppression, SDK
@@ -85,6 +96,14 @@ public:
         /* Task 3.7 power lifecycle — surfaced read-only in
            STATE/DIAGNOSTICS (display/suspend/gate flags). */
         const PowerLifecycle* power = nullptr;
+
+        /* Task 4.6 reactive inputs — the REACTIVE_COMMAND
+           verb space (set_enabled / set_params) and the
+           read-only reactive surface in STATE/DIAGNOSTICS +
+           the "reactive" event. Nullptr -> the surface
+           reports available=false honestly rather than
+           fabricating toggles. */
+        ReactiveInputs*     reactive = nullptr;
 
         /* IPC-side queue/counter source (IpcServer::Stats) —
            diagnostics exposes queue depths, not guesses. */
@@ -106,6 +125,16 @@ public:
            owner loop's stop flag so owned components shut down in
            order (OrderlyShutdown). Empty -> Unavailable. */
         std::function<void()> request_shutdown;
+
+        /* Task 4.7: the Task-3.9 ownership report (competing-
+           owner scan + managed-config sole-writer check)
+           surfaced read-only in STATE/DIAGNOSTICS — the
+           Devices & Diagnostics view's conflict list is the
+           engine's report, never a UI-side guess. The provider
+           returns the serialized OwnershipReport; empty -> the
+           field is an honest null (no scan wired), never a
+           fabricated "no conflicts". */
+        std::function<nlohmann::json()> ownership;
     };
 
     explicit EngineService(Engine& engine);
@@ -137,11 +166,16 @@ public:
 
     /* Diff-driven event emission for the push channel: call
        periodically (~500 ms) from the engine's owner loop.
-       Emits topology/connection/playback events on change
-       and frame_status at a bounded rate when delivery stats
-       moved. Single-caller: the diffing signatures are not
-       mutex-guarded (same contract as SceneWorker::Step). */
+       Emits topology/connection/playback/reactive events on
+       change and frame_status at a bounded rate when delivery
+       stats moved. Single-caller: the diffing signatures are
+       not mutex-guarded (same contract as SceneWorker::Step). */
     void PollEvents(TimePoint now = Clock::now());
+
+    /* Emits the "reactive" event with the current reactive
+       state — the ReactiveInputs manager's changed hook
+       calls this (enable/disable, pause transitions). */
+    void EmitReactive();
 
     /*---- IIpcService ---------------------------------------*/
     nlohmann::json OnWelcome() override;
@@ -174,18 +208,39 @@ private:
     std::string         last_connection_sig_;
     std::string         last_topology_sig_;
     std::string         last_playback_sig_;
+    std::string         last_reactive_sig_;
     std::string         last_stats_sig_;
     TimePoint           last_frame_status_{};
 
     void   Emit(const std::string& kind, const nlohmann::json& data);
+    /* Task 4.4 LAYOUT_COMMAND surface (docs/ipc-protocol.md
+       §5): identify drives the mapper's bounded blink
+       overlay; the other verbs mutate the applied scene
+       document through the ONE apply path
+       (ApplySceneDocument — same validation, revision bump,
+       and scene event as SET_SCENE). */
+    IpcReply       HandleLayoutCommand(const std::string& verb,
+                                       const nlohmann::json& body);
+    /* Task 4.6 REACTIVE_COMMAND surface (docs/ipc-protocol.md):
+       set_enabled / set_params drive the ReactiveInputs
+       manager; every reply carries the full reactive body so
+       the client lands on real state, never an assumed one. */
+    IpcReply       HandleReactiveCommand(const std::string& verb,
+                                         const nlohmann::json& body);
+    IpcReply       HandleIdentify(const nlohmann::json& body);
+    IpcReply       HandleLayoutMutate(const std::string& verb,
+                                      const nlohmann::json& body);
+    std::vector<DeviceSnapshot> LayoutSnapshots() const;
     nlohmann::json SceneJsonLocked() const;
     nlohmann::json PlaybackJson() const;
     nlohmann::json PowerJson() const;
     nlohmann::json StateJson() const;
+    nlohmann::json ReactiveJson() const;
     nlohmann::json SnapshotsJson() const;
     nlohmann::json DeliveryStatsJson(const nlohmann::json& body) const;
     nlohmann::json ConnectionJson() const;
     nlohmann::json FrameStatusJson() const;
+    nlohmann::json OwnershipJson() const;
 };
 
 } /* namespace ipc */

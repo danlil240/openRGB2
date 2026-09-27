@@ -122,6 +122,48 @@ public:
        No scene / no bindings -> empty. */
     std::vector<RgbFrame> MapFrame(const EvaluatedFrame& eval);
 
+    /*---- LED identification (Task 4.4, LAYOUT_COMMAND      --*\
+    |  "identify"): a bounded per-controller overlay. While   |
+    |  active, MapFrame emits a blink pattern for the target  |
+    |  controller — every LED dark except the identified      |
+    |  range, which alternates lit/dark on a 250 ms phase     |
+    |  derived from each frame's sample_time (deterministic).  |
+    |  The overlay produces a frame even when NO binding maps |
+    |  to the controller (identification exists to FIND the    |
+    |  hardware before it is bound) and even when no scene is  |
+    |  loaded; it travels the normal delivery lane like any    |
+    |  frame, so lane suppression/budgets stay authoritative.  |
+    |  Expiry is checked against sample_time — a stalled       |
+    |  worker simply ends identification on its next frame,    |
+    |  emitting ONE restore frame on the pre-identify          |
+    |  baseline so the blink can't freeze the LEDs on a lit    |
+    |  phase when no scene frame follows. led_start is         |
+    |  absolute in the complete-controller buffer; the caller  |
+    |  resolves zone offsets.                                  |
+    |  CancelIdentify stamps the booking expired instead of    |
+    |  erasing it — the restore frame exists only in the       |
+    |  expiry branch, so an outright erase with no scene       |
+    |  frame following would freeze the blink's last phase on  |
+    |  the hardware; the stamped entry keeps IdentifyActive()  |
+    |  true until the one tick that prunes it and restores.    |
+    \*---------------------------------------------------------*/
+    bool StartIdentify(const DeviceKey& controller,
+                       uint32_t led_start, uint32_t led_count,
+                       Clock::duration duration, TimePoint now,
+                       std::string& err);
+    bool CancelIdentify(const DeviceKey& controller,
+                        TimePoint now);
+    bool Identifying(const DeviceKey& controller,
+                     TimePoint now) const;
+
+    /* True while ANY identification overlay is still booked —
+       including an expired-but-unpruned one, so the frame path
+       stays awake for the prune+restore tick that ends it.
+       EngineService wires this as the worker's idle-frame
+       hook: the blink must reach hardware BEFORE a scene
+       exists to bind it (docs/ipc-protocol.md §5). */
+    bool IdentifyActive() const;
+
     /*---- Introspection (diagnostics/tests) ----------------*\
     | BindingState: the persisted binding's latest resolver   |
     | status (Resolved/Unresolved/Ambiguous — Ambiguous is    |
@@ -155,11 +197,24 @@ private:
         std::vector<RgbColor> colors;
     };
 
+    /* One active identification overlay. */
+    struct Identify
+    {
+        uint32_t  led_start = 0;
+        uint32_t  led_count = 0;
+        TimePoint start;
+        TimePoint until;
+    };
+
+    void ApplyIdentify(std::vector<RgbFrame>& out,
+                       TimePoint sample_time);
+
     mutable std::mutex                              mutex_;
     std::shared_ptr<const studio::SceneDocument>    doc_;
     std::map<DeviceKey, DeviceSnapshot>             snapshots_;
     std::map<std::string, Resolution>               resolved_;
     std::map<DeviceKey, Emitted>                    emitted_;
+    std::map<DeviceKey, Identify>                   identify_;
 };
 
 } /* namespace openrgb2 */

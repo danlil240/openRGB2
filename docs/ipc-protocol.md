@@ -147,6 +147,7 @@ Request → reply. `request_id` echoes.
 | 0x010A | PING | `{}` | PONG `{}` |
 | 0x010B | GET_PRESETS | `{}` | PRESETS |
 | 0x010C | QUIT | `{}` | OK `{shutting_down:true, ordered:true}` / ERROR |
+| 0x010D | REACTIVE_COMMAND | `{verb, ...args}` | OK `<reactive body>` / ERROR |
 | 0x0300 | DIAG_GET | `{}` | DIAGNOSTICS (valid on both pipes) |
 
 Reply types: WELCOME 0x8001, OK 0x8002, ERROR 0x8003, SNAPSHOTS 0x8100,
@@ -212,7 +213,11 @@ SET_PLAYBACK_MODE accepts `mode` plus optional `control`
 (`"playing"` default | `"paused"` sampled-hold | `"stopped"` black) and
 optional `params` `{speed:int, reverse:bool, color:"#RRGGBB"}` applied
 to the uploaded preset (speed 10..200, direction for Rainbow Wave,
-color for Breathing). Animation playback is limited to the three
+color for Breathing). Each params field overlays the engine's recorded
+per-scene selection — an omitted field (or an omitted `params` object)
+PRESERVES the recorded value rather than resetting it to defaults: the
+wire reports parameter revisions, not values, so clients send only the
+fields they are changing. Animation playback is limited to the three
 uploaded presets — `Spectrum Cycle`, `Rainbow Wave`, `Breathing` —
 which a scene selects by naming one of them in `effect.preset` (SDK
 names and `snake_case` ids both accepted). While an uploaded loop owns
@@ -233,9 +238,41 @@ mean_interval_s,interval_count,provenance}`.
 "displayed" (plan section 4).
 
 **STATE** — `{engine:{running,scene_clock_hz,scene_sequence}, scene:{...},
-sdk:{...}, playback:{...}, power:{...}, ipc:{sessions_active, messages_in,
-responses_out, events_sent, events_dropped, queued_events, resync_bytes,
-rejected_hellos, rate_limited, refused_busy}}`.
+sdk:{...}, playback:{...}, power:{...}, reactive:{...}, ownership:{...}|null,
+ipc:{sessions_active, messages_in, responses_out, events_sent, events_dropped,
+queued_events, resync_bytes, rejected_hellos, rate_limited, refused_busy}}`.
+
+**OWNERSHIP** (STATE/DIAGNOSTICS field, `null` when no ownership
+report is wired) — the Task-3.9 startup scan's verbatim,
+report-only findings (plan section 4: competing owners are
+surfaced, never killed or taken over from this surface):
+
+```json
+{ "scanned": true,
+  "backend":  {"listening": true, "attached": true},
+  "conflicts": [ {"owner":"L-Connect","exe":"LConnect.exe",
+                  "pid":1234,"detail":"competing RGB owner (Lian Li)"} ],
+  "notices":   [ {"owner":"FanControl","exe":"FanControl.exe",
+                  "pid":4321,"detail":"cooling owner — expected"} ],
+  "config":   {"checked": true, "findings": ["..."],
+               "enabled_plugins": ["..."],
+               "legacy_producers": ["..."] } }
+```
+
+`scanned:false` means the startup ownership scan never ran —
+that is honest absence, NOT a "no conflicts" result; clients
+must not render an empty conflict list as a verified-clean
+scan. `conflicts` are processes that can write RGB hardware
+(a second OpenRGB, L-Connect, GCC/RGB Fusion, Synapse, G Hub,
+iCUE, SignalRGB); `notices` are informational (the managed
+backend itself, FanControl — expected and required to keep
+running). `config` is the managed-config sole-writer check:
+`findings`/`legacy_producers` carry the human-readable report
+including legacy Studio/Effects producer warnings on BOTH
+plugin-load paths (`<config>/plugins` and the backend exe
+dir's system `plugins` folder). There is deliberately no
+verb to act on a finding — takeover is the operator's
+decision (plan section 4).
 
 **QUIT** — the "Quit All" hook (plan section 4): requests the engine's
 ordered, bounded shutdown (the power monitor, IPC intake, scene worker,
@@ -252,10 +289,150 @@ the one-time loop freeze (`power_hold`), and wake-restore progress.
 **PRESETS** — `{presets:[{id,name,description,needs}]}` — Lighting-view
 preset cards.
 
-**LAYOUT_COMMAND** — reserved verb space for the Milestone-4 Layout view:
-`identify`, `set_orientation`, `set_mirror`, `calibrate_led`, `set_binding`.
-Recognized verbs currently answer `unavailable` ("reserved for the
-Milestone-4 layout engine"); unknown verbs → `bad_request`.
+**LAYOUT_COMMAND** — the Layout view's verb space (plan section 5).
+Every request carries `{verb:"<name>", ...args}`; unknown verbs →
+`bad_request`. Six verbs exist (Task 4.4):
+
+| verb | body | reply (OK) |
+| --- | --- | --- |
+| `identify` | `{controller:<DeviceKey>, zone?:"name", led_index?:int, duration_ms?:int}` | `{identifying:true, controller, zone, led_start, led_count, duration_ms}` |
+| `set_position` | `{object_id, position:{x,y,z}}` | `{object_id, position, revision}` |
+| `set_orientation` | `{object_id, rotation:{x,y,z}}` | `{object_id, rotation, revision}` |
+| `set_mirror` | `{object_id, mirror_of:"id"|""}` | `{object_id, mirror_of, revision}` |
+| `calibrate_led` | `{object_id, emitter_index:int, address:int}` | `{object_id, emitter_index, address, revision}` |
+| `set_binding` | `{object_id, binding:"id"|""[, controller:<DeviceKey>]}` | `{object_id, binding, revision}` |
+
+`identify` is a **transient** operation — it never touches the scene
+document. The engine runs a bounded blink overlay in the frame path
+(device mapper): the identified LED range alternates lit/dark on a
+250 ms half-period over a dark field, through the normal delivery
+lane (budgets and suppression still apply). It works **with or
+without a scene loaded** — finding hardware precedes binding it, so
+while an overlay is booked the worker's no-scene ticks still produce
+frames for the mapper's overlay pass; on expiry the mapper emits one
+restore frame on the pre-identify baseline (the blink can never
+freeze the LEDs on a lit phase) and the frame path sleeps again.
+`zone` names a zone (or `controller.zone` carries it); `led_index`
+selects one LED inside the scope; `duration_ms` defaults to 3000 and
+is clamped to 500–30000; `duration_ms:0` cancels →
+`{identifying:false, cancelled, controller}`. A cancel ends the
+overlay through the same one restore frame on the next produced
+frame — the blink never freezes on its last phase.
+Errors: absent/disconnected controller → `unavailable`; bad zone or
+out-of-range index → `bad_request`; a wireless group owned by an
+uploaded animation loop → `unavailable` (one producer per group).
+
+The other five verbs are **scene mutations**: they edit the applied
+SceneDocument through the same apply path as SET_SCENE (LED-address
+validation, effect resolution, revision bump, `scene` event). No
+loaded scene → `unavailable`. Fields:
+
+- `set_position`/`set_orientation` require the full `{x,y,z}` vector
+  (meters / euler XYZ degrees — the document's only rotation
+  convention); partial or non-finite vectors → `bad_request`.
+- `set_mirror` follows the resolver's own semantics: linking makes the
+  object a render-only `linked` copy sharing the target's output —
+  its binding/emitters/verified are cleared (unlink does NOT restore
+  them; UI undo reverts the whole document). Targets must be device
+  objects; self-mirror and chains → `bad_request`. Linking an object
+  that is already another object's mirror SOURCE is likewise
+  `bad_request` — it would strand that `mirror_of` on a `linked`
+  object (the same chain the scene-graph validator forbids); unlink
+  its copies first. Mirrored fans share the source zone —
+  addressable LED counts never multiply.
+- `calibrate_led` sets an emitter's `address` — an index inside the
+  object's bound zone; `-1` marks it render-only. The bound is the
+  binding's `zone_leds`, else the resolved zone's enumerated count;
+  no bound → `bad_request`. Out-of-range → `bad_request` (the UI
+  range-checks first; the engine is the last boundary).
+- `set_binding` repoints `object.binding` (`""` unbinds). A NEW id
+  requires `controller:<DeviceKey>` and derives the binding's
+  identity (name/vendor/serial/location/type/zone/count) from the
+  live snapshot — absent topology → `unavailable`; clients cannot
+  fabricate controller identities.
+
+`set_position` was added in Task 4.4 alongside the reserved five —
+the Layout view's arrangement editing needed an explicit move op.
+
+**REACTIVE_COMMAND** — the Lighting view's reactive-input surface
+(Task 4.6, plan section 5). Every request carries `{verb:"<name>",
+...args}`; unknown verbs → `bad_request`. Two verbs:
+
+| verb | body | reply (OK) |
+| --- | --- | --- |
+| `set_enabled` | `{input:"audio"\|"screen"\|"key", enabled:bool}` | full REACTIVE body |
+| `set_params` | `{input, sensitivity?:number}` (audio) \| `{input:"screen", screen_index:int}` | full REACTIVE body |
+
+`set_enabled` starts/stops the capture source: enabling runs a cheap
+synchronous **pre-flight probe** before the capture thread spawns
+(WASAPI default-endpoint open for `audio`, a `SetWindowsHookExW`
+install/uninstall probe for `key`, the display bounds check + one
+real grab for `screen` — skipped while `capture_paused` since the
+displays are asleep). A source whose probe fails → `unavailable`
+carrying the source's own reason, and the input **stays disabled** —
+the reply never claims a capture that cannot run. Disabling stops it
+— a disabled input captures nothing (no hidden CPU/device cost).
+Conditions only detectable mid-capture (endpoint removed, display
+disconnected, unsupported mix format) surface asynchronously instead:
+`status` carries the reason and `running` goes false (or retries
+transient losses) while `enabled` keeps the user's selection —
+toggling off/on retries, and a repeated `set_enabled{enabled:true}`
+on a dead input retries in place too (the dead capture thread is
+reaped and a fresh one starts; the reply lands on real state).
+
+Concurrent commands for the SAME input **serialize**: a second
+`set_enabled` arriving while a start/stop is in flight waits for it
+to settle, then applies on the settled state — last command wins in
+arrival order (a disable issued mid-enable stops the source right
+after it starts). Only one capture thread ever exists per input.
+`set_params` tunes a running or idle source: `sensitivity` is the
+audio onset domain 0.25–2.0 (clamped); `screen_index` selects the
+enumerated display (out-of-range → `bad_request`). A param that does
+not apply to the named input → `bad_request`, never silently ignored.
+State changes emit the `reactive` event exactly once for other
+subscribers (through the manager's changed hook). The selected
+inputs persist in the engine profile and re-arm on engine start.
+
+**REACTIVE** (STATE/DIAGNOSTICS field and `reactive` event body) —
+
+```json
+{ "available": true, "capture_paused": false,
+  "inputs": [ { "id":"audio"|"screen"|"key", "available":true,
+      "enabled":false, "running":false, "paused":false,
+      "sensitivity":1.0, "screen_index":0,
+      "status":"audio: listening" } ],
+  "displays": [ {"index":0,"name":"\\\\.\\DISPLAY1","width":2560,"height":1440} ] }
+```
+
+`available:false` on an input means no capture source exists on this
+system — `status` carries the honest reason; the UI disables the
+toggle, never a fabricated enable. `running` is capture-thread
+liveness: `enabled:true, running:false` means the source died after
+starting (only detectable mid-capture — `status` carries the reason);
+`enabled:false` always implies the thread is joined. `capture_paused`
+is the Task 3.7
+power gate: while displays are off or the system is suspended the
+engine pauses capture — running inputs report `paused:true` and feed
+no events/grid/level into scene evaluation. `displays` is the screen
+source's selection list (`screen_index` positions). When the engine
+has no reactive surface wired at all the whole body is
+`{available:false, reason, inputs:[], displays:[]}`.
+
+**Bounds and privacy** (plan section 6): capture is strictly local to
+the engine process. What reaches scene evaluation is bounded and
+lossy by design — audio onset events + a smoothed 0..1 level (~5 ms
+energy chunks), a 12×6 downsampled screen grid (≤ 25 Hz, one display),
+and key-edge events (virtual-key code, first edge only — no auto-
+repeat, no typed text, no history). The event queue is capped (96,
+drop-oldest) and events older than 5 s never reach evaluation. No
+audio samples, framebuffer contents, or key sequences are recorded or
+transmitted.
+
+Reactive scenes stay **Live effects only**: a scene using a reactive
+input (named preset `needs`, or an inline `ripple`/`level`/
+`screenfield` layer) reports `animation_playback:false` with the
+reactive reason through PLAYBACK's `unavailable_reason` — the same
+capability path as every other unsupported scene.
 
 **DIAGNOSTICS** — the read-only aggregate view:
 
@@ -266,6 +443,9 @@ Milestone-4 layout engine"); unknown verbs → `bad_request`.
   "delivery": {"available":..., "aggregate":{...}, "pending":N, "controllers":[...]},
   "sdk":      {"state":..., "protocol_version":N, "reconnect_attempt":N, ...},
   "power":    {"display_on":B, "suspended":B, "output_paused":B, ...},
+  "reactive": {"available":B, "capture_paused":B, "inputs":[...], "displays":[...]},
+  "ownership":{"scanned":B, "backend":{...}, "conflicts":[...], "notices":[...],
+               "config":{...}},
   "ipc":      {"sessions_active":N, "queued_events":N, "events_dropped":N, ...},
   "clock":    {"steady_ms":F},
   "backend_counters": null }
@@ -301,6 +481,7 @@ matches the corresponding pull body:
 | `scene` | SCENE body | scene applied (SET_SCENE or --scene) |
 | `playback` | PLAYBACK body | requested-mode or applied-status change |
 | `connection` | `sdk` object | SDK link state change |
+| `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |
 | `frame_status` | `{aggregate, controllers:[{key,sequence,colors,stats}]}` | ≤ 1 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses |
 
 An `events` field that is neither `"all"` nor an array of strings, or any

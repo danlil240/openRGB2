@@ -23,6 +23,12 @@ void SceneWorker::SetFrameCallback(FrameCallback cb)
     callback_ = std::move(cb);
 }
 
+void SceneWorker::SetIdleFrameHook(IdleFrameHook hook)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    idle_frame_hook_ = std::move(hook);
+}
+
 void SceneWorker::SubmitScene(
     std::shared_ptr<const studio::SceneDocument> doc,
     std::vector<studio::EffectLayer> layers,
@@ -40,6 +46,18 @@ void SceneWorker::SubmitInput(std::shared_ptr<const studio::InputState> input)
     std::lock_guard<std::mutex> lock(mutex_);
     pending_input_      = std::move(input);
     has_pending_input_  = true;
+}
+
+void SceneWorker::SetInputProvider(InputProvider provider)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    input_provider_ = std::move(provider);
+}
+
+TimePoint SceneWorker::Epoch() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return epoch_;
 }
 
 uint64_t SceneWorker::AppliedRevision() const
@@ -70,6 +88,28 @@ bool SceneWorker::Step(TimePoint now)
 {
     FrameCallback cb;
     EvaluatedFrame frame;
+    bool         evaluate;
+
+    /* Pull input OUTSIDE the worker lock: the provider —
+       ReactiveInputs::Snapshot() — stamps event ages through
+       the scene clock, and EngineHost wires that as
+       Worker().Running()/Epoch(), both of which take mutex_.
+       Invoking the provider while holding mutex_ self-
+       deadlocks on a non-recursive std::mutex. The provider
+       runs only on the worker thread (Step is single-caller),
+       so capturing it under the lock and calling it here
+       keeps latest-wins semantics identical. */
+    InputProvider provider;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        provider = input_provider_;
+    }
+    std::shared_ptr<const studio::InputState> pulled_input;
+    if(provider)
+    {
+        pulled_input = provider();
+    }
+
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -88,9 +128,22 @@ bool SceneWorker::Step(TimePoint now)
             pending_input_.reset();
             has_pending_input_ = false;
         }
-
-        if(!active_scene_.doc)
+        /* Pull input: the provider (ReactiveInputs) owns the
+           per-tick state when wired — pause/disable takes
+           effect on the very next tick. */
+        if(provider)
         {
+            active_input_ = std::move(pulled_input);
+        }
+
+        evaluate = active_scene_.doc != nullptr;
+        if(!evaluate &&
+           (!idle_frame_hook_ || !idle_frame_hook_()))
+        {
+            /* No scene and nothing downstream needs a frame —
+               the clock idles (Task 4.4 review: an identify
+               overlay wires the hook, so the blink reaches
+               hardware with no scene loaded). */
             return false;
         }
 
@@ -106,9 +159,14 @@ bool SceneWorker::Step(TimePoint now)
 
     /* Evaluate outside the lock — the core engine is pure; the
        callback may re-enter the worker (SubmitScene/SubmitInput)
-       without deadlocking. */
-    engine_.Evaluate(*active_scene_.doc, frame.scene_time_s,
-                     frame.colors, active_input_.get());
+       without deadlocking. Idle-hook frames skip evaluation: there
+       is no scene, so colors stay empty and the callback's overlay
+       pass (identify) is what produces output. */
+    if(evaluate)
+    {
+        engine_.Evaluate(*active_scene_.doc, frame.scene_time_s,
+                         frame.colors, active_input_.get());
+    }
     if(cb)
     {
         cb(frame);
