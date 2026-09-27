@@ -71,8 +71,10 @@ function Test-ManifestFiles([string]$dir, $manifest) {
 
 function Test-InstallRunning([string]$InstallDir) {
     $engine  = Join-Path $InstallDir "openrgb2-engine.exe"
+    $ui      = Join-Path $InstallDir "openrgb2-ui.exe"
     $backend = Join-Path $InstallDir "backend\OpenRGB.exe"
-    foreach($spec in @(@("openrgb2-engine",$engine), @("OpenRGB",$backend))) {
+    foreach($spec in @(@("openrgb2-engine",$engine), @("openrgb2-ui",$ui),
+                      @("OpenRGB",$backend))) {
         $hit = Get-Process -Name $spec[0] -ErrorAction SilentlyContinue |
             Where-Object { try {
                 $_.Path -and $_.Path.Equals($spec[1],
@@ -184,7 +186,10 @@ function Invoke-PackageRollback {
         to_version   = $bakManifest.version
         backup       = $BackupDir
     }
-    ($entries | ConvertTo-Json -Depth 4) | Set-Content -Encoding UTF8 $journal
+    # -InputObject keeps the journal a JSON ARRAY even with a single
+    # entry (piping would unroll it to a bare object -- shape drift).
+    (ConvertTo-Json -InputObject $entries -Depth 4) |
+        Set-Content -Encoding UTF8 $journal
 
     Write-Host "ROLLBACK OK: restored $($bakManifest.version) binaries; user state preserved" -ForegroundColor Green
     return 0

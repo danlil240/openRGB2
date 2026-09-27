@@ -72,11 +72,28 @@ RGB) and must keep running.
   yourself** (recommended), or re-run with `-TakeOver`. With
   `-TakeOver` the stack starts and competitors are LEFT RUNNING —
   close them for hardware access. Two RGB writers can coexist; the
-  managed engine is simply the honest scene writer.
-- **Nothing is ever killed.** The start script contains no
-  process-termination call at all; the stop script only signals
-  processes verified by image path as this install's own, and
-  `-Force` (its last resort) applies to verified own processes only.
+  managed engine is simply the honest scene writer. **One exception:**
+  a foreign `OpenRGB.exe` still blocks startup (see below).
+- **Our scripts never kill — and never let the backend's own prompt
+  kill either.** The start script contains no process-termination
+  call at all; the stop script only signals processes verified by
+  image path as this install's own, and `-Force` (its last resort)
+  applies to verified own processes only.
+- **The pinned backend has its own kill-capable guard.** The vendored
+  `backend\OpenRGB.exe` runs a single-instance check at launch
+  (`vendor/OpenRGB/startup/main_Windows.cpp`): while a foreign
+  `OpenRGB.exe` is running it shows a Yes/No dialog whose **Yes**
+  hard-terminates the foreign instance via `TerminateProcess`, and
+  its "server already running" probe checks the legacy default port
+  **6742**, not our managed **6744** — so the dialog can appear even
+  though nothing holds 6744. The vendored cli has **no flag** to skip
+  that guard, so `start-openrgb2.ps1` **refuses to spawn the backend
+  at all while a foreign `OpenRGB.exe` lives** (exit 3, even under
+  `-TakeOver`): the close stays manual and the prompt is never
+  triggered. If you run `backend\OpenRGB.exe` by hand in that
+  situation the prompt — and its kill — is the backend's own, not
+  ours. An `OpenRGB.exe` at OUR pinned path that has not bound yet
+  is waited on, never double-spawned.
 - The same scan runs inside the engine and is surfaced read-only in
   the UI (Devices & Diagnostics) and in `openrgb2-ctl state`/`diag`
   under `ownership` — report-only there too; there is deliberately
@@ -96,8 +113,9 @@ Order: **engine first, backend second.**
 
 1. `openrgb2-ctl.exe quit` sends the IPC `QUIT` verb — the engine runs
    its ordered, bounded shutdown (power monitor → IPC intake → IPC
-   server → scene worker → delivery lanes → SDK transport). The
-   script waits for the process to exit within the bound.
+   server → scene worker → reactive inputs → delivery lanes → SDK
+   transport). The script waits for the process to exit within the
+   bound.
 2. The backend — still the sole hardware owner — is closed with a
    graceful `CloseMainWindow` so it can persist its own config. The
    engine must be fully exited first (ordered handoff).

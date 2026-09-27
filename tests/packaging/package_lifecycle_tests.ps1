@@ -21,8 +21,13 @@
           post-update user state preserved, corrupt backup refused
       T7  clean shutdown ordering: IPC QUIT reaches the engine while
           the backend is still up, both exit, profile file untouched
-      T8  update refuses while the install is running (image-path
-          verified)
+      T8  update refuses while the install is running -- engine AND
+          UI (image-path verified); rollback refuses too
+      T9  backend guard: a foreign OpenRGB.exe refuses the spawn even
+          under -TakeOver (the pinned backend's own kill-capable
+          single-instance prompt is never triggered); an OpenRGB.exe
+          at OUR pinned path mid-start is waited on, never
+          double-spawned
 
     Exit code: number of failed checks.
 #>
@@ -117,6 +122,9 @@ function Sha([string]$path) {
 . (Join-Path $ScriptsDir "update-openrgb2.ps1")
 . (Join-Path $ScriptsDir "rollback-openrgb2.ps1")
 
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$startSrc = Get-Content (Join-Path $ScriptsDir "start-openrgb2.ps1") -Raw
+
 #====================================================================#
 Section "T1 classifier parity (synthetic process list)"
 #====================================================================#
@@ -141,6 +149,47 @@ Check (@($f | Where-Object { $_.owner -like "FanControl*" -and -not $_.conflict 
       "FanControl is a notice, never a conflict"
 Check (@($f | Where-Object { $_.exe -ieq "Steam.exe" }).Count -eq 0) "unrelated processes not reported"
 
+#---- mechanical parity with the C++ classifier (review fix r1) ------
+# Extract the rule tokens and owner labels straight from
+# src/engine/OwnershipScan.cpp and compare BOTH sets to this script's
+# mirror. Parity is asserted, not commented -- a rule added or renamed
+# on either side fails loudly here instead of silently diverging.
+$cppSrc = Get-Content (Join-Path $RepoRoot "src\engine\OwnershipScan.cpp") -Raw
+$cppBeg = $cppSrc.IndexOf("std::vector<OwnerFinding> ClassifyOwners")
+$cppEnd = $cppSrc.IndexOf("IsLegacySceneProducerName")
+Check ($cppBeg -ge 0 -and $cppEnd -gt $cppBeg) "OwnershipScan.cpp classifier region located"
+$cppBody = $cppSrc.Substring($cppBeg, $cppEnd - $cppBeg)
+$cppTokens = @(
+    ([regex]::Matches($cppBody, 'Contains\(\s*(?:compact|name)\s*,\s*"([^"]+)"\s*\)') +
+     [regex]::Matches($cppBody, 'name\s*==\s*"([^"]+)"')) |
+        ForEach-Object { $_.Groups[1].Value.ToLowerInvariant() } |
+        Sort-Object -Unique)
+$cppOwners = @([regex]::Matches($cppBody, 'owner\s*=\s*"([^"]+)"') |
+    ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+
+$psBeg  = $startSrc.IndexOf("function Get-OwnerFindings")
+$psEnd  = $startSrc.IndexOf("function Find-ListenerPid")
+$psBody = $startSrc.Substring($psBeg, $psEnd - $psBeg)
+$psTokens = @(
+    ([regex]::Matches($psBody, '\.Contains\("([^"]+)"\)') +
+     [regex]::Matches($psBody, '-eq\s+"([^"]+)"')) |
+        ForEach-Object { $_.Groups[1].Value.ToLowerInvariant() } |
+        Sort-Object -Unique)
+$psOwners = @([regex]::Matches($psBody, 'owner\s*=\s*"([^"]+)"') |
+    ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+
+$tokDiff = @(Compare-Object $cppTokens $psTokens)
+Check ($cppTokens.Count -gt 0 -and $tokDiff.Count -eq 0) `
+      "rule-token parity with OwnershipScan.cpp ($($cppTokens.Count) tokens)"
+foreach($d in $tokDiff) {
+    Write-Host "    drift: $($d.SideIndicator) $($d.InputObject)"
+}
+$ownDiff = @(Compare-Object $cppOwners $psOwners)
+Check ($ownDiff.Count -eq 0) "owner-label parity with OwnershipScan.cpp"
+foreach($d in $ownDiff) {
+    Write-Host "    drift: $($d.SideIndicator) $($d.InputObject)"
+}
+
 #====================================================================#
 Section "T2 takeover gate + no kill path"
 #====================================================================#
@@ -150,7 +199,6 @@ Check (Assert-TakeoverConsent -Findings $f -Consent $true) `
       "conflicts + explicit consent -> proceed"
 Check (Assert-TakeoverConsent -Findings $notices -Consent $false) `
       "notices only -> proceed without consent"
-$startSrc = Get-Content (Join-Path $ScriptsDir "start-openrgb2.ps1") -Raw
 Check ($startSrc -notmatch 'Stop-Process\s+-|taskkill|Stop-Computer') `
       "start script contains no process-termination call"
 $stopSrc = Get-Content (Join-Path $ScriptsDir "stop-openrgb2.ps1") -Raw
@@ -189,10 +237,19 @@ Section "T4 explicit -TakeOver proceeds"
 #====================================================================#
 # cmd exes stay alive regardless of arguments; the backend never
 # binds :6744 (warning path), the engine proc survives the startup
-# check, the run file records both.
+# check, the run file records both. The conflict list deliberately
+# carries NO openrgb.exe: a foreign one now refuses the backend spawn
+# (T9) and a fake pid has no resolvable image path.
+$procsTakeover = @(
+    [pscustomobject]@{ pid=50;  exe="LConnect.Service.exe" },
+    [pscustomobject]@{ pid=51;  exe="FanControl.exe" },
+    [pscustomobject]@{ pid=52;  exe="iCUE.exe" },
+    [pscustomobject]@{ pid=53;  exe="RazerSynapse.exe" },
+    [pscustomobject]@{ pid=54;  exe="Steam.exe" }
+)
 $rc = Invoke-ManagedStart -InstallDir $instA -Scene "" -NoUI $true `
     -TakeOver $true -ScanOnly $false -Elevated $false `
-    -BackendWaitSeconds 1 -ProcessList $procs -ListenerPidOverride 0
+    -BackendWaitSeconds 1 -ProcessList $procsTakeover -ListenerPidOverride 0
 Check ($rc -eq 0) "conflicts + -TakeOver -> started (0)"
 $runFile = Join-Path $instA "state\openrgb2.run.json"
 Check (Test-Path $runFile) "run file written"
@@ -348,6 +405,76 @@ Check ($rc -eq 1) "update refused while engine running"
 Check ((Read-Tag $instD) -eq "D") "refused update changed nothing"
 Check (-not (Test-Path "$instD.previous")) "refused update took no snapshot"
 Kill-Spawned
+
+# a running UI locks openrgb2-ui.exe -> update must refuse just the
+# same (review fix r1: the check used to watch engine+backend only).
+$ui = Start-Process -FilePath (Join-Path $instD "openrgb2-ui.exe") -PassThru
+$script:Spawned += $ui.Id
+Start-Sleep -Milliseconds 500
+$rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instD -SkipVerify $true
+Check ($rc -eq 1) "update refused while UI running"
+Check ((Read-Tag $instD) -eq "D") "UI-blocked update changed nothing"
+# rollback refuses while running too (needs a valid backup present
+# first -- the running check must fire before any restore).
+New-FakeTree "$instD.previous" "0.9.0" "D0" `
+    (Join-Path $Sys32 "cmd.exe") (Join-Path $Sys32 "cmd.exe")
+$rc = Invoke-PackageRollback -InstallDir $instD -BackupDir "" -SkipVerify $true
+Check ($rc -eq 1) "rollback refused while UI running"
+Check ((Read-Tag $instD) -eq "D") "refused rollback changed nothing"
+Kill-Spawned
+
+#====================================================================#
+Section "T9 backend guard: foreign OpenRGB.exe refuses the spawn"
+#====================================================================#
+# The pinned backend's own single-instance dialog can TerminateProcess
+# a foreign OpenRGB.exe -- the launcher must REFUSE the spawn rather
+# than trigger that prompt (the vendored cli offers no skip flag).
+# Real processes make the image-path check meaningful: a foreign copy
+# at a foreign path refuses; a copy at OUR pinned path is the
+# still-starting managed backend -- a notice, waited on, never
+# double-spawned.
+$foreignDir = Join-Path $TestRoot "foreign-bin"
+New-Item -ItemType Directory -Force $foreignDir | Out-Null
+Copy-Item (Join-Path $Sys32 "cmd.exe") (Join-Path $foreignDir "OpenRGB.exe") -Force
+$foreign = Start-Process -FilePath (Join-Path $foreignDir "OpenRGB.exe") -PassThru
+$script:Spawned += $foreign.Id
+Start-Sleep -Milliseconds 400
+
+$rc = Invoke-ManagedStart -InstallDir $instA -Scene "" -NoUI $true `
+    -TakeOver $true -ScanOnly $false -Elevated $false `
+    -BackendWaitSeconds 1 -ListenerPidOverride 0 `
+    -ProcessList @([pscustomobject]@{pid=$foreign.Id; exe="OpenRGB.exe"},
+                  [pscustomobject]@{pid=54; exe="Steam.exe"})
+Check ($rc -eq 3) "foreign OpenRGB.exe + -TakeOver -> startup refused (3)"
+$runFileA = Join-Path $instA "state\openrgb2.run.json"
+Check (-not (Test-Path $runFileA)) "refused startup spawns nothing"
+$foreignAlive = $false
+try { $foreignAlive = $null -ne (Get-Process -Id $foreign.Id -ErrorAction Stop) } catch {}
+Check $foreignAlive "foreign OpenRGB.exe left running -- never touched"
+Kill-Spawned
+
+# own-path OpenRGB.exe mid-start: reclassified as OUR backend (a
+# notice, not a conflict -- no consent needed), waited on, never
+# double-spawned.
+$ownBk = Start-Process -FilePath (Join-Path $instA "backend\OpenRGB.exe") -PassThru
+$script:Spawned += $ownBk.Id
+Start-Sleep -Milliseconds 400
+$rc = Invoke-ManagedStart -InstallDir $instA -Scene "" -NoUI $true `
+    -TakeOver $false -ScanOnly $false -Elevated $false `
+    -BackendWaitSeconds 1 -ListenerPidOverride 0 `
+    -ProcessList @([pscustomobject]@{pid=$ownBk.Id; exe="OpenRGB.exe"})
+Check ($rc -eq 0) "own backend mid-start -> waited + proceeded (0)"
+if(Test-Path $runFileA) {
+    $run = Get-Content $runFileA -Raw | ConvertFrom-Json
+    Check ([int]$run.backend_pid -eq $ownBk.Id) `
+          "run file records the already-running backend (no second spawn)"
+    $script:Spawned += [int]$run.engine_pid
+} else { Check $false "run file written after own-backend wait" }
+$ownAlive = $false
+try { $ownAlive = $null -ne (Get-Process -Id $ownBk.Id -ErrorAction Stop) } catch {}
+Check $ownAlive "still-starting backend untouched"
+Kill-Spawned
+Remove-Item -Force -ErrorAction SilentlyContinue $runFileA
 
 #====================================================================#
 Write-Host ""

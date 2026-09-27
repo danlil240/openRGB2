@@ -8,8 +8,9 @@
       1. engine -- sends the IPC QUIT verb (openrgb2-ctl.exe quit), the
          same "Quit All" hook the UI uses: the engine runs its ordered,
          bounded shutdown (power monitor -> IPC intake -> IPC server ->
-         scene worker -> delivery lanes -> SDK transport). The script
-         then waits for the process to exit within the bound.
+         scene worker -> reactive inputs -> delivery lanes -> SDK
+         transport). The script then waits for the process to exit
+         within the bound.
       2. backend handoff -- the backend stays the sole hardware owner;
          it is closed AFTER the engine fully exits with a graceful
          CloseMainWindow (WM_CLOSE), never a hard kill -- so it can

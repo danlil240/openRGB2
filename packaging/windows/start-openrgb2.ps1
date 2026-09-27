@@ -28,6 +28,17 @@
          takeover-relevant conflict (with -TakeOver the engine attaches
          to whatever listens and reports it honestly; our backend is
          then not spawned -- the port cannot be shared).
+         The pinned binary carries its OWN single-instance guard
+         (vendored startup\main_Windows.cpp): launched while a foreign
+         OpenRGB.exe lives it shows a Yes/No prompt whose Yes
+         hard-kills that instance via TerminateProcess (and its
+         server probe checks the legacy default port 6742, not our
+         managed 6744). The vendored cli has NO flag to skip that
+         guard, so this launcher refuses the backend spawn while a
+         foreign OpenRGB.exe is running -- exit 3, close it yourself;
+         the kill-capable prompt is never triggered from here. An
+         OpenRGB.exe at OUR pinned path is a still-starting managed
+         backend: waited on, never double-spawned.
       4. engine -- openrgb2-engine.exe --sdk with the private config dir
          passed as --backend-config so startup runs the managed-config
          sole-writer check (legacy Studio/Effects/HardwareSync
@@ -46,7 +57,8 @@
     only ever closes OUR processes.
 
     Exit codes: 0 started/attached, 1 fatal error (missing files),
-    3 takeover refused (conflicts present, no -TakeOver).
+    3 refused (conflicts without -TakeOver, or a foreign OpenRGB.exe
+    blocking the safe backend spawn).
 
     This file is dot-source safe: sourcing it defines the functions
     without running the startup (the offline packaging suite uses
@@ -73,7 +85,10 @@ param(
 
     # EXPLICIT ownership takeover: required before startup proceeds
     # while competing RGB owners are running. Competitors are left
-    # untouched -- the operator closes them; we never kill.
+    # untouched -- the operator closes them; we never kill. One
+    # exception: a foreign OpenRGB.exe still blocks the backend spawn
+    # (the pinned binary's own single-instance prompt could terminate
+    # it -- this script refuses rather than trigger that prompt).
     [switch]$TakeOver,
 
     # Run the ownership scan, print findings, exit (3 = conflicts).
@@ -103,9 +118,12 @@ Set-StrictMode -Version 2.0
 $ManagedPort = 6744
 
 #--------------------------------------------------------------------#
-# Ownership scan -- mirrors openrgb2::ClassifyOwners exactly. Keep    #
-# the name rules in sync with src/engine/OwnershipScan.cpp: any     #
-# drift means the launcher and the engine report different owners.  #
+# Ownership scan -- mirrors openrgb2::ClassifyOwners exactly. The     #
+# packaging suite MECHANICALLY holds parity: T1 in                    #
+# tests/packaging/package_lifecycle_tests.ps1 extracts the rule       #
+# tokens and owner labels straight out of                             #
+# src/engine/OwnershipScan.cpp and compares both sets to this         #
+# mirror -- drift fails the test, it cannot silently diverge.         #
 #--------------------------------------------------------------------#
 function Get-OwnerFindings {
     param(
@@ -219,6 +237,10 @@ function Assert-TakeoverConsent {
         foreach($c in $conflicts) {
             Write-Host "  competitor left running: $($c.owner) (pid $($c.pid))" -ForegroundColor Yellow
         }
+        Write-Host ("  exception: a foreign OpenRGB.exe still blocks the backend " +
+            "spawn -- the pinned binary's own single-instance prompt could " +
+            "TERMINATE it, and that prompt is never triggered from here") `
+            -ForegroundColor Yellow
         return $true
     }
     Write-Host "" 
@@ -296,6 +318,24 @@ function Invoke-ManagedStart {
     $findings   = Get-OwnerFindings -Processes $procs -SelfPid $PID `
                       -BackendPid $backendPid
 
+    # Reclassify OUR pinned backend: an OpenRGB.exe at THIS install's
+    # backend path is never foreign -- when it has not bound the port
+    # yet the listener check above missed it, so it lands in "other
+    # instance". It is ours: a notice, not a conflict. (A foreign
+    # OpenRGB.exe keeps its conflict -- and later REFUSES the backend
+    # spawn so the pinned binary's own kill-capable single-instance
+    # prompt is never triggered.)
+    foreach($fnd in @($findings | Where-Object {
+            $_.owner -eq "OpenRGB (other instance)" })) {
+        $img = Get-ProcessImagePath ([int]$fnd.pid)
+        if($img -and $img.Equals($BackendExe,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            $fnd.owner    = "OpenRGB (managed backend)"
+            $fnd.conflict = $false
+            $fnd.detail   = "still starting -- our pinned backend, port not bound yet"
+        }
+    }
+
     if($backendPid -ne 0) {
         $img = Get-ProcessImagePath $backendPid
         if($img -and
@@ -339,34 +379,80 @@ function Invoke-ManagedStart {
         -not ((Get-ProcessImagePath $backendPid) -eq $BackendExe)
 
     #---- 3. backend ---------------------------------------------------
+    # The pinned backend carries its OWN single-instance guard
+    # (vendored startup\main_Windows.cpp): launched while a foreign
+    # OpenRGB.exe lives it pops a Yes/No dialog whose Yes hard-kills
+    # that instance via TerminateProcess (and its server probe checks
+    # the legacy default port 6742, not the managed $ManagedPort). The
+    # vendored cli has NO flag to skip the guard, so the launcher never
+    # puts the backend in that position: a foreign OpenRGB.exe REFUSES
+    # startup (the operator closes it -- still user-driven, never a
+    # kill), and an OpenRGB.exe at OUR pinned path is a still-starting
+    # managed backend -- waited on, never double-spawned (a second copy
+    # would hit the same guard and offer to kill OUR backend).
     $startedBackend = $false
     $backendProcId  = 0
-    if($backendPid -eq 0) {
-        New-Item -ItemType Directory -Force -Path $BackendCfg | Out-Null
-        Write-Host "==> starting pinned backend (config: state\backend)" -ForegroundColor Cyan
-        $bp = Start-Process -FilePath $BackendExe -PassThru `
-              -WorkingDirectory $BackendCfg `
-              -ArgumentList "--server","--server-host","127.0.0.1",
-                            "--server-port","$ManagedPort",
-                            "--noautoconnect","--localconfig"
-        $backendProcId  = $bp.Id
-        $startedBackend = $true
-        $deadline = (Get-Date).AddSeconds($BackendWaitSeconds)
-        $listenNow  = { if($ListenerPidOverride -ge 0) { $ListenerPidOverride }
+    $listenNow      = { if($ListenerPidOverride -ge 0) { $ListenerPidOverride }
                         else { Find-ListenerPid $ManagedPort } }
-        while((Get-Date) -lt $deadline -and (& $listenNow) -eq 0) {
-            Start-Sleep -Milliseconds 500
-            $bp.Refresh()
-            if($bp.HasExited) {
-                Write-Host "ERROR: backend exited during startup (code $($bp.ExitCode))" -ForegroundColor Red
-                return 1
+    if($backendPid -eq 0) {
+        # Scan already split the buckets by image path: "OpenRGB (other
+        # instance)" is FOREIGN (unreadable path counts as foreign --
+        # conservative), "OpenRGB (managed backend)" is OUR pinned
+        # backend still starting.
+        $foreignOpenRgb = @($findings | Where-Object {
+                $_.owner -eq "OpenRGB (other instance)" })
+        $ownStarting    = @($findings | Where-Object {
+                $_.owner -eq "OpenRGB (managed backend)" })
+        if($foreignOpenRgb.Count -gt 0) {
+            Write-Host ""
+            Write-Host "BACKEND LAUNCH REFUSED -- a foreign OpenRGB.exe is running:" -ForegroundColor Red
+            foreach($fnd in $foreignOpenRgb) {
+                $fimg = Get-ProcessImagePath ([int]$fnd.pid)
+                $imgDesc = if($fimg) { $fimg } else { "image path unreadable" }
+                Write-Host "  pid $($fnd.pid): $imgDesc" -ForegroundColor Red
             }
+            Write-Host "  Launching the pinned backend now would open its OWN single-instance prompt, which can TERMINATE the foreign instance (TerminateProcess)." -ForegroundColor Red
+            Write-Host "  OpenRGB2 never triggers that prompt -- close the foreign OpenRGB.exe yourself, then re-run this script." -ForegroundColor Red
+            return 3
         }
-        $backendPid = (& $listenNow)
-        if($backendPid -eq 0) {
-            Write-Host "WARNING: backend has not bound :$ManagedPort within ${BackendWaitSeconds}s -- starting the engine anyway (it re-probes the backend on a bounded schedule)" -ForegroundColor Yellow
+        if($ownStarting.Count -gt 0) {
+            $backendProcId = [int]$ownStarting[0].pid
+            Write-Host "==> managed backend already starting (pid $backendProcId) -- waiting for :$ManagedPort (never spawning a second copy)" -ForegroundColor Cyan
+            $deadline = (Get-Date).AddSeconds($BackendWaitSeconds)
+            while((Get-Date) -lt $deadline -and (& $listenNow) -eq 0) {
+                Start-Sleep -Milliseconds 500
+            }
+            $backendPid = (& $listenNow)
+            if($backendPid -eq 0) {
+                Write-Host "WARNING: starting backend has not bound :$ManagedPort within ${BackendWaitSeconds}s -- starting the engine anyway (it re-probes the backend on a bounded schedule)" -ForegroundColor Yellow
+            } else {
+                Write-Host "  backend listening on :$ManagedPort (pid $backendPid)"
+            }
         } else {
-            Write-Host "  backend listening on :$ManagedPort (pid $backendPid)"
+            New-Item -ItemType Directory -Force -Path $BackendCfg | Out-Null
+            Write-Host "==> starting pinned backend (config: state\backend)" -ForegroundColor Cyan
+            $bp = Start-Process -FilePath $BackendExe -PassThru `
+                  -WorkingDirectory $BackendCfg `
+                  -ArgumentList "--server","--server-host","127.0.0.1",
+                                "--server-port","$ManagedPort",
+                                "--noautoconnect","--localconfig"
+            $backendProcId  = $bp.Id
+            $startedBackend = $true
+            $deadline = (Get-Date).AddSeconds($BackendWaitSeconds)
+            while((Get-Date) -lt $deadline -and (& $listenNow) -eq 0) {
+                Start-Sleep -Milliseconds 500
+                $bp.Refresh()
+                if($bp.HasExited) {
+                    Write-Host "ERROR: backend exited during startup (code $($bp.ExitCode))" -ForegroundColor Red
+                    return 1
+                }
+            }
+            $backendPid = (& $listenNow)
+            if($backendPid -eq 0) {
+                Write-Host "WARNING: backend has not bound :$ManagedPort within ${BackendWaitSeconds}s -- starting the engine anyway (it re-probes the backend on a bounded schedule)" -ForegroundColor Yellow
+            } else {
+                Write-Host "  backend listening on :$ManagedPort (pid $backendPid)"
+            }
         }
     } elseif($foreignPortOwner) {
         Write-Host "==> not spawning backend: :$ManagedPort held by foreign process (takeover attaches the engine to it)" -ForegroundColor Yellow
