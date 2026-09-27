@@ -27,8 +27,17 @@ enable_testing()
 
 # CTest labels defined by the implementation plan (Milestone 0): core, sdk,
 # engine, ui, backend. Targets are added as their milestones land.
+add_subdirectory(src/engine)
+add_subdirectory(src/backends/openrgb)
+add_subdirectory(src/ipc)
+add_subdirectory(src/platform/windows)
 add_subdirectory(tests/core)
 add_subdirectory(tests/backend)
+add_subdirectory(tests/engine)
+add_subdirectory(tests/sdk)
 
 # Milestone 1 benchmark producer (opt-in physical runs, offline build)
 add_subdirectory(tools/bench)
+
+# Task 3.9 verification driver (IPC client + SDK save/restore)
+add_subdirectory(tools/engine_ctl)

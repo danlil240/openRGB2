@@ -11,6 +11,11 @@ Committed profiles describe device topology and matching rules with
   (MACs, serials, locations), session revalidation records, and anything
   with unique IDs. Create files here during the authorized hardware
   session (see `docs/hardware/daniel-pc.md`).
+- `local/engine-state.json` — the engine's durable profile (written by
+  `openrgb2-engine --state`, default path): per-scene playback
+  selections and the resolved binding-identity table. Atomic writes
+  keep `engine-state.json.lkg` as last-known-good; a corrupt primary
+  is set aside as `.rejected`, never silently destroyed.
 
 Suggested `profiles/local/wireless-group.json` (created at revalidation
 time, never committed):
