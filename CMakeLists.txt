@@ -29,6 +29,7 @@ enable_testing()
 # engine, ui, backend. Targets are added as their milestones land.
 add_subdirectory(src/engine)
 add_subdirectory(src/backends/openrgb)
+add_subdirectory(src/ipc)
 add_subdirectory(tests/core)
 add_subdirectory(tests/backend)
 add_subdirectory(tests/engine)

@@ -146,6 +146,16 @@ public:
                         DeliveryStats& out) const;
     DeliveryStats Stats() const override;
 
+    /* The last frame handed to the transport for `controller`
+       — the delivered-state preview (plan section 5: preview
+       and output use the same sampled colors). False when the
+       controller is unregistered or nothing was delivered yet.
+       Also exposes the lane's send budget via `budget` when
+       non-null. */
+    bool          LastDelivered(const DeviceKey& controller,
+                                RgbFrame& out,
+                                Clock::duration* budget = nullptr) const;
+
     /* One delivery worker thread per lane. A lane blocked
        inside a slow transport send cannot stall the others —
        its submissions still collapse into the depth-1 slots.

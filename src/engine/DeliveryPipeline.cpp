@@ -463,6 +463,29 @@ DeliveryStats DeliveryPipeline::Stats() const
     return aggregate_;
 }
 
+bool DeliveryPipeline::LastDelivered(const DeviceKey& controller,
+                                     RgbFrame& out,
+                                     Clock::duration* budget) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = lanes_.find(controller);
+    if(it == lanes_.end() || !it->second->has_sent)
+    {
+        return false;
+    }
+    const Lane& lane = *it->second;
+    out.controller          = controller;
+    out.topology_generation = lane.snap.topology_generation;
+    out.sequence            = lane.last_sent_seq;
+    out.sample_time         = lane.last_send;
+    out.colors              = lane.last_colors;
+    if(budget)
+    {
+        *budget = lane.min_interval;
+    }
+    return true;
+}
+
 /*---------------------------------------------------------*\
 || Lane worker threads                                      |
 \*---------------------------------------------------------*/

@@ -329,7 +329,7 @@ Dependencies: **0 → 1 → 2 → 3 → 4 → 5 → 6**. Within Milestone 2, qua
 - [ ] Test fragmented/coalesced TCP packets, malformed sizes, unsupported versions/modes, and changed controller indices.
 - [x] Implement per-controller pending-frame replacement, absolute-time sampling, unchanged-frame suppression, and independent budgets. Test blocked wireless alongside fast wired output.
 - [x] Implement exact motherboard mapping, full-group wireless batching, unmapped-color preservation, and DIMM identity resolution.
-- [ ] Implement bounded/versioned local IPC and restricted read-only backend metrics.
+- [x] Implement bounded/versioned local IPC and restricted read-only backend metrics.
 - [ ] Add `PlaybackMode`/`PlaybackStatus`, SDK preset selection, and frame suppression while a wireless loop is active. Test unsupported presets and mode/parameter acknowledgement.
 - [ ] Drive the matching effect on other devices from validated playback clock/metadata; test drift correction, clock wrap/reset, stale data, and different endpoint rates without claiming atomic output.
 - [ ] Adapt display/system power monitoring; discard pending frames on display-off/suspend and revalidate on wake.

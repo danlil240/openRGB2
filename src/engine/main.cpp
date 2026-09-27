@@ -20,6 +20,10 @@
 #include "Engine.h"
 #include "SceneWorker.h"
 
+#include "EngineService.h"
+#include "IpcServer.h"
+#include "NamedPipe.h"
+
 #include "OpenRgbClient.h"
 #include "TcpSocket.h"
 
@@ -93,7 +97,7 @@ void Usage(const char* argv0)
 {
     std::fprintf(stderr,
         "usage: %s [--scene <scene.json>] [--effects-dir <dir>]\n"
-        "          [--sdk [host:port]]\n"
+        "          [--sdk [host:port]] [--ipc | --no-ipc]\n"
         "\n"
         "  Runs the lighting engine until SIGINT/SIGTERM. No UI is\n"
         "  required or expected. Without --scene the engine idles at\n"
@@ -105,8 +109,13 @@ void Usage(const char* argv0)
         "  --sdk connects submitLatest to the OpenRGB backend SDK\n"
         "  (default 127.0.0.1:6744); without it frames go to a null\n"
         "  sink. The backend is launched externally — this process\n"
-        "  never spawns it.\n",
-        argv0);
+        "  never spawns it.\n"
+        "  IPC is on by default: the command pipe %s and the\n"
+        "  read-only diagnostics pipe %s (restricted to the\n"
+        "  creating user; see docs/ipc-protocol.md). --no-ipc\n"
+        "  runs headless with no pipes.\n",
+        argv0, openrgb2::ipc::kCommandPipeName,
+        openrgb2::ipc::kDiagnosticsPipeName);
 }
 
 bool LoadSceneFile(const std::string& path,
@@ -154,6 +163,7 @@ int main(int argc, char** argv)
     std::string effects_dir;
     std::string sdk_addr;                 /* empty = SDK disabled */
     bool        sdk_enabled = false;
+    bool        ipc_enabled = true;       /* --no-ipc opts out    */
     for(int i = 1; i < argc; ++i)
     {
         const std::string arg = argv[i];
@@ -175,6 +185,14 @@ int main(int argc, char** argv)
             {
                 sdk_addr = argv[++i];
             }
+        }
+        else if(arg == "--ipc")
+        {
+            ipc_enabled = true;
+        }
+        else if(arg == "--no-ipc")
+        {
+            ipc_enabled = false;
         }
         else if(arg == "--help" || arg == "-h")
         {
@@ -281,6 +299,58 @@ int main(int argc, char** argv)
         studio::EffectLooks().LoadDefaultsDirectory(effects_dir, nullptr);
     }
 
+    /* The IPC service owns the scene-apply path (Task 3.5): the
+       --scene CLI and SET_SCENE both go through
+       ApplySceneDocument, so a UI-applied scene and a
+       CLI-loaded scene are indistinguishable to the engine. */
+    openrgb2::ipc::EngineService::Deps ipc_deps;
+    ipc_deps.pipeline = pipeline.get();
+    ipc_deps.mapper   = &mapper;
+    ipc_deps.sdk      = sdk_client.get();
+    openrgb2::ipc::EngineService ipc_service(engine, ipc_deps);
+
+    std::unique_ptr<openrgb2::ipc::IpcServer>         ipc_server;
+    std::unique_ptr<openrgb2::ipc::NamedPipeListener> cmd_listener;
+    std::unique_ptr<openrgb2::ipc::NamedPipeListener> diag_listener;
+    if(ipc_enabled)
+    {
+        ipc_server =
+            std::make_unique<openrgb2::ipc::IpcServer>(ipc_service);
+        ipc_service.SetEventSink(
+            [&ipc_server](const openrgb2::ipc::IpcEvent& ev)
+            { ipc_server->Emit(ev); });
+        ipc_service.SetServerStatsProvider(
+            [&ipc_server]() { return ipc_server->Stats(); });
+
+        /* Both pipes share the restricted DACL (creating user +
+           LocalSystem only). The diagnostics pipe is read-only
+           by construction: DiagGet is the only verb it serves. */
+        cmd_listener =
+            std::make_unique<openrgb2::ipc::NamedPipeListener>(
+                *ipc_server, openrgb2::ipc::ChannelKind::Command,
+                openrgb2::ipc::kCommandPipeName);
+        diag_listener =
+            std::make_unique<openrgb2::ipc::NamedPipeListener>(
+                *ipc_server, openrgb2::ipc::ChannelKind::Diagnostics,
+                openrgb2::ipc::kDiagnosticsPipeName);
+        std::string err;
+        if(!cmd_listener->Start(err))
+        {
+            std::fprintf(stderr,
+                "openrgb2-engine: command pipe unavailable: %s "
+                "(continuing without IPC)\n", err.c_str());
+            cmd_listener.reset();
+        }
+        err.clear();
+        if(!diag_listener->Start(err))
+        {
+            std::fprintf(stderr,
+                "openrgb2-engine: diagnostics pipe unavailable: %s "
+                "(continuing)\n", err.c_str());
+            diag_listener.reset();
+        }
+    }
+
     if(!scene_path.empty())
     {
         std::shared_ptr<studio::SceneDocument> doc;
@@ -288,23 +358,14 @@ int main(int argc, char** argv)
         {
             return 1;
         }
-        /* Resolve the scene's effect stack the way the persisted
-           document intends: the inline layer stack when present,
-           otherwise the named preset through the effect-look
-           registry (EffectState contract in SceneTypes.h). */
-        std::vector<studio::EffectLayer> layers = doc->effect.layers;
-        if(layers.empty() && !doc->effect.preset.empty())
+        std::string err;
+        if(!ipc_service.ApplySceneDocument(doc, err))
         {
-            layers = studio::BuildPreset(doc->effect.preset,
-                                         doc->effect.seed);
-            studio::ApplyGlobalParams(layers, doc->effect.speed,
-                                      doc->effect.intensity);
+            std::fprintf(stderr,
+                "openrgb2-engine: scene apply failed: %s\n",
+                err.c_str());
+            return 1;
         }
-        engine.Worker().SubmitScene(doc, std::move(layers),
-                                    /*revision*/ 1);
-        /* The document owns the persisted bindings — resolution
-           itself runs on every SyncDevices (re-enumeration). */
-        mapper.SetScene(doc);
     }
 
     std::signal(SIGINT, OnSignal);
@@ -338,6 +399,13 @@ int main(int argc, char** argv)
     const auto started = openrgb2::Clock::now();
     while(!g_stop.load())
     {
+        if(ipc_server)
+        {
+            /* Diff-driven push events: topology, connection,
+               playback changes and the bounded-rate
+               frame_status feed (Task 3.5). */
+            ipc_service.PollEvents();
+        }
         if(sdk_client)
         {
             sdk_client->Poll();

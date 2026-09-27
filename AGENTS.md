@@ -11,8 +11,13 @@ milestones.
 | --- | --- |
 | `vendor/OpenRGB/` | Wireless-enabled OpenRGB backend (imported working-tree state of the `lianli-wireless` fork; provenance in `vendor/provenance/`) |
 | `src/core/` | Qt-free scene/effects/resolver core (imported Desktop Lighting Studio core) |
+| `src/engine/` | Qt-free lighting engine: scene worker, delivery pipeline, device mapping, `openrgb2-engine` process |
+| `src/backends/openrgb/` | Qt-free OpenRGB SDK v4 client (loopback TCP to the pinned backend) |
+| `src/ipc/` | Versioned/bounded local IPC: restricted named pipes (command + read-only diagnostics), JSON framing — contract in `docs/ipc-protocol.md` |
 | `tests/core/` | Qt-free offline regression suites (CTest label `core`) |
 | `tests/backend/` | Offline Lian Li wireless protocol harness (CTest label `backend`) |
+| `tests/engine/` | Qt-free engine + IPC suites (CTest label `engine`) |
+| `tests/sdk/` | SDK-client suites over an in-process fake backend (CTest label `sdk`) |
 | `tools/bench/` | Milestone 1 benchmark producer (`lianli_bench`); physical runs are opt-in, wire layer is offline-tested |
 | `docs/` | Hardware profile (`hardware/daniel-pc.md`) and benchmark reports (`benchmarks/baseline.md`) |
 | `profiles/` | Committed topology profiles (no unique IDs); `profiles/local/` is gitignored user state |
