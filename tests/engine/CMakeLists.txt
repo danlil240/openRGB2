@@ -85,3 +85,7 @@ target_include_directories(ipc_protocol_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(ipc_engine_service_test PRIVATE openrgb2_ipc)
+# Task 4.7 review: the ownership wire surface drives the real
+# EngineHost::OwnershipJson serializer as the provider — a
+# scripted body would ship a field-name typo green.
+target_link_libraries(ipc_engine_service_test PRIVATE openrgb2_host)

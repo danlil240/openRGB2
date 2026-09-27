@@ -27,6 +27,8 @@
 #include "test_pipe.h"
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QTemporaryDir>
 #include <QVariantMap>
 
@@ -218,7 +220,13 @@ static nlohmann::json OwnershipBody()
             { "checked", true },
             { "findings", nlohmann::json::array({
                 "sole scene writer verified: no enabled or "
-                "loadable plugins"}) },
+                "loadable plugins",
+                /* a private path, as the real engine emits it
+                   verbatim (OwnershipScan "backend config dir
+                   '<dir>' not found") — the export must scrub it */
+                "backend config dir 'C:\\Users\\testuser\\AppData"
+                "\\Roaming\\OpenRGB' not found — cannot verify "
+                "sole scene writer"}) },
             { "enabled_plugins",  nlohmann::json::array() },
             { "legacy_producers", nlohmann::json::array() },
         })},
@@ -569,6 +577,64 @@ int main(int argc, char** argv)
                   .get<std::string>()
                   .find("Lian Li") != std::string::npos);
         CHECK(!diag.lastExport().isEmpty());
+
+        /* Private paths never leave the machine either: the
+           scripted ownership finding carried a C:\Users\
+           testuser dir verbatim (the real engine emits
+           backend_config_dir exactly like this) — it must
+           appear only as C:\Users\<redacted>. */
+        CHECK(text.find("testuser") == std::string::npos);
+        CHECK(text.find("C:\\\\Users\\\\<redacted>") !=
+              std::string::npos);
+        /* ...and the rest of the path survived. */
+        CHECK(text.find("Roaming") != std::string::npos);
+    }
+
+    /*---- export event + profile dir scrub --------------------
+           The export event's target lives under the real
+           user's profile; the journal is bundled verbatim on
+           the NEXT export, so the recorded form must already
+           be the redacted one. */
+    std::printf("-- export path scrub\n");
+    {
+        /* the recorded event detail is redacted in the
+           journal itself */
+        bool saw_export = false;
+        for(const QVariant& e : diag.eventLog())
+        {
+            const QVariantMap ev = e.toMap();
+            if(ev.value(QStringLiteral("kind")).toString() ==
+               QStringLiteral("export"))
+            {
+                saw_export = true;
+                const QString d =
+                    ev.value(QStringLiteral("detail")).toString();
+                CHECK(d.contains(QStringLiteral("<profile>")));
+                CHECK(!d.contains(QDir::homePath()));
+            }
+        }
+        CHECK(saw_export);
+
+        /* second export: the journal entry lands in the
+           bundle — the real username must appear nowhere. */
+        QTemporaryDir tmp2;
+        CHECK(tmp2.isValid());
+        const QString path2 =
+            tmp2.filePath(QStringLiteral("diag2.json"));
+        CHECK(diag.exportDiagnostics(path2));
+        std::ifstream in2(path2.toStdString(),
+                          std::ios::binary);
+        const std::string text2(
+            (std::istreambuf_iterator<char>(in2)),
+            std::istreambuf_iterator<char>());
+        const QString home_user =
+            QFileInfo(QDir::homePath()).fileName();
+        if(!home_user.isEmpty())
+        {
+            CHECK(text2.find(home_user.toStdString()) ==
+                  std::string::npos);
+        }
+        CHECK(text2.find("<profile>") != std::string::npos);
     }
 
     bridge.stop();

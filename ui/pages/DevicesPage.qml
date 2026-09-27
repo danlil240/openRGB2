@@ -699,7 +699,9 @@ Item {
         fileMode: FileDialog.SaveFile
         nameFilters: [qsTr("JSON (*.json)")]
         defaultSuffix: "json"
-        selectedFile: root.hasCtl ? diagCtl.defaultExportPath() : ""
+        /* selectedFile is a url — the controller's path is a
+           plain local path, so it goes through file:///. */
+        selectedFile: root.hasCtl ? "file:///" + diagCtl.defaultExportPath() : ""
         onAccepted:
             if(root.hasCtl) { diagCtl.exportDiagnostics(selectedFile); }
     }

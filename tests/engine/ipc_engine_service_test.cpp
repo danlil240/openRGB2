@@ -14,6 +14,7 @@
 #include "DeliveryPipeline.h"
 #include "DeviceMapper.h"
 #include "Engine.h"
+#include "EngineHost.h"
 #include "FrameSink.h"
 
 #include <cstdio>
@@ -308,6 +309,93 @@ int main()
         /* backend's own counters pipe is a later plan item —
            honest null, never a fake */
         CHECK(r.body["backend_counters"].is_null());
+    }
+
+    /*---- Task 4.7 ownership wire surface ----------------------
+           The UI suite scripts its own OwnershipBody, so a
+           field-name typo in the REAL serializers would ship
+           green. Wire the real provider — EngineHost::
+           OwnershipJson on a never-started host (the honest
+           scanned:false surface; the same serializer
+           production wires after the startup scan) — through
+           GetState and DiagGet, then the unwired and
+           non-object cases for the honest null. */
+    {
+        EngineHostOptions oopts;
+        oopts.ipc_enabled     = false;
+        oopts.power_monitor   = false;
+        oopts.scan_owners     = false;
+        oopts.single_instance = false;
+        EngineHost host(oopts);
+
+        Engine           engine6;
+        DeliveryPipeline pipe6;
+        DeviceMapper     mapper6;
+        EngineService::Deps d6;
+        d6.pipeline  = &pipe6;
+        d6.mapper    = &mapper6;
+        d6.ownership = [&host] { return host.OwnershipJson(); };
+        EngineService svc6(engine6, d6);
+
+        IpcReply r = svc6.Dispatch(MsgType::GetState,
+                                   nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        const nlohmann::json& ow = r.body["ownership"];
+        CHECK(ow.is_object());
+        /* the real serializer's key names — scanned:false is
+           "the scan never ran", never "verified clean" */
+        CHECK(ow["scanned"].get<bool>() == false);
+        CHECK(ow["backend"]["listening"].get<bool>() == false);
+        CHECK(ow["backend"]["attached"].get<bool>() == false);
+        CHECK(ow["conflicts"].is_array());
+        CHECK(ow["notices"].is_array());
+        CHECK(ow["config"]["checked"].get<bool>() == false);
+        CHECK(ow["config"]["findings"].is_array());
+        CHECK(ow["config"]["enabled_plugins"].is_array());
+        CHECK(ow["config"]["legacy_producers"].is_array());
+
+        r = svc6.Dispatch(MsgType::DiagGet,
+                          nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["ownership"]["scanned"].get<bool>()
+              == false);
+        CHECK(r.body["ownership"]["config"]["legacy_producers"]
+                  .is_array());
+
+        /* unwired -> honest null on both pulls (the schema's
+           "null when no ownership report is wired"), never an
+           empty conflict list that would read as clean */
+        Engine           engine7;
+        DeliveryPipeline pipe7;
+        DeviceMapper     mapper7;
+        EngineService::Deps d7;
+        d7.pipeline = &pipe7;
+        d7.mapper   = &mapper7;
+        EngineService svc7(engine7, d7);
+        r = svc7.Dispatch(MsgType::GetState,
+                          nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body.contains("ownership"));
+        CHECK(r.body["ownership"].is_null());
+        r = svc7.Dispatch(MsgType::DiagGet,
+                          nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["ownership"].is_null());
+
+        /* a non-object provider result is a bug in the owner —
+           the surface still answers null, never a bogus
+           shape */
+        Engine           engine8;
+        EngineService::Deps d8;
+        d8.ownership = []
+        {
+            return nlohmann::json("not-an-object");
+        };
+        EngineService svc8(engine8, d8);
+        r = svc8.Dispatch(MsgType::GetState,
+                          nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["ownership"].is_null());
     }
 
     /*---- layout verbs (Task 4.4) -------------------------------*/

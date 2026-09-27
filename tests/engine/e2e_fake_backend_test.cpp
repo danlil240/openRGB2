@@ -242,6 +242,25 @@ int main()
     /*---- startup -> attach -> enumerate ---------------------*/
     CHECK(host.Ownership().scanned);
     CHECK(host.Ownership().backend_attached);
+    /* The wire form of the same report (Task 4.7 review): the
+       REAL serializer's key names + scanned:true, asserted
+       where the scan actually ran — a scripted copy would
+       ship a field-name typo green. Findings are machine-
+       dependent, so the lists are shape-asserted only. */
+    {
+        const nlohmann::json oj = host.OwnershipJson();
+        CHECK(oj["scanned"].get<bool>() == true);
+        CHECK(oj["backend"]["attached"].get<bool>() == true);
+        CHECK(oj["backend"].contains("listening"));
+        CHECK(oj["conflicts"].is_array());
+        CHECK(oj["notices"].is_array());
+        /* config.checked is machine-dependent (a real backend
+           on this port would resolve an exe dir) — assert the
+           key, not the value */
+        CHECK(oj["config"].contains("checked"));
+        CHECK(oj["config"]["findings"].is_array());
+        CHECK(oj["config"]["legacy_producers"].is_array());
+    }
     sdk::OpenRgbClient* client = host.GetSdk();
     CHECK(client != nullptr);
     CHECK(client->State() == ConnectionState::Connected);

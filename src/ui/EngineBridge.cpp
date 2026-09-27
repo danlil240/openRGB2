@@ -722,13 +722,16 @@ QVariantMap EngineBridge::playbackView() const
     const double configured_hz =
         frame_interval > 0.0 ? 1.0 / frame_interval : 0.0;
 
-    /* Physical measurement — only what the wire reports. */
+    /* Physical measurement — only what the wire reports as a
+       physical measurement: the provenance contract is that
+       only "physically_measured" claims one ("configured" and
+       "transport_measured" describe other channels). */
     const double  pint =
         phys.value(QStringLiteral("frame_interval_s")).toDouble();
     const QString prov =
         phys.value(QStringLiteral("provenance")).toString();
-    const bool measured = pint > 0.0 && !prov.isEmpty() &&
-                          prov != QLatin1String("unknown");
+    const bool measured = pint > 0.0 &&
+                          prov == QLatin1String("physically_measured");
 
     QVariantMap out;
     out.insert(QStringLiteral("requested_mode"),  requested);

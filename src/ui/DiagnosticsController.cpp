@@ -95,10 +95,55 @@ const QRegularExpression& MacPattern()
     return re;
 }
 
+/* Private-path scrub — a support bundle never carries the
+   user's profile location (the Milestone 6 redaction rule
+   applies to exports, and engine findings embed the managed
+   config/exe dirs verbatim — both live under the profile).
+   Applied to EVERY string value, not just keyed identifier
+   fields. Two layers: the resolved home dir verbatim in each
+   separator spelling a decoded string can carry — forward
+   slash (QDir form), single backslash (native), doubled
+   backslash (a JSON-encoded path inside an already-decoded
+   string) — and the generic <drive>:\Users\<name> form for
+   any user. Only the NAME segment is private: the rest of
+   the path stays readable for the support reader. */
+const QRegularExpression& UsersDirPattern()
+{
+    static const QRegularExpression re(QStringLiteral(
+        R"((\b[A-Za-z]:(?:\\\\|\\|/)Users(?:\\\\|\\|/))[^\\/\s"']+)"));
+    return re;
+}
+
+void ScrubPrivatePaths(QString& s)
+{
+    /* Exact-match scrub of THIS machine's home — covers
+       profiles outside <drive>:\Users (redirected or
+       non-standard homes) the generic pattern cannot name.
+       Guarded: a drive-root or "/" home must never blank
+       every path. */
+    const QString home = QDir::homePath();
+    if(home.size() > 3)
+    {
+        QString bs = home;
+        bs.replace(QLatin1Char('/'), QLatin1Char('\\'));
+        QString es = bs;
+        es.replace(QStringLiteral("\\"), QStringLiteral("\\\\"));
+        const QString variants[] = {home, bs, es};
+        for(const QString& v : variants)
+        {
+            s.replace(v, QStringLiteral("<profile>"),
+                      Qt::CaseInsensitive);
+        }
+    }
+    s.replace(UsersDirPattern(),
+              QStringLiteral("\\1<redacted>"));
+}
+
 QString RedactString(const QString& s)
 {
     QString out = s;
     out.replace(MacPattern(), QStringLiteral("[redacted]"));
+    ScrubPrivatePaths(out);
     return out;
 }
 
@@ -252,8 +297,12 @@ void DiagnosticsController::RecomputeRates()
     const bool configured = interval > 0.0;
 
     /* 2 — Physical playback rate: only what the wire
-       measured. provenance "unknown" or a zero interval is
-       UNMEASURED — never rendered as 0 FPS. */
+       measured PHYSICALLY. The wire contract
+       (MeasurementProvenance -> ProvenanceName) is that only
+       "physically_measured" claims a physical measurement —
+       "configured" and "transport_measured" describe other
+       channels — so anything else, or a zero interval, is
+       UNMEASURED, never rendered as 0 FPS. */
     const QVariantMap phys =
         st.value(QStringLiteral("physical")).toMap();
     const double  pint =
@@ -261,8 +310,8 @@ void DiagnosticsController::RecomputeRates()
     const QString pprov =
         phys.value(QStringLiteral("provenance")).toString();
     const bool pmeasured =
-        pint > 0.0 && !pprov.isEmpty() &&
-        pprov != QLatin1String("unknown");
+        pint > 0.0 &&
+        pprov == QLatin1String("physically_measured");
 
     /* 3 — Live delivery rate: DELIVERY_STATS aggregate
        interval stats — frames the transport ACCEPTED
@@ -427,6 +476,14 @@ void DiagnosticsController::RecomputeControllers()
             const QString kser =
                 key.value(QStringLiteral("serial")).toString();
             if(!kser.isEmpty() && !cser.isEmpty() && cser != kser)
+            {
+                continue;
+            }
+            const QString cloc =
+                ck.value(QStringLiteral("location")).toString();
+            const QString kloc =
+                key.value(QStringLiteral("location")).toString();
+            if(!kloc.isEmpty() && !cloc.isEmpty() && cloc != kloc)
             {
                 continue;
             }
@@ -661,8 +718,9 @@ nlohmann::json DiagnosticsController::ExportBundle() const
     }
     bundle["notes"] =
         "Unique identifiers (serial numbers, hardware "
-        "locations, MAC addresses) are redacted in this "
-        "export. Rates labeled transport-admitted are frames "
+        "locations, MAC addresses) and user-profile filesystem "
+        "paths are redacted in this export. Rates labeled "
+        "transport-admitted are frames "
         "accepted by the transport, never displayed-physical "
         "rates.";
     RedactJson(bundle);
@@ -715,8 +773,13 @@ bool DiagnosticsController::exportDiagnostics(const QString& path)
     emit exportErrorChanged();
     last_export_ = target;
     emit lastExportChanged();
+    /* The journal is bundled verbatim on the next export — the
+       target lives under the user's profile, so the recorded
+       form is already the redacted one (the local display form
+       keeps the real path via last_export_). */
     AppendEvent(QStringLiteral("export"),
-                QStringLiteral("bundle written to ") + target);
+                QStringLiteral("bundle written to ") +
+                RedactString(target));
     return true;
 }
 

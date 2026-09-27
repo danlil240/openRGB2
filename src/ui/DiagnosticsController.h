@@ -157,12 +157,17 @@ public:
     void setRefreshIntervalMs(int ms);
 
     /*---- export (exposed for the offline suite) -------------*/
-    /* Recursive redaction: object members named "serial" or
-       "location" and any MAC-shaped / raw-hex-identifier
-       substrings inside string values become "[redacted]" —
-       the export must never carry unique identifiers (the
-       committed-profiles rule; plan section 6/Milestone 6
-       redaction requirement applies to exports too). */
+    /* Recursive redaction applied to every value in the
+       bundle: object members named "serial" or "location" and
+       any MAC-shaped / raw-hex-identifier substring inside
+       string values become "[redacted]", and private
+       filesystem paths — the machine's profile dir (every
+       separator spelling) and any <drive>:\Users\<name> —
+       collapse to "<profile>" / "<drive>:…\<redacted>" so
+       engine findings and journaled export paths never leak
+       the user's directory (the committed-profiles rule;
+       plan section 6/Milestone 6 redaction requirement
+       applies to exports too). */
     static void     RedactJson(nlohmann::json& j);
     nlohmann::json  ExportBundle() const;
 
