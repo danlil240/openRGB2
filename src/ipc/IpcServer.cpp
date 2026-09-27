@@ -45,6 +45,7 @@ bool IsRequestType(MsgType t)
     case MsgType::Unsubscribe:
     case MsgType::Ping:
     case MsgType::GetPresets:
+    case MsgType::Quit:
     case MsgType::DiagGet:
         return true;
     default:

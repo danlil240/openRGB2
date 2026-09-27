@@ -17,6 +17,7 @@
 #include "IpcProtocol.h"
 #include "IpcServer.h"
 #include "IpcService.h"
+#include "EngineService.h"
 #include "NamedPipe.h"
 
 #include "fake_ipc_channel.h"
@@ -470,6 +471,66 @@ int main()
         CHECK(c.RecvMsg(m, 5000));
         CHECK(m.type == MsgType::Diagnostics);
         CHECK(svc.DispatchedCount() == 2);   /* both DIAG_GETs */
+    }
+
+    /*---- QUIT reaches dispatch (wire level, Task 3.7) -------*\
+    | Regression: IsRequestType once lacked Quit — the verb was|
+    | rejected as UnknownCommand before EngineService ever saw  |
+    | it. A real session must deliver the documented reply AND  |
+    | fire the shutdown hook.                                   |
+    \*----------------------------------------------------------*/
+    {
+        openrgb2::Engine engine;
+        EngineService::Deps deps;
+        bool shutdown_requested = false;
+        deps.request_shutdown =
+            [&] { shutdown_requested = true; };
+        EngineService svc(engine, deps);
+        IpcServer server(svc);
+        TestClient c;
+        CHECK(server.Serve(c.MakeChannel(), ChannelKind::Command));
+        c.Hello();
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Welcome);
+
+        c.SendMsg(MsgType::Quit, 90, nlohmann::json::object());
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Ok);       /* NOT UnknownCommand */
+        CHECK(m.request_id == 90);
+        const nlohmann::json b = m.Body();
+        CHECK(b["shutting_down"].get<bool>() == true);
+        CHECK(b["ordered"].get<bool>() == true);
+        CHECK(shutdown_requested);
+
+        /* ...and on the read-only diagnostics pipe the verb is
+           refused before dispatch — the hook never fires. */
+        shutdown_requested = false;
+        TestClient d;
+        CHECK(server.Serve(d.MakeChannel(),
+                           ChannelKind::Diagnostics));
+        d.Hello();
+        CHECK(d.RecvMsg(m, 5000));
+        d.SendMsg(MsgType::Quit, 91, nlohmann::json::object());
+        CHECK(d.RecvMsg(m, 5000));
+        CHECK(IsError(m, ErrCode::ReadOnly));
+        CHECK(!shutdown_requested);
+    }
+
+    /*---- QUIT unwired -> honest Unavailable -----------------*/
+    {
+        openrgb2::Engine engine;
+        EngineService::Deps deps;   /* no request_shutdown */
+        EngineService svc(engine, deps);
+        IpcServer server(svc);
+        TestClient c;
+        server.Serve(c.MakeChannel(), ChannelKind::Command);
+        c.Hello();
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        c.SendMsg(MsgType::Quit, 92, nlohmann::json::object());
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(IsError(m, ErrCode::Unavailable));
     }
 
     /*---- connection cap ------------------------------------*/
