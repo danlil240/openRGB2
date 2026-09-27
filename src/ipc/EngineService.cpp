@@ -6,6 +6,8 @@
 
 #include "EngineService.h"
 
+#include "ProfileStore.h"      /* ValidateSceneLedAddresses */
+
 #include "scene/SceneJson.h"
 
 #include <cstdio>
@@ -311,6 +313,38 @@ bool EngineService::ApplySceneDocument(
     {
         err = "null scene document";
         return false;
+    }
+
+    /* Task 3.8 offline bindings: the persisted identity table
+       completes name-only bindings BEFORE anything else reads
+       the document — the hook may hand back an augmented copy. */
+    if(deps_.prepare_scene)
+    {
+        deps_.prepare_scene(doc);
+        if(!doc)
+        {
+            err = "scene preparation returned no document";
+            return false;
+        }
+    }
+
+    /* Task 3.8 persistence-boundary regression (calibration
+       report, plan section 5): expanded documents bypass
+       workspace resolution, so out-of-range LED addresses are
+       rejected HERE — the last boundary before the scene is
+       applied and stored. */
+    {
+        std::vector<std::string> errs;
+        if(!ValidateSceneLedAddresses(*doc, &errs))
+        {
+            err = errs.front();
+            if(errs.size() > 1)
+            {
+                err += " (+" + std::to_string(errs.size() - 1) +
+                       " more)";
+            }
+            return false;
+        }
     }
 
     /* Resolve the effect stack the persisted document intends:

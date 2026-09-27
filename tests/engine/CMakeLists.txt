@@ -26,6 +26,10 @@ set_tests_properties(playback_mode_test PROPERTIES
 engine_suite(power_lifecycle_test)
 engine_suite(shutdown_test)
 
+# Task 3.8 — profile store: atomicity, migration, offline
+# bindings, last-known-good, durable PlaybackMode, scene loader.
+engine_suite(profile_store_test)
+
 # Task 3.5 — IPC layer. ipc_server_test additionally needs the
 # named-pipe transport + ACL APIs.
 engine_suite(ipc_protocol_test)

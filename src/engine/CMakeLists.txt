@@ -33,17 +33,23 @@ add_library(openrgb2_engine STATIC
     PlaybackController.cpp
     PowerLifecycle.cpp
     OrderlyShutdown.cpp
+    ProfileStore.cpp
+    SceneLoader.cpp
     Engine.cpp
     ${CORE_DIR}/scene/SceneTypes.cpp
     ${CORE_DIR}/scene/SceneGraph.cpp
     ${CORE_DIR}/scene/BindingResolver.cpp
     ${CORE_DIR}/scene/SceneJson.cpp
+    ${CORE_DIR}/scene/SceneResolver.cpp
     ${CORE_DIR}/scene/EmitterLayout.cpp
+    ${CORE_DIR}/config/StudioConfig.cpp
+    ${CORE_DIR}/config/ConfigMigration.cpp
     ${CORE_DIR}/effects/EffectTypes.cpp
     ${CORE_DIR}/effects/EffectEngine.cpp
     ${CORE_DIR}/effects/EffectJson.cpp
     ${CORE_DIR}/effects/Presets.cpp
     ${CORE_DIR}/presets/EffectRegistry.cpp
+    ${CORE_DIR}/presets/PresetRegistry.cpp
     ${CORE_DIR}/presets/DevicePreset.cpp
     ${CORE_DIR}/playback/PlaybackLoop.cpp
     ${LLW_CTRL}/LianLiWirelessEffects.cpp
@@ -68,11 +74,16 @@ target_compile_definitions(openrgb2_engine PRIVATE
     _IS_USED_MULTITHREAD=0)
 target_link_libraries(openrgb2_engine PUBLIC Threads::Threads)
 
-# Standalone engine process. --scene loads a scene document; preset
-# names resolve through the packaged effect registry
+# Standalone engine process. --scene resolves any persisted form
+# through the profile layer (expanded scene JSON, a compact
+# studio.json workspace via the device-type registry, or a legacy
+# host-settings blob via ConfigMigration); preset names resolve
+# through the packaged effect registry
 # (--effects-dir / DLS_EFFECT_DIR / source-tree probe), falling back
-# to the persisted inline layer stack. --ipc (default on) serves the
-# versioned command + read-only diagnostics pipes for the UI.
+# to the persisted inline layer stack. --state sets the durable
+# engine profile (atomic writes + last-known-good). --ipc (default
+# on) serves the versioned command + read-only diagnostics pipes
+# for the UI.
 add_executable(openrgb2-engine
     main.cpp)
 target_link_libraries(openrgb2-engine PRIVATE

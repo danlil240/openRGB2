@@ -90,6 +90,17 @@ public:
            diagnostics exposes queue depths, not guesses. */
         std::function<IpcServerStats()> server_stats;
 
+        /* Task 3.8 offline bindings: before a scene applies,
+           the persisted resolved-identity table completes the
+           document's bindings. The hook may REPLACE `doc` with
+           an augmented copy — a name-only binding inherits its
+           recorded serial/location, so a missing device's
+           binding is never reassigned to a same-named
+           different device after restart. Empty -> no
+           augmentation. */
+        std::function<void(std::shared_ptr<const studio::SceneDocument>&)>
+            prepare_scene;
+
         /* The "Quit All" hook (plan section 4): QUIT invokes this
            AFTER the reply is prepared; production wires it to the
            owner loop's stop flag so owned components shut down in

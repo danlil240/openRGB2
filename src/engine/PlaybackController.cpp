@@ -112,6 +112,57 @@ void PlaybackController::PersistLocked()
     ps.mode         = requested_mode_;
     ps.params       = params_;
     TouchSceneLocked(scene_key_);
+    modes_dirty_    = true;
+}
+
+void PlaybackController::FlushPersisted()
+{
+    std::vector<PersistedSceneMode> modes;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(!modes_dirty_ || !deps_.save_modes)
+        {
+            /* Clear regardless — an in-memory-only controller
+               must not keep the flag forever. */
+            modes_dirty_ = false;
+            return;
+        }
+        modes_dirty_ = false;
+        modes.reserve(scene_lru_.size());
+        for(const std::string& key : scene_lru_)
+        {
+            const auto it = per_scene_.find(key);
+            if(it != per_scene_.end())
+            {
+                modes.push_back(PersistedSceneMode{
+                    key, it->second.mode, it->second.params });
+            }
+        }
+    }
+    /* File I/O outside the mutex — a slow disk can never stall
+       Status/Poll/Tick readers. */
+    std::string err;
+    if(!deps_.save_modes(modes, err))
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        status_detail_ = "playback profile save failed: " + err;
+    }
+}
+
+size_t PlaybackController::RestoreSceneModes(
+    const std::vector<PersistedSceneMode>& modes)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    for(const PersistedSceneMode& m : modes)
+    {
+        if(m.scene_key.empty())
+        {
+            continue;
+        }
+        per_scene_[m.scene_key] = PerScene{ m.mode, m.params };
+        TouchSceneLocked(m.scene_key);
+    }
+    return per_scene_.size();
 }
 
 bool PlaybackController::FindWireless(DeviceSnapshot& out) const
@@ -253,6 +304,7 @@ PlaybackController::Result PlaybackController::RequestImpl(
     bool              to_animation = false;
     bool              to_live      = false;
     bool              control_only_req = false;
+    bool              early_accept     = false;
     std::string       sdk_name;
     LianLiWireless::PlaybackPreset want_preset =
         LianLiWireless::PlaybackPreset::SpectrumCycle;
@@ -353,45 +405,56 @@ PlaybackController::Result PlaybackController::RequestImpl(
             r.accepted = true;
             r.revision = applied_param_rev_;
             PersistLocked();
-            return r;
-        }
-
-        /* Control-only request on an acknowledged upload —
-           the uploaded loop already matches, so pause/stop/
-           resume needs no new select: it runs the transport-
-           control path directly. */
-        const bool control_only =
-            mode == PlaybackMode::AnimationPlayback &&
-            applied_mode_ == PlaybackMode::AnimationPlayback &&
-            upload_ == UploadState::Active && !ack_pending_ &&
-            same_params && caps.preset == preset_ &&
-            control != control_;
-        if(control_only)
-        {
-            transition_        = true;
-            ++epoch_;
-            requested_mode_    = mode;
-            requested_control_ = control;
-            ++next_rev_;
-            requested_rev_ = next_rev_;
-            PersistLocked();
-            control_only_req = true;
+            early_accept = true;
         }
         else
         {
-            /* Claim the transition. */
-            transition_ = true;
-            ++epoch_;
-            to_animation = (mode == PlaybackMode::AnimationPlayback);
-            /* Back to live only needs a transition when an owned
-               group actually exists — has_wireless_ is set and
-               cleared together with upload state. */
-            to_live      = (mode == PlaybackMode::LiveEffects &&
-                            has_wireless_);
-            requested_mode_    = mode;
-            requested_control_ =
-                to_animation ? control : PlaybackControl::Playing;
+            /* Control-only request on an acknowledged upload —
+               the uploaded loop already matches, so pause/stop/
+               resume needs no new select: it runs the transport-
+               control path directly. */
+            const bool control_only =
+                mode == PlaybackMode::AnimationPlayback &&
+                applied_mode_ == PlaybackMode::AnimationPlayback &&
+                upload_ == UploadState::Active && !ack_pending_ &&
+                same_params && caps.preset == preset_ &&
+                control != control_;
+            if(control_only)
+            {
+                transition_        = true;
+                ++epoch_;
+                requested_mode_    = mode;
+                requested_control_ = control;
+                ++next_rev_;
+                requested_rev_ = next_rev_;
+                PersistLocked();
+                control_only_req = true;
+            }
+            else
+            {
+                /* Claim the transition. */
+                transition_ = true;
+                ++epoch_;
+                to_animation =
+                    (mode == PlaybackMode::AnimationPlayback);
+                /* Back to live only needs a transition when an
+                   owned group actually exists — has_wireless_ is
+                   set and cleared together with upload state. */
+                to_live      = (mode == PlaybackMode::LiveEffects &&
+                                has_wireless_);
+                requested_mode_    = mode;
+                requested_control_ =
+                    to_animation ? control : PlaybackControl::Playing;
+            }
         }
+    }
+
+    if(early_accept)
+    {
+        /* The mutex is released — durable persistence may do
+           file I/O. */
+        FlushPersisted();
+        return r;
     }
 
     /*---- Blocking section — no lock held ------------------*/
@@ -413,6 +476,7 @@ PlaybackController::Result PlaybackController::RequestImpl(
             r.pending  = ack_pending_;
             r.revision = requested_rev_;
         }
+        FlushPersisted();
         Changed();
         return r;
     }
@@ -588,6 +652,7 @@ PlaybackController::Result PlaybackController::RequestImpl(
             deps_.set_suppressed(wireless_key_, false, "");
         }
     }
+    FlushPersisted();
     Changed();
     return r;
 }

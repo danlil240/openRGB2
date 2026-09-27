@@ -151,6 +151,16 @@ public:
            "playback" event. Called WITHOUT the mutex held. */
         std::function<void()>                           changed;
 
+        /* Task 3.8 durable persistence: PersistLocked() marks
+           the per-scene store dirty; FlushPersisted() (run at
+           the end of every mutating entry point, never under
+           the mutex) snapshots it in LRU order and hands it
+           here — production writes the profile store, tests a
+           fake. Empty -> in-memory only; a false return is
+           reported in Detail(), never silently dropped. */
+        std::function<bool(const std::vector<PersistedSceneMode>&,
+                           std::string& err)>             save_modes;
+
         /* Clock injection (tests). */
         std::function<TimePoint()>                      now;
     };
@@ -315,6 +325,15 @@ public:
        and lets Tick() produce them. */
     bool                 PlaybackOwnsWired() const;
 
+    /*---- Task 3.8 — durable per-scene store ----------------*\
+    || RestoreSceneModes: replay the profile's persisted       ||
+    || selections at startup (LRU order, bounded to            ||
+    || kMaxScenes — the tail/most-recent entries survive).     ||
+    || Returns the entries held. Does NOT apply a selection:   ||
+    || OnSceneApplied does that when its scene loads.          ||
+    \*---------------------------------------------------------*/
+    size_t RestoreSceneModes(const std::vector<PersistedSceneMode>& modes);
+
     /* Test introspection. */
     const PlaybackClockSync& ClockSync() const;
     size_t                   PersistedScenes() const;
@@ -350,6 +369,11 @@ private:
     bool   BackendReports(const Expect& exp, const DeviceKey& key);
     void   MarkFailedLocked(const std::string& detail);
     void   PersistLocked();
+    /* Snapshots the dirty per-scene store and hands it to
+       deps_.save_modes WITHOUT the mutex held (file I/O must
+       never run under mutex_). No-op when nothing changed or
+       no sink is wired; a failed save lands in status_detail_. */
+    void   FlushPersisted();
     void   DoControl(PlaybackControl control, std::string& err);
     void   Changed();
 
@@ -414,10 +438,13 @@ private:
     uint64_t           wired_seq_       = 0;
 
     /* Per-scene persistence (bounded LRU — scene churn can't
-       grow the engine's memory without limit). */
+       grow the engine's memory without limit). modes_dirty_
+       marks a change FlushPersisted must hand to the profile
+       store (Task 3.8 durability). */
     std::map<std::string, PerScene> per_scene_;
     std::deque<std::string>      scene_lru_; /* front=oldest */
     std::string        scene_key_;
+    bool               modes_dirty_    = false;
 };
 
 } /* namespace openrgb2 */

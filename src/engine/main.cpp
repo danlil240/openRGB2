@@ -21,6 +21,8 @@
 #include "OrderlyShutdown.h"
 #include "PlaybackController.h"
 #include "PowerLifecycle.h"
+#include "ProfileStore.h"
+#include "SceneLoader.h"
 #include "SceneWorker.h"
 
 #include "EngineService.h"
@@ -34,6 +36,7 @@
 
 #include "effects/Presets.h"
 #include "presets/EffectRegistry.h"
+#include "presets/PresetRegistry.h"
 #include "scene/SceneJson.h"
 
 #include <nlohmann/json.hpp>
@@ -43,9 +46,11 @@
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -101,20 +106,29 @@ void SyncLanes(openrgb2::DeliveryPipeline& pipeline,
 void Usage(const char* argv0)
 {
     std::fprintf(stderr,
-        "usage: %s [--scene <scene.json>] [--effects-dir <dir>]\n"
+        "usage: %s [--scene <file>] [--effects-dir <dir>]\n"
+        "          [--devices-dir <dir>] [--state <file>]\n"
         "          [--sdk [host:port]] [--ipc | --no-ipc]\n"
         "\n"
         "  Runs the lighting engine until SIGINT/SIGTERM. No UI is\n"
         "  required or expected. Without --scene the engine idles at\n"
         "  the 60 Hz scene clock (no frames are produced).\n"
-        "  --scene expects an expanded SceneDocument JSON (the core\n"
-        "  scene schema); workspace/profile resolution lands with the\n"
-        "  profile task. --effects-dir loads effect-look JSON files so\n"
+        "  --scene accepts any persisted form the profile layer\n"
+        "  resolves: an expanded SceneDocument JSON ('version'),\n"
+        "  a compact workspace studio.json ('schema_version'), or a\n"
+        "  legacy host-settings blob ('scene'). Workspace docs need\n"
+        "  --devices-dir (default: presets/devices or\n"
+        "  src/core/presets/devices relative to the working\n"
+        "  directory). --effects-dir loads effect-look JSON files so\n"
         "  scenes that name a preset resolve through the registry.\n"
         "  --sdk connects submitLatest to the OpenRGB backend SDK\n"
         "  (default 127.0.0.1:6744); without it frames go to a null\n"
         "  sink. The backend is launched externally — this process\n"
         "  never spawns it.\n"
+        "  --state sets the durable engine profile (default\n"
+        "  profiles/local/engine-state.json — gitignored user state\n"
+        "  holding per-scene playback selections and resolved\n"
+        "  binding identities; atomic writes + last-known-good).\n"
         "  IPC is on by default: the command pipe %s and the\n"
         "  read-only diagnostics pipe %s (restricted to the\n"
         "  creating user; see docs/ipc-protocol.md). --no-ipc\n"
@@ -123,41 +137,107 @@ void Usage(const char* argv0)
         openrgb2::ipc::kDiagnosticsPipeName);
 }
 
-bool LoadSceneFile(const std::string& path,
-                   std::shared_ptr<studio::SceneDocument>& out)
+/* Device-type registry for workspace resolution: --devices-dir,
+   else the conventional probe paths relative to the working
+   directory. An empty registry is legal — only compact
+   workspace documents actually need it. */
+studio::PresetRegistry BuildDeviceRegistry(const std::string& dir)
 {
-    std::ifstream in(path);
-    if(!in)
+    studio::PresetRegistry reg;
+    std::vector<std::string> candidates;
+    if(!dir.empty())
     {
-        std::fprintf(stderr, "openrgb2-engine: cannot open %s\n",
-                     path.c_str());
-        return false;
+        candidates.push_back(dir);
     }
-    std::stringstream ss;
-    ss << in.rdbuf();
-
-    nlohmann::json j = nlohmann::json::parse(ss.str(), nullptr, false);
-    if(j.is_discarded())
+    else
     {
-        std::fprintf(stderr, "openrgb2-engine: %s is not valid JSON\n",
-                     path.c_str());
-        return false;
+        candidates.push_back("presets/devices");
+        candidates.push_back("src/core/presets/devices");
     }
-
-    auto doc = std::make_shared<studio::SceneDocument>();
-    std::vector<std::string> errors;
-    if(!studio::FromJson(j, *doc, &errors))
+    for(const std::string& c : candidates)
     {
-        std::fprintf(stderr, "openrgb2-engine: %s failed to load:\n",
-                     path.c_str());
+        std::error_code ec;
+        if(dir.empty() && !std::filesystem::exists(c, ec))
+        {
+            continue;   /* probe candidate absent — try the next */
+        }
+        std::vector<std::string> errors;
+        reg.LoadDirectory(c, &errors);
         for(const std::string& e : errors)
         {
-            std::fprintf(stderr, "  %s\n", e.c_str());
+            std::fprintf(stderr,
+                "openrgb2-engine: device types: %s\n", e.c_str());
         }
+        if(dir.empty() && reg.FileCount() == 0)
+        {
+            continue;
+        }
+        std::fprintf(stderr,
+            "openrgb2-engine: device-type registry loaded %zu "
+            "types from %s\n", reg.FileCount(), c.c_str());
+        return reg;
+    }
+    return reg;
+}
+
+/* Task 3.8 offline bindings: record the identity each scene
+   binding resolved TO (serial/location/zone + LED count) into
+   the engine profile. A binding then resolves to the SAME
+   device after restart — a missing device keeps its binding
+   and a same-named different device can never inherit it.
+   Only reports true on change (the owner loop must not
+   rewrite the profile every 500 ms tick). */
+bool RecordResolvedBindings(
+    openrgb2::DeviceMapper& mapper,
+    const std::vector<openrgb2::DeviceSnapshot>& snaps,
+    openrgb2::EngineState& state)
+{
+    const std::shared_ptr<const studio::SceneDocument> doc =
+        mapper.Scene();
+    if(!doc)
+    {
         return false;
     }
-    out = std::move(doc);
-    return true;
+    bool changed = false;
+    for(const studio::DeviceBinding& b : doc->bindings)
+    {
+        openrgb2::ZonePlacement zp;
+        if(!mapper.BoundZone(b.id, zp))
+        {
+            continue;   /* unresolved/ambiguous — keep the last
+                           recorded identity (missing-device
+                           profile preservation). */
+        }
+        const auto sit = std::find_if(snaps.begin(), snaps.end(),
+            [&zp](const openrgb2::DeviceSnapshot& s)
+            { return s.key == zp.controller; });
+        if(sit == snaps.end())
+        {
+            continue;
+        }
+        std::string zone_name = b.zone_name;
+        if(zone_name.empty() && zp.zone_index < sit->zones.size())
+        {
+            zone_name = sit->zones[zp.zone_index].name;
+        }
+        const studio::DeviceBinding id =
+            openrgb2::ResolvedBindingIdentity(b, *sit, zone_name,
+                                              zp.led_count);
+        studio::DeviceBinding& slot = state.bindings[b.id];
+        if(slot.id              != id.id              ||
+           slot.controller_name != id.controller_name ||
+           slot.vendor          != id.vendor          ||
+           slot.serial          != id.serial          ||
+           slot.location        != id.location        ||
+           slot.device_type     != id.device_type     ||
+           slot.zone_name       != id.zone_name       ||
+           slot.zone_leds       != id.zone_leds)
+        {
+            slot    = id;
+            changed = true;
+        }
+    }
+    return changed;
 }
 
 } /* anonymous namespace */
@@ -166,6 +246,8 @@ int main(int argc, char** argv)
 {
     std::string scene_path;
     std::string effects_dir;
+    std::string devices_dir;
+    std::string state_path = "profiles/local/engine-state.json";
     std::string sdk_addr;                 /* empty = SDK disabled */
     bool        sdk_enabled = false;
     bool        ipc_enabled = true;       /* --no-ipc opts out    */
@@ -179,6 +261,14 @@ int main(int argc, char** argv)
         else if((arg == "--effects-dir") && i + 1 < argc)
         {
             effects_dir = argv[++i];
+        }
+        else if((arg == "--devices-dir") && i + 1 < argc)
+        {
+            devices_dir = argv[++i];
+        }
+        else if((arg == "--state") && i + 1 < argc)
+        {
+            state_path = argv[++i];
         }
         else if(arg == "--sdk")
         {
@@ -428,7 +518,81 @@ int main(int argc, char** argv)
        GroupStatus/RgbClockSnapshot is in-process state not
        exposed over the SDK wire, and no backend diagnostics
        pipe exists yet — sync reports honest Unknown/Stale. */
+
+    /*---- Task 3.8 — the durable engine profile -------------*\
+    || profiles/local/ is gitignored user state: resolved      ||
+    || identities (serials/locations) live here, never in      ||
+    || committed files. The store does atomic temp+rename      ||
+    || writes, keeps a last-known-good backup, and migrates    ||
+    || older schema versions forward. A corrupt primary is     ||
+    || reported honestly and recovered from LKG — never a      ||
+    || blank or guessed state.                                 ||
+    \*---------------------------------------------------------*/
+    openrgb2::ProfileStore    profile(state_path);
+    openrgb2::EngineState     engine_state;
+    std::mutex                state_mutex;
+    {
+        const openrgb2::ProfileStore::LoadResult lr =
+            profile.Load();
+        switch(lr.status)
+        {
+        case openrgb2::ProfileStore::LoadStatus::Empty:
+            break;   /* fresh start — not an error */
+        case openrgb2::ProfileStore::LoadStatus::Loaded:
+            engine_state = lr.state;
+            break;
+        case openrgb2::ProfileStore::LoadStatus::Migrated:
+            engine_state = lr.state;
+            std::fprintf(stderr,
+                "openrgb2-engine: profile %s migrated to schema "
+                "v%d\n", state_path.c_str(),
+                openrgb2::kEngineStateSchemaVersion);
+            break;
+        case openrgb2::ProfileStore::LoadStatus::Recovered:
+            engine_state = lr.state;
+            std::fprintf(stderr,
+                "openrgb2-engine: %s\n", lr.error.c_str());
+            break;
+        case openrgb2::ProfileStore::LoadStatus::Failed:
+            /* Honest report; the engine still runs (the state
+               is empty and flagged, never guessed). */
+            std::fprintf(stderr,
+                "openrgb2-engine: %s — running with no profile "
+                "state\n", lr.error.c_str());
+            break;
+        }
+        for(const std::string& w : lr.warnings)
+        {
+            std::fprintf(stderr,
+                "openrgb2-engine: profile: %s\n", w.c_str());
+        }
+    }
+
+    /* Durable per-scene playback selections (Task 3.8): the
+       controller hands its whole LRU store on every change —
+       write it atomically through the profile store. */
+    pdeps.save_modes =
+        [&profile, &engine_state, &state_mutex](
+            const std::vector<openrgb2::PersistedSceneMode>& modes,
+            std::string& err)
+        {
+            std::lock_guard<std::mutex> g(state_mutex);
+            engine_state.scenes = modes;
+            return profile.Save(engine_state, err);
+        };
+
     openrgb2::PlaybackController playback(std::move(pdeps));
+    {
+        const size_t restored =
+            playback.RestoreSceneModes(engine_state.scenes);
+        if(restored > 0)
+        {
+            std::fprintf(stderr,
+                "openrgb2-engine: restored %zu per-scene playback "
+                "selections from %s\n", restored,
+                state_path.c_str());
+        }
+    }
 
     /* Power lifecycle (Task 3.7): display-off gates ALL RGB
        frame output + reactive capture through the pipeline's
@@ -547,6 +711,25 @@ int main(int argc, char** argv)
        runs below (OrderlyShutdown). */
     ipc_deps.request_shutdown =
         [] { g_stop.store(true); };
+    /* Task 3.8 offline bindings: a persisted resolved identity
+       completes name-only scene bindings before apply — the
+       same binding id keeps pointing at the same physical
+       device across restarts, and a same-named different
+       device can never inherit the binding. */
+    ipc_deps.prepare_scene =
+        [&engine_state, &state_mutex](
+            std::shared_ptr<const studio::SceneDocument>& doc)
+        {
+            auto copy = std::make_shared<studio::SceneDocument>(*doc);
+            {
+                std::lock_guard<std::mutex> g(state_mutex);
+                if(openrgb2::AugmentSceneBindings(*copy,
+                                                engine_state.bindings))
+                {
+                    doc = copy;
+                }
+            }
+        };
     openrgb2::ipc::EngineService ipc_service(engine, ipc_deps);
 
     std::unique_ptr<openrgb2::ipc::IpcServer>         ipc_server;
@@ -593,12 +776,27 @@ int main(int argc, char** argv)
 
     if(!scene_path.empty())
     {
+        /* Task 3.8: --scene resolves through the profile/
+           workspace layer — expanded scene JSON, a compact
+           studio.json workspace, or a legacy host-settings
+           blob all land on the same SceneDocument. */
+        const studio::PresetRegistry device_registry =
+            BuildDeviceRegistry(devices_dir);
         std::shared_ptr<studio::SceneDocument> doc;
-        if(!LoadSceneFile(scene_path, doc))
+        std::string err;
+        std::vector<std::string> warnings;
+        if(!openrgb2::LoadSceneDocument(scene_path, device_registry,
+                                        doc, err, &warnings))
         {
+            std::fprintf(stderr, "openrgb2-engine: %s\n",
+                         err.c_str());
             return 1;
         }
-        std::string err;
+        for(const std::string& w : warnings)
+        {
+            std::fprintf(stderr, "openrgb2-engine: %s: %s\n",
+                         scene_path.c_str(), w.c_str());
+        }
         if(!ipc_service.ApplySceneDocument(doc, err))
         {
             std::fprintf(stderr,
@@ -671,6 +869,23 @@ int main(int argc, char** argv)
             const std::vector<openrgb2::DeviceSnapshot> snaps =
                 sdk_client->Snapshots();
             mapper.SyncDevices(snaps);
+            /* Task 3.8: persist the identities bindings resolved
+               to — the offline binding table survives restarts
+               and only writes on change. */
+            {
+                std::lock_guard<std::mutex> g(state_mutex);
+                if(RecordResolvedBindings(mapper, snaps,
+                                          engine_state))
+                {
+                    std::string serr;
+                    if(!profile.Save(engine_state, serr))
+                    {
+                        std::fprintf(stderr,
+                            "openrgb2-engine: profile save "
+                            "failed: %s\n", serr.c_str());
+                    }
+                }
+            }
             for(const openrgb2::DeviceKey& key :
                 mapper.BoundControllers())
             {

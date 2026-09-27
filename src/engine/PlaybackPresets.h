@@ -64,6 +64,23 @@ struct PlaybackParams
 /* Clamp a requested speed into the preset domain. */
 int32_t ClampPlaybackSpeed(int32_t speed);
 
+/*---------------------------------------------------------*\
+||| PersistedSceneMode — one per-scene playback selection  ||
+||| as stored in the engine profile (Task 3.8). The scene  ||
+||| document itself carries no playback field (src/core is ||
+||| frozen), so the engine keeps this store keyed by scene ||
+||| identity; the profile store makes it durable across    ||
+||| engine restarts. Old profiles never had the field — a  ||
+||| migrated/missing entry means LiveEffects, never an     ||
+||| assumed uploaded playback.                             ||
+\*---------------------------------------------------------*/
+struct PersistedSceneMode
+{
+    std::string    scene_key;
+    PlaybackMode   mode   = PlaybackMode::LiveEffects;
+    PlaybackParams params;
+};
+
 /* Which controls a preset supports (UI/diagnostics). */
 struct PlaybackPresetSupport
 {

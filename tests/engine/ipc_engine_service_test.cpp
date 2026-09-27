@@ -153,6 +153,36 @@ int main()
                          nlohmann::json::object());
         CHECK(r.body["document"]["name"].get<std::string>()
               == "ipc-test");
+
+        /* Task 3.8 calibration regression: an out-of-range LED
+           address (emitter 8 on an 8-LED zone) is rejected at
+           the persistence boundary — expanded documents bypass
+           workspace resolution, so the check runs on apply. */
+        const auto led_doc = [](int address)
+        {
+            char buf[1024];
+            std::snprintf(buf, sizeof(buf),
+                "{ \"document\": { \"version\": 2,"
+                " \"bindings\": [{ \"id\": \"b1\","
+                "  \"controller_name\": \"fan\","
+                "  \"zone_name\": \"ring\", \"zone_leds\": 8 }],"
+                " \"objects\": [{ \"id\": \"o9\", \"kind\": \"device\","
+                "  \"binding\": \"b1\", \"verified\": true,"
+                "  \"emitters\": [{ \"address\": %d }] }] } }",
+                address);
+            return nlohmann::json::parse(buf);
+        };
+        r = svc.Dispatch(MsgType::SetScene, led_doc(8));
+        CHECK(r.code == ErrCode::BadRequest);
+        r = svc.Dispatch(MsgType::GetScene,
+                         nlohmann::json::object());
+        CHECK(r.body["document"]["name"].get<std::string>()
+              == "ipc-test");
+
+        /* ...while the same document with an in-range address
+           applies cleanly. */
+        r = svc.Dispatch(MsgType::SetScene, led_doc(7));
+        CHECK(r.code == ErrCode::Ok);
     }
 
     /*---- playback mode --------------------------------------*/
