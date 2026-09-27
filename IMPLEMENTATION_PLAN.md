@@ -342,14 +342,14 @@ Dependencies: **0 → 1 → 2 → 3 → 4 → 5 → 6**. Within Milestone 2, qua
 
 **Create:** `src/ui/`, `ui/pages/`, `ui/components/`, `ui/theme/`, `tests/ui/`.
 
-- [ ] Review a clickable Dashboard/Lighting/Layout mockup against section 5.
-- [ ] Implement the shared visual system, presets, device groups, playback, color/speed, profiles, and connection/error states.
-- [ ] Add the Animation playback / Live effects selector, supported-control filtering, disabled reasons for reactive scenes, upload progress/state, and persisted selection. Preserve old profiles as Live effects.
-- [ ] Integrate layout, linked copies, orientation, identification, calibration, and undo/redo through engine commands.
-- [ ] Reject invalid LED addresses at every boundary; test Save while the edited field still has focus.
-- [ ] Port the existing audio/screen/key-reactive RGB inputs into the engine with bounded queues and explicit enable/disable.
-- [ ] Display configured/physically measured playback, live delivery, and preview FPS separately; show stale synchronization and unmeasured rates honestly.
-- [ ] Test keyboard access, high-DPI layouts, save failures, UI restart, and responsiveness under streaming.
+- [x] Review a clickable Dashboard/Lighting/Layout mockup against section 5.
+- [x] Implement the shared visual system, presets, device groups, playback, color/speed, profiles, and connection/error states.
+- [x] Add the Animation playback / Live effects selector, supported-control filtering, disabled reasons for reactive scenes, upload progress/state, and persisted selection. Preserve old profiles as Live effects.
+- [x] Integrate layout, linked copies, orientation, identification, calibration, and undo/redo through engine commands.
+- [x] Reject invalid LED addresses at every boundary; test Save while the edited field still has focus.
+- [x] Port the existing audio/screen/key-reactive RGB inputs into the engine with bounded queues and explicit enable/disable.
+- [x] Display configured/physically measured playback, live delivery, and preview FPS separately; show stale synchronization and unmeasured rates honestly.
+- [x] Test keyboard access, high-DPI layouts, save failures, UI restart, and responsiveness under streaming.
 
 **Pass:** The real setup can be configured and animated without opening OpenRGB or editing JSON; UI responsiveness meets section 6.
 
