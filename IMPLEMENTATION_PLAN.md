@@ -357,12 +357,12 @@ Dependencies: **0 → 1 → 2 → 3 → 4 → 5 → 6**. Within Milestone 2, qua
 
 **Create:** `docs/benchmarks/mixed-and-soak.md`, `docs/hardware/support-matrix.md`.
 
-- [ ] Measure cross-device skew and add latency compensation only where justified.
-- [ ] Qualify both modes on the complete topology, including playback clock drift, rapid mode/parameter changes, and a disconnected device during upload.
-- [ ] Test cold start, backend restart, UI crash, unplug/replug, display sleep, system suspend/resume, and an existing competing owner.
-- [ ] Verify no recurring GPU RGB writes wake a sleeping display and missing bindings are not reassigned to same-named devices.
-- [ ] Verify cooling/sensors remain unchanged during RGB stress.
-- [ ] Run an eight-hour soak for each mode; inspect timing, resources, retries, heartbeat gaps, clock drift, and physical output.
+- [x] Measure cross-device skew and add latency compensation only where justified.
+- [x] Qualify both modes on the complete topology, including playback clock drift, rapid mode/parameter changes, and a disconnected device during upload.
+- [x] Test cold start, backend restart, UI crash, unplug/replug, display sleep, system suspend/resume, and an existing competing owner.
+- [x] Verify no recurring GPU RGB writes wake a sleeping display and missing bindings are not reassigned to same-named devices.
+- [x] Verify cooling/sensors remain unchanged during RGB stress.
+- [x] Run an eight-hour soak for each mode; inspect timing, resources, retries, heartbeat gaps, clock drift, and physical output.
 
 **Pass:** Agreed FPS and stability requirements pass on the full topology. Unidentified motherboard LEDs and unverified GPU rings remain outside the verified support matrix.
 

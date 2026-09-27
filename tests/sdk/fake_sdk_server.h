@@ -149,6 +149,27 @@ public:
         events.clear();
     }
 
+    /* Device disconnect/reconnect simulation (task 5.2): the
+       backend's enumeration is positional — erasing a
+       controller shifts the indices of every later one,
+       exactly like the real server serving a shorter
+       controller list. HandleSend reads `controllers` under
+       the same mutex, so a removal mid-request is safe. */
+    void RemoveController(size_t index)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        if(index < controllers.size())
+        {
+            controllers.erase(controllers.begin() +
+                              (ptrdiff_t)index);
+        }
+    }
+    void AddController(const FakeController& c)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        controllers.push_back(c);
+    }
+
     void HandleSend(FakeStream& stream, const uint8_t* data,
                     size_t len);
 
@@ -294,6 +315,72 @@ namespace detail
         b.insert(b.end(), s.begin(), s.end());
         b.push_back(0);
     }
+
+    /* Apply the applied fields of a replayed mode description
+       (the raw blob inside an UPDATEMODE body — the same
+       v4-shaped serialization BuildControllerBody emits for
+       one mode). Bounded: false on malformed input, never
+       reads past `len`. Only the fields the client can patch
+       (speed/direction/colors + name) are written back. */
+    inline bool ApplyModeBlob(const uint8_t* p, size_t len,
+                              FakeMode& m)
+    {
+        if(len < 2)
+        {
+            return false;
+        }
+        uint16_t name_len = 0;
+        memcpy(&name_len, p, 2);
+        if(name_len == 0 || len < 2u + name_len)
+        {
+            return false;
+        }
+        m.name.assign(reinterpret_cast<const char*>(p + 2),
+                      name_len - 1);
+        const uint8_t* q = p + 2 + name_len;
+        size_t         left = len - 2 - name_len;
+        const auto u32 = [&q, &left](uint32_t& v) -> bool
+        {
+            if(left < 4)
+            {
+                return false;
+            }
+            memcpy(&v, q, 4);
+            q += 4;
+            left -= 4;
+            return true;
+        };
+        /* value, flags, speed_min, speed_max, brightness_min,
+           brightness_max, colors_min, colors_max */
+        uint32_t v = 0;
+        for(int i = 0; i < 8; ++i)
+        {
+            if(!u32(v)) { return false; }
+        }
+        if(!u32(m.speed) || !u32(v) /* brightness */ ||
+           !u32(m.direction) || !u32(m.color_mode))
+        {
+            return false;
+        }
+        if(left < 2)
+        {
+            return false;
+        }
+        uint16_t ncolors = 0;
+        memcpy(&ncolors, q, 2);
+        q += 2;
+        left -= 2;
+        if((size_t)ncolors * 4 > left)
+        {
+            return false;
+        }
+        m.colors.assign(ncolors, 0);
+        for(uint16_t i = 0; i < ncolors; ++i)
+        {
+            memcpy(&m.colors[i], q + i * 4, 4);
+        }
+        return true;
+    }
 }
 
 inline std::vector<uint8_t> FakeSdkServer::BuildControllerBody(
@@ -422,6 +509,58 @@ inline void FakeSdkServer::HandleSend(FakeStream& stream,
                       openrgb2::sdk::kPktControllerData,
                       BuildControllerBody(
                           controllers[req.header.dev_id]));
+            }
+            break;
+        }
+        case openrgb2::sdk::kPktUpdateMode:
+        {
+            /* The real backend applies the replayed mode
+               description: active_mode moves and the patched
+               fields (speed/direction/colors) stick — the
+               playback task's RefreshStatus acknowledgement
+               reads exactly these back. */
+            events.push_back(ServerEvent{ req.header.dev_id,
+                                          req.header.pkt_id,
+                                          req.body });
+            if(req.header.dev_id < controllers.size() &&
+               req.body.size() >= 8)
+            {
+                int32_t mode_index = 0;
+                memcpy(&mode_index, req.body.data() + 4, 4);
+                FakeController& c = controllers[req.header.dev_id];
+                if(mode_index >= 0 &&
+                   (size_t)mode_index < c.modes.size())
+                {
+                    c.active_mode = (uint32_t)mode_index;
+                    detail::ApplyModeBlob(req.body.data() + 8,
+                                          req.body.size() - 8,
+                                          c.modes[(size_t)mode_index]);
+                }
+            }
+            break;
+        }
+        case openrgb2::sdk::kPktSetCustomMode:
+        {
+            /* SETCUSTOMMODE switches the controller to its
+               direct mode — the mode named "Direct" here
+               (matches the real wireless controller's naming;
+               index 0 is the custom mode on OpenRGB devices). */
+            events.push_back(ServerEvent{ req.header.dev_id,
+                                          req.header.pkt_id,
+                                          req.body });
+            if(req.header.dev_id < controllers.size())
+            {
+                FakeController& c = controllers[req.header.dev_id];
+                uint32_t direct = 0;
+                for(size_t i = 0; i < c.modes.size(); ++i)
+                {
+                    if(c.modes[i].name == "Direct")
+                    {
+                        direct = (uint32_t)i;
+                        break;
+                    }
+                }
+                c.active_mode = direct;
             }
             break;
         }

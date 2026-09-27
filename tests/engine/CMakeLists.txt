@@ -62,6 +62,60 @@ set_tests_properties(e2e_fake_backend_test PROPERTIES
     LABELS engine
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Task 5.2 — mode qualification: rapid mode/parameter storm
+# (no wedge, no lost requests, pending always resolves),
+# disconnect during an uploaded-playback apply (honest
+# failure, never silent partial success), and reconnect
+# recovery — the REAL EngineHost composition against the
+# in-process fake backend.
+add_executable(e2e_mode_qual_test e2e_mode_qual_test.cpp)
+target_link_libraries(e2e_mode_qual_test PRIVATE
+    openrgb2_host)
+target_include_directories(e2e_mode_qual_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(e2e_mode_qual_test PRIVATE NDEBUG)
+add_test(NAME e2e_mode_qual_test COMMAND e2e_mode_qual_test)
+set_tests_properties(e2e_mode_qual_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Task 5.3 — lifecycle matrix (simulable rows): cold start with
+# the backend down-then-up, UI-session crash over REAL named
+# pipes, live unplug/replug (bounded misroute + identity
+# re-resolve), injected display-off/suspend-resume against the
+# production lifecycle machine, backend restart, and the
+# re-probe that re-arms a latched-out reconnect — plus the
+# competing-owner report-and-never-kill contract against a real
+# renamed process. Runs the REAL EngineHost composition against
+# the in-process fake SDK backend.
+add_executable(e2e_lifecycle_test e2e_lifecycle_test.cpp)
+target_link_libraries(e2e_lifecycle_test PRIVATE
+    openrgb2_host)
+target_include_directories(e2e_lifecycle_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(e2e_lifecycle_test PRIVATE NDEBUG)
+add_test(NAME e2e_lifecycle_test COMMAND e2e_lifecycle_test)
+set_tests_properties(e2e_lifecycle_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Task 5.4 — non-interference: display-off zero writes per
+# lane (incl. a distinct GPU lane asserted separately),
+# parked playback requests across the gate (no wire write,
+# post-wake replay), and missing-binding identity integrity
+# across an engine restart — the REAL EngineHost composition
+# against the in-process fake SDK backend.
+add_executable(e2e_noninterference_test e2e_noninterference_test.cpp)
+target_link_libraries(e2e_noninterference_test PRIVATE
+    openrgb2_host)
+target_include_directories(e2e_noninterference_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(e2e_noninterference_test PRIVATE NDEBUG)
+add_test(NAME e2e_noninterference_test COMMAND e2e_noninterference_test)
+set_tests_properties(e2e_noninterference_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Task 3.5 — IPC layer. ipc_server_test additionally needs the
 # named-pipe transport + ACL APIs.
 engine_suite(ipc_protocol_test)

@@ -580,8 +580,9 @@ bool EngineHost::Start(std::string& err)
     if(opts_.sdk_enabled)
     {
         sdk::OpenRgbClientOptions copts;
-        copts.host = opts_.sdk_host;
-        copts.port = opts_.sdk_port;
+        copts.host    = opts_.sdk_host;
+        copts.port    = opts_.sdk_port;
+        copts.backoff = opts_.sdk_backoff;
         std::unique_ptr<sdk::IStreamTransport> transport =
             opts_.transport_factory
                 ? opts_.transport_factory()
@@ -1029,6 +1030,23 @@ void EngineHost::PollOnce()
     if(sdk_)
     {
         sdk_->Poll();
+        ReprobeSdk(Clock::now());
+        /* Task 5.3 topology revalidation (option doc above):
+           a bounded RefreshStatus on a slow cadence so a
+           mid-session unplug/replug is detected within the
+           interval instead of misrouting frames through a
+           stale positional index until the socket happens
+           to break. Failures mark the connection broken —
+           the bounded reconnect path takes over. */
+        if(sdk_->State() == ConnectionState::Connected)
+        {
+            const TimePoint now = Clock::now();
+            if(now - last_topology_poll_ >= opts_.sdk_topology_poll)
+            {
+                last_topology_poll_ = now;
+                sdk_->RefreshStatus();
+            }
+        }
         /* Mirror connection/topology into the lanes so
            validation tracks the live backend state and new
            controllers get lanes without a restart. */
@@ -1083,6 +1101,19 @@ void EngineHost::PollOnce()
             {
                 continue;
             }
+            /* Task 5.3: no upkeep writes while the power gate
+               is asserted — SETCUSTOMMODE is a hardware write
+               and must not cross a suspend/display-off
+               boundary (it bypasses the lane gate the same
+               way the controller's own freeze does — but the
+               freeze is the only allowed exception, and it
+               goes through the playback controller). The
+               generation bookkeeping stays stale, so the
+               upkeep re-applies once the gate releases. */
+            if(lifecycle_ && lifecycle_->OutputPaused())
+            {
+                continue;
+            }
             uint64_t& done = custom_mode_done_[key];
             if(done != snap_it->topology_generation)
             {
@@ -1093,6 +1124,29 @@ void EngineHost::PollOnce()
             }
         }
     }
+}
+
+/* Task 5.3: the bounded backoff is deliberate, but latching
+   Disconnected FOREVER after max_attempts is not — a backend
+   outage longer than the backoff window (a machine boot,
+   a slow manual restart) left the engine permanently
+   detached: nothing called ReconnectNow() after Start().
+   Poll-side re-arm at a bounded rate recovers honestly. */
+void EngineHost::ReprobeSdk(TimePoint now)
+{
+    if(sdk_->State() != ConnectionState::Disconnected)
+    {
+        return;
+    }
+    if(now - last_reprobe_ < opts_.sdk_reprobe)
+    {
+        return;
+    }
+    last_reprobe_ = now;
+    Log("backend absent — re-arming the bounded SDK reconnect "
+        "(client latched Disconnected after exhausting "
+        "backoff)");
+    sdk_->ReconnectNow();
 }
 
 void EngineHost::Run()

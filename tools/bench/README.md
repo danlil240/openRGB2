@@ -45,6 +45,39 @@ Layout:
 | `sdk_wire.{h,cpp}` | Pure SDK wire-format parsing/building (protocol capped at 4); offline-tested by `tests/backend/bench_sdk_wire_test.cpp` |
 | `sdk_client.{h,cpp}` | Minimal synchronous winsock TCP client with version handshake |
 | `bench_producer.cpp` | CLI, workload patterns, rate sweep, state capture/restore, CSV output |
+| `skew_bench.cpp` | M5 cross-device skew harness (below) |
+| `skew_stats.h` | Pure skew/distribution aggregation; offline-tested by `tests/backend/skew_stats_test.cpp` |
 
 SDK send success is not hardware confirmation — physical presentation
 requires the measurement method in `docs/benchmarks/baseline.md` §6.5.
+
+## Skew harness (Milestone 5)
+
+`skew_bench` measures frame-application skew across controllers by
+driving the **production delivery path** — a real `DeliveryPipeline`
+(per-controller lanes, the engine's wireless 30 ms budget, latest-wins)
+sending through a real `OpenRgbClient` — behind an instrumented
+transport sink that timestamps every send's call/return. Each producer
+tick stamps one logical timestamp (one sequence + one `sample_time`)
+across all lanes, mirroring the scene worker's submission shape.
+
+```bash
+build/tools/bench/Release/skew_bench.exe --list            # enumerate (read-only)
+build/tools/bench/Release/skew_bench.exe --rtt-only        # request/reply RTT probe (read-only)
+build/tools/bench/Release/skew_bench.exe --all --dry-run   # show the plan
+
+build/tools/bench/Release/skew_bench.exe \
+    --all --pattern gradient --sweep 30,60 --duration-s 20 \
+    --rtt-rounds 50 --out session/skew.csv
+```
+
+Reports, per lane: send-duration distribution (submit → transport
+return), send offset from the tick's logical timestamp, sequence lag
+for paced lanes, and per-tick inter-controller call/return spread —
+plus the per-controller `DeliveryStats` the engine exposes via
+GET_DELIVERY_STATS. UPDATELEDS is fire-and-forget, so "send complete"
+means **transport-admitted, never displayed**; the RTT probe
+(REQUEST_CONTROLLER_COUNT / CONTROLLER_DATA round trips on a side
+connection) is the protocol's only true submit→ack observable.
+Physical LED skew requires hardware observation — see
+`docs/benchmarks/skew-result.md`.

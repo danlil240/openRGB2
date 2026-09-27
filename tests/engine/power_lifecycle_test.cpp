@@ -606,6 +606,215 @@ static void TestReconnectResend()
 }
 
 /*---------------------------------------------------------*\
+|| T7: the power gate parks user requests — no write        ||
+||     crosses the suspend boundary; the parked intent      ||
+||     replays through the validated path post-wake (5.4)   ||
+\*---------------------------------------------------------*/
+
+static void TestSuspendParksRequest()
+{
+    Harness h;
+    const DeviceSnapshot ws = WirelessSnap();
+    const DeviceSnapshot wd = WiredSnap();
+    h.backend.snaps = { ws, wd };
+    h.pipeline.RegisterDevice(ws);
+    h.pipeline.RegisterDevice(wd);
+    h.UploadActive();
+    const size_t ops_at_upload = h.backend.ops.size();
+
+    /* Suspend: gate asserts. An IPC-side playback Request
+       inside the suspend window must NOT write — it is
+       validated, recorded, and parked for replay. */
+    h.life->PostEvent(PowerLifecycle::Event::Suspend);
+    h.Step();
+    CHECK(h.ctl->PowerGate());
+
+    PlaybackParams slower;
+    slower.speed = 40;
+    PlaybackController::Result r = h.ctl->Request(
+        PlaybackMode::AnimationPlayback,
+        PlaybackControl::Playing, slower);
+    CHECK(r.accepted);                 /* parked, not refused  */
+    CHECK(r.pending);
+    CHECK(h.ctl->AckPending());        /* honest pending       */
+    CHECK(h.ctl->RequestedMode() ==
+          PlaybackMode::AnimationPlayback);
+    /* Zero hardware writes across the boundary: no selects,
+       no custom-mode asserts, no direct frames. */
+    CHECK(h.backend.ops.size() == ops_at_upload);
+    h.Step();
+    CHECK(h.backend.ops.size() == ops_at_upload);
+
+    /* A second parked request overwrites the first — latest
+       intent wins, still zero writes. */
+    PlaybackController::Result r2 = h.ctl->Request(
+        PlaybackMode::AnimationPlayback,
+        PlaybackControl::Stopped, slower);
+    CHECK(r2.accepted && r2.pending);
+    CHECK(h.ctl->IntendedControl() == PlaybackControl::Stopped);
+    CHECK(h.backend.ops.size() == ops_at_upload);
+
+    /* Resume: the wake path revalidates (refresh) BEFORE any
+       write, then the parked intent lands — Stopped here, so
+       the restore leaves the device in Direct, never a
+       Playing loop the user cancelled mid-sleep. */
+    h.life->PostEvent(PowerLifecycle::Event::Resume);
+    h.Step();
+    CHECK(!h.ctl->PowerGate());
+    size_t ri = h.backend.ops.size(), wi = h.backend.ops.size();
+    for(size_t i = ops_at_upload; i < h.backend.ops.size(); ++i)
+    {
+        if(h.backend.ops[i] == "refresh" &&
+           ri == h.backend.ops.size())
+        {
+            ri = i;
+        }
+        if((h.backend.ops[i] == "custom" ||
+            h.backend.ops[i].rfind("select:", 0) == 0 ||
+            h.backend.ops[i] == "direct") &&
+           wi == h.backend.ops.size())
+        {
+            wi = i;
+        }
+    }
+    CHECK(ri < wi);   /* revalidation strictly before writes   */
+    CHECK(h.ctl->Status().control == PlaybackControl::Stopped);
+
+    /* Nothing else pending: the deferred slot is consumed. */
+    for(int i = 0; i < 4; ++i)
+    {
+        h.Step();
+    }
+    CHECK(!h.ctl->AckPending());
+}
+
+/*---------------------------------------------------------*\
+|| T8: parked request while NOT owning the group — a new    ||
+||     animation selection made during suspend applies      ||
+||     post-wake through the normal transition              ||
+\*---------------------------------------------------------*/
+
+static void TestSuspendParkedNewUpload()
+{
+    Harness h;
+    const DeviceSnapshot ws = WirelessSnap();
+    h.backend.snaps = { ws };
+    h.pipeline.RegisterDevice(ws);
+    h.scene = MakeScene("rainbow", "rainbow_wave");
+    h.backend.report.valid = true;
+    h.backend.report.name  = "Direct";
+
+    h.life->PostEvent(PowerLifecycle::Event::Suspend);
+    h.Step();
+    CHECK(h.ctl->PowerGate());
+
+    PlaybackParams params;
+    params.speed = 60;
+    PlaybackController::Result r = h.ctl->Request(
+        PlaybackMode::AnimationPlayback,
+        PlaybackControl::Playing, params);
+    CHECK(r.accepted && r.pending);
+    CHECK(h.backend.selects.empty());   /* nothing written   */
+
+    /* Resume: no owned group to revalidate (NotOwned), so the
+       parked request itself replays — the upload lands
+       post-wake, never mid-suspend. */
+    h.life->PostEvent(PowerLifecycle::Event::Resume);
+    h.Step();
+    CHECK(!h.backend.selects.empty());
+    CHECK(h.backend.selects.back() == "Rainbow Wave");
+    h.ReportPending();
+    h.Step();
+    CHECK(h.ctl->Status().upload == UploadState::Active);
+    CHECK(h.ctl->Status().control == PlaybackControl::Playing);
+}
+
+/*---------------------------------------------------------*\
+||| T9: a parked PAUSED request keeps the power hold — the   ||
+|||     wake must NOT un-hold to Playing. This is the only   ||
+|||     test where !HoldOverridden() is the deciding clause  ||
+|||     in AttemptRestore: the parked intent is Paused, so   ||
+|||     IntendedControl()==Paused already holds and only the ||
+|||     flag stands between the user intent and the un-hold. ||
+|||     (T7 parks Stopped — its first clause fails before    ||
+|||     the flag is even consulted.)                         ||
+|\*---------------------------------------------------------*/
+
+static void TestParkedPauseKeepsHold()
+{
+    Harness h;
+    const DeviceSnapshot ws = WirelessSnap();
+    const DeviceSnapshot wd = WiredSnap();
+    h.backend.snaps = { ws, wd };
+    h.pipeline.RegisterDevice(ws);
+    h.pipeline.RegisterDevice(wd);
+    h.UploadActive();
+    const size_t selects_at_upload = h.backend.selects.size();
+
+    /* Display off: the power freeze parks the loop at Paused
+       (control_ AND intended both Paused, power_hold_ set) —
+       a lifecycle-imposed hold, NOT user intent. */
+    h.life->PostEvent(PowerLifecycle::Event::DisplayOff);
+    h.Step();
+    CHECK(h.life->PowerHold());
+    CHECK(h.ctl->Status().control == PlaybackControl::Paused);
+    CHECK(h.ctl->IntendedControl() == PlaybackControl::Paused);
+    CHECK(!h.ctl->HoldOverridden());     /* power-imposed hold */
+    const size_t ops_after_freeze = h.backend.ops.size();
+
+    /* Inside the off window the user re-asserts Paused with a
+       param change (a real recorded request, not an idempotent
+       no-op): validated + parked, zero writes — and it marks
+       the hold overridden by USER intent. */
+    PlaybackParams held;
+    held.speed = 40;                     /* upload used 100    */
+    PlaybackController::Result r = h.ctl->Request(
+        PlaybackMode::AnimationPlayback,
+        PlaybackControl::Paused, held);
+    CHECK(r.accepted && r.pending);
+    CHECK(h.ctl->IntendedControl() == PlaybackControl::Paused);
+    CHECK(h.ctl->HoldOverridden());      /* user overrode hold */
+    CHECK(h.backend.ops.size() == ops_after_freeze);  /* parked */
+
+    /* Wake: AttemptRestore must NOT un-hold to Playing — the
+       flag is the sole deciding predicate here (intended is
+       already Paused). Check intended after the LIFECYCLE poll
+       alone, before the parked-replay tick can re-record it. */
+    h.life->PostEvent(PowerLifecycle::Event::DisplayOn);
+    h.now += std::chrono::milliseconds(600);
+    h.life->Poll(h.now);
+    CHECK(h.ctl->IntendedControl() == PlaybackControl::Paused);
+    /* And no Playing-restore write ran: the revalidation saw
+       the device already held (Direct == intended Paused), so
+       the only post-freeze op is the revalidation refresh. */
+    bool refresh_seen = false;
+    for(size_t i = ops_after_freeze; i < h.backend.ops.size(); ++i)
+    {
+        CHECK(h.backend.ops[i] == "refresh");
+        refresh_seen = true;
+    }
+    CHECK(refresh_seen);
+    CHECK(h.backend.selects.size() == selects_at_upload);
+    CHECK(!h.life->RestorePending());
+    CHECK(!h.life->PowerHold());
+    CHECK(!h.ctl->PowerGate());
+    CHECK(!h.life->OutputPaused());
+
+    /* The parked request replays on the first ungated tick —
+       a no-op now (intended == applied hold), so still no
+       upload restore write and the device stays paused. */
+    h.Step();
+    CHECK(!h.ctl->AckPending());
+    CHECK(h.ctl->Status().control == PlaybackControl::Paused);
+    CHECK(h.ctl->Status().upload == UploadState::Active);
+    CHECK(h.backend.selects.size() == selects_at_upload);
+    /* Nothing ever reached the display: the only wireless
+       write in the whole scenario is the freeze's one
+       sampled-hold frame via the owner bypass. */
+    CHECK(FramesFor(h.transport, ws.key) == 0);
+}
+
+/*---------------------------------------------------------*\
 || T5: maintenance traffic is never the stop mechanism      ||
 \*---------------------------------------------------------*/
 
@@ -695,6 +904,9 @@ int main()
     TestSuspendResume();
     TestResumeConsistent();
     TestReconnectResend();
+    TestSuspendParksRequest();
+    TestSuspendParkedNewUpload();
+    TestParkedPauseKeepsHold();
     TestMaintenanceNeverStopped();
     TestGateOrdering();
 

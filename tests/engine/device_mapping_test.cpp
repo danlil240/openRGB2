@@ -20,6 +20,7 @@
 #include "DeliveryPipeline.h"
 #include "DeviceMapper.h"
 #include "FrameSink.h"
+#include "ProfileStore.h"        /* AugmentSceneBindings */
 
 #include "scene/SceneTypes.h"
 
@@ -720,6 +721,138 @@ static void TestMissingDeviceBindingPreserved()
     CHECK(fa != nullptr && AllEqual(fa->colors, 0, 10, RGB(9, 0, 0)));
 }
 
+/* Task 5.4 — missing-binding integrity through the FULL
+   offline-binding chain: a committed name-only scene binding
+   is completed by the persisted resolved-identity record at
+   apply time (AugmentSceneBindings — the EngineService
+   prepare_scene hook); afterwards a same-named device with a
+   DIFFERENT serial can never capture the binding or its
+   frames, and the record itself is not rewritten by the
+   failed resolution. A name-only binding with NO recorded
+   identity is the documented first-bind exception: it may
+   resolve to a single same-named candidate, never to one of
+   several (Ambiguous, never a silent pick). */
+static void TestAugmentedIdentityImposterRejected()
+{
+    /* The persisted identity record, as the engine profile
+       holds it after a real session. */
+    std::map<std::string, studio::DeviceBinding> record;
+    {
+        studio::DeviceBinding b;
+        b.id              = "b-a";
+        b.controller_name = "Corsair Vengeance RGB DDR5";
+        b.vendor          = "Corsair";
+        b.serial          = kDimmASerial;
+        b.location        = kDimmALoc;
+        b.zone_name       = "DRAM";
+        b.zone_leds       = 10;
+        record[b.id]      = b;
+    }
+
+    /* The committed scene ships name-only bindings. The
+       controller name must equal the recorded identity's —
+       the augment refuses to touch a re-purposed binding
+       id. b-b carries a committed serial so it stays
+       resolved throughout (a second same-named name-only
+       binding would sit Ambiguous and pollute the frame
+       assertions). */
+    auto doc = std::make_shared<studio::SceneDocument>();
+    doc->bindings = {
+        Binding("b-a", "Corsair Vengeance RGB DDR5",
+                "", "", "DRAM", 10),
+        Binding("b-b", "Corsair Vengeance RGB DDR5",
+                kDimmBSerial, "", "DRAM", 10),
+    };
+    doc->objects = {
+        DevObj("o-a", "b-a", 0, 10),
+        DevObj("o-b", "b-b", 0, 10),
+    };
+
+    /* Only b-a has a recorded identity — and only b-a is
+       name-only, so only b-a is augmented. */
+    CHECK(AugmentSceneBindings(*doc, record));
+    CHECK(doc->bindings[0].serial == kDimmASerial);
+    CHECK(doc->bindings[1].serial == kDimmBSerial);
+
+    const DeviceSnapshot da = Dimm(kDimmASerial, kDimmALoc);
+    const DeviceSnapshot db = Dimm(kDimmBSerial, kDimmBLoc);
+    /* Imposter: same display name, different identity — the
+       unit swapped in for the missing DIMM A. */
+    const DeviceSnapshot imposter = Dimm("SN-FAKE-DIMM-C",
+                                         "smbus:0-0099");
+
+    DeviceMapper mapper;
+    mapper.SetScene(doc);
+    studio::BindingStatus st;
+
+    /* The real device present: resolved, frames flow to its
+       key. */
+    mapper.SyncDevices({ da, db });
+    CHECK(mapper.BindingState("b-a", st) &&
+          st == studio::BindingStatus::Resolved);
+    CHECK(mapper.BindingState("b-b", st) &&
+          st == studio::BindingStatus::Resolved);
+
+    /* DIMM A absent, imposter in its slot: b-a goes
+       Unresolved — the same-named different-serial device
+       never inherits the binding — and emits ZERO frames to
+       the imposter's key. */
+    mapper.SyncDevices({ db, imposter });
+    CHECK(mapper.BindingState("b-a", st) &&
+          st == studio::BindingStatus::Unresolved);
+    std::vector<RgbFrame> frames = mapper.MapFrame(
+        EvalAll(*doc, { { "o-a", SC(9, 9, 9) },
+                        { "o-b", SC(4, 4, 4) } }));
+    CHECK(FrameFor(frames, imposter.key) == nullptr);
+    CHECK(FrameFor(frames, db.key) != nullptr);
+
+    /* The identity record itself is unchanged by the failed
+       resolution — a re-apply still pins the ORIGINAL
+       serial. */
+    CHECK(record["b-a"].serial == kDimmASerial);
+    auto doc2 = std::make_shared<studio::SceneDocument>();
+    doc2->bindings = {
+        Binding("b-a", "Corsair Vengeance RGB DDR5",
+                "", "", "DRAM", 10),
+    };
+    CHECK(AugmentSceneBindings(*doc2, record));
+    CHECK(doc2->bindings[0].serial == kDimmASerial);
+
+    /* The real device returns: the same identity re-resolves
+       and frames route to it again. */
+    mapper.SyncDevices({ imposter, db, da });
+    CHECK(mapper.BindingState("b-a", st) &&
+          st == studio::BindingStatus::Resolved);
+    frames = mapper.MapFrame(EvalAll(*doc, { { "o-a", SC(9, 9, 9) } }));
+    const RgbFrame* fa = FrameFor(frames, da.key);
+    CHECK(fa != nullptr && AllEqual(fa->colors, 0, 10,
+                                    RGB(9, 9, 9)));
+
+    /* Documented exception — first-bind with NO recorded
+       identity: the name-only binding resolves to a SINGLE
+       same-named candidate (there is nothing stronger to
+       pin to; the resolution is then recorded, pinning it
+       from the next apply on). Two candidates is Ambiguous —
+       never a silent pick. */
+    auto doc3 = std::make_shared<studio::SceneDocument>();
+    doc3->bindings = {
+        Binding("b-x", "Corsair Vengeance RGB DDR5",
+                "", "", "", 0),
+    };
+    doc3->objects = { DevObj("o-x", "b-x", 0, 10) };
+    DeviceMapper mapper3;
+    mapper3.SetScene(doc3);
+    mapper3.SyncDevices({ db });
+    CHECK(mapper3.BindingState("b-x", st) &&
+          st == studio::BindingStatus::Resolved);
+    mapper3.SyncDevices({ da, db });
+    CHECK(mapper3.BindingState("b-x", st) &&
+          st == studio::BindingStatus::Ambiguous);
+    frames = mapper3.MapFrame(EvalAll(*doc3, { { "o-x", SC(1, 1, 1) } }));
+    CHECK(FrameFor(frames, da.key) == nullptr);
+    CHECK(FrameFor(frames, db.key) == nullptr);
+}
+
 /* Per-controller sequence counters are independent and
    monotonic; sample_time passes through from the eval. */
 static void TestSequencesAndSampleTime()
@@ -830,6 +963,7 @@ int main()
     TestUnmappedLedsKeepColors();
     TestStaleGenerationRejected();
     TestMissingDeviceBindingPreserved();
+    TestAugmentedIdentityImposterRejected();
     TestSequencesAndSampleTime();
     TestDisconnectedAndUnboundSkipped();
     TestBrightnessScalesMappedOnly();

@@ -408,6 +408,34 @@ bool OpenRgbClient::RefreshStatus()
     }
     try
     {
+        /* A device added or removed changes the server-side
+           count — the per-device refresh below iterates only
+           the KNOWN map, so it can never see an addition and
+           sees a removal only indirectly through a shifted
+           index. Re-fetch the count first: any difference
+           takes the full re-enumeration path (generation bump
+           obsoletes stale frames + remaps positional ids). */
+        const std::vector<uint8_t> count_reply =
+            Request(0, kPktControllerCount, {},
+                    kPktControllerCount);
+        if(count_reply.size() != 4)
+        {
+            last_error_ = "malformed controller count reply";
+            return false;
+        }
+        uint32_t count = 0;
+        memcpy(&count, count_reply.data(), 4);
+        if(count != devices_.size())
+        {
+            std::string err;
+            if(!EnumerateLocked(err))
+            {
+                last_error_ = err;
+                return false;
+            }
+            return true;
+        }
+
         bool structural = false;
         std::vector<std::pair<DeviceKey, SdkController>> fresh;
         fresh.reserve(devices_.size());
