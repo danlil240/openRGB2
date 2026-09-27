@@ -37,23 +37,30 @@ powershell -File packaging\windows\stage-release.ps1 -VerifyOnly -OutDir <dir>
 - The staged folder is the product; copy it whole to the install
   location. App DLLs are resolved app-locally — no installer or PATH
   changes needed.
-- Run `openrgb2-engine.exe` from inside the folder (the engine probes
-  `presets/devices` + `presets/effects` relative to its working
-  directory and writes durable state to `profiles/local/` there).
-- The backend is launched EXTERNALLY — the engine only attaches over
-  the loopback SDK. Start it as:
-  `backend\OpenRGB.exe --server --server-host 127.0.0.1
-   --server-port 6744 --noautoconnect --localconfig`
-  (managed startup/elevation is Task 6.2's job).
+- Managed startup/shutdown/update/rollback is Task 6.2: the shipped
+  `scripts/*.ps1` + `OpenRGB2.cmd` launch the pinned backend
+  (`--server --server-host 127.0.0.1 --server-port 6744 --noautoconnect
+  --localconfig`, private config `state\backend`), then the engine
+  (attach-only — it never spawns the backend), then the UI. Full
+  guide: `install-recovery.md` here (staged as `INSTALL.md`).
+- User state lives only under `profiles/local/` + `state/` (created
+  at runtime, never shipped) — update and rollback both preserve it.
 - Recovery: delete the folder and re-stage — the package is fully
-  reproducible. User state lives only under `profiles/local/` +
-  `backend/OpenRGB.json` (written at runtime, never shipped).
-- Managed startup/elevation/update+rollback is Task 6.2; this script
-  only produces the verified release tree.
+  reproducible; `manifest.json` verifies every file.
 
 ## Files here
 
 - `stage-release.ps1` — staging + verification script.
+- `start-openrgb2.ps1` / `stop-openrgb2.ps1` — managed startup
+  (ownership scan -> explicit `-TakeOver` gate -> backend -> engine ->
+  UI) and ordered clean shutdown (engine IPC QUIT -> graceful backend
+  handoff; verified-own processes only, never kills competitors).
+- `update-openrgb2.ps1` / `rollback-openrgb2.ps1` — manifest-verified
+  update over an install (preserving `profiles/local/` + `state/`)
+  and one-level rollback from `<install>.previous`.
+- `OpenRGB2.cmd` — double-click launcher shipped at the package root.
+- `install-recovery.md` — install/startup/ownership/update/rollback
+  guide (staged as `INSTALL.md`).
 - `NOTICES.txt` — shipped license/provenance manifest.
 - `licenses/` — license texts shipped in the package.
 - `dependency-inventory.md` — every shipped binary + deps + provenance.

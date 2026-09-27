@@ -16,6 +16,10 @@
                                libusb, *.bin firmware blobs)
         licenses/              full license texts
         NOTICES.txt            license/provenance manifest
+        scripts/*.ps1          managed lifecycle (Task 6.2): start /
+                               stop / update / rollback
+        OpenRGB2.cmd           double-click launcher -> scripts\start
+        INSTALL.md             install/startup/recovery guide
         manifest.json          source/build manifest (per-file SHA-256)
 
     After staging, a verification pass asserts required files are present
@@ -156,6 +160,11 @@ if(-not $VerifyOnly) {
     Require (Join-Path $RepoRoot "src\core\presets\effects") "bundled effect presets" | Out-Null
     Require (Join-Path $PkgDir "NOTICES.txt") "notices manifest source" | Out-Null
     Require (Join-Path $PkgDir "licenses")    "license texts" | Out-Null
+    foreach($s in @("start-openrgb2.ps1","stop-openrgb2.ps1",
+                    "update-openrgb2.ps1","rollback-openrgb2.ps1",
+                    "OpenRGB2.cmd","install-recovery.md")) {
+        Require (Join-Path $PkgDir $s) "managed-lifecycle file $s" | Out-Null
+    }
 
     Step "Staging OpenRGB2 $version -> $OutDir"
     if(Test-Path $OutDir) { Remove-Item -Recurse -Force $OutDir }
@@ -252,6 +261,21 @@ if(-not $VerifyOnly) {
     Info "NOTICES.txt + license texts staged"
 
     #--------------------------------------------------------------#
+    # Managed lifecycle (Task 6.2): startup/stop/update/rollback    #
+    # scripts under scripts/, the double-click launcher at the      #
+    # root, and the install/recovery guide as INSTALL.md.           #
+    #--------------------------------------------------------------#
+    New-Item -ItemType Directory -Force -Path (Join-Path $OutDir "scripts") | Out-Null
+    foreach($s in @("start-openrgb2.ps1","stop-openrgb2.ps1",
+                    "update-openrgb2.ps1","rollback-openrgb2.ps1")) {
+        Copy-Item (Join-Path $PkgDir $s) (Join-Path $OutDir "scripts")
+    }
+    Copy-Item (Join-Path $PkgDir "OpenRGB2.cmd") $OutDir
+    Copy-Item (Join-Path $PkgDir "install-recovery.md") `
+              (Join-Path $OutDir "INSTALL.md")
+    Info "managed-lifecycle scripts + INSTALL.md staged"
+
+    #--------------------------------------------------------------#
     # Source/build manifest -- collected now, but only WRITTEN after #
     # the verification pass below succeeds, so a failed package can  #
     # never carry an "exclusions_verified" claim.                    #
@@ -273,7 +297,9 @@ if(-not $VerifyOnly) {
                 elseif($rel -like "presets/*")      { "src/core/presets" }
                 elseif($rel -like "profiles/*")     { "profiles" }
                 elseif($rel -like "licenses/*")     { "packaging/windows/licenses" }
-                elseif($rel -eq "NOTICES.txt")      { "packaging/windows" }
+                elseif($rel -like "scripts/*")      { "packaging/windows" }
+                elseif($rel -eq "NOTICES.txt" -or $rel -eq "OpenRGB2.cmd" -or
+                       $rel -eq "INSTALL.md")       { "packaging/windows" }
                 elseif($_.Name -like "Qt6*.dll" -or
                        $_.FullName -match "platforms|styles|imageformats|iconengines|qml|qmltooling|translations|tls|generic|networkinformation") {
                     "qt-runtime" }
@@ -333,7 +359,13 @@ $required = @(
     "presets\devices",
     "presets\effects",
     "NOTICES.txt",
-    "licenses"
+    "licenses",
+    "scripts\start-openrgb2.ps1",
+    "scripts\stop-openrgb2.ps1",
+    "scripts\update-openrgb2.ps1",
+    "scripts\rollback-openrgb2.ps1",
+    "OpenRGB2.cmd",
+    "INSTALL.md"
 )
 # manifest.json is only written AFTER this verification passes (see
 # below); when re-checking an existing tree it must already be there.

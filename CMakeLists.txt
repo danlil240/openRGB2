@@ -46,6 +46,9 @@ add_subdirectory(tests/sdk)
 if(Qt6_FOUND)
     add_subdirectory(tests/ui)
 endif()
+# Milestone 6 — package lifecycle (managed startup, takeover,
+# update/rollback, clean shutdown). Internally WIN32-gated.
+add_subdirectory(tests/packaging)
 
 # Milestone 1 benchmark producer (opt-in physical runs, offline build)
 add_subdirectory(tools/bench)
