@@ -87,3 +87,17 @@ add_test(NAME bench_sdk_wire_test COMMAND bench_sdk_wire_test)
 set_tests_properties(bench_sdk_wire_test PROPERTIES
     LABELS backend
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Skew-harness aggregation layer (pure math, header-only).
+add_executable(skew_stats_test
+    skew_stats_test.cpp)
+
+target_include_directories(skew_stats_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/tools/bench)
+
+target_compile_definitions(skew_stats_test PRIVATE NDEBUG)
+
+add_test(NAME skew_stats_test COMMAND skew_stats_test)
+set_tests_properties(skew_stats_test PROPERTIES
+    LABELS backend
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
