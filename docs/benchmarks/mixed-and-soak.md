@@ -12,7 +12,9 @@ once, which is the plan's mixed-mode intent.
 > mode. What was actually run is recorded honestly below — a bounded
 > in-session run of **65.0 min (playback)** and **60.0 min (live)**, not
 > 8 h per leg. Eight-hour-plus resource conclusions are *not* claimed;
-> the numbers below show what the bounded run measured.
+> the numbers below show what the bounded run measured. The owner
+> subsequently accepted these bounded legs as the release qualification
+> (waiving the literal 8 h criterion) during final release adjudication.
 
 ## Builds under test
 

@@ -102,7 +102,8 @@ camera/photodiode exists on this rig.
   zero transport rejections on the live leg, keepalive gaps <1 s,
   backend CPU ~0.8 core under live load, engine memory slope
   decelerating toward ~5 MB. The plan's **8-hour criterion was not
-  run** — bounded legs only (`docs/benchmarks/mixed-and-soak.md`).
+  run** — the owner accepted the bounded 65 + 60 min legs as the
+  release qualification (`docs/benchmarks/mixed-and-soak.md`).
 
 ## Known limitations / residuals
 
@@ -111,8 +112,9 @@ camera/photodiode exists on this rig.
   never silent).
 - **Physical FPS unmeasured** — every rate above is transport- or
   device-trace-level; no light measurement instrument exists.
-- **8 h soak open** — 65 + 60 min bounded legs ran; long-run resource
-  conclusions are not claimed.
+- **8 h soak waived** — the literal 8 h-per-mode criterion was waived by
+  the owner in favor of the 65 + 60 min bounded legs; long-run resource
+  conclusions beyond that horizon are still not claimed.
 - **Motherboard coverage gaps** — `LED_C`/`Chipset Accent` accept
   frames but their physical location is unknown; the 8/16/8 ARGB
   headers enumerate 0 LEDs (largest known coverage gap, predates the
