@@ -13,6 +13,12 @@
 //   - params: audio sensitivity domain, display-index bounds,
 //     wrong-input rejection
 //   - the persisted selection round-trips and re-arms
+//   - a self-terminated source reaps its zombie thread on
+//     re-enable instead of terminating (round-2 review)
+//   - a throwing Start/Stop releases the transition slot —
+//     no wedged busy flag, no hung Shutdown (round-2 review)
+//   - pause/params changed mid-start are replayed onto the
+//     source once it is running (round-2 review)
 //   - inline reactive layers report the honest Live-only
 //     playback reason
 // No real desktop capture anywhere: every source is a fake.
@@ -30,6 +36,7 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -52,6 +59,8 @@ public:
     {
         ++starts;
         bus = b;
+        if(throw_start)
+            throw std::runtime_error(name + ": start threw");
         if(fail_start)
         {
             status = name + ": start failed";
@@ -70,6 +79,8 @@ public:
     {
         ++stops;
         running = false;
+        if(throw_stop)
+            throw std::runtime_error(name + ": stop threw");
         status  = name + ": off";
     }
     bool        Running() const override     { return running; }
@@ -83,6 +94,8 @@ public:
     studio::InputBus*  bus    = nullptr;
     bool               running = false;
     bool               fail_start    = false;
+    bool               throw_start   = false;
+    bool               throw_stop    = false;
     bool               push_on_start = false;
     bool               paused        = false;
     float              sens   = 1.0f;
@@ -140,6 +153,24 @@ public:
     }
     bool        Running() const override { return running_.load(); }
     std::string Status() const override  { return "fake"; }
+    /* Recording hooks — prove the manager replays paused/
+       params onto the source after Start settles (round-2
+       review: mid-start changes used to be dropped). */
+    void SetPaused(bool p) override
+    {
+        ++paused_calls;
+        last_paused = p;
+    }
+    void SetSensitivity(float s) override
+    {
+        ++sens_calls;
+        last_sens = s;
+    }
+    void SetScreenIndex(int i) override
+    {
+        ++screen_calls;
+        last_screen = i;
+    }
 
     std::mutex         mu_;
     std::thread        thread_;
@@ -149,6 +180,79 @@ public:
     std::atomic<int>   start_calls  { 0 };
     std::atomic<int>   live_threads { 0 };
     std::atomic<int>   max_live     { 0 };
+    std::atomic<int>   paused_calls { 0 };
+    std::atomic<int>   sens_calls   { 0 };
+    std::atomic<int>   screen_calls { 0 };
+    std::atomic<bool>  last_paused  { false };
+    std::atomic<float> last_sens    { 1.0f };
+    std::atomic<int>   last_screen  { 0 };
+};
+
+/*---------------------------------------------------------*\
+||| A fake whose capture thread can SELF-TERMINATE: it     ||
+||| flips running_=false and returns while thread_ is      ||
+||| still joinable — the same zombie shape the real        ||
+||| sources leave after an in-capture failure (hook        ||
+||| install failure, unsupported mix format). Start()      ||
+||| reaps the zombie before respawning, mirroring the      ||
+||| fixed production contract; zombie_seen records that    ||
+||| the re-enable really did pass through a joinable       ||
+||| thread_ (without the reap the move-assign would be     ||
+||| std::terminate — the round-2 Finding-A crash).         ||
+\*---------------------------------------------------------*/
+class ZombieSource final : public IReactiveSource
+{
+public:
+    ~ZombieSource() override { Stop(); }
+
+    bool Start(studio::InputBus* b) override
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if(running_.load())
+            return false;
+        if(thread_.joinable())
+        {
+            zombie_seen = true;
+            thread_.join();
+        }
+        ++starts;
+        bus_     = b;
+        running_ = true;
+        thread_  = std::thread([this]
+        {
+            if(die_fast.load())
+            {
+                /* die like WinKeyHook's failed install:
+                   running_ flips false, thread_ stays
+                   joinable for whoever comes next */
+                running_ = false;
+                return;
+            }
+            while(running_.load())
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(1));
+        });
+        return true;
+    }
+    void Stop() override
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        running_ = false;
+        if(thread_.joinable())
+            thread_.join();
+        bus_ = nullptr;
+    }
+    bool        Running() const override { return running_.load(); }
+    std::string Status() const override  { return "zombie"; }
+    bool        Joinable() const         { return thread_.joinable(); }
+
+    std::mutex         mu_;
+    std::thread        thread_;
+    studio::InputBus*  bus_ = nullptr;
+    std::atomic<bool>  running_    { false };
+    std::atomic<bool>  die_fast    { true };
+    std::atomic<bool>  zombie_seen { false };
+    std::atomic<int>   starts      { 0 };
 };
 
 /* A manager with per-id fakes; factory order matches
@@ -561,6 +665,210 @@ static void TestConcurrentEnableSerialized()
     CHECK(src->live_threads.load() == 0);
 }
 
+/* Round-2 Finding A: a source that self-terminated (running_
+   false, thread_ still joinable) keeps the slot enabled — a
+   re-enable then fails the idempotent check and re-enters
+   Start(), where the zombie must be REAPED before respawn
+   (the round-1 fix covered Stop() but missed this path:
+   move-assign onto a joinable std::thread is std::terminate,
+   reachable via a legal IPC command). */
+static void TestZombieRespawn()
+{
+    ZombieSource* src = nullptr;
+    ReactiveInputs::Deps deps;
+    deps.now = [] { return 0.0; };
+    deps.source_factory =
+        [&src](const std::string& id)
+            -> std::unique_ptr<IReactiveSource>
+        {
+            if(id != "audio")
+                return std::make_unique<FakeSource>();
+            auto s = std::make_unique<ZombieSource>();
+            src = s.get();
+            return s;
+        };
+    ReactiveInputs m(std::move(deps));
+    CHECK(src != nullptr);
+
+    std::string err;
+    CHECK(m.SetEnabled("audio", true, err));
+    CHECK(src->starts.load() == 1);
+
+    /* The capture thread dies on its own: running_ goes
+       false while thread_ is still joinable — the same
+       zombie the real sources leave after an in-capture
+       failure. */
+    for(int i = 0;
+        i < 200 && (src->Running() || !src->Joinable()); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(!src->Running());
+    CHECK(src->Joinable());              /* the zombie exists */
+    {
+        /* enabled stays the user's selection; running is the
+           honest liveness report (the contract's
+           enabled:true, running:false state). */
+        const ReactiveInputStatus st = m.Status().front();
+        CHECK(st.enabled && !st.running);
+    }
+
+    /* Re-enable: enabled==requested but !Running() so the
+       idempotent check fails and Start() re-runs. With the
+       reap this respawns cleanly; without it this call was
+       std::terminate. */
+    src->die_fast = false;   /* the retry stays alive */
+    CHECK(m.SetEnabled("audio", true, err));
+    CHECK(src->starts.load() == 2);
+    CHECK(src->zombie_seen.load());      /* proves Start()
+            observed + reaped the joinable zombie */
+    for(int i = 0; i < 200 && !src->Running(); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(src->Running());
+    {
+        const ReactiveInputStatus st = m.Status().front();
+        CHECK(st.enabled && st.running);
+    }
+
+    /* And the normal lifecycle still works afterwards. */
+    CHECK(m.SetEnabled("audio", false, err));
+    CHECK(!src->Running());
+    CHECK(!src->Joinable());
+}
+
+/* Round-2 Finding B: a Start()/Stop() that THROWS must not
+   wedge the slot — `busy` left set would block every later
+   set_enabled on transition_cv_ forever and hang Shutdown().
+   The exception still propagates (IPC boundary answers
+   Internal); the slot must stay honest and usable. */
+static void TestThrowingStartStopUnwedges()
+{
+    Fixture f;
+    ReactiveInputs m(std::move(f.deps));
+    std::string err;
+
+    /*--- Start() throws ------------------------------------*/
+    f.fakes[0]->throw_start = true;
+    bool threw = false;
+    try
+    {
+        m.SetEnabled("audio", true, err);
+    }
+    catch(const std::exception&)
+    {
+        threw = true;
+    }
+    CHECK(threw);
+    /* Honest state: not enabled, not running. */
+    {
+        const ReactiveInputStatus st = m.Status().front();
+        CHECK(!st.enabled && !st.running);
+    }
+    /* busy was released — this call completing IS the check
+       (a wedged slot would hang here on transition_cv_). */
+    f.fakes[0]->throw_start = false;
+    CHECK(m.SetEnabled("audio", true, err));
+    CHECK(m.Status().front().running);
+
+    /*--- Stop() throws -------------------------------------*/
+    f.fakes[0]->throw_stop = true;
+    threw = false;
+    try
+    {
+        m.SetEnabled("audio", false, err);
+    }
+    catch(const std::exception&)
+    {
+        threw = true;
+    }
+    CHECK(threw);
+    CHECK(!m.Status().front().enabled);  /* honestly disabled */
+    f.fakes[0]->throw_stop = false;
+    /* Still not wedged: a fresh enable/disable cycle works. */
+    CHECK(m.SetEnabled("audio", true, err));
+    CHECK(m.SetEnabled("audio", false, err));
+    /* Shutdown() at scope exit must not hang either —
+       reaching the next test proves it. */
+}
+
+/* Round-2 Finding C: SetPaused/SetSensitivity/SetScreenIndex
+   only push to a source that is already Running() — a change
+   issued while a latch holds Start() open updates manager
+   state but skips the source. The post-start replay must
+   re-apply the persisted values so nothing is lost (a missed
+   unpause = dead-but-enabled input; a missed pause = screen
+   grabs while displays sleep). */
+static void TestMidStartChangesReapplied()
+{
+    ThreadedSource* audio  = nullptr;
+    ThreadedSource* screen = nullptr;
+    ReactiveInputs::Deps deps;
+    deps.now = [] { return 0.0; };
+    deps.enumerate_displays = []
+    {
+        return std::vector<ReactiveDisplay>{
+            { 0, "DISPLAY1", 1920, 1080 },
+            { 1, "DISPLAY2", 2560, 1440 } };
+    };
+    deps.source_factory =
+        [&audio, &screen](const std::string& id)
+            -> std::unique_ptr<IReactiveSource>
+        {
+            if(id == "key")
+                return std::make_unique<FakeSource>();
+            auto s = std::make_unique<ThreadedSource>();
+            if(id == "audio") audio  = s.get();
+            else              screen = s.get();
+            return s;
+        };
+    ReactiveInputs m(std::move(deps));
+    CHECK(audio != nullptr);
+    CHECK(screen != nullptr);
+
+    /*--- pause + sensitivity land inside the start window ---*/
+    audio->block_start = true;
+    bool r = false;
+    std::string e;
+    std::thread t1([&] { r = m.SetEnabled("audio", true, e); });
+    while(audio->start_calls.load() == 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    /* t1 is inside Start() with the mutex dropped: these hit
+       manager state only — the not-yet-running source is
+       skipped. */
+    m.SetPaused(true);
+    std::string err;
+    CHECK(m.SetSensitivity("audio", 1.5f, err));
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    audio->block_start = false;
+    t1.join();
+    CHECK(r);
+    /* The post-start replay pushed the persisted values:
+       last write is the mid-start one, and the source saw
+       both the pre-Start application and the replay. */
+    CHECK(audio->last_paused.load());
+    CHECK(audio->last_sens.load() == 1.5f);
+    CHECK(audio->paused_calls.load() >= 2);
+    CHECK(audio->sens_calls.load()  >= 2);
+
+    /*--- screen_index lands inside the start window --------*/
+    screen->block_start = true;
+    r = false;
+    e.clear();
+    std::thread t2([&] { r = m.SetEnabled("screen", true, e); });
+    while(screen->start_calls.load() == 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(m.SetScreenIndex(1, err));
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    screen->block_start = false;
+    t2.join();
+    CHECK(r);
+    CHECK(screen->last_screen.load() == 1);
+    CHECK(screen->screen_calls.load() >= 2);
+    /* The pause gate replayed too — a paused start comes up
+       gated (plan section 6). */
+    CHECK(screen->last_paused.load());
+
+    m.SetPaused(false);
+}
+
 static void TestReactiveSceneReason()
 {
     /* Inline reactive layers -> Live-only playback with the
@@ -617,6 +925,9 @@ int main()
     TestPauseReachesScene();
     TestPersistRestore();
     TestConcurrentEnableSerialized();
+    TestZombieRespawn();
+    TestThrowingStartStopUnwedges();
+    TestMidStartChangesReapplied();
     TestReactiveSceneReason();
 
     std::printf("%d checks, %d failures\n", checks, failures);

@@ -344,7 +344,9 @@ Conditions only detectable mid-capture (endpoint removed, display
 disconnected, unsupported mix format) surface asynchronously instead:
 `status` carries the reason and `running` goes false (or retries
 transient losses) while `enabled` keeps the user's selection —
-toggling off/on retries.
+toggling off/on retries, and a repeated `set_enabled{enabled:true}`
+on a dead input retries in place too (the dead capture thread is
+reaped and a fresh one starts; the reply lands on real state).
 
 Concurrent commands for the SAME input **serialize**: a second
 `set_enabled` arriving while a start/stop is in flight waits for it

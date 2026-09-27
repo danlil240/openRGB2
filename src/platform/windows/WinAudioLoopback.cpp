@@ -149,6 +149,14 @@ public:
         std::lock_guard<std::mutex> lock(lifecycle_mu_);
         if(running_.load())
             return false;
+        /* A self-terminated capture thread (unsupported mix
+           format, COM init failure sets running_=false inside
+           ThreadMain) leaves thread_ joinable — reap it or the
+           move-assign below is std::terminate. A still-running
+           thread can never reach here (running_==true already
+           returned), so joinable+!running is always a zombie. */
+        if(thread_.joinable())
+            thread_.join();
         /* Synchronous pre-flight: prove a loopback session
            CAN be opened right now so a genuinely unavailable
            source (no default render endpoint, init denied)

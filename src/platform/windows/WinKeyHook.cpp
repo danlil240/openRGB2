@@ -99,6 +99,19 @@ public:
         std::lock_guard<std::mutex> lock(lifecycle_mu_);
         if(running_.load())
             return false;
+        /* A self-terminated capture thread (hook-install
+           failure or GetMessage error sets running_=false
+           inside ThreadMain) leaves thread_ joinable — reap
+           it or the move-assign below is std::terminate. A
+           still-running thread can never reach here
+           (running_==true already returned), so
+           joinable+!running is always a zombie. The zombie's
+           thread id is stale too — clear it so Stop()'s
+           WM_QUIT can never land on a dead/reused id while
+           the new thread is still publishing its own. */
+        if(thread_.joinable())
+            thread_.join();
+        tid_ = 0;
         /* Synchronous pre-flight: prove the hook CAN install
            right now — install + uninstall is cheap and side-
            effect-free (an LL hook only fires through the

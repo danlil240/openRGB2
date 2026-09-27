@@ -160,6 +160,13 @@ public:
         std::lock_guard<std::mutex> lock(lifecycle_mu_);
         if(running_.load())
             return false;
+        /* A self-terminated capture thread leaves thread_
+           joinable — reap it or the move-assign below is
+           std::terminate. A still-running thread can never
+           reach here (running_==true already returned), so
+           joinable+!running is always a zombie. */
+        if(thread_.joinable())
+            thread_.join();
         /* Synchronous pre-flight: run the same bounds check
            + one real grab before promising "started" — a
            gone display or a GDI read that can't work at all

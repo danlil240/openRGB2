@@ -80,7 +80,11 @@ public:
        reason ("no default output device", "unsupported
        platform", ...). Conditions only detectable mid-
        capture (device removed, display gone) still surface
-       asynchronously through Status(). */
+       asynchronously through Status(). A source that
+       self-terminated (running=false with the thread still
+       joinable) must be reaped here BEFORE respawning —
+       move-assigning onto a joinable std::thread is
+       std::terminate. */
     virtual bool        Start(studio::InputBus* bus) = 0;
     /* Stop capturing and release resources (joins the
        capture thread). Safe when not running — and must

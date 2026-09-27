@@ -124,7 +124,32 @@ bool ReactiveInputs::SetEnabled(const std::string& id,
            (WASAPI, hook install). `busy` keeps concurrent
            commands serialized while the lock is dropped. */
         lock.unlock();
-        const bool ok = s->source->Start(&bus_);
+        bool ok = false;
+        try
+        {
+            ok = s->source->Start(&bus_);
+        }
+        catch(...)
+        {
+            /* A throwing Start (thread-create system_error,
+               bad_alloc inside the probe) must not wedge the
+               slot: busy left set would block every later
+               command on transition_cv_ forever AND hang
+               Shutdown(). Release waiters, leave the slot
+               honestly disabled, then propagate — the IPC
+               boundary still answers Internal and the session
+               survives (IpcServer's dispatch catch). */
+            lock.lock();
+            s->busy    = false;
+            s->enabled = false;
+            transition_cv_.notify_all();
+            err = s->source->Status();
+            if(err.empty())
+                err = id + " input threw during start";
+            lock.unlock();
+            Changed();
+            throw;
+        }
         lock.lock();
         s->busy = false;
         transition_cv_.notify_all();
@@ -138,6 +163,18 @@ bool ReactiveInputs::SetEnabled(const std::string& id,
             Changed();
             return false;
         }
+        /* Pause/params landing while the mutex was dropped
+           during Start() updated manager state but skipped
+           the not-yet-running source (SetPaused/
+           SetSensitivity/SetScreenIndex only push when
+           Running()) — replay the persisted slot state so a
+           change in the start window is never lost: a missed
+           unpause would be a dead-but-enabled input, a missed
+           pause would keep the sampler grabbing while
+           displays sleep. */
+        s->source->SetPaused(paused_);
+        s->source->SetSensitivity(s->sensitivity);
+        s->source->SetScreenIndex(s->screen_index);
         s->enabled = true;
     }
     else
@@ -147,7 +184,22 @@ bool ReactiveInputs::SetEnabled(const std::string& id,
            thread. After it returns nothing captures for a
            disabled input. */
         lock.unlock();
-        s->source->Stop();
+        try
+        {
+            s->source->Stop();
+        }
+        catch(...)
+        {
+            /* Same unwedging as the Start path — the slot is
+               already honestly disabled; release waiters and
+               let the IPC boundary report Internal. */
+            lock.lock();
+            s->busy = false;
+            transition_cv_.notify_all();
+            lock.unlock();
+            Changed();
+            throw;
+        }
         lock.lock();
         s->busy = false;
         transition_cv_.notify_all();
@@ -321,18 +373,29 @@ void ReactiveInputs::Restore(
     const std::vector<PersistedInput>& saved)
 {
     suppress_changed_ = true;
-    for(const PersistedInput& p : saved)
+    try
     {
-        std::string err;
-        /* params before enable so a starting source gets the
-           recorded values, not the defaults */
-        SetSensitivity(p.id, p.sensitivity, err);
-        if(p.id == "screen")
-            SetScreenIndex(p.screen_index, err);
-        if(p.enabled)
-            SetEnabled(p.id, true, err); /* a source that
-                fails simply stays disabled — Status() is
-                the honest record */
+        for(const PersistedInput& p : saved)
+        {
+            std::string err;
+            /* params before enable so a starting source gets
+               the recorded values, not the defaults */
+            SetSensitivity(p.id, p.sensitivity, err);
+            if(p.id == "screen")
+                SetScreenIndex(p.screen_index, err);
+            if(p.enabled)
+                SetEnabled(p.id, true, err); /* a source that
+                    fails simply stays disabled — Status() is
+                    the honest record */
+        }
+    }
+    catch(...)
+    {
+        /* A throwing source must not pin suppress_changed_
+           forever — restore still aborts (the exception
+           propagates) but later changes keep emitting. */
+        suppress_changed_ = false;
+        throw;
     }
     suppress_changed_ = false;
 }
