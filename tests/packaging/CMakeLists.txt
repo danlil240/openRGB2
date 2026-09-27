@@ -5,6 +5,14 @@
 # scripts and process fixtures are Win32/PowerShell.
 
 if(WIN32)
+    add_test(NAME package_launcher_test
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/launcher_tests.ps1
+            -Launcher ${CMAKE_SOURCE_DIR}/packaging/windows/OpenRGB2.cmd)
+    set_tests_properties(package_launcher_test PROPERTIES
+        LABELS packaging
+        TIMEOUT 30)
+
     add_test(NAME package_lifecycle_test
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
             -File ${CMAKE_CURRENT_SOURCE_DIR}/package_lifecycle_tests.ps1

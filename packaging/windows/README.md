@@ -59,6 +59,8 @@ powershell -File packaging\windows\stage-release.ps1 -VerifyOnly -OutDir <dir>
   update over an install (preserving `profiles/local/` + `state/`)
   and one-level rollback from `<install>.previous`.
 - `OpenRGB2.cmd` — double-click launcher shipped at the package root.
+  The copy in this source directory launches the staged release under
+  `build/package/` when one is present.
 - `install-recovery.md` — install/startup/ownership/update/rollback
   guide (staged as `INSTALL.md`).
 - `NOTICES.txt` — shipped license/provenance manifest.
