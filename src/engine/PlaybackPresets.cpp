@@ -156,6 +156,34 @@ ScenePlaybackCaps ClassifyScenePlayback(const studio::SceneDocument* doc)
     const std::string& preset = doc->effect.preset;
     if(preset.empty())
     {
+        /* Inline reactive layers name their input honestly:
+           ripple consumes input events (audio onsets / key
+           edges), level the audio envelope, screenfield the
+           screen grid — the scene needs a live reactive
+           input, so it stays Live-only (Task 4.6: the
+           input's presence flows into the reason). */
+        for(const studio::EffectLayer& l : doc->effect.layers)
+        {
+            if(l.primitive == "ripple")
+            {
+                out.reason = "scene reacts to audio/key input "
+                             "events — reactive scenes stay "
+                             "live effects";
+                return out;
+            }
+            if(l.primitive == "level")
+            {
+                out.reason = "scene reacts to audio input — "
+                             "reactive scenes stay live effects";
+                return out;
+            }
+            if(l.primitive == "screenfield")
+            {
+                out.reason = "scene reacts to screen input — "
+                             "reactive scenes stay live effects";
+                return out;
+            }
+        }
         /* Arbitrary inline-layer scenes (and empty scenes) are
            live-only — they cannot be an uploaded loop. */
         out.reason = doc->effect.layers.empty()

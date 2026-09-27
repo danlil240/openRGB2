@@ -322,12 +322,13 @@ int main()
 
     static const char* want_order[] = {
         "power-monitor", "ipc-listeners", "ipc-server",
-        "scene-worker", "delivery-pipeline", "sdk-transport",
+        "scene-worker", "reactive-inputs",
+        "delivery-pipeline", "sdk-transport",
     };
-    CHECK(sd.steps.size() == 6);
-    if(sd.steps.size() == 6)
+    CHECK(sd.steps.size() == 7);
+    if(sd.steps.size() == 7)
     {
-        for(size_t i = 0; i < 6; ++i)
+        for(size_t i = 0; i < 7; ++i)
         {
             CHECK(sd.steps[i].name == want_order[i]);
             CHECK(sd.steps[i].within);

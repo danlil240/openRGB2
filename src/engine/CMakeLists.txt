@@ -34,6 +34,7 @@ add_library(openrgb2_engine STATIC
     PowerLifecycle.cpp
     OrderlyShutdown.cpp
     ProfileStore.cpp
+    ReactiveInputs.cpp
     SceneLoader.cpp
     SingleInstance.cpp
     OwnershipScan.cpp
@@ -54,6 +55,8 @@ add_library(openrgb2_engine STATIC
     ${CORE_DIR}/presets/PresetRegistry.cpp
     ${CORE_DIR}/presets/DevicePreset.cpp
     ${CORE_DIR}/playback/PlaybackLoop.cpp
+    ${CORE_DIR}/inputs/InputBus.cpp
+    ${CORE_DIR}/inputs/OnsetDetect.cpp
     ${LLW_CTRL}/LianLiWirelessEffects.cpp
     ${LLW_CTRL}/LianLiWirelessCodec.cpp
     ${LLW_DEPS}/tinyuz/compress/tuz_enc.cpp

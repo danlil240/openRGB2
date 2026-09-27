@@ -39,6 +39,7 @@
 #include "OpenRgbClient.h"
 #include "PlaybackController.h"
 #include "PowerLifecycle.h"
+#include "ReactiveInputs.h"
 
 #include "effects/Presets.h"
 #include "scene/SceneTypes.h"
@@ -96,6 +97,14 @@ public:
            STATE/DIAGNOSTICS (display/suspend/gate flags). */
         const PowerLifecycle* power = nullptr;
 
+        /* Task 4.6 reactive inputs — the REACTIVE_COMMAND
+           verb space (set_enabled / set_params) and the
+           read-only reactive surface in STATE/DIAGNOSTICS +
+           the "reactive" event. Nullptr -> the surface
+           reports available=false honestly rather than
+           fabricating toggles. */
+        ReactiveInputs*     reactive = nullptr;
+
         /* IPC-side queue/counter source (IpcServer::Stats) —
            diagnostics exposes queue depths, not guesses. */
         std::function<IpcServerStats()> server_stats;
@@ -147,11 +156,16 @@ public:
 
     /* Diff-driven event emission for the push channel: call
        periodically (~500 ms) from the engine's owner loop.
-       Emits topology/connection/playback events on change
-       and frame_status at a bounded rate when delivery stats
-       moved. Single-caller: the diffing signatures are not
-       mutex-guarded (same contract as SceneWorker::Step). */
+       Emits topology/connection/playback/reactive events on
+       change and frame_status at a bounded rate when delivery
+       stats moved. Single-caller: the diffing signatures are
+       not mutex-guarded (same contract as SceneWorker::Step). */
     void PollEvents(TimePoint now = Clock::now());
+
+    /* Emits the "reactive" event with the current reactive
+       state — the ReactiveInputs manager's changed hook
+       calls this (enable/disable, pause transitions). */
+    void EmitReactive();
 
     /*---- IIpcService ---------------------------------------*/
     nlohmann::json OnWelcome() override;
@@ -184,6 +198,7 @@ private:
     std::string         last_connection_sig_;
     std::string         last_topology_sig_;
     std::string         last_playback_sig_;
+    std::string         last_reactive_sig_;
     std::string         last_stats_sig_;
     TimePoint           last_frame_status_{};
 
@@ -196,6 +211,12 @@ private:
        and scene event as SET_SCENE). */
     IpcReply       HandleLayoutCommand(const std::string& verb,
                                        const nlohmann::json& body);
+    /* Task 4.6 REACTIVE_COMMAND surface (docs/ipc-protocol.md):
+       set_enabled / set_params drive the ReactiveInputs
+       manager; every reply carries the full reactive body so
+       the client lands on real state, never an assumed one. */
+    IpcReply       HandleReactiveCommand(const std::string& verb,
+                                         const nlohmann::json& body);
     IpcReply       HandleIdentify(const nlohmann::json& body);
     IpcReply       HandleLayoutMutate(const std::string& verb,
                                       const nlohmann::json& body);
@@ -204,6 +225,7 @@ private:
     nlohmann::json PlaybackJson() const;
     nlohmann::json PowerJson() const;
     nlohmann::json StateJson() const;
+    nlohmann::json ReactiveJson() const;
     nlohmann::json SnapshotsJson() const;
     nlohmann::json DeliveryStatsJson(const nlohmann::json& body) const;
     nlohmann::json ConnectionJson() const;

@@ -254,6 +254,12 @@ void EngineBridge::ApplyWelcome(const nlohmann::json& welcome)
             playback_ = JsonToVariant(state["playback"]).toMap();
             emit playbackChanged();
         }
+        if(state.contains("reactive") &&
+           state["reactive"].is_object())
+        {
+            reactive_ = JsonToVariant(state["reactive"]).toMap();
+            emit reactiveChanged();
+        }
         state_report_ = JsonToVariant(state).toMap();
         emit stateReportChanged();
     }
@@ -325,6 +331,11 @@ void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
         frame_status_ = JsonToVariant(data).toMap();
         emit frameStatusChanged();
     }
+    else if(kind == ipc::event_kind::kReactive)
+    {
+        reactive_ = JsonToVariant(data).toMap();
+        emit reactiveChanged();
+    }
     RecomputeDegraded();
 
     emit eventReceived(QString::fromStdString(kind),
@@ -382,6 +393,12 @@ void EngineBridge::ApplyReply(uint32_t request_id, ipc::MsgType type,
         {
             connection_ = JsonToVariant(body["sdk"]).toMap();
             emit connectionChanged();
+        }
+        if(body.contains("reactive") &&
+           body["reactive"].is_object())
+        {
+            reactive_ = JsonToVariant(body["reactive"]).toMap();
+            emit reactiveChanged();
         }
         break;
     case ipc::MsgType::Presets:
@@ -583,6 +600,18 @@ int EngineBridge::layoutCommand(const QString& verb,
     return Issue(ipc::MsgType::LayoutCommand, b);
 }
 
+int EngineBridge::reactiveCommand(const QString& verb,
+                                  const QVariantMap& args)
+{
+    nlohmann::json b = VariantToJson(args);
+    if(!b.is_object())
+    {
+        b = nlohmann::json::object();
+    }
+    b["verb"] = verb.toStdString();
+    return Issue(ipc::MsgType::ReactiveCommand, b);
+}
+
 /*---------------------------------------------------------*\
 ||| Accessors + test hooks                                    ||
 \*---------------------------------------------------------*/
@@ -747,6 +776,7 @@ QVariantMap EngineBridge::deliveryStats() const   { return delivery_stats_; }
 QVariantList EngineBridge::presets() const        { return presets_; }
 QVariantMap EngineBridge::diagnostics() const     { return diagnostics_; }
 QVariantMap EngineBridge::stateReport() const     { return state_report_; }
+QVariantMap EngineBridge::reactive() const        { return reactive_; }
 
 void EngineBridge::setPipeName(const QString& name)
 {

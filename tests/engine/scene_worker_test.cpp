@@ -212,6 +212,51 @@ static void TestInputSlot()
     CHECK(frames.size() == 2);
 }
 
+static void TestReentrantInputProvider()
+{
+    /* Task 4.6 regression: the pull provider —
+       ReactiveInputs::Snapshot() — stamps input-event ages
+       on the scene clock, and EngineHost wires that as
+       Worker().Running()/Epoch(). If Step ever invoked the
+       provider while holding mutex_, those accessors re-lock
+       a non-recursive std::mutex and the worker self-
+       deadlocks on its first tick (pre-fix this test hung;
+       the hang itself is the failure signature). */
+    SceneWorker worker;
+    auto doc = WaveDoc();
+    worker.SubmitScene(doc, WaveLayers());
+
+    std::vector<EvaluatedFrame> frames;
+    worker.SetFrameCallback([&frames](const EvaluatedFrame& f)
+    {
+        frames.push_back(f);
+    });
+
+    const TimePoint epoch = Clock::now();
+    worker.SetEpoch(epoch);
+
+    std::atomic<int> epoch_reads{ 0 };
+    std::atomic<int> running_reads{ 0 };
+    auto input = std::make_shared<studio::InputState>();
+    input->audio_level = 0.5f;
+    worker.SetInputProvider(
+        [&]() -> std::shared_ptr<const studio::InputState>
+        {
+            (void)worker.Epoch();    /* re-entrant worker reads */
+            (void)worker.Running();
+            ++epoch_reads;
+            ++running_reads;
+            return input;
+        });
+
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(50)));
+    CHECK(epoch_reads.load() == 1);
+    CHECK(running_reads.load() == 1);
+    CHECK(frames.size() == 1);
+    /* The provider result is the tick's input — the pushed
+       slot would be overridden the same way. */
+}
+
 static void TestWorkerThread()
 {
     SceneWorker worker;
@@ -350,6 +395,7 @@ int main()
     TestLatestWinsScene();
     TestNoScene();
     TestInputSlot();
+    TestReentrantInputProvider();
     TestNextDeadline();
     TestFutureEpochWorker();
     TestWorkerThread();

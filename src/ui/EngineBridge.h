@@ -95,6 +95,14 @@ class EngineBridge : public QObject
                    NOTIFY diagnosticsChanged)
     Q_PROPERTY(QVariantMap stateReport READ stateReport
                    NOTIFY stateReportChanged)
+    /* Task 4.6 reactive-input surface — the REACTIVE_COMMAND
+       body's read view: {available, capture_paused, inputs:
+       [{id,available,enabled,running,paused,sensitivity,
+       screen_index,status}], displays:[{index,name,width,
+       height}]}. available=false carries the engine's honest
+       reason — never a fabricated toggle set. */
+    Q_PROPERTY(QVariantMap reactive READ reactive
+                   NOTIFY reactiveChanged)
 
 public:
     explicit EngineBridge(QObject* parent = nullptr);
@@ -125,6 +133,12 @@ public:
     Q_INVOKABLE int unsubscribe();
     Q_INVOKABLE int layoutCommand(const QString& verb,
                                   const QVariantMap& args);
+    /* REACTIVE_COMMAND {verb,...args} — "set_enabled"
+       {input,enabled} / "set_params" {input,sensitivity?|
+       screen_index}. The engine replies with the full
+       reactive body; the "reactive" event updates the store. */
+    Q_INVOKABLE int reactiveCommand(const QString& verb,
+                                    const QVariantMap& args);
     Q_INVOKABLE int quitEngine();
 
     /*---- state ------------------------------------------------*/
@@ -145,6 +159,7 @@ public:
     QVariantList presets() const;
     QVariantMap diagnostics() const;
     QVariantMap stateReport() const;
+    QVariantMap reactive() const;
 
     /*---- test hooks (call before start()) ----------------------*/
     using ChannelFactory =
@@ -173,6 +188,7 @@ signals:
     void presetsChanged();
     void diagnosticsChanged();
     void stateReportChanged();
+    void reactiveChanged();
 
     /* requestId echoes SendRequest's correlator; typeName is the
        wire type (MsgTypeName — e.g. "PONG", "SNAPSHOTS", "ERROR"). */
@@ -238,6 +254,7 @@ private:
     QVariantList presets_;
     QVariantMap diagnostics_;
     QVariantMap state_report_;
+    QVariantMap reactive_;
 };
 
 } /* namespace ui */

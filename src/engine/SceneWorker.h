@@ -94,6 +94,25 @@ public:
     /* Latest-wins reactive-input submission; nullptr clears. */
     void     SubmitInput(std::shared_ptr<const studio::InputState> input);
 
+    /* Pull-style reactive input (Task 4.6): when set, the
+       provider is queried once per tick and its result becomes
+       the tick's input — the ReactiveInputs manager is the
+       producer, so a paused/disabled source stops feeding the
+       scene on the very next tick rather than waiting for a
+       push. Takes precedence over the SubmitInput depth-1
+       slot. Must be cheap and non-blocking. It is invoked on
+       the worker thread WITHOUT mutex_ held — it may read
+       worker state (Epoch(), Running()) but must not call
+       Step(). */
+    using InputProvider =
+        std::function<std::shared_ptr<const studio::InputState>()>;
+    void     SetInputProvider(InputProvider provider);
+
+    /* The scene clock's t = 0 reference. Reactive-input
+       providers stamp event times on this base so event ages
+       evaluate correctly against the tick's scene_time_s. */
+    TimePoint Epoch() const;
+
     /* Scene revision most recently applied by a Step. */
     uint64_t AppliedRevision() const;
     uint64_t Sequence() const;               /* frames produced      */
@@ -157,6 +176,7 @@ private:
     studio::EffectEngine  engine_;
     FrameCallback         callback_;
     IdleFrameHook         idle_frame_hook_;
+    InputProvider         input_provider_;
 };
 
 } /* namespace openrgb2 */

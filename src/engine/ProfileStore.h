@@ -52,6 +52,7 @@
 
 #include "EngineTypes.h"
 #include "PlaybackPresets.h"   /* PersistedSceneMode, PlaybackParams */
+#include "ReactiveInputs.h"    /* ReactiveInputs::PersistedInput     */
 
 #include "scene/SceneTypes.h"  /* studio::DeviceBinding           */
 
@@ -81,6 +82,11 @@ struct EngineState
         kEngineStateSchemaVersion;
     std::vector<PersistedSceneMode>          scenes;
     std::map<std::string, studio::DeviceBinding> bindings;
+    /* Task 4.6: the reactive-input selection (enabled flags +
+       per-input params) — restoring re-arms the recorded
+       inputs; a source that fails to start stays disabled
+       and reports honestly rather than lying enabled. */
+    std::vector<ReactiveInputs::PersistedInput> reactive;
     nlohmann::json                           extensions;
 };
 

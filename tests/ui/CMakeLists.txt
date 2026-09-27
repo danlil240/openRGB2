@@ -60,6 +60,13 @@ ui_suite(ui_playback_test)
 # ops leaving no ghost history).
 ui_suite(ui_layout_test)
 
+# Task 4.6: the reactive-input surface — the bridge's reactive
+# store lands from STATE + pushed events, reactiveCommand issues
+# the exact REACTIVE_COMMAND bodies, engine ERRORs surface
+# honestly, and unavailable stays unavailable (no fabricated
+# toggles). A real EngineBridge over the in-process pipe.
+ui_suite(ui_reactive_test)
+
 # The QML smoke test additionally needs the module's compiled
 # plugin + Qt Quick runtime on its link line.
 add_executable(qml_smoke_test qml_smoke_test.cpp)

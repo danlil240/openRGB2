@@ -50,6 +50,7 @@
 #include "PlaybackController.h"
 #include "PowerLifecycle.h"
 #include "ProfileStore.h"
+#include "ReactiveInputs.h"
 #include "SingleInstance.h"
 
 #include "EngineService.h"
@@ -105,6 +106,16 @@ struct EngineHostOptions
                                             empty = skip the
                                             sole-writer check  */
     bool        power_monitor   = true;
+
+    /* Task 4.6 reactive inputs (audio/screen/key). True wires
+       the ReactiveInputs manager against the platform
+       sources; the manager itself is cheap — capture only
+       starts when an input is enabled. reactive_factory
+       overrides the platform sources for the offline suite
+       (tests never capture a real desktop). */
+    bool        reactive_inputs = true;
+    std::function<std::unique_ptr<IReactiveSource>(
+        const std::string& id)> reactive_factory;
 
     /* Log sink (default: stderr with the engine prefix). */
     std::function<void(const std::string&)> log;
@@ -165,6 +176,7 @@ public:
     ipc::EngineService*      GetService()    { return service_.get(); }
     sdk::OpenRgbClient*      GetSdk()        { return sdk_.get(); }
     PowerLifecycle*          GetLifecycle()  { return lifecycle_.get(); }
+    ReactiveInputs*          GetReactive()   { return reactive_.get(); }
     const OwnershipReport&   Ownership() const { return ownership_; }
     uint64_t                 FramesProduced() const;
 
@@ -176,6 +188,9 @@ private:
     bool StartIpc();
     bool ApplyStartupScene(std::string& err);
     void ScanOwners();
+    /* ReactiveInputs changed hook: emit the IPC event +
+       persist the selection through the profile store. */
+    void OnReactiveChanged();
 
     EngineHostOptions        opts_;
     SingleInstanceGuard      instance_;
@@ -191,6 +206,7 @@ private:
     EngineState                              engine_state_;
     std::mutex                               state_mutex_;
     std::unique_ptr<PowerLifecycle>          lifecycle_;
+    std::unique_ptr<ReactiveInputs>          reactive_;
     platform::WinPowerMonitor                power_monitor_;
     std::unique_ptr<ipc::EngineService>      service_;
     std::unique_ptr<ipc::IpcServer>          ipc_server_;

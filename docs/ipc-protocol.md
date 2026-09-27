@@ -147,6 +147,7 @@ Request → reply. `request_id` echoes.
 | 0x010A | PING | `{}` | PONG `{}` |
 | 0x010B | GET_PRESETS | `{}` | PRESETS |
 | 0x010C | QUIT | `{}` | OK `{shutting_down:true, ordered:true}` / ERROR |
+| 0x010D | REACTIVE_COMMAND | `{verb, ...args}` | OK `<reactive body>` / ERROR |
 | 0x0300 | DIAG_GET | `{}` | DIAGNOSTICS (valid on both pipes) |
 
 Reply types: WELCOME 0x8001, OK 0x8002, ERROR 0x8003, SNAPSHOTS 0x8100,
@@ -237,9 +238,9 @@ mean_interval_s,interval_count,provenance}`.
 "displayed" (plan section 4).
 
 **STATE** — `{engine:{running,scene_clock_hz,scene_sequence}, scene:{...},
-sdk:{...}, playback:{...}, power:{...}, ipc:{sessions_active, messages_in,
-responses_out, events_sent, events_dropped, queued_events, resync_bytes,
-rejected_hellos, rate_limited, refused_busy}}`.
+sdk:{...}, playback:{...}, power:{...}, reactive:{...}, ipc:{sessions_active,
+messages_in, responses_out, events_sent, events_dropped, queued_events,
+resync_bytes, rejected_hellos, rate_limited, refused_busy}}`.
 
 **QUIT** — the "Quit All" hook (plan section 4): requests the engine's
 ordered, bounded shutdown (the power monitor, IPC intake, scene worker,
@@ -321,6 +322,64 @@ loaded scene → `unavailable`. Fields:
 `set_position` was added in Task 4.4 alongside the reserved five —
 the Layout view's arrangement editing needed an explicit move op.
 
+**REACTIVE_COMMAND** — the Lighting view's reactive-input surface
+(Task 4.6, plan section 5). Every request carries `{verb:"<name>",
+...args}`; unknown verbs → `bad_request`. Two verbs:
+
+| verb | body | reply (OK) |
+| --- | --- | --- |
+| `set_enabled` | `{input:"audio"\|"screen"\|"key", enabled:bool}` | full REACTIVE body |
+| `set_params` | `{input, sensitivity?:number}` (audio) \| `{input:"screen", screen_index:int}` | full REACTIVE body |
+
+`set_enabled` starts/stops the capture source: enabling starts the
+capture thread (a source that fails to start → `unavailable` carrying
+the source's own reason, and the input stays disabled); disabling
+stops it — a disabled input captures nothing (no hidden CPU/device
+cost). `set_params` tunes a running or idle source: `sensitivity` is
+the audio onset domain 0.25–2.0 (clamped); `screen_index` selects the
+enumerated display (out-of-range → `bad_request`). A param that does
+not apply to the named input → `bad_request`, never silently ignored.
+Successful commands also emit the `reactive` event for other
+subscribers. The selected inputs persist in the engine profile and
+re-arm on engine start.
+
+**REACTIVE** (STATE/DIAGNOSTICS field and `reactive` event body) —
+
+```json
+{ "available": true, "capture_paused": false,
+  "inputs": [ { "id":"audio"|"screen"|"key", "available":true,
+      "enabled":false, "running":false, "paused":false,
+      "sensitivity":1.0, "screen_index":0,
+      "status":"audio: listening" } ],
+  "displays": [ {"index":0,"name":"\\\\.\\DISPLAY1","width":2560,"height":1440} ] }
+```
+
+`available:false` on an input means no capture source exists on this
+system — `status` carries the honest reason; the UI disables the
+toggle, never a fabricated enable. `capture_paused` is the Task 3.7
+power gate: while displays are off or the system is suspended the
+engine pauses capture — running inputs report `paused:true` and feed
+no events/grid/level into scene evaluation. `displays` is the screen
+source's selection list (`screen_index` positions). When the engine
+has no reactive surface wired at all the whole body is
+`{available:false, reason, inputs:[], displays:[]}`.
+
+**Bounds and privacy** (plan section 6): capture is strictly local to
+the engine process. What reaches scene evaluation is bounded and
+lossy by design — audio onset events + a smoothed 0..1 level (~5 ms
+energy chunks), a 12×6 downsampled screen grid (≤ 25 Hz, one display),
+and key-edge events (virtual-key code, first edge only — no auto-
+repeat, no typed text, no history). The event queue is capped (96,
+drop-oldest) and events older than 5 s never reach evaluation. No
+audio samples, framebuffer contents, or key sequences are recorded or
+transmitted.
+
+Reactive scenes stay **Live effects only**: a scene using a reactive
+input (named preset `needs`, or an inline `ripple`/`level`/
+`screenfield` layer) reports `animation_playback:false` with the
+reactive reason through PLAYBACK's `unavailable_reason` — the same
+capability path as every other unsupported scene.
+
 **DIAGNOSTICS** — the read-only aggregate view:
 
 ```json
@@ -330,6 +389,7 @@ the Layout view's arrangement editing needed an explicit move op.
   "delivery": {"available":..., "aggregate":{...}, "pending":N, "controllers":[...]},
   "sdk":      {"state":..., "protocol_version":N, "reconnect_attempt":N, ...},
   "power":    {"display_on":B, "suspended":B, "output_paused":B, ...},
+  "reactive": {"available":B, "capture_paused":B, "inputs":[...], "displays":[...]},
   "ipc":      {"sessions_active":N, "queued_events":N, "events_dropped":N, ...},
   "clock":    {"steady_ms":F},
   "backend_counters": null }
@@ -365,6 +425,7 @@ matches the corresponding pull body:
 | `scene` | SCENE body | scene applied (SET_SCENE or --scene) |
 | `playback` | PLAYBACK body | requested-mode or applied-status change |
 | `connection` | `sdk` object | SDK link state change |
+| `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |
 | `frame_status` | `{aggregate, controllers:[{key,sequence,colors,stats}]}` | ≤ 1 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses |
 
 An `events` field that is neither `"all"` nor an array of strings, or any

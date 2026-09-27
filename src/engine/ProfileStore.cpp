@@ -32,6 +32,8 @@ constexpr const char* kKind = "openrgb2-engine-state";
    document caps). Generous vs. real usage. */
 constexpr size_t kMaxSceneEntries   = 256;
 constexpr size_t kMaxBindingEntries = 1024;
+constexpr size_t kMaxReactiveEntries = 16;   /* 3 real ids —
+   the bound only exists so a corrupt file can't allocate  */
 
 void AddErr(std::vector<std::string>& errs, const std::string& path,
             const std::string& msg)
@@ -317,6 +319,20 @@ nlohmann::json EngineStateToJson(const EngineState& state)
         bindings[kv.first] = BindingToJson(kv.second);
     }
     j["bindings"] = std::move(bindings);
+
+    /* Task 4.6 reactive inputs — the enabled selection +
+       per-input params as recorded by the manager. */
+    nlohmann::json reactive = nlohmann::json::array();
+    for(const ReactiveInputs::PersistedInput& p : state.reactive)
+    {
+        reactive.push_back(nlohmann::json::object({
+            { "input",        p.id           },
+            { "enabled",      p.enabled      },
+            { "sensitivity",  p.sensitivity  },
+            { "screen_index", p.screen_index },
+        }));
+    }
+    j["reactive"] = std::move(reactive);
     return j;
 }
 
@@ -607,13 +623,144 @@ bool EngineStateFromJson(const nlohmann::json& j,
         }
     }
 
+    /*---- reactive inputs (Task 4.6) ----------------------*\
+    || v1: array of {input, enabled, sensitivity?,           ||
+    || screen_index?}. Unknown input ids are warnings — a    ||
+    || newer document may know ids this build doesn't; skip  ||
+    || them, never fail the whole profile over one entry.    ||
+    \*---------------------------------------------------------*/
+    const auto rit = j.find("reactive");
+    if(rit != j.end() && !rit->is_null())
+    {
+        if(!rit->is_array())
+        {
+            if(legacy)
+            {
+                warn.push_back("reactive: not an array — ignored");
+            }
+            else
+            {
+                AddErr(errs, "reactive", "expected array");
+                return false;
+            }
+        }
+        else if(rit->size() > kMaxReactiveEntries)
+        {
+            AddErr(errs, "reactive",
+                   "exceeds the " +
+                   std::to_string(kMaxReactiveEntries) +
+                   "-entry bound");
+            return false;
+        }
+        else
+        {
+            bool ok = true;
+            int  i  = 0;
+            for(const nlohmann::json& je : *rit)
+            {
+                const std::string path =
+                    "reactive[" + std::to_string(i++) + "]";
+                if(!je.is_object())
+                {
+                    if(legacy)
+                    {
+                        continue;
+                    }
+                    AddErr(errs, path, "expected object");
+                    ok = false;
+                    continue;
+                }
+                std::string id;
+                if(!FieldStr(je, "input", id) || id.empty())
+                {
+                    if(legacy)
+                    {
+                        continue;
+                    }
+                    AddErr(errs, path + ".input",
+                           "missing or empty");
+                    ok = false;
+                    continue;
+                }
+                bool known = false;
+                for(const std::string& k :
+                        ReactiveInputs::InputIds())
+                {
+                    if(k == id)
+                    {
+                        known = true;
+                        break;
+                    }
+                }
+                if(!known)
+                {
+                    warn.push_back(path + ".input: '" + id +
+                                   "' is not a reactive input "
+                                   "this build knows — skipped");
+                    continue;
+                }
+                ReactiveInputs::PersistedInput p;
+                p.id = id;
+                const auto en = je.find("enabled");
+                if(en != je.end())
+                {
+                    if(en->is_boolean())
+                    {
+                        p.enabled = en->get<bool>();
+                    }
+                    else if(!legacy)
+                    {
+                        AddErr(errs, path + ".enabled",
+                               "expected boolean");
+                        ok = false;
+                    }
+                }
+                const auto se = je.find("sensitivity");
+                if(se != je.end())
+                {
+                    if(se->is_number())
+                    {
+                        p.sensitivity = (float)se->get<double>();
+                    }
+                    else if(!legacy)
+                    {
+                        AddErr(errs, path + ".sensitivity",
+                               "expected number");
+                        ok = false;
+                    }
+                }
+                const auto si = je.find("screen_index");
+                if(si != je.end())
+                {
+                    if(si->is_number_integer() &&
+                       si->get<long long>() >= 0)
+                    {
+                        p.screen_index = (int)si->get<long long>();
+                    }
+                    else if(!legacy)
+                    {
+                        AddErr(errs, path + ".screen_index",
+                               "expected integer >= 0");
+                        ok = false;
+                    }
+                }
+                candidate.reactive.push_back(p);
+            }
+            if(!ok)
+            {
+                return false;
+            }
+        }
+    }
+
     /* Unknown top-level members are retained verbatim — a
        migrated document never silently drops fields that
        still apply. */
     for(auto it = j.begin(); it != j.end(); ++it)
     {
         if(it.key() != "kind" && it.key() != "schema_version" &&
-           it.key() != "scenes" && it.key() != "bindings")
+           it.key() != "scenes" && it.key() != "bindings" &&
+           it.key() != "reactive")
         {
             candidate.extensions[it.key()] = it.value();
         }

@@ -48,6 +48,18 @@ void SceneWorker::SubmitInput(std::shared_ptr<const studio::InputState> input)
     has_pending_input_  = true;
 }
 
+void SceneWorker::SetInputProvider(InputProvider provider)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    input_provider_ = std::move(provider);
+}
+
+TimePoint SceneWorker::Epoch() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return epoch_;
+}
+
 uint64_t SceneWorker::AppliedRevision() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -77,6 +89,27 @@ bool SceneWorker::Step(TimePoint now)
     FrameCallback cb;
     EvaluatedFrame frame;
     bool         evaluate;
+
+    /* Pull input OUTSIDE the worker lock: the provider —
+       ReactiveInputs::Snapshot() — stamps event ages through
+       the scene clock, and EngineHost wires that as
+       Worker().Running()/Epoch(), both of which take mutex_.
+       Invoking the provider while holding mutex_ self-
+       deadlocks on a non-recursive std::mutex. The provider
+       runs only on the worker thread (Step is single-caller),
+       so capturing it under the lock and calling it here
+       keeps latest-wins semantics identical. */
+    InputProvider provider;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        provider = input_provider_;
+    }
+    std::shared_ptr<const studio::InputState> pulled_input;
+    if(provider)
+    {
+        pulled_input = provider();
+    }
+
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -94,6 +127,13 @@ bool SceneWorker::Step(TimePoint now)
             active_input_      = std::move(pending_input_);
             pending_input_.reset();
             has_pending_input_ = false;
+        }
+        /* Pull input: the provider (ReactiveInputs) owns the
+           per-tick state when wired — pause/disable takes
+           effect on the very next tick. */
+        if(provider)
+        {
+            active_input_ = std::move(pulled_input);
         }
 
         evaluate = active_scene_.doc != nullptr;

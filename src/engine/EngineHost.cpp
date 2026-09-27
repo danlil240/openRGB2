@@ -12,6 +12,8 @@
 
 #include "SceneLoader.h"
 
+#include "WinReactiveInputs.h"
+
 #include "TcpSocket.h"
 
 #include "effects/Presets.h"
@@ -467,11 +469,17 @@ PowerLifecycle::Deps EngineHost::BuildLifecycleDeps()
     ldeps.set_capture_paused =
         [this](bool p)
         {
-            /* The reactive-input pause seam: platform reactive
-               samplers (a later milestone) must read this flag —
-               GPU-side capture writes must not run while the
-               display sleeps. */
+            /* The reactive-input pause seam (Task 4.6): the
+               ReactiveInputs manager reads this — paused
+               sources skip capture work (the screen sampler
+               does NO GPU reads while displays sleep) and the
+               scene worker sees an empty input state on the
+               next tick. */
             capture_paused_.store(p);
+            if(reactive_)
+            {
+                reactive_->SetPaused(p);
+            }
         };
     ldeps.snapshots =
         [this]() -> std::vector<DeviceSnapshot>
@@ -659,6 +667,66 @@ bool EngineHost::Start(std::string& err)
         }
     }
 
+    /*---- Task 4.6 reactive inputs ----------------------------*\
+    || Audio / screen / key capture, Qt-free ports of the        ||
+    || preserved plugin's inputs. The manager itself is cheap:   ||
+    || nothing captures until an input is enabled through IPC.   ||
+    || Three honest wirings:                                     ||
+    ||   - the bus stamps events on the scene clock so ages      ||
+    ||     evaluate correctly against the tick's scene_time_s    ||
+    ||   - the worker PULLS a Snapshot() each tick (the          ||
+    ||     InputProvider hook), so pause/disable stops feeding   ||
+    ||     the scene on the very next frame                      ||
+    ||   - the persisted selection re-arms on start; a source    ||
+    ||     that fails to start stays disabled and reports its    ||
+    ||     own reason — never a fabricated toggle                ||
+    \*---------------------------------------------------------*/
+    if(opts_.reactive_inputs)
+    {
+        ReactiveInputs::Deps rdeps;
+        rdeps.source_factory =
+            opts_.reactive_factory
+                ? opts_.reactive_factory
+                : [](const std::string& id)
+                  { return platform::MakeReactiveSource(id); };
+        rdeps.enumerate_displays =
+            [] { return platform::EnumerateDisplays(); };
+        rdeps.now =
+            [this]
+            {
+                /* Scene-clock seconds. The worker's epoch is
+                   only set once engine_.Start() runs (Restore
+                   above races ahead of it) — until then stamp
+                   t = 0 so early events age against the same
+                   base the first ticks evaluate at. */
+                if(!engine_.Worker().Running())
+                {
+                    return 0.0;
+                }
+                return std::chrono::duration<double>(
+                    Clock::now() - engine_.Worker().Epoch())
+                    .count();
+            };
+        rdeps.changed =
+            [this] { OnReactiveChanged(); };
+        reactive_ = std::make_unique<ReactiveInputs>(
+            std::move(rdeps));
+        engine_.Worker().SetInputProvider(
+            [this]() { return reactive_->Snapshot(); });
+        reactive_->Restore(engine_state_.reactive);
+        {
+            const auto persisted = engine_state_.reactive;
+            for(const auto& p : persisted)
+            {
+                if(p.enabled)
+                {
+                    Log("reactive input '" + p.id +
+                        "' re-armed from " + opts_.state_path);
+                }
+            }
+        }
+    }
+
     lifecycle_ = std::make_unique<PowerLifecycle>(
         BuildLifecycleDeps());
 
@@ -724,6 +792,10 @@ bool EngineHost::Start(std::string& err)
         ipc_deps.sdk      = sdk_.get();
         ipc_deps.playback = playback_.get();
         ipc_deps.power    = lifecycle_.get();
+        /* Task 4.6: the REACTIVE_COMMAND surface — nullptr is
+           legal; the service then reports available=false
+           honestly rather than fabricating toggles. */
+        ipc_deps.reactive = reactive_.get();
         /* Task 4.4 layout verbs: identify and the set_binding
            create path resolve against live topology — the
            same source the mapper syncs from. */
@@ -866,6 +938,31 @@ bool EngineHost::ApplyStartupScene(std::string& err)
 /*---------------------------------------------------------*\
 || Owner loop                                               ||
 \*---------------------------------------------------------*/
+/* Task 4.6 reactive-input change hook: the manager's
+   `changed` dep — emits the IPC event and persists the
+   selection. Runs on whichever thread applied the change
+   (IPC session threads for set_enabled/set_params, the
+   owner loop for the pause gate); the profile save is
+   bounded like every other state_mutex_ holder. */
+void EngineHost::OnReactiveChanged()
+{
+    if(service_)
+    {
+        service_->EmitReactive();
+    }
+    if(!reactive_ || !profile_)
+    {
+        return;
+    }
+    std::string serr;
+    std::lock_guard<std::mutex> g(state_mutex_);
+    engine_state_.reactive = reactive_->PersistedState();
+    if(!profile_->Save(engine_state_, serr))
+    {
+        Log("profile save failed: " + serr);
+    }
+}
+
 void EngineHost::PollOnce()
 {
     if(ipc_server_)
@@ -992,6 +1089,14 @@ const OrderlyShutdown::Result& EngineHost::Stop()
     shutdown.Add("scene-worker",
                  std::chrono::milliseconds(2000),
                  [this] { engine_.Stop(); });
+    /* Reactive capture sources (Task 4.6): the worker stopped
+       first, so sources only feed a dead bus — each source's
+       join is bounded by its own thread's wake latency
+       (audio ~5 ms chunks, screen ~40-50 ms, key hook's
+       WM_QUIT wait bounded by its publish loop). */
+    shutdown.Add("reactive-inputs",
+                 std::chrono::milliseconds(3000),
+                 [this] { if(reactive_) reactive_->Shutdown(); });
     /* One in-flight transport send per lane plus join time —
        bounded by the transport's own send timeout (4 s
        default); lanes join sequentially. */

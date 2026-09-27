@@ -1032,18 +1032,22 @@ int main()
         events.clear();
         svc.PollEvents();
         /* first poll: connection + topology + playback +
-           frame_status signatures all differ from empty */
-        CHECK(events.size() == 4);
+           frame_status + reactive (Task 4.6) signatures all
+           differ from empty */
+        CHECK(events.size() == 5);
         bool saw_conn = false, saw_topo = false,
-             saw_play = false, saw_frame = false;
+             saw_play = false, saw_frame = false,
+             saw_react = false;
         for(const IpcEvent& e : events)
         {
             saw_conn  |= e.kind == event_kind::kConnection;
             saw_topo  |= e.kind == event_kind::kTopology;
             saw_play  |= e.kind == event_kind::kPlayback;
             saw_frame |= e.kind == event_kind::kFrameStatus;
+            saw_react |= e.kind == event_kind::kReactive;
         }
-        CHECK(saw_conn && saw_topo && saw_play && saw_frame);
+        CHECK(saw_conn && saw_topo && saw_play && saw_frame
+              && saw_react);
 
         events.clear();
         svc.PollEvents();

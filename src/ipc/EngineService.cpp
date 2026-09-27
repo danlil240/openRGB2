@@ -229,6 +229,14 @@ nlohmann::json PlaybackStatusToJson(const PlaybackStatus& st)
     });
 }
 
+/* Reactive-input verbs (Task 4.6 — plan section 5, the
+   Lighting view's reactive-controls card). Unknown verbs
+   are BadRequest. */
+bool IsKnownReactiveVerb(const std::string& verb)
+{
+    return verb == "set_enabled" || verb == "set_params";
+}
+
 /* Layout/calibration verbs (Task 4.4 — plan section 5,
    Layout view; bodies in docs/ipc-protocol.md §5). Unknown
    verbs are BadRequest. */
@@ -694,6 +702,58 @@ nlohmann::json EngineService::PowerJson() const
     return out;
 }
 
+nlohmann::json EngineService::ReactiveJson() const
+{
+    /* No manager wired -> honest absence, never a fabricated
+       set of toggles. */
+    if(!deps_.reactive)
+    {
+        return nlohmann::json::object({
+            { "available", false },
+            { "reason",    "reactive inputs are not wired on "
+                           "this engine" },
+            { "inputs",    nlohmann::json::array() },
+            { "displays",  nlohmann::json::array() },
+        });
+    }
+
+    nlohmann::json inputs = nlohmann::json::array();
+    for(const ReactiveInputStatus& s : deps_.reactive->Status())
+    {
+        inputs.push_back(nlohmann::json::object({
+            { "id",           s.id           },
+            { "available",    s.available    },
+            { "enabled",      s.enabled      },
+            { "running",      s.running      },
+            { "paused",       s.paused       },
+            { "sensitivity",  s.sensitivity  },
+            { "screen_index", s.screen_index },
+            { "status",       s.status       },
+        }));
+    }
+    nlohmann::json displays = nlohmann::json::array();
+    for(const ReactiveDisplay& d : deps_.reactive->Displays())
+    {
+        displays.push_back(nlohmann::json::object({
+            { "index",  d.index  },
+            { "name",   d.name   },
+            { "width",  d.width  },
+            { "height", d.height },
+        }));
+    }
+    return nlohmann::json::object({
+        { "available",      true                        },
+        { "capture_paused", deps_.reactive->Paused()    },
+        { "inputs",         std::move(inputs)           },
+        { "displays",       std::move(displays)         },
+    });
+}
+
+void EngineService::EmitReactive()
+{
+    Emit(event_kind::kReactive, ReactiveJson());
+}
+
 nlohmann::json EngineService::StateJson() const
 {
     nlohmann::json ipc_stats = nullptr;
@@ -724,6 +784,7 @@ nlohmann::json EngineService::StateJson() const
         { "sdk",        ConnectionJson()                     },
         { "playback",   PlaybackJson()                       },
         { "power",      PowerJson()                          },
+        { "reactive",   ReactiveJson()                       },
         { "ipc",        ipc_stats                            },
     });
 }
@@ -749,6 +810,7 @@ nlohmann::json EngineService::DiagnosticsJson(TimePoint now) const
                                   nlohmann::json::object())  },
         { "sdk",              ConnectionJson()               },
         { "power",            PowerJson()                    },
+        { "reactive",         ReactiveJson()                 },
         { "ipc",              deps_.server_stats
                                   ? StateJson()["ipc"]
                                   : nlohmann::json(nullptr)  },
@@ -800,6 +862,11 @@ bool EngineService::SnapshotEvent(const std::string& kind,
     if(kind == event_kind::kFrameStatus)
     {
         out = FrameStatusJson();
+        return true;
+    }
+    if(kind == event_kind::kReactive)
+    {
+        out = ReactiveJson();
         return true;
     }
     return false;
@@ -1082,6 +1149,26 @@ IpcReply EngineService::Dispatch(MsgType type,
                                   "unknown layout verb '" + verb + "'");
         }
         return HandleLayoutCommand(verb, body);
+    }
+
+    case MsgType::ReactiveCommand:
+    {
+        const std::string verb =
+            (body.is_object()
+             && body.value("verb", nlohmann::json()).is_string())
+                ? body["verb"].get<std::string>()
+                : std::string();
+        if(verb.empty())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "REACTIVE_COMMAND requires {verb:<string>}");
+        }
+        if(!IsKnownReactiveVerb(verb))
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "unknown reactive verb '" + verb + "'");
+        }
+        return HandleReactiveCommand(verb, body);
     }
 
     case MsgType::Quit:
@@ -1733,6 +1820,125 @@ IpcReply EngineService::HandleLayoutMutate(
     return IpcReply::Success(MsgType::Ok, std::move(detail));
 }
 
+/*---------------------------------------------------------*\
+||| REACTIVE_COMMAND handlers (Task 4.6)                      ||
+|||                                                            ||
+|||   set_enabled {input:"audio"|"screen"|"key",             ||
+|||                enabled:bool} — starts/stops the capture   ||
+|||                source. A disabled input captures          ||
+|||                nothing (its thread is joined).            ||
+|||   set_params  {input, sensitivity?|screen_index?} —       ||
+|||                per-input tuning; wrong-input params       ||
+|||                are bad_request, never silently ignored.   ||
+|||   Every reply carries the full reactive body — the        ||
+|||   client lands on real state, never an assumed toggle.    ||
+|||   A successful change ALSO emits the "reactive" event     ||
+|||   so other subscribers converge.                          ||
+\*---------------------------------------------------------*/
+IpcReply EngineService::HandleReactiveCommand(
+    const std::string& verb, const nlohmann::json& body)
+{
+    if(!deps_.reactive)
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "reactive inputs are not wired on this engine");
+    }
+    if(!body.is_object() ||
+       !body.value("input", nlohmann::json()).is_string())
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            verb + " requires {input:\"audio\"|\"screen\"|\"key\"}");
+    }
+    const std::string input = body["input"].get<std::string>();
+    bool known = false;
+    for(const std::string& id : ReactiveInputs::InputIds())
+    {
+        if(id == input)
+        {
+            known = true;
+            break;
+        }
+    }
+    if(!known)
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "unknown reactive input '" + input + "'");
+    }
+
+    std::string err;
+    if(verb == "set_enabled")
+    {
+        const auto it = body.find("enabled");
+        if(it == body.end() || !it->is_boolean())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "set_enabled requires {enabled:bool}");
+        }
+        const bool enabled = it->get<bool>();
+        if(!deps_.reactive->SetEnabled(input, enabled, err))
+        {
+            /* Source missing/failed — honest Unavailable with
+               the source's own reason; the slot stays
+               disabled. */
+            return IpcReply::Fail(ErrCode::Unavailable, err);
+        }
+        EmitReactive();
+        return IpcReply::Success(MsgType::Ok, ReactiveJson());
+    }
+
+    /* set_params: {input, sensitivity?} (audio) |
+       {input:"screen", screen_index} */
+    bool any = false;
+    {
+        const auto it = body.find("sensitivity");
+        if(it != body.end())
+        {
+            if(!it->is_number())
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "sensitivity must be a number");
+            }
+            any = true;
+            if(!deps_.reactive->SetSensitivity(
+                   input, (float)it->get<double>(), err))
+            {
+                return IpcReply::Fail(ErrCode::BadRequest, err);
+            }
+        }
+    }
+    {
+        const auto it = body.find("screen_index");
+        if(it != body.end())
+        {
+            if(input != "screen")
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "screen_index only applies to the "
+                    "\"screen\" input");
+            }
+            if(!it->is_number_integer())
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "screen_index must be an integer");
+            }
+            any = true;
+            if(!deps_.reactive->SetScreenIndex(
+                   (int)it->get<int64_t>(), err))
+            {
+                return IpcReply::Fail(ErrCode::BadRequest, err);
+            }
+        }
+    }
+    if(!any)
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "set_params carries no parameter (sensitivity | "
+            "screen_index)");
+    }
+    EmitReactive();
+    return IpcReply::Success(MsgType::Ok, ReactiveJson());
+}
+
 void EngineService::PollEvents(TimePoint now)
 {
     std::vector<IpcEvent> pending;
@@ -1756,6 +1962,17 @@ void EngineService::PollEvents(TimePoint now)
     {
         last_playback_sig_ = play.dump();
         pending.push_back(IpcEvent{ event_kind::kPlayback, play });
+    }
+
+    /* reactive: status strings shift on their own (a source
+       reinitializing, a display disappearing) — diff-driven
+       like the others so subscribers see them without a
+       command round-trip. */
+    const nlohmann::json react = ReactiveJson();
+    if(react.dump() != last_reactive_sig_)
+    {
+        last_reactive_sig_ = react.dump();
+        pending.push_back(IpcEvent{ event_kind::kReactive, react });
     }
 
     /* frame_status: bounded rate, only when the aggregate

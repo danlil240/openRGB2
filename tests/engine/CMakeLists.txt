@@ -34,6 +34,20 @@ engine_suite(profile_store_test)
 # sole-writer check, single-instance guard, listener-PID lookup.
 engine_suite(ownership_scan_test)
 
+# Task 4.6 — reactive inputs: bounded queue/flood, enable/disable
+# lifecycle against injected fakes, the capture_paused gate end to
+# end at the LED level, params/display bounds, persist/restore,
+# and the honest live-only playback reason for reactive scenes.
+engine_suite(reactive_inputs_test)
+
+# Task 4.9-parallel IPC surface for the same task: REACTIVE_COMMAND
+# verb bounds, honest Unavailable paths, STATE/DIAGNOSTICS surface,
+# the reactive event, and the reactive-scene playback reason.
+engine_suite(ipc_reactive_test)
+target_link_libraries(ipc_reactive_test PRIVATE openrgb2_ipc)
+target_include_directories(ipc_reactive_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Task 3.9 — offline end-to-end: the REAL EngineHost composition
 # against the scripted in-process SDK backend (startup -> attach ->
 # enumerate -> bind -> frames -> ordered shutdown).

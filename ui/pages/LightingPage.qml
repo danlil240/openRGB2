@@ -83,6 +83,36 @@ Item {
         sceneEdit.save();
     }
 
+    /* Per-input capability gate (Task 4.6): a reactive-input
+       toggle is only operable when the WORKING scene consumes
+       that input — the preset's declared `needs`, else the
+       inline layer stack's reactive primitives (ripple with an
+       empty source consumes every event, so it needs either
+       event input; level needs audio; screenfield needs
+       screen). Never a guess: no scene -> nothing operable. */
+    function sceneNeeds(inputId) {
+        if(!root.editorUp || !sceneEdit.hasWorking)
+            return false;
+        const needs = sceneEdit.presetSupport.needs || "";
+        if(needs !== "")
+            return needs === inputId;
+        const doc = sceneEdit.workingDocument || {};
+        const eff = doc.effect || {};
+        const layers = eff.layers || [];
+        for(let i = 0; i < layers.length; ++i) {
+            const p   = layers[i].primitive || "";
+            const src = layers[i].source    || "";
+            if(p === "screenfield" && inputId === "screen")
+                return true;
+            if(p === "level" && inputId === "audio")
+                return true;
+            if(p === "ripple" && (src === "" || src === inputId)
+               && (inputId === "audio" || inputId === "key"))
+                return true;
+        }
+        return false;
+    }
+
     function deviceNameFor(key) {
         if(!key || !root.engineUp)
             return "controller";
@@ -216,7 +246,7 @@ Item {
                             }
                             Text {
                                 visible: needs !== "" && !isPlayback
-                                text: qsTr("reactive input arrives with the live-inputs release")
+                                text: qsTr("reactive input required — enable it in REACTIVE INPUTS below")
                                 color: Theme.textDisabled
                                 font.pixelSize: Theme.fontSizeSmall
                                 wrapMode: Text.WordWrap
@@ -1086,29 +1116,289 @@ Item {
                     }
                 }
 
-                /*---- Reactive inputs (placeholder) --------------
-                   Audio/screen/key capture arrives with the
-                   live-inputs task (4.6) — honest disabled
-                   controls, never fake toggles.           */
+                /*---- Reactive inputs (Task 4.6) -----------------
+                   Enable/disable + honest status for each engine
+                   reactive input. Every toggle is real wire
+                   traffic: REACTIVE_COMMAND round-trips the
+                   engine and `checked` re-lands on the pushed
+                   "reactive" event — never on the click. A
+                   toggle is operable only when the engine
+                   reports the input available AND the working
+                   scene consumes it (sceneNeeds); a running
+                   input stays operable so capture can always
+                   be stopped. */
                 Card {
+                    id: reactiveCard
                     title: qsTr("REACTIVE INPUTS")
+                    objectName: "reactiveCard"
                     width: parent.width - 2 * col.padding
+
+                    readonly property var reactiveState:
+                        root.engineUp ? (bridge.reactive || {}) : ({})
+                    readonly property bool reactiveAvailable:
+                        reactiveState.available === true
+                    readonly property var reactiveInputs:
+                        reactiveState.inputs || []
+                    readonly property var reactiveDisplays:
+                        reactiveState.displays || []
+                    readonly property bool capturePaused:
+                        reactiveState.capture_paused === true
+
+                    function inputState(id) {
+                        for(let i = 0;
+                            i < reactiveCard.reactiveInputs.length;
+                            ++i) {
+                            const it = reactiveCard.reactiveInputs[i];
+                            if(it.id === id)
+                                return it;
+                        }
+                        return null;
+                    }
+
                     Column {
-                        spacing: Theme.spaceS
+                        spacing: Theme.spaceM
+
+                        /* Engine surface absent — the honest
+                           reason, never a fabricated set of
+                           toggles. */
                         Text {
-                            text: qsTr("Audio, screen, and keyboard reactive capture arrive with the live-inputs release. Presets that need an input show a badge above.")
+                            objectName: "reactiveUnavailableNote"
+                            visible: root.engineUp
+                                     && !reactiveCard.reactiveAvailable
+                            text: reactiveCard.reactiveState.reason
+                                  || qsTr("reactive inputs are not wired on this engine")
+                            color: Theme.warn
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                            width: parent.width
+                        }
+
+                        /* capture_paused — the power gate the
+                           engine applies while displays are
+                           off or the system is suspended. */
+                        Text {
+                            objectName: "reactivePausedNote"
+                            visible: reactiveCard.capturePaused
+                            text: qsTr("Capture paused — displays are off or the system is suspended; nothing is captured.")
+                            color: Theme.warn
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                            width: parent.width
+                        }
+
+                        Repeater {
+                            objectName: "reactiveInputList"
+                            model: reactiveCard.reactiveAvailable
+                                   ? [ { "inputId": "audio",
+                                         "label": qsTr("Audio reactive") },
+                                       { "inputId": "screen",
+                                         "label": qsTr("Screen mirror") },
+                                       { "inputId": "key",
+                                         "label": qsTr("Keyboard reactive") } ]
+                                   : []
+
+                            delegate: Column {
+                                id: inputRow
+                                required property var modelData
+                                readonly property string inputId:
+                                    modelData.inputId
+                                readonly property var st:
+                                    reactiveCard.inputState(inputId)
+                                readonly property bool present:
+                                    st !== null
+                                readonly property bool avail:
+                                    present && st.available === true
+                                readonly property bool on:
+                                    present && st.enabled === true
+                                    && st.running === true
+                                /* Operable only when the scene
+                                   consumes this input — or the
+                                   input is running (it must
+                                   always be stoppable). */
+                                readonly property bool usable:
+                                    root.engineUp && avail
+                                    && (on || root.sceneNeeds(inputId))
+                                width: parent.width
+                                spacing: Theme.spaceXS
+
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: Theme.spaceL
+                                    CheckBox {
+                                        id: inputCheck
+                                        objectName: inputId + "Check"
+                                        text: modelData.label
+                                        enabled: inputRow.usable
+                                        onClicked:
+                                            bridge.reactiveCommand(
+                                                "set_enabled",
+                                                { "input": inputId,
+                                                  "enabled": inputCheck.checked })
+                                        Binding {
+                                            target: inputCheck
+                                            property: "checked"
+                                            value: inputRow.on
+                                        }
+                                    }
+                                    StatusPill {
+                                        objectName: inputId + "Pill"
+                                        visible: inputRow.present
+                                        text: !inputRow.avail
+                                              ? qsTr("unavailable")
+                                              : inputRow.on
+                                              ? (reactiveCard.capturePaused
+                                                 ? qsTr("paused") : qsTr("on"))
+                                              : qsTr("off")
+                                        tone: !inputRow.avail ? "warn"
+                                              : inputRow.on
+                                              ? (reactiveCard.capturePaused
+                                                 ? "warn" : "ok")
+                                              : "neutral"
+                                    }
+                                    Text {
+                                        objectName: inputId + "Status"
+                                        Layout.fillWidth: true
+                                        text: {
+                                            if(!inputRow.present)
+                                                return qsTr("not reported by the engine");
+                                            if(!inputRow.avail)
+                                                return inputRow.st.status
+                                                    || qsTr("not available on this system");
+                                            if(!root.sceneNeeds(inputId)
+                                               && !inputRow.on)
+                                                return qsTr("the current scene doesn't use this input");
+                                            return inputRow.st.status || "";
+                                        }
+                                        color: Theme.textDisabled
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        wrapMode: Text.WordWrap
+                                    }
+                                }
+
+                                /* Audio: sensitivity (the
+                                   engine's 0.25..2.0 domain,
+                                   shown as percent; debounced
+                                   like playback params). */
+                                RowLayout {
+                                    visible: inputRow.inputId === "audio"
+                                             && inputRow.avail
+                                    width: parent.width
+                                    spacing: Theme.spaceL
+                                    Text {
+                                        text: qsTr("Sensitivity")
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeBody
+                                        Layout.preferredWidth: 110
+                                    }
+                                    AppSlider {
+                                        id: sensSlider
+                                        objectName: "audioSensitivity"
+                                        Layout.fillWidth: true
+                                        from: 25; to: 200; stepSize: 1
+                                        enabled: inputRow.usable
+                                        onMoved: sensTimer.restart()
+                                        Binding {
+                                            target: sensSlider
+                                            property: "value"
+                                            value: inputRow.present
+                                                   ? Math.round(
+                                                       inputRow.st.sensitivity
+                                                       * 100)
+                                                   : 100
+                                        }
+                                    }
+                                    Text {
+                                        text: Math.round(sensSlider.value) + "%"
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeBody
+                                    }
+                                    Timer {
+                                        id: sensTimer
+                                        interval: 150
+                                        onTriggered:
+                                            bridge.reactiveCommand(
+                                                "set_params",
+                                                { "input": "audio",
+                                                  "sensitivity":
+                                                      sensSlider.value / 100.0 })
+                                    }
+                                }
+
+                                /* Screen: which display the
+                                   sampler mirrors. */
+                                RowLayout {
+                                    visible: inputRow.inputId === "screen"
+                                             && inputRow.avail
+                                    width: parent.width
+                                    spacing: Theme.spaceL
+                                    Text {
+                                        text: qsTr("Display")
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeBody
+                                        Layout.preferredWidth: 110
+                                    }
+                                    ComboBox {
+                                        id: dispCombo
+                                        objectName: "screenDisplay"
+                                        Layout.fillWidth: true
+                                        enabled: inputRow.usable && count > 0
+                                        model: reactiveCard.reactiveDisplays
+                                        textRole: "name"
+                                        onActivated: index =>
+                                            bridge.reactiveCommand(
+                                                "set_params",
+                                                { "input": "screen",
+                                                  "screen_index": index })
+                                        Binding {
+                                            target: dispCombo
+                                            property: "currentIndex"
+                                            value: inputRow.present
+                                                   ? inputRow.st.screen_index
+                                                   : 0
+                                        }
+                                    }
+                                    Text {
+                                        visible: dispCombo.count === 0
+                                        text: qsTr("no displays reported")
+                                        color: Theme.textDisabled
+                                        font.pixelSize: Theme.fontSizeSmall
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            objectName: "reactiveLiveNote"
+                            visible: root.engineUp
+                                     && reactiveCard.reactiveAvailable
+                            text: root.animationRequested
+                                  ? qsTr("Animation playback is selected — reactive capture has no visible effect while an uploaded loop owns output. Reactive scenes stay Live effects.")
+                                  : qsTr("Reactive scenes stay Live effects — a scene using these inputs can't be uploaded as animation playback.")
                             color: Theme.textSecondary
                             font.pixelSize: Theme.fontSizeSmall
                             wrapMode: Text.WordWrap
                             width: parent.width
                         }
-                        Repeater {
-                            model: [ qsTr("Audio reactive"), qsTr("Screen reactive"),
-                                     qsTr("Keyboard reactive") ]
-                            CheckBox {
-                                text: modelData
-                                enabled: false
-                            }
+
+                        /* Bounded, local capture — the privacy
+                           surface the plan requires next to the
+                           controls. */
+                        Text {
+                            visible: root.engineUp
+                                     && reactiveCard.reactiveAvailable
+                            text: qsTr("Capture stays inside the engine process — audio energies (~5 ms chunks), a 12×6 screen grid (≤ 25 Hz), and key edges only. No audio samples, pixels, or typed text are recorded.")
+                            color: Theme.textDisabled
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                            width: parent.width
+                        }
+
+                        EmptyState {
+                            objectName: "reactiveEmpty"
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            visible: !root.engineUp
+                            title: qsTr("Engine not connected")
+                            detail: qsTr("Reactive input controls report what the engine exposes.")
                         }
                     }
                 }
