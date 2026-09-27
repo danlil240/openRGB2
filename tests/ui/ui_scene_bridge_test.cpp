@@ -554,6 +554,10 @@ int main(int argc, char** argv)
         return !edit.saving() && !edit.saveError().isEmpty();
     }));
     CHECK(edit.saveError().contains(QStringLiteral("refused")));
+    /* The refusal is attributed to its source — an engine
+       ERROR reply never reads as a local input refusal
+       (Task 4.5). */
+    CHECK(edit.saveErrorSource() == QStringLiteral("engine"));
     /* The uncommitted edit survived the failure — retryable. */
     CHECK(edit.dirty());
     edit.save();                    /* retry now succeeds   */
@@ -600,6 +604,12 @@ int main(int argc, char** argv)
     CHECK(params["speed"].get<double>() == 150.0);
     CHECK(params["color"] == "#00FF10");
     CHECK(!params.contains("reverse"));
+
+    /* A refused input is a DIFFERENT state than the engine
+       rejection above — the UI refused it before a body
+       existed (Task 4.5). */
+    CHECK(!edit.setPreset(QString()));
+    CHECK(edit.saveErrorSource() == QStringLiteral("input"));
 
     /* A non-playback preset must not emit params at all. */
     CHECK(edit.setPreset(QStringLiteral("aurora")));

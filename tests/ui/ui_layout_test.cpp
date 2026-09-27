@@ -435,9 +435,17 @@ static nlohmann::json WelcomeBody(const nlohmann::json& doc)
 
 /* The scripted engine mutates its stored document for the
    scene-mutation verbs — the scene EVENT echo is what the
-   controller repaints from. */
-static void ApplyLayoutVerb(Server& s, const std::string& verb,
-                            const nlohmann::json& body)
+   controller repaints from. Task 4.5: calibrate_led mirrors
+   the REAL engine's dispatch validation (EngineService::
+   HandleLayoutMutate + the apply path's
+   ValidateSceneLedAddresses) so the fake server is a second
+   boundary, not a rubber stamp — a hostile client that skips
+   LayoutEditModel's check meets a refusal here, exactly like
+   EngineService::Dispatch. Returns "" applied, else the
+   bad_request message. */
+static std::string ApplyLayoutVerb(Server& s,
+                                   const std::string& verb,
+                                   const nlohmann::json& body)
 {
     const std::string oid = body.value("object_id", "");
     for(nlohmann::json& o : s.doc["objects"])
@@ -473,8 +481,66 @@ static void ApplyLayoutVerb(Server& s, const std::string& verb,
         }
         else if(verb == "calibrate_led")
         {
-            o["emitters"][body["emitter_index"].get<int>()]
-                ["address"] = body["address"];
+            /* Engine parity (ipc_engine_service_test): bad
+               object kind, bad emitter index, address < -1,
+               unbound/unknown zone bound, and
+               address >= zone_leds all refuse. */
+            if(o.value("kind", "") != "device")
+            {
+                return "calibrate_led targets device objects";
+            }
+            if(!body.value("emitter_index", nlohmann::json())
+                    .is_number_integer() ||
+               !body.value("address", nlohmann::json())
+                    .is_number_integer())
+            {
+                return "calibrate_led requires integer "
+                       "emitter_index and address";
+            }
+            const int64_t ei =
+                body["emitter_index"].get<int64_t>();
+            const int64_t ad = body["address"].get<int64_t>();
+            const int64_t emitters =
+                o.contains("emitters") && o["emitters"].is_array()
+                    ? (int64_t)o["emitters"].size() : 0;
+            if(ei < 0 || ei >= emitters)
+            {
+                return "emitter_index out of range";
+            }
+            if(ad < -1)
+            {
+                return "address must be >= -1";
+            }
+            if(ad >= 0)
+            {
+                int64_t zone_leds = 0;
+                const std::string bid = o.value("binding", "");
+                if(!bid.empty() && s.doc.contains("bindings") &&
+                   s.doc["bindings"].is_array())
+                {
+                    for(const nlohmann::json& b : s.doc["bindings"])
+                    {
+                        if(b.value("id", "") == bid)
+                        {
+                            zone_leds =
+                                b.value("zone_leds", (int64_t)0);
+                            break;
+                        }
+                    }
+                }
+                if(zone_leds <= 0)
+                {
+                    return "object '" + oid +
+                           "' has no bound zone LED count";
+                }
+                if(ad >= zone_leds)
+                {
+                    return "address " + std::to_string(ad) +
+                           " out of range (zone has " +
+                           std::to_string(zone_leds) + " LEDs)";
+                }
+            }
+            o["emitters"][ei]["address"] = ad;
         }
         else if(verb == "set_binding")
         {
@@ -482,6 +548,7 @@ static void ApplyLayoutVerb(Server& s, const std::string& verb,
         }
         break;
     }
+    return std::string();
 }
 
 static bool ServeOnce(Server& s, uint32_t wait_ms = 15)
@@ -594,7 +661,21 @@ static bool ServeOnce(Server& s, uint32_t wait_ms = 15)
             }
             else
             {
-                ApplyLayoutVerb(s, verb, body);
+                const std::string verr =
+                    ApplyLayoutVerb(s, verb, body);
+                if(!verr.empty())
+                {
+                    /* Engine-parity refusal — the dispatch
+                       boundary's BadRequest. */
+                    s.srv.SendMsg(MsgType::Error, m.request_id,
+                        nlohmann::json::object({
+                            { "code",
+                              (uint32_t)ErrCode::BadRequest },
+                            { "error",   "bad_request" },
+                            { "message", verr },
+                        }));
+                    break;
+                }
                 ++s.revision;
                 s.srv.SendMsg(MsgType::Ok, m.request_id,
                     nlohmann::json::object({
@@ -775,6 +856,10 @@ static void BridgeTests()
         const int sc = s.scene_saves;
         CHECK(!ctl.calibrateEmitter(QStringLiteral("fan0"), 0,
                                     40));      /* = zone N   */
+        /* a UI-side refusal is a DIFFERENT state than an
+           engine rejection — never conflated (Task 4.5) */
+        CHECK(ctl.lastErrorSource() ==
+              QStringLiteral("input"));
         CHECK(!ctl.calibrateEmitter(QStringLiteral("fan0"), 0,
                                     400));
         CHECK(!ctl.calibrateEmitter(QStringLiteral("fan0"), 9,
@@ -783,6 +868,8 @@ static void BridgeTests()
         CHECK(s.layout_commands == lc);
         CHECK(s.scene_saves == sc);
         CHECK(!ctl.lastError().isEmpty());
+        CHECK(ctl.lastErrorSource() ==
+              QStringLiteral("input"));
     }
     CHECK(ctl.calibrateEmitter(QStringLiteral("fan0"), 0, 39));
     CHECK(PumpBoth(s, [&] {
@@ -791,6 +878,58 @@ static void BridgeTests()
     }));
     CHECK(s.last_layout_body["emitter_index"].get<int>() == 0);
     CHECK(s.last_layout_body["address"].get<int>() == 39);
+    CHECK(ctl.lastError().isEmpty());
+    CHECK(ctl.lastErrorSource().isEmpty());
+
+    /*---- the SAME out-of-range address refused at the IPC
+           boundary too — the UI check is not the only gate.
+           A hostile client bypassing LayoutEditModel entirely
+           (raw bridge.layoutCommand) meets the scripted
+           server's engine-parity dispatch refusal; the real
+           engine's identical coverage lives in
+           tests/engine/ipc_engine_service_test.cpp
+           (calibrate_led). Task 4.5 boundary regression. --*/
+    std::printf("-- hostile calibrate bypass\n");
+    {
+        QString reply_type;
+        QString reply_msg;
+        int     reply_id = 0;
+        QObject::connect(&bridge, &EngineBridge::replyReceived,
+            [&](int id, const QString& type,
+                const QVariantMap& b)
+            {
+                reply_id   = id;
+                reply_type = type;
+                reply_msg  = b.value(QStringLiteral("message"))
+                                 .toString();
+            });
+        QVariantMap hostile;
+        hostile.insert(QStringLiteral("object_id"),
+                       QStringLiteral("fan0"));
+        hostile.insert(QStringLiteral("emitter_index"), 0);
+        hostile.insert(QStringLiteral("address"), 40);   /* =N */
+        const int req =
+            bridge.layoutCommand(QStringLiteral("calibrate_led"),
+                                 hostile);
+        CHECK(req > 0);
+        CHECK(PumpBoth(s, [&] { return reply_id == req; }));
+        CHECK(reply_type == QStringLiteral("ERROR"));
+        CHECK(reply_msg.contains(QStringLiteral("out of range")));
+        /* the applied document is untouched — no ghost write
+           (the address stays at the last APPLIED 39, the
+           refused 40 never landed) */
+        const nlohmann::json* o =
+            ctl.ModelForTesting().FindObject("fan0");
+        CHECK(o != nullptr);
+        if(o)
+        {
+            CHECK((*o)["emitters"][0]["address"].get<int>()
+                  == 39);
+        }
+        /* and the controller never counted it as an applied
+           edit — no ghost undo entry either */
+        CHECK(!ctl.busy());
+    }
 
     /*---- linking a mirrored copy ----------------------------*/
     std::printf("-- set_mirror\n");
@@ -826,6 +965,10 @@ static void BridgeTests()
         CHECK(PumpBoth(s, [&] { return !ctl.busy(); }));
         CHECK(ctl.undoCount() == undo_before);
         CHECK(ctl.lastError() == QStringLiteral("refused by test"));
+        /* an ENGINE rejection is a distinct state from the
+           local input refusal above (Task 4.5) */
+        CHECK(ctl.lastErrorSource() ==
+              QStringLiteral("engine"));
         /* the refused doc never touched the applied model */
         CHECK(AppliedX(ctl, QStringLiteral("fan0")) == 0.5);
     }

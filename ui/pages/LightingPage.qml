@@ -68,6 +68,21 @@ Item {
         }
     }
 
+    /* Commit-on-save (calibration-report regression, Task
+       4.5): a text field still holding focus owns UNCOMMITTED
+       text — its editingFinished hasn't fired, so saving the
+       working copy would silently store the stale value.
+       Commit every edit-owning field first; a refused commit
+       aborts the save and surfaces the refusal rather than
+       writing stale data. */
+    function commitPendingEdits() {
+        if(!root.editorUp)
+            return;
+        if(!sceneEdit.setSceneName(nameField.text))
+            return;
+        sceneEdit.save();
+    }
+
     function deviceNameFor(key) {
         if(!key || !root.engineUp)
             return "controller";
@@ -152,9 +167,14 @@ Item {
                             modelData.needs || ""
 
                         activeFocusOnTab: true
+                        /* !selected like the MouseArea: re-picking
+                           the already-selected preset is a no-op
+                           that must not disarm the pending
+                           Animation-playback default (setPreset
+                           sees picked == prev and clears it). */
                         Keys.onPressed: e => {
                             if(e.key === Qt.Key_Space || e.key === Qt.Key_Return) {
-                                if(root.editorUp && root.engineUp)
+                                if(root.editorUp && root.engineUp && !selected)
                                     sceneEdit.setPreset(pid);
                                 e.accepted = true;
                             }
@@ -1174,6 +1194,7 @@ Item {
                             }
                             TextField {
                                 id: nameField
+                                objectName: "nameField"
                                 Layout.fillWidth: true
                                 enabled: root.editorUp
                                 placeholderText: qsTr("name this scene")
@@ -1276,7 +1297,8 @@ Item {
             Layout.fillWidth: true
             visible: root.editorUp
                      && (sceneEdit.dirty || sceneEdit.conflict
-                         || sceneEdit.saving || sceneEdit.saveError !== "")
+                         || sceneEdit.saving || sceneEdit.saveError !== ""
+                         || nameField.text !== sceneEdit.sceneName)
             implicitHeight: saveRow.implicitHeight + 2 * Theme.spaceM
             color: Theme.surface
             Rectangle {
@@ -1316,13 +1338,36 @@ Item {
                                ? Theme.warn : Theme.textPrimary
                         font.pixelSize: Theme.fontSizeBody
                     }
-                    Text {
+                    Row {
                         visible: root.editorUp && sceneEdit.saveError !== ""
-                        text: root.editorUp ? sceneEdit.saveError : ""
-                        color: Theme.bad
-                        font.pixelSize: Theme.fontSizeSmall
-                        wrapMode: Text.WordWrap
+                        spacing: Theme.spaceS
                         width: parent.width
+                        /* The error SOURCE is part of the state —
+                           a refused input never reads as an
+                           engine rejection (Task 4.5). */
+                        StatusPill {
+                            id: saveErrSrc
+                            visible: root.editorUp
+                            text: {
+                                if(!root.editorUp) return "";
+                                switch(sceneEdit.saveErrorSource) {
+                                case "engine":     return qsTr("engine rejected");
+                                case "connection": return qsTr("not sent");
+                                default:           return qsTr("refused before send");
+                                }
+                            }
+                            tone: root.editorUp
+                                  && sceneEdit.saveErrorSource === "engine"
+                                  ? "bad" : "warn"
+                        }
+                        Text {
+                            width: parent.width - saveErrSrc.width
+                                   - parent.spacing
+                            text: root.editorUp ? sceneEdit.saveError : ""
+                            color: Theme.bad
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                        }
                     }
                 }
 
@@ -1343,9 +1388,18 @@ Item {
                     text: (root.editorUp && sceneEdit.saving)
                           ? qsTr("Saving…") : qsTr("Save")
                     primary: true
+                    /* Reachable also when the ONLY pending edit
+                       is uncommitted field text — an uncommitted
+                       name must never make Save unreachable nor
+                       save the stale value. */
                     enabled: root.editorUp && root.engineUp
-                             && sceneEdit.dirty && !sceneEdit.saving
-                    onClicked: sceneEdit.save()
+                             && !sceneEdit.saving
+                             && (sceneEdit.dirty
+                                 || nameField.text
+                                    !== sceneEdit.sceneName)
+                    /* Commit-on-save: focused fields commit before
+                       the body exists — never a stale save. */
+                    onClicked: root.commitPendingEdits()
                 }
             }
         }

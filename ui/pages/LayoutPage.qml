@@ -108,6 +108,29 @@ Item {
                ? -2 : n;
     }
 
+    /* Live calibration-address check — the same bound
+       LayoutEditModel::BuildCalibrateLed enforces, evaluated
+       BEFORE a body exists so the refusal is immediate AND
+       inline (Task 4.5: reject at every boundary; the field
+       is the first). "" means sendable. */
+    function addrErr(text) {
+        var t = (text === undefined || text === null
+                 ? "" : String(text)).trim();
+        if(t === "")
+            return qsTr("enter a whole-number LED address (-1 = render-only)");
+        var n = parseInt(t, 10);
+        if(isNaN(n) || String(n) !== t)
+            return qsTr("LED address must be a whole number (-1 = render-only)");
+        if(n < -1)
+            return qsTr("LED address must be >= -1 (-1 = render-only)");
+        if(root.ctlUp && layoutCtl.zoneBound <= 0)
+            return qsTr("no bound zone LED count — only -1 (render-only) applies");
+        if(root.ctlUp && n >= layoutCtl.zoneBound)
+            return qsTr("address %1 is out of range — the bound zone has %2 LEDs")
+                .arg(n).arg(layoutCtl.zoneBound);
+        return "";
+    }
+
     Connections {
         target: root.ctlUp ? layoutCtl : null
         function onItemsChanged() { root.refreshItems(); }
@@ -169,13 +192,35 @@ Item {
                     elide: Text.ElideRight
                 }
             }
-            Text {
+            Row {
                 visible: root.ctlUp && layoutCtl.lastError !== ""
-                text: root.ctlUp ? layoutCtl.lastError : ""
-                color: Theme.bad
-                font.pixelSize: Theme.fontSizeSmall
-                wrapMode: Text.WordWrap
+                spacing: Theme.spaceS
                 width: parent.width - 2 * col.padding
+                /* The error SOURCE is part of the state — a
+                   local input refusal never reads as an
+                   engine rejection (Task 4.5). */
+                StatusPill {
+                    id: layoutErrSrc
+                    text: {
+                        if(!root.ctlUp) return "";
+                        switch(layoutCtl.lastErrorSource) {
+                        case "engine":     return qsTr("engine rejected");
+                        case "connection": return qsTr("not sent");
+                        default:           return qsTr("refused before send");
+                        }
+                    }
+                    tone: root.ctlUp
+                          && layoutCtl.lastErrorSource === "engine"
+                          ? "bad" : "warn"
+                }
+                Text {
+                    width: parent.width - layoutErrSrc.width
+                           - parent.spacing
+                    text: root.ctlUp ? layoutCtl.lastError : ""
+                    color: Theme.bad
+                    font.pixelSize: Theme.fontSizeSmall
+                    wrapMode: Text.WordWrap
+                }
             }
 
             /*---- canvas + inspector ---------------------------*/
@@ -693,60 +738,86 @@ Item {
                                 model: root.ctlUp
                                        ? layoutCtl.selectedEmitters
                                        : []
-                                delegate: RowLayout {
+                                delegate: Column {
                                     width: ListView.view.width
-                                    spacing: Theme.spaceS
-                                    Text {
-                                        text: "#" + modelData.index
-                                              + (modelData.group
-                                                 ? " · "
-                                                   + modelData.group
-                                                 : "")
-                                        color: Theme.textSecondary
-                                        font.pixelSize:
-                                            Theme.fontSizeSmall
-                                        Layout.preferredWidth: 90
-                                        elide: Text.ElideRight
-                                    }
-                                    TextField {
-                                        id: addrField
-                                        Layout.fillWidth: true
-                                        text: String(
-                                            modelData.address)
-                                        inputMethodHints:
-                                            Qt.ImhDigitsOnly
-                                        color: Theme.textPrimary
-                                        font.pixelSize:
-                                            Theme.fontSizeSmall
-                                        background: Rectangle {
-                                            radius: Theme.radiusS
-                                            color: Theme.surfaceAlt
-                                            border.width:
-                                                addrField.activeFocus
-                                                ? 2 : 1
-                                            border.color:
-                                                addrField.activeFocus
-                                                ? Theme.accent
-                                                : Theme.border
+                                    spacing: 2
+                                    RowLayout {
+                                        width: parent.width
+                                        spacing: Theme.spaceS
+                                        Text {
+                                            text: "#" + modelData.index
+                                                  + (modelData.group
+                                                     ? " · "
+                                                       + modelData.group
+                                                     : "")
+                                            color: Theme.textSecondary
+                                            font.pixelSize:
+                                                Theme.fontSizeSmall
+                                            Layout.preferredWidth: 90
+                                            elide: Text.ElideRight
                                         }
-                                        onEditingFinished: {
-                                            var n = parseInt(
-                                                text, 10);
-                                            if(isNaN(n)
-                                               || String(n)
-                                                  !== text.trim()) {
-                                                text = String(
-                                                    modelData.address);
-                                                return;
+                                        TextField {
+                                            id: addrField
+                                            Layout.fillWidth: true
+                                            text: String(
+                                                modelData.address)
+                                            inputMethodHints:
+                                                Qt.ImhDigitsOnly
+                                            color: Theme.textPrimary
+                                            font.pixelSize:
+                                                Theme.fontSizeSmall
+                                            background: Rectangle {
+                                                radius: Theme.radiusS
+                                                color: Theme.surfaceAlt
+                                                border.width:
+                                                    addrField.activeFocus
+                                                    || root.addrErr(
+                                                           addrField.text)
+                                                           !== ""
+                                                    ? 2 : 1
+                                                border.color:
+                                                    root.addrErr(
+                                                        addrField.text)
+                                                        !== ""
+                                                    ? Theme.bad
+                                                    : addrField.activeFocus
+                                                      ? Theme.accent
+                                                      : Theme.border
                                             }
-                                            /* range-checked in
-                                               the model BEFORE
-                                               send — and again
-                                               on the engine  */
-                                            layoutCtl.calibrateEmitter(
-                                                layoutCtl.selectedId,
-                                                modelData.index, n);
+                                            onEditingFinished: {
+                                                /* refused HERE —
+                                                   the inline error
+                                                   stays until the
+                                                   text is valid;
+                                                   nothing is sent  */
+                                                if(root.addrErr(text)
+                                                   !== "")
+                                                    return;
+                                                /* range-checked in
+                                                   the model BEFORE
+                                                   send — and again
+                                                   on the engine   */
+                                                layoutCtl.calibrateEmitter(
+                                                    layoutCtl.selectedId,
+                                                    modelData.index,
+                                                    parseInt(text, 10));
+                                            }
                                         }
+                                    }
+                                    /* immediate inline error — the
+                                       refusal is visible AT the
+                                       field, not just the toolbar */
+                                    Text {
+                                        visible: root.addrErr(
+                                                     addrField.text)
+                                                 !== ""
+                                        text: root.addrErr(
+                                                  addrField.text)
+                                        color: Theme.bad
+                                        font.pixelSize:
+                                            Theme.fontSizeSmall
+                                        wrapMode: Text.WordWrap
+                                        width: parent.width
                                     }
                                 }
                             }
@@ -775,6 +846,20 @@ Item {
                             width: parent.width
                             spacing: Theme.spaceS
                             property var snap: modelData
+                            /* The led-index bound identify must
+                               respect: the picked zone's count,
+                               or the controller total on the
+                               whole-controller scope. */
+                            readonly property int ledBound: {
+                                if(zonePick.currentIndex <= 0)
+                                    return snap.led_count || 0;
+                                var zs = snap.zones || [];
+                                for(var i = 0; i < zs.length; ++i)
+                                    if(zs[i].name === zonePick.zones[
+                                                zonePick.currentIndex])
+                                        return zs[i].led_count || 0;
+                                return 0;
+                            }
                             RowLayout {
                                 width: parent.width
                                 spacing: Theme.spaceL
@@ -866,6 +951,14 @@ Item {
                                             durField.text);
                                         if(led === -2 || dur === -2)
                                             return;
+                                        /* an out-of-range led #
+                                           is refused HERE — the
+                                           engine's own range check
+                                           is the second gate, not
+                                           the only one */
+                                        if(led >= 0 && ledBound > 0
+                                           && led >= ledBound)
+                                            return;
                                         if(dur < 0)    dur = 3000;
                                         layoutCtl.identify(
                                             snap.key, zone, led,
@@ -884,14 +977,30 @@ Item {
                                 }
                             }
                             /* the refusal is visible, not silent —
-                               a mistyped field never becomes a
-                               whole-controller blink */
+                               a mistyped or out-of-range field
+                               never becomes a whole-controller
+                               blink */
                             Text {
-                                visible: root.parseIdx(
-                                             ledField.text) === -2
-                                         || root.parseIdx(
-                                                durField.text) === -2
-                                text: qsTr("led # and ms must be whole numbers")
+                                visible: {
+                                    if(root.parseIdx(ledField.text)
+                                       === -2
+                                       || root.parseIdx(durField.text)
+                                          === -2)
+                                        return true;
+                                    var led = root.parseIdx(
+                                                  ledField.text);
+                                    return led >= 0 && ledBound > 0
+                                           && led >= ledBound;
+                                }
+                                text: {
+                                    if(root.parseIdx(ledField.text)
+                                       === -2
+                                       || root.parseIdx(durField.text)
+                                          === -2)
+                                        return qsTr("led # and ms must be whole numbers");
+                                    return qsTr("led # out of range — this scope has %1 LEDs")
+                                        .arg(ledBound);
+                                }
                                 color: Theme.bad
                                 font.pixelSize: Theme.fontSizeSmall
                             }

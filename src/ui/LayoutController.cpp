@@ -54,7 +54,8 @@ LayoutController::LayoutController(EngineBridge* bridge,
         identify_timer_.stop();
         identifying_ = QVariantMap{};
         emit identifyingChanged();
-        SetLastError(QStringLiteral("engine connection lost"));
+        SetLastError(QStringLiteral("engine connection lost"),
+                     QStringLiteral("connection"));
         emit itemsChanged();
     });
 }
@@ -130,7 +131,8 @@ void LayoutController::OnReplyReceived(int id,
         else
         {
             SetLastError(body.value(QStringLiteral("message"))
-                             .toString());
+                             .toString(),
+                         QStringLiteral("engine"));
         }
         return;
     }
@@ -177,7 +179,8 @@ void LayoutController::OnReplyReceived(int id,
             model_.DropUndo();
         }
         SetLastError(body.value(QStringLiteral("message"))
-                         .toString());
+                         .toString(),
+                     QStringLiteral("engine"));
     }
     emit busyChanged();
     emit historyChanged();
@@ -185,11 +188,15 @@ void LayoutController::OnReplyReceived(int id,
 
 /*---- helpers ------------------------------------------------*/
 
-void LayoutController::SetLastError(const QString& e)
+void LayoutController::SetLastError(const QString& e,
+                                    const QString& source)
 {
-    if(last_error_ != e)
+    const QString src =
+        e.isEmpty() ? QString() : source;
+    if(last_error_ != e || last_error_source_ != src)
     {
-        last_error_ = e;
+        last_error_        = e;
+        last_error_source_ = src;
         emit lastErrorChanged();
     }
 }
@@ -208,7 +215,8 @@ bool LayoutController::Issue(const LayoutOp& op)
     if(pending_.id != 0)
     {
         SetLastError(QStringLiteral(
-            "an edit is still applying — wait for it"));
+            "an edit is still applying — wait for it"),
+                     QStringLiteral("input"));
         return false;
     }
     /* Record the restore point BEFORE issuing so a
@@ -222,7 +230,8 @@ bool LayoutController::Issue(const LayoutOp& op)
     {
         model_.DropUndo();
         SetLastError(QStringLiteral(
-            "not sent — no live engine connection"));
+            "not sent — no live engine connection"),
+                     QStringLiteral("connection"));
         return false;
     }
     pending_ = Pending{ req, QStringLiteral("apply"),
@@ -288,7 +297,8 @@ bool LayoutController::moveObject(const QString& objectId,
         model_.FindObject(objectId.toStdString());
     if(o == nullptr)
     {
-        SetLastError(QStringLiteral("unknown scene object"));
+        SetLastError(QStringLiteral("unknown scene object"),
+                     QStringLiteral("input"));
         return false;
     }
     /* y (height) stays where the document put it — the canvas
@@ -300,7 +310,8 @@ bool LayoutController::moveObject(const QString& objectId,
     if(!model_.BuildSetPosition(objectId.toStdString(),
                                 x, y, z, op, err))
     {
-        SetLastError(QString::fromStdString(err));
+        SetLastError(QString::fromStdString(err),
+                     QStringLiteral("input"));
         return false;
     }
     return Issue(op);
@@ -313,7 +324,8 @@ bool LayoutController::rotateObject(const QString& objectId,
         model_.FindObject(objectId.toStdString());
     if(o == nullptr)
     {
-        SetLastError(QStringLiteral("unknown scene object"));
+        SetLastError(QStringLiteral("unknown scene object"),
+                     QStringLiteral("input"));
         return false;
     }
     const nlohmann::json r =
@@ -324,7 +336,8 @@ bool LayoutController::rotateObject(const QString& objectId,
                                    r.value("x", 0.0), yawDeg,
                                    r.value("z", 0.0), op, err))
     {
-        SetLastError(QString::fromStdString(err));
+        SetLastError(QString::fromStdString(err),
+                     QStringLiteral("input"));
         return false;
     }
     return Issue(op);
@@ -338,7 +351,8 @@ bool LayoutController::setMirrorTarget(const QString& objectId,
     if(!model_.BuildSetMirror(objectId.toStdString(),
                               targetId.toStdString(), op, err))
     {
-        SetLastError(QString::fromStdString(err));
+        SetLastError(QString::fromStdString(err),
+                     QStringLiteral("input"));
         return false;
     }
     return Issue(op);
@@ -357,7 +371,8 @@ bool LayoutController::assignBinding(const QString& objectId,
     if(!model_.BuildSetBinding(objectId.toStdString(),
                                bindingId.toStdString(), op, err))
     {
-        SetLastError(QString::fromStdString(err));
+        SetLastError(QString::fromStdString(err),
+                     QStringLiteral("input"));
         return false;
     }
     return Issue(op);
@@ -379,7 +394,8 @@ bool LayoutController::bindNewController(
             objectId.toStdString(), bid.toStdString(),
             VariantToJson(controllerKey), op, err))
     {
-        SetLastError(QString::fromStdString(err));
+        SetLastError(QString::fromStdString(err),
+                     QStringLiteral("input"));
         return false;
     }
     return Issue(op);
@@ -395,7 +411,8 @@ bool LayoutController::calibrateEmitter(const QString& objectId,
                                  emitterIndex, address, op,
                                  err))
     {
-        SetLastError(QString::fromStdString(err));
+        SetLastError(QString::fromStdString(err),
+                     QStringLiteral("input"));
         return false;
     }
     return Issue(op);
@@ -408,7 +425,8 @@ void LayoutController::undo()
     if(pending_.id != 0)
     {
         SetLastError(QStringLiteral(
-            "an edit is still applying — wait for it"));
+            "an edit is still applying — wait for it"),
+                     QStringLiteral("input"));
         return;
     }
     const LayoutEditModel::HistoryEntry* e =
@@ -428,7 +446,8 @@ void LayoutController::undo()
     if(req <= 0)
     {
         SetLastError(QStringLiteral(
-            "not sent — no live engine connection"));
+            "not sent — no live engine connection"),
+                     QStringLiteral("connection"));
         return;
     }
     pending_ = Pending{ req, QStringLiteral("undo"),
@@ -442,7 +461,8 @@ void LayoutController::redo()
     if(pending_.id != 0)
     {
         SetLastError(QStringLiteral(
-            "an edit is still applying — wait for it"));
+            "an edit is still applying — wait for it"),
+                     QStringLiteral("input"));
         return;
     }
     const LayoutEditModel::HistoryEntry* e =
@@ -457,7 +477,8 @@ void LayoutController::redo()
     if(req <= 0)
     {
         SetLastError(QStringLiteral(
-            "not sent — no live engine connection"));
+            "not sent — no live engine connection"),
+                     QStringLiteral("connection"));
         return;
     }
     pending_ = Pending{ req, QStringLiteral("redo"),
@@ -497,7 +518,8 @@ int LayoutController::identify(const QVariantMap& controllerKey,
     if(req <= 0)
     {
         SetLastError(QStringLiteral(
-            "not sent — no live engine connection"));
+            "not sent — no live engine connection"),
+                     QStringLiteral("connection"));
         return 0;
     }
     pending_identify_id_ = req;
@@ -680,6 +702,11 @@ int LayoutController::redoCount() const
 QString LayoutController::lastError() const
 {
     return last_error_;
+}
+
+QString LayoutController::lastErrorSource() const
+{
+    return last_error_source_;
 }
 
 QString LayoutController::statusText() const

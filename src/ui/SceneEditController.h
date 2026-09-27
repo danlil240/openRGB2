@@ -61,6 +61,12 @@ class SceneEditController : public QObject
     Q_PROPERTY(bool saving READ saving NOTIFY savingChanged)
     Q_PROPERTY(QString saveError READ saveError
                    NOTIFY saveErrorChanged)
+    /* Where the last save/edit error came from — a refused
+       input never reads as an engine rejection (Task 4.5):
+       "" no error, "input" refused before send, "engine" an
+       ERROR reply, "connection" nothing could be sent. */
+    Q_PROPERTY(QString saveErrorSource READ saveErrorSource
+                   NOTIFY saveErrorChanged)
 
     /*---- working-document scalars (bind directly) ---------*/
     Q_PROPERTY(QString sceneName READ sceneName
@@ -170,6 +176,7 @@ public:
     bool        presetReplacedLayers() const;
     bool        saving() const;
     QString     saveError() const;
+    QString     saveErrorSource() const;
     QString     sceneName() const;
     QString     presetId() const;
     double      brightness() const;
@@ -219,7 +226,10 @@ private:
        playback preset (omitted from the request). */
     QVariantMap FilteredParams() const;
     void        TouchWorking();
-    void        SetSaveError(const QString& e);
+    /* source: "" | "input" | "engine" | "connection" —
+       see saveErrorSource. */
+    void        SetSaveError(const QString& e,
+                             const QString& source = QString());
     QVariantMap ResolveGroupHints(const DeviceGroup& g) const;
 
     EngineBridge*   bridge_;
@@ -229,6 +239,7 @@ private:
     int             pending_save_id_ = 0;
     bool            saving_          = false;
     QString         save_error_;
+    QString         save_error_source_;
     /* The scene revision a successful SET_SCENE reported —
        the applied-scene push carrying the SAME revision is
        that save's own echo (the engine reserializes the

@@ -79,3 +79,27 @@ set_tests_properties(qml_smoke_test PROPERTIES
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${QT_BIN_DIR}")
+
+# Task 4.5: the focused-save regression — the REAL shell page
+# (nameField focus + uncommitted text, then the Save button's
+# commitPendingEdits path) against a scripted engine over the
+# in-process pipe; the SET_SCENE body must carry the EDITED
+# value, never the stale one.
+add_executable(qml_focused_save_test qml_focused_save_test.cpp)
+target_link_libraries(qml_focused_save_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    openrgb2_ipc_wire
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+target_include_directories(qml_focused_save_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(qml_focused_save_test PRIVATE NDEBUG)
+set_target_properties(qml_focused_save_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(qml_focused_save_test)
+add_test(NAME qml_focused_save_test COMMAND qml_focused_save_test)
+set_tests_properties(qml_focused_save_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")

@@ -52,9 +52,21 @@ int main()
                     ZoneSnapshot{ "Fan 2", 40 },
                     ZoneSnapshot{ "Fan 3", 40 } };
     fsnap.connection = ConnectionState::Connected;
-    deps.snapshots = [&fsnap]
+    /* Task 4.5: a second enumerated controller carrying a
+       SMALL zone — rebinding an object whose calibrated
+       addresses exceed it must fail the same apply-path
+       ValidateSceneLedAddresses, so set_binding is not a
+       validation bypass. */
+    DeviceSnapshot tsnap;
+    tsnap.key = DeviceKey{ "Lian Li: SL Wireless Hub",
+                           "112233445566",
+                           "Wireless: 11:22:33:44:55:66", "" };
+    tsnap.topology_generation = 1;
+    tsnap.zones = { ZoneSnapshot{ "Tiny", 8 } };
+    tsnap.connection = ConnectionState::Connected;
+    deps.snapshots = [&fsnap, &tsnap]
     {
-        return std::vector<DeviceSnapshot>{ fsnap };
+        return std::vector<DeviceSnapshot>{ fsnap, tsnap };
     };
     /* no sdk client — the service must report honest absence */
     deps.playback_caps = []
@@ -712,6 +724,80 @@ int main()
             CHECK(found);
             CHECK(r.body["document"]["objects"][0]["binding"]
                       .get<std::string>() == "b_new");
+        }
+
+        /* Task 4.5 boundary regression: set_binding is NOT a
+           validation bypass. fan0's emitter 0 calibrated to
+           39 is legal under the 40-LED b_new zone; rebinding
+           the object to the 8-LED "Tiny" zone strands that
+           address out of range, so the mutated document fails
+           the apply-path ValidateSceneLedAddresses and the
+           WHOLE mutation refuses — binding, stranded address,
+           and the new binding record all stay unapplied. */
+        r = svc.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "calibrate_led" },
+                { "object_id", "fan0" },
+                { "emitter_index", 0 }, { "address", 39 },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        r = svc.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "set_binding" }, { "object_id", "fan0" },
+                { "binding", "b_tiny" },
+                { "controller", nlohmann::json::object({
+                    {"device","Lian Li: SL Wireless Hub"},
+                    {"serial","112233445566"},
+                    {"location","Wireless: 11:22:33:44:55:66"},
+                    {"zone","Tiny"}}) },
+            }));
+        CHECK(r.code == ErrCode::BadRequest);
+        /* the refused mutation applied nothing: the binding
+           stays b_new and the new "b_tiny" record never
+           landed */
+        r = svc.Dispatch(MsgType::GetScene,
+                         nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        if(r.code == ErrCode::Ok)
+        {
+            const nlohmann::json& o0 =
+                r.body["document"]["objects"][0];
+            CHECK(o0["binding"].get<std::string>() == "b_new");
+            CHECK(o0["emitters"][0]["address"].get<int>()
+                  == 39);
+            for(const nlohmann::json& b :
+                    r.body["document"]["bindings"])
+            {
+                CHECK(b.value("id", std::string()) != "b_tiny");
+            }
+        }
+        /* a compliant rebind applies cleanly — the refusal
+           was the address, not the verb */
+        r = svc.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "calibrate_led" },
+                { "object_id", "fan0" },
+                { "emitter_index", 0 }, { "address", 7 },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        r = svc.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "set_binding" }, { "object_id", "fan0" },
+                { "binding", "b_tiny" },
+                { "controller", nlohmann::json::object({
+                    {"device","Lian Li: SL Wireless Hub"},
+                    {"serial","112233445566"},
+                    {"location","Wireless: 11:22:33:44:55:66"},
+                    {"zone","Tiny"}}) },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        r = svc.Dispatch(MsgType::GetScene,
+                         nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        if(r.code == ErrCode::Ok)
+        {
+            CHECK(r.body["document"]["objects"][0]["binding"]
+                      .get<std::string>() == "b_tiny");
         }
 
         /* No loaded scene: mutations are honest Unavailable. */

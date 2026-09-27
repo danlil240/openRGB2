@@ -92,6 +92,13 @@ class LayoutController : public QObject
 
     Q_PROPERTY(QString lastError READ lastError
                    NOTIFY lastErrorChanged)
+    /* Where the last error came from — a UI-side validation
+       refusal is a DIFFERENT state than an engine rejection
+       and never reads as one (Task 4.5): "" no error,
+       "input" refused before send, "engine" the engine's
+       ERROR reply, "connection" nothing could be sent. */
+    Q_PROPERTY(QString lastErrorSource READ lastErrorSource
+                   NOTIFY lastErrorChanged)
     /* Last command outcome — "applied: move fan0",
        "identify acknowledged", or the engine's error. */
     Q_PROPERTY(QString statusText READ statusText
@@ -176,6 +183,7 @@ public:
     int          undoCount() const;
     int          redoCount() const;
     QString      lastError() const;
+    QString      lastErrorSource() const;
     QString      statusText() const;
     QVariantMap  identifying() const;
 
@@ -196,7 +204,10 @@ private:
     void OnReplyReceived(int id, const QString& type,
                          const QVariantMap& body);
     bool Issue(const LayoutOp& op);
-    void SetLastError(const QString& e);
+    /* source: "" | "input" | "engine" | "connection" — see
+       lastErrorSource. */
+    void SetLastError(const QString& e,
+                      const QString& source = QString());
     void SetStatus(const QString& s);
     QString UniqueBindingId(const QString& base) const;
 
@@ -204,6 +215,7 @@ private:
     LayoutEditModel model_;
     QString         selected_id_;
     QString         last_error_;
+    QString         last_error_source_;
     QString         status_text_;
     QVariantMap     identifying_;
 

@@ -101,7 +101,8 @@ SceneEditController::SceneEditController(EngineBridge* bridge,
                         QStringLiteral("engine connection lost "
                                        "before the save reply "
                                        "(%1) — edits preserved")
-                            .arg(reason));
+                            .arg(reason),
+                        QStringLiteral("connection"));
                 }
             });
     connect(bridge_, &EngineBridge::snapshotsChanged,
@@ -283,7 +284,8 @@ void SceneEditController::OnReplyReceived(int id, const QString& type,
         SetSaveError(msg.isEmpty()
                          ? QStringLiteral("engine rejected the "
                                           "scene — edits preserved")
-                         : msg);
+                         : msg,
+                     QStringLiteral("engine"));
     }
     /* Any other reply type for the correlator is a protocol
        oddity — treat it like a failure, keep the edit. */
@@ -291,7 +293,8 @@ void SceneEditController::OnReplyReceived(int id, const QString& type,
     {
         SetSaveError(QStringLiteral("unexpected reply type %1 "
                                     "to SET_SCENE — edits "
-                                    "preserved").arg(type));
+                                    "preserved").arg(type),
+                     QStringLiteral("engine"));
     }
 }
 
@@ -333,7 +336,8 @@ bool SceneEditController::setPreset(const QString& id)
     std::string err;
     if(!model_.SetPreset(id.toStdString(), err))
     {
-        SetSaveError(QString::fromStdString(err));
+        SetSaveError(QString::fromStdString(err),
+                     QStringLiteral("input"));
         return false;
     }
     PlaybackPresetInfo info;
@@ -358,7 +362,8 @@ bool SceneEditController::setSceneName(const QString& name)
     std::string err;
     if(!model_.SetName(name.toStdString(), err))
     {
-        SetSaveError(QString::fromStdString(err));
+        SetSaveError(QString::fromStdString(err),
+                     QStringLiteral("input"));
         return false;
     }
     TouchWorking();
@@ -403,7 +408,8 @@ bool SceneEditController::setGroupColor(const QString& hex)
     if(ids.empty())
     {
         SetSaveError(QStringLiteral("no device objects in the "
-                                    "scene"));
+                                    "scene"),
+                     QStringLiteral("input"));
         return false;
     }
     bool ok = true;
@@ -417,7 +423,8 @@ bool SceneEditController::setGroupColor(const QString& hex)
     }
     if(!ok)
     {
-        SetSaveError(QString::fromStdString(err));
+        SetSaveError(QString::fromStdString(err),
+                     QStringLiteral("input"));
         return false;
     }
     SetSaveError(QString());
@@ -464,7 +471,8 @@ void SceneEditController::save()
     }
     if(!model_.HasWorking())
     {
-        SetSaveError(QStringLiteral("nothing to save"));
+        SetSaveError(QStringLiteral("nothing to save"),
+                     QStringLiteral("input"));
         return;
     }
     const int id = bridge_->setScene(
@@ -475,7 +483,8 @@ void SceneEditController::save()
         SetSaveError(bridge_->lastError().isEmpty()
                          ? QStringLiteral("not sent — engine not "
                                           "connected")
-                         : bridge_->lastError());
+                         : bridge_->lastError(),
+                     QStringLiteral("connection"));
         return;
     }
     pending_save_id_ = id;
@@ -683,7 +692,8 @@ bool SceneEditController::saveProfile(const QString& name)
 {
     if(!model_.HasWorking())
     {
-        SetSaveError(QStringLiteral("no scene document to save"));
+        SetSaveError(QStringLiteral("no scene document to save"),
+                     QStringLiteral("input"));
         return false;
     }
     /* The stored copy gets the profile's name as the document
@@ -701,7 +711,8 @@ bool SceneEditController::loadProfile(const QString& name)
     if(doc.isEmpty())
     {
         SetSaveError(QStringLiteral("profile '%1' not found")
-                         .arg(name));
+                         .arg(name),
+                     QStringLiteral("input"));
         return false;
     }
     /* A staged profile is an EXISTING scene instance — it
@@ -743,6 +754,10 @@ bool SceneEditController::presetReplacedLayers() const
 }
 bool    SceneEditController::saving() const   { return saving_; }
 QString SceneEditController::saveError() const { return save_error_; }
+QString SceneEditController::saveErrorSource() const
+{
+    return save_error_source_;
+}
 
 QString SceneEditController::sceneName() const
 {
@@ -808,7 +823,12 @@ QVariantMap SceneEditController::ResolveGroupHints(
     out.insert(QStringLiteral("state"),
                QStringLiteral("unbound"));
 
-    if(g.binding.empty() || g.controller_name.empty())
+    /* BindingResolver treats an empty controller_name as
+       match-any — an unbound OBJECT is what reports
+       "unbound", not a binding that leaves the name open
+       (the hint must agree with the authoritative resolver;
+       serial/vendor narrowing below still applies). */
+    if(g.binding.empty())
     {
         return out;              /* unbound object */
     }
@@ -1053,13 +1073,16 @@ QString SceneEditController::paramColor()   const { return param_color_; }
 ||| Mutators                                                 ||
 \*---------------------------------------------------------*/
 
-void SceneEditController::SetSaveError(const QString& e)
+void SceneEditController::SetSaveError(const QString& e,
+                                       const QString& source)
 {
-    if(save_error_ == e)
+    const QString src = e.isEmpty() ? QString() : source;
+    if(save_error_ == e && save_error_source_ == src)
     {
         return;
     }
-    save_error_ = e;
+    save_error_        = e;
+    save_error_source_ = src;
     emit saveErrorChanged();
 }
 
