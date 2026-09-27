@@ -139,6 +139,23 @@ function Copy-Tree([string]$src, [string]$dst) {
     Copy-Item -Recurse -Force -Path (Join-Path $src "*") -Destination $dst
 }
 
+# Scrub private path prefixes before they land in the shipped
+# manifest.json: repo-local paths become <repo>-relative and anything
+# under the build user's profile collapses to <profile>, so the package
+# never leaks a local username (same redaction class as the docs pass).
+function ConvertTo-ManifestPath([string]$p) {
+    if(-not $p) { return $p }
+    $norm = $p -replace '/','\'
+    if($norm.StartsWith($RepoRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        return ('<repo>' + $norm.Substring($RepoRoot.Length))
+    }
+    $prof = [Environment]::GetFolderPath('UserProfile')
+    if($prof -and $norm.StartsWith($prof, [StringComparison]::OrdinalIgnoreCase)) {
+        return ('<profile>' + $norm.Substring($prof.Length))
+    }
+    return $norm
+}
+
 #--------------------------------------------------------------------#
 # Input binaries                                                      #
 #--------------------------------------------------------------------#
@@ -162,7 +179,7 @@ if(-not $VerifyOnly) {
     Require (Join-Path $PkgDir "licenses")    "license texts" | Out-Null
     foreach($s in @("start-openrgb2.ps1","stop-openrgb2.ps1",
                     "update-openrgb2.ps1","rollback-openrgb2.ps1",
-                    "OpenRGB2.cmd","install-recovery.md")) {
+                    "OpenRGB2.cmd","install-recovery.md","RELEASE.md")) {
         Require (Join-Path $PkgDir $s) "managed-lifecycle file $s" | Out-Null
     }
 
@@ -188,7 +205,12 @@ if(-not $VerifyOnly) {
         --no-compiler-runtime --no-opengl-sw --no-network `
         (Join-Path $OutDir "openrgb2-ui.exe") | Out-Null
     if($LASTEXITCODE -ne 0) { Fail "windeployqt failed for openrgb2-ui.exe" }
-    Info "Qt runtime + QML modules deployed for UI"
+    # --no-network skips Qt6Network.dll, but Qt6Qml/Qt6Quick STATICALLY
+    # import it -- without this copy the staged UI dies at loader init
+    # (0xC0000135, "Qt6Network.dll was not found"). Shipping the lib
+    # adds no listener surface by itself.
+    Copy-Item (Require (Join-Path $QtDir "bin\Qt6Network.dll") "Qt6Network.dll") $OutDir
+    Info "Qt runtime + QML modules deployed for UI (+Qt6Network.dll)"
 
     #--------------------------------------------------------------#
     # MSVC CRT runtime (engine/ctl have no windeployqt step)        #
@@ -273,6 +295,7 @@ if(-not $VerifyOnly) {
     Copy-Item (Join-Path $PkgDir "OpenRGB2.cmd") $OutDir
     Copy-Item (Join-Path $PkgDir "install-recovery.md") `
               (Join-Path $OutDir "INSTALL.md")
+    Copy-Item (Join-Path $PkgDir "RELEASE.md") $OutDir
     Info "managed-lifecycle scripts + INSTALL.md staged"
 
     #--------------------------------------------------------------#
@@ -299,7 +322,8 @@ if(-not $VerifyOnly) {
                 elseif($rel -like "licenses/*")     { "packaging/windows/licenses" }
                 elseif($rel -like "scripts/*")      { "packaging/windows" }
                 elseif($rel -eq "NOTICES.txt" -or $rel -eq "OpenRGB2.cmd" -or
-                       $rel -eq "INSTALL.md")       { "packaging/windows" }
+                       $rel -eq "INSTALL.md" -or $rel -eq "RELEASE.md") {
+                                                       "packaging/windows" }
                 elseif($_.Name -like "Qt6*.dll" -or
                        $_.FullName -match "platforms|styles|imageformats|iconengines|qml|qmltooling|translations|tls|generic|networkinformation") {
                     "qt-runtime" }
@@ -320,12 +344,12 @@ if(-not $VerifyOnly) {
         source = [ordered]@{
             repository   = "openRGB2"
             revision     = $gitRev
-            build_dir    = $BuildDir
+            build_dir    = ConvertTo-ManifestPath $BuildDir
             configuration= $Configuration
-            qt_dir       = $QtDir
-            backend_dir  = $BackendDeployDir
+            qt_dir       = ConvertTo-ManifestPath $QtDir
+            backend_dir  = ConvertTo-ManifestPath $BackendDeployDir
             backend_pin  = "vendor/OpenRGB @ 53a477eab8d14b0bc49aeb40e3d569cbcb16a377 (lianli-wireless; see vendor/provenance/MANIFEST.md)"
-            vc_redist    = $VcRedistDir
+            vc_redist    = ConvertTo-ManifestPath $VcRedistDir
         }
         exclusions_verified = @(
             "old effect plugins (plugins/ dirs, *EffectPlugin*)",
@@ -348,6 +372,7 @@ $required = @(
     "openrgb2-engine.exe",
     "openrgb2-ctl.exe",
     "Qt6Core.dll",
+    "Qt6Network.dll",
     "Qt6QuickControls2.dll",
     "platforms\qwindows.dll",
     "backend\OpenRGB.exe",
@@ -365,7 +390,8 @@ $required = @(
     "scripts\update-openrgb2.ps1",
     "scripts\rollback-openrgb2.ps1",
     "OpenRGB2.cmd",
-    "INSTALL.md"
+    "INSTALL.md",
+    "RELEASE.md"
 )
 # manifest.json is only written AFTER this verification passes (see
 # below); when re-checking an existing tree it must already be there.

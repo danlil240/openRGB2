@@ -64,3 +64,6 @@ powershell -File packaging\windows\stage-release.ps1 -VerifyOnly -OutDir <dir>
 - `NOTICES.txt` — shipped license/provenance manifest.
 - `licenses/` — license texts shipped in the package.
 - `dependency-inventory.md` — every shipped binary + deps + provenance.
+- `RELEASE.md` — release presentation (what's installed, how to run,
+  measured support matrix + performance, honest limitations); staged
+  at the package root (Task 6.4).

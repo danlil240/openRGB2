@@ -1,7 +1,7 @@
 # Import Provenance Manifest — Milestone 0
 
 Import date: 2026-09-26. Source: the `openrgb-unified` working tree at
-`C:\Users\daniel\tools\openrgb-unified` (left untouched by the import).
+`C:\Users\<user>\tools\openrgb-unified` (left untouched by the import).
 
 The origin commit IDs are **not** complete snapshots of the imported
 functionality: both origin trees carried uncommitted tracked modifications and

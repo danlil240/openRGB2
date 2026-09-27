@@ -3,7 +3,7 @@
 This guide covers the staged package produced by `stage-release.ps1`
 (`build/package/OpenRGB2-<version>-win64/`). The staged folder IS the
 product — copy it whole to the install location; all DLLs resolve
-app-locally. No installer, no PATH changes, no registry writes.
+app-locally. No installer and no PATH changes.
 
 ## Layout
 
@@ -14,6 +14,19 @@ app-locally. No installer, no PATH changes, no registry writes.
 | `presets\`, `profiles\` | bundled preset library + committed topology profiles |
 | `profiles\local\` | **user state** (created at runtime; never shipped) — durable engine profile + resolved hardware identities |
 | `state\` | **user state** (created at runtime) — backend private config (`state\backend\`), run file, update journal |
+
+**State written OUTSIDE the install dir** (verified during the Task
+6.4 install/remove run — documented, not hidden):
+
+| Location | Writer | Contents |
+| --- | --- | --- |
+| `%APPDATA%\OpenRGB\logs\OpenRGB_<ts>.log` | vendored backend | one ~370-byte early-startup log stub **per backend launch**. The vendored `LogManager` opens a file under the *global* config dir during `ResourceManager` construction — *before* `--localconfig` re-points it to `state\backend\logs` (which receives the real log). It also creates `%APPDATA%\OpenRGB\` itself when absent, and briefly reads the global `OpenRGB.json` before the local one (read-only). |
+| `%LOCALAPPDATA%\OpenRGB2\OpenRGB2\cache\` | Qt runtime (UI) | `QStandardPaths` pipeline/shader cache for `openrgb2-ui.exe` — Qt writes this for any Qt Quick app; safe to delete. |
+| `HKCU\Software\OpenRGB2\OpenRGB2` | UI (`UiSettings`) | `QSettings` for window geometry / last view / playback-param seeds. UI-only preferences — engine state is never in the registry. |
+
+To remove OpenRGB2 completely: delete the install folder, then the
+three locations above. Nothing else is written — no system dirs, no
+services, no PATH/registry changes beyond the single QSettings key.
 | `scripts\*.ps1` | managed startup / shutdown / update / rollback |
 | `OpenRGB2.cmd` | double-click entry point (runs `scripts\start-openrgb2.ps1`) |
 | `manifest.json` | per-file SHA-256 + provenance for the whole package |

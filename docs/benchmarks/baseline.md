@@ -14,7 +14,7 @@ group (see `docs/hardware/daniel-pc.md`), separately measuring:
 
 1. **The old Studio path** — the preserved Desktop Lighting Studio output
    adapter driving the vendored backend (source of record at
-   `C:\Users\daniel\tools\openrgb-unified`; run read-only).
+   `C:\Users\<user>\tools\openrgb-unified`; run read-only).
 2. **A minimal SDK producer** — `tools/bench/lianli_bench`, this
    repository's Milestone 1 producer (Direct-mode color updates over the
    SDK TCP loopback).
@@ -146,7 +146,8 @@ were diffed per phase with up to ~30 s summary-flush granularity).
 ### 7.1 Revalidation
 
 - 5 controllers enumerated; wireless group `UNI FAN SL V3 Wireless 66:E1`
-  (serial/location `9B:10:76:E5:66:E1`) present with **120 LEDs** and modes
+  (serial/location redacted — on file in `profiles/local/`) present with
+  **120 LEDs** and modes
   `Direct / Static / Spectrum Cycle / Rainbow Wave / Breathing`. ✓
 - GPU (26 LEDs), Razer mouse (13), G512 keyboard (108) enumerated.
 - **Topology gap:** motherboard `X870E AORUS ELITE WIFI7 ICE` reported only

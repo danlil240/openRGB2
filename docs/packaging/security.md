@@ -46,7 +46,7 @@ vendored compile-time default is itself loopback
 (`OPENRGB_SDK_HOST "127.0.0.1"`, NetworkProtocol.h:33). Nothing in
 the package makes a non-loopback bind possible through the scripts.
 
-## 2. Private configuration — PASS (owner+SYSTEM only)
+## 2. Private configuration — PASS with a documented residual (owner+SYSTEM only)
 
 Two boundaries hold state private: the backend's `--localconfig` and
 the restricted named-pipe DACL.
@@ -54,19 +54,34 @@ the restricted named-pipe DACL.
 **Backend private config.** The backend ran with `--localconfig` and
 `state\backend` as its working directory; it wrote
 `state\backend\OpenRGB.json` (98 KB) and `state\backend\logs\` inside
-the package — nothing touches the global `%APPDATA%\OpenRGB` tree.
-Engine state lives under `profiles\local\` (gitignored user state).
+the package — the config tree never touches the global
+`%APPDATA%\OpenRGB`. Engine state lives under `profiles\local\`
+(gitignored user state).
+
+**Residual (measured in the Task 6.4 install/remove run, doc updated
+accordingly):** the vendored backend's `LogManager` opens its logfile
+under the *global* config dir during `ResourceManager` construction —
+*before* `--localconfig` re-points it — so each managed launch leaves
+one ~370-byte stub `%APPDATA%\OpenRGB\logs\OpenRGB_<ts>.log` (and
+creates `%APPDATA%\OpenRGB\` itself when absent; it also *reads* the
+global `OpenRGB.json` once before the local settings load — read-only,
+the private config still wins). Additionally the UI writes Qt runtime
+caches to `%LOCALAPPDATA%\OpenRGB2\` and UI preferences via `QSettings`
+to `HKCU\Software\OpenRGB2\OpenRGB2`. All three are listed in
+`INSTALL.md` ("State written OUTSIDE the install dir"); none contains
+engine state, hardware identities, or credentials.
 
 **Named-pipe ACL.** With the packaged engine running, both pipes
 exist and carry the Task-3.5 restricted DACL
 (`GetNamedSecurityInfoW`, SE_KERNEL_OBJECT, SDDL dump):
 
 ```
-\\.\pipe\openrgb2-engine       D:P(A;;FA;;;S-1-5-21-985583470-140289594-31760812-1001)(A;;FA;;;SY)
-\\.\pipe\openrgb2-engine-diag  D:P(A;;FA;;;S-1-5-21-985583470-140289594-31760812-1001)(A;;FA;;;SY)
+\\.\pipe\openrgb2-engine       D:P(A;;FA;;;S-1-5-21-<redacted>-1001)(A;;FA;;;SY)
+\\.\pipe\openrgb2-engine-diag  D:P(A;;FA;;;S-1-5-21-<redacted>-1001)(A;;FA;;;SY)
 ```
 
-The SID is the creating user (`LILINTAL-HOME-P\daniel`). `D:P` is a
+The SID is the creating user (`<host>\<user>` — the literal SID is
+redacted above; it was the installing user's own SID). `D:P` is a
 protected DACL; the only ACEs are GENERIC_ALL to the owner and
 LocalSystem — no Everyone/Users/Anonymous/Network access, matching
 `docs/ipc-protocol.md` and `src/ipc/NamedPipe.cpp` (`BuildRestrictedSddl`;
@@ -208,7 +223,7 @@ publish-time decision (plan §1: publication is separate).
 | Boundary | Verdict |
 | --- | --- |
 | Loopback :6744 | PASS — listener is `127.0.0.1` only; LAN-IP probe refused; engine holds no sockets |
-| Private configuration | PASS — pipe DACL owner+SYSTEM; backend state confined to `state\backend` |
+| Private configuration | PASS* — pipe DACL owner+SYSTEM; backend config confined to `state\backend`; *residual: 370-byte global log stub per launch + UI Qt cache/QSettings writes (documented in INSTALL.md) |
 | Single-instance | PASS — engine mutex refuses; backend's kill-capable prompt unreachable from launcher |
 | Elevation | PASS — `asInvoker` everywhere; only opt-in `-Elevated`/UAC; unelevated degradation is logged+visible |
 | Signed binaries | PASS — unsigned + SAC transients documented; zero workarounds/exclusions in repo |
