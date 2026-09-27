@@ -406,6 +406,27 @@ static void TestLifecycle()
     CHECK(fresh.status == SubmitStatus::Accepted);
     CHECK(h.pipeline.DrainDue(ws.key, h.now) == 1);
     CHECK(h.transport.frames.back().controller == ws.key);
+
+    /* Back at rest: a repeated Live request is the cheap
+       no-op — no hardware calls, no transition, no pending.
+       (Regression: has_wireless_ must be cleared by the
+       resumed-live ack path.) */
+    const int customs = h.backend.custom_calls;
+    r = h.ctl->Request(PlaybackMode::LiveEffects,
+                       PlaybackControl::Playing, params);
+    CHECK(r.accepted);
+    CHECK(!r.pending);
+    CHECK(h.backend.custom_calls == customs);
+
+    /* ...and a later playback request still re-owns the
+       group — has_wireless_ re-sets on the new claim. */
+    r = h.ctl->Request(PlaybackMode::AnimationPlayback,
+                       PlaybackControl::Playing, params);
+    CHECK(r.accepted && r.pending);
+    CHECK(h.pipeline.IsSuppressed(ws.key));
+    h.ReportPending();
+    h.Poll();
+    CHECK(h.ctl->Status().mode == PlaybackMode::AnimationPlayback);
 }
 
 /*---------------------------------------------------------*\

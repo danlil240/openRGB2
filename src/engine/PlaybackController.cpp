@@ -171,7 +171,7 @@ PlaybackController::Expect PlaybackController::BuildExpect(
     const PlaybackPresetSupport sup = PlaybackPresetControls(preset);
     if(sup.speed)
     {
-        e.speed = (uint32_t)ClampPlaybackSpeed(params_.speed);
+        e.speed = (uint32_t)ClampPlaybackSpeed(params.speed);
     }
     if(sup.direction)
     {
@@ -957,6 +957,15 @@ void PlaybackController::Poll(TimePoint now)
                         upload_       = UploadState::None;
                         control_      = PlaybackControl::Playing;
                         suppressed_   = false;
+                        /* Ownership released — has_wireless_ is
+                           set and cleared together with upload
+                           state, so a later Live request is the
+                           cheap no-op again. The lane un-suppress
+                           below uses the captured `key`. */
+                        has_wireless_ = false;
+                        wireless_key_ = DeviceKey{};
+                        wireless_gen_ = 0;
+                        wireless_leds_= 0;
                         status_detail_.clear();
                         resumed_live  = true;
                     }
