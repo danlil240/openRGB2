@@ -16,6 +16,7 @@ profiles/local/
 
 # Vendored backend runtime state (config written by a live backend run)
 vendor/OpenRGB/OpenRGB.json
+vendor/OpenRGB/logs/
 
 # Qt generated
 *.pro.user
