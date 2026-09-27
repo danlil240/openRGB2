@@ -56,7 +56,7 @@ FanControl remains the cooling owner. The notes record a PawnIO failure affectin
 
 ### 2.2 Existing code is the implementation foundation
 
-The vault led to `C:\Users\daniel\tools\openrgb-unified`, which already contains a Windows wireless controller, RF discovery/convergence, compression, a deterministic Qt-free effects engine, device binding, QML calibration, reactive inputs, and display-power handling.
+The vault led to the preserved `openrgb-unified` working tree, which already contains a Windows wireless controller, RF discovery/convergence, compression, a deterministic Qt-free effects engine, device binding, QML calibration, reactive inputs, and display-power handling.
 
 | Inspected source | Revision/state |
 | --- | --- |

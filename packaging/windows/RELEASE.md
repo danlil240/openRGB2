@@ -128,6 +128,12 @@ camera/photodiode exists on this rig.
   Smart App Control denials until ISG verdicts land; documented
   platform behaviour, not a defect. No SAC workaround or exclusion
   exists anywhere in this repo (`docs/packaging/security.md`).
+- **Backend modal dialog absorbs graceful close** — a backend showing
+  a modal (observed: the PawnIO prompt) never receives
+  `CloseMainWindow`, so `stop-openrgb2.ps1` needs `-Force` to stop our
+  own backend in that state. `-Force` still only applies to processes
+  verified by image path as this install's own; foreign processes are
+  never touched.
 
 ## Verification trail
 

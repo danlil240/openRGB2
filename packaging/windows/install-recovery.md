@@ -14,9 +14,14 @@ app-locally. No installer and no PATH changes.
 | `presets\`, `profiles\` | bundled preset library + committed topology profiles |
 | `profiles\local\` | **user state** (created at runtime; never shipped) — durable engine profile + resolved hardware identities |
 | `state\` | **user state** (created at runtime) — backend private config (`state\backend\`), run file, update journal |
+| `scripts\*.ps1` | managed startup / shutdown / update / rollback |
+| `OpenRGB2.cmd` | double-click entry point (runs `scripts\start-openrgb2.ps1`) |
+| `manifest.json` | per-file SHA-256 + provenance for the whole package |
 
-**State written OUTSIDE the install dir** (verified during the Task
-6.4 install/remove run — documented, not hidden):
+### State written OUTSIDE the install dir
+
+Verified during the Task 6.4 install/remove run — documented, not
+hidden:
 
 | Location | Writer | Contents |
 | --- | --- | --- |
@@ -27,9 +32,6 @@ app-locally. No installer and no PATH changes.
 To remove OpenRGB2 completely: delete the install folder, then the
 three locations above. Nothing else is written — no system dirs, no
 services, no PATH/registry changes beyond the single QSettings key.
-| `scripts\*.ps1` | managed startup / shutdown / update / rollback |
-| `OpenRGB2.cmd` | double-click entry point (runs `scripts\start-openrgb2.ps1`) |
-| `manifest.json` | per-file SHA-256 + provenance for the whole package |
 
 ## Process model and startup
 
