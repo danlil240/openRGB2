@@ -58,8 +58,13 @@ Item {
     }
     Component.onCompleted: syncDiagActive()
     onVisibleChanged: syncDiagActive()
+    /* The target resolves through the page item — a bare
+       `Window.window` here looks the attached property up
+       on this (non-Item) Connections object, binds null,
+       and the handlers never fire (the pitfall SettingsPage
+       documents). */
     Connections {
-        target: Window.window
+        target: root.Window.window
         function onVisibleChanged()    { root.syncDiagActive(); }
         function onVisibilityChanged() { root.syncDiagActive(); }
     }

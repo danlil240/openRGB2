@@ -221,7 +221,11 @@ Item {
                            Animation-playback default (setPreset
                            sees picked == prev and clears it). */
                         Keys.onPressed: e => {
-                            if(e.key === Qt.Key_Space || e.key === Qt.Key_Return) {
+                            /* Space/Return/Enter like the mode
+                               cards — Key_Enter is the numpad. */
+                            if(e.key === Qt.Key_Space
+                               || e.key === Qt.Key_Return
+                               || e.key === Qt.Key_Enter) {
                                 if(root.editorUp && root.engineUp && !selected)
                                     sceneEdit.setPreset(pid);
                                 e.accepted = true;

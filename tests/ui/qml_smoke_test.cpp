@@ -67,6 +67,7 @@ int main(int argc, char** argv)
         "pages/LightingPage.qml",
         "pages/LayoutPage.qml",
         "pages/DevicesPage.qml",
+        "pages/SettingsPage.qml",
     };
 
     for(const char* f : files)

@@ -586,6 +586,25 @@ int main(int argc, char** argv)
         }
     }
 
+    /*---- diagCtl.active follows window visibility -------------
+       The Devices page gates its poll on (page on screen AND
+       window shown): hiding the window must suspend polling.
+       This is the Connections-target regression — the window
+       resolves through the page item, not the (non-Item)
+       Connections object. */
+    std::printf("-- diagCtl.active follows window visibility\n");
+    {
+        QTest::keyClick(win, Qt::Key_4, Qt::ControlModifier);
+        QCoreApplication::processEvents();
+        CHECK(PumpBoth(s, [&] { return diag_ctl.active(); }));
+        win->setVisible(false);
+        QCoreApplication::processEvents();
+        CHECK(PumpBoth(s, [&] { return !diag_ctl.active(); }));
+        win->setVisible(true);
+        QCoreApplication::processEvents();
+        CHECK(PumpBoth(s, [&] { return diag_ctl.active(); }));
+    }
+
     /*---- Quit All: confirm -> QUIT -> ordered -> close --------*/
     std::printf("-- quit-all issues QUIT + closes on ack\n");
     {

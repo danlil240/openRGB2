@@ -49,12 +49,21 @@ Item {
         function onReplyReceived(id, type, body) {
             if(id !== 0 && id === root.pendingQuitId) {
                 root.pendingQuitId = 0;
-                if(type === "OK") {
+                if(type === "OK"
+                   && body && body.ordered === true
+                   && body.shutting_down === true) {
                     /* Ordered shutdown acknowledged — the engine
                        is going down; this shell's job is done. */
                     root.quitStatus = qsTr("Engine is shutting down.");
                     if(root.appWindow)
                         root.appWindow.close();
+                } else if(type === "OK") {
+                    /* A bare OK is not a confirmed shutdown — the
+                       wire contract carries ordered +
+                       shutting_down; anything less keeps the
+                       shell up. */
+                    root.quitError = qsTr(
+                        "engine acknowledged but did not confirm shutdown");
                 } else {
                     root.quitError =
                         (body && body.message)
