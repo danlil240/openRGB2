@@ -1832,8 +1832,10 @@ IpcReply EngineService::HandleLayoutMutate(
 |||                are bad_request, never silently ignored.   ||
 |||   Every reply carries the full reactive body — the        ||
 |||   client lands on real state, never an assumed toggle.    ||
-|||   A successful change ALSO emits the "reactive" event     ||
-|||   so other subscribers converge.                          ||
+|||   The "reactive" event for other subscribers is emitted   ||
+|||   by the manager's changed hook (ReactiveInputs::Changed  ||
+|||   -> EngineHost::OnReactiveChanged), NOT here — emitting  ||
+|||   in both places would double-push every command.         ||
 \*---------------------------------------------------------*/
 IpcReply EngineService::HandleReactiveCommand(
     const std::string& verb, const nlohmann::json& body)
@@ -1882,7 +1884,6 @@ IpcReply EngineService::HandleReactiveCommand(
                disabled. */
             return IpcReply::Fail(ErrCode::Unavailable, err);
         }
-        EmitReactive();
         return IpcReply::Success(MsgType::Ok, ReactiveJson());
     }
 
@@ -1935,7 +1936,6 @@ IpcReply EngineService::HandleReactiveCommand(
             "set_params carries no parameter (sensitivity | "
             "screen_index)");
     }
-    EmitReactive();
     return IpcReply::Success(MsgType::Ok, ReactiveJson());
 }
 

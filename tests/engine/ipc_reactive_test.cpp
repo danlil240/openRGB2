@@ -92,6 +92,13 @@ int main()
             { 0, "DISPLAY1", 1920, 1080 },
             { 1, "DISPLAY2", 2560, 1440 } };
     };
+    /* The changed hook mirrors production wiring (EngineHost
+       routes it to service_->EmitReactive) — the service's
+       command handler no longer emits the event itself. */
+    std::function<void()> reactive_changed;
+    rdeps.changed =
+        [&reactive_changed]
+        { if(reactive_changed) reactive_changed(); };
     ReactiveInputs reactive(std::move(rdeps));
 
     /* A REAL PlaybackController — the scene classifier is the
@@ -110,6 +117,7 @@ int main()
     deps.reactive = &reactive;
     deps.playback = &playback;
     EngineService svc(engine, deps);
+    reactive_changed = [&svc] { svc.EmitReactive(); };
 
     std::vector<IpcEvent> events;
     svc.SetEventSink(

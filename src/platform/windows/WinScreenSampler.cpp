@@ -153,8 +153,26 @@ public:
 
     bool Start(studio::InputBus* b) override
     {
+        /* lifecycle_mu_ closes the check-then-spawn race:
+           two concurrent Starts can never both pass the
+           running check, and a Stop can never slip between
+           the flag set and the thread_ assignment. */
+        std::lock_guard<std::mutex> lock(lifecycle_mu_);
         if(running_.load())
             return false;
+        /* Synchronous pre-flight: run the same bounds check
+           + one real grab before promising "started" — a
+           gone display or a GDI read that can't work at all
+           refuses Start honestly (Unavailable + stays
+           disabled). Conditions arising mid-capture (the
+           display later disconnecting) still surface
+           asynchronously via Status(). */
+        std::string err;
+        if(!Probe(err))
+        {
+            SetStatus(err);
+            return false;
+        }
         bus_       = b;
         running_   = true;
         cells_.assign(kCols * kRows, studio::ColorF{});
@@ -165,8 +183,7 @@ public:
 
     void Stop() override
     {
-        if(!running_.load())
-            return;
+        std::lock_guard<std::mutex> lock(lifecycle_mu_);
         running_ = false;
         if(thread_.joinable())
             thread_.join();
@@ -195,6 +212,34 @@ public:
     }
 
 private:
+    /* Cheap pre-flight under lifecycle_mu_: the display-index
+       bounds check + one real 12x6 grab (~2-4 ms, result
+       discarded). Skipped while capture_paused — displays
+       are sleeping so there is nothing to sample, and the
+       grab itself must not touch the GPU then; capture
+       state surfaces via status once the gate opens. */
+    bool Probe(std::string& err)
+    {
+        if(paused_.load())
+            return true;
+        const int idx = screen_index_.load();
+        const std::vector<DisplayRect> displays =
+            DisplayRects();
+        if(idx < 0 || idx >= (int)displays.size())
+        {
+            err = "screen: display " + std::to_string(idx) +
+                  " gone";
+            return false;
+        }
+        unsigned int px[kCols * kRows];
+        if(!GrabGdi(displays[idx], kCols, kRows, px))
+        {
+            err = "screen: capture unavailable";
+            return false;
+        }
+        return true;
+    }
+
     void SetStatus(const std::string& s)
     {
         std::lock_guard<std::mutex> lock(status_mu_);
@@ -280,6 +325,7 @@ private:
     }
 
     studio::InputBus*      bus_ = nullptr;
+    std::mutex             lifecycle_mu_; /* Start/Stop body */
     std::thread            thread_;
     std::atomic<bool>      running_      { false };
     std::atomic<bool>      paused_       { false };

@@ -331,17 +331,33 @@ the Layout view's arrangement editing needed an explicit move op.
 | `set_enabled` | `{input:"audio"\|"screen"\|"key", enabled:bool}` | full REACTIVE body |
 | `set_params` | `{input, sensitivity?:number}` (audio) \| `{input:"screen", screen_index:int}` | full REACTIVE body |
 
-`set_enabled` starts/stops the capture source: enabling starts the
-capture thread (a source that fails to start → `unavailable` carrying
-the source's own reason, and the input stays disabled); disabling
-stops it — a disabled input captures nothing (no hidden CPU/device
-cost). `set_params` tunes a running or idle source: `sensitivity` is
-the audio onset domain 0.25–2.0 (clamped); `screen_index` selects the
+`set_enabled` starts/stops the capture source: enabling runs a cheap
+synchronous **pre-flight probe** before the capture thread spawns
+(WASAPI default-endpoint open for `audio`, a `SetWindowsHookExW`
+install/uninstall probe for `key`, the display bounds check + one
+real grab for `screen` — skipped while `capture_paused` since the
+displays are asleep). A source whose probe fails → `unavailable`
+carrying the source's own reason, and the input **stays disabled** —
+the reply never claims a capture that cannot run. Disabling stops it
+— a disabled input captures nothing (no hidden CPU/device cost).
+Conditions only detectable mid-capture (endpoint removed, display
+disconnected, unsupported mix format) surface asynchronously instead:
+`status` carries the reason and `running` goes false (or retries
+transient losses) while `enabled` keeps the user's selection —
+toggling off/on retries.
+
+Concurrent commands for the SAME input **serialize**: a second
+`set_enabled` arriving while a start/stop is in flight waits for it
+to settle, then applies on the settled state — last command wins in
+arrival order (a disable issued mid-enable stops the source right
+after it starts). Only one capture thread ever exists per input.
+`set_params` tunes a running or idle source: `sensitivity` is the
+audio onset domain 0.25–2.0 (clamped); `screen_index` selects the
 enumerated display (out-of-range → `bad_request`). A param that does
 not apply to the named input → `bad_request`, never silently ignored.
-Successful commands also emit the `reactive` event for other
-subscribers. The selected inputs persist in the engine profile and
-re-arm on engine start.
+State changes emit the `reactive` event exactly once for other
+subscribers (through the manager's changed hook). The selected
+inputs persist in the engine profile and re-arm on engine start.
 
 **REACTIVE** (STATE/DIAGNOSTICS field and `reactive` event body) —
 
@@ -356,7 +372,11 @@ re-arm on engine start.
 
 `available:false` on an input means no capture source exists on this
 system — `status` carries the honest reason; the UI disables the
-toggle, never a fabricated enable. `capture_paused` is the Task 3.7
+toggle, never a fabricated enable. `running` is capture-thread
+liveness: `enabled:true, running:false` means the source died after
+starting (only detectable mid-capture — `status` carries the reason);
+`enabled:false` always implies the thread is joined. `capture_paused`
+is the Task 3.7
 power gate: while displays are off or the system is suspended the
 engine pauses capture — running inputs report `paused:true` and feed
 no events/grid/level into scene evaluation. `displays` is the screen

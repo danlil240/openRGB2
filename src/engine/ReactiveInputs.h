@@ -44,6 +44,7 @@
 
 #include "inputs/InputBus.h"
 
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -69,13 +70,22 @@ class IReactiveSource
 public:
     virtual ~IReactiveSource() = default;
 
-    /* Attach to the bus and start capturing. False means the
+    /* Attach to the bus and start capturing. Real sources
+       run a cheap synchronous PRE-FLIGHT first (endpoint
+       enumeration, hook install probe, first grab — see the
+       Windows implementations) so a genuinely unavailable
+       source refuses here instead of reporting OK and
+       failing on the capture thread later. False means the
        source could not start — Status() carries the honest
        reason ("no default output device", "unsupported
-       platform", ...). */
+       platform", ...). Conditions only detectable mid-
+       capture (device removed, display gone) still surface
+       asynchronously through Status(). */
     virtual bool        Start(studio::InputBus* bus) = 0;
     /* Stop capturing and release resources (joins the
-       capture thread). Safe when not running. */
+       capture thread). Safe when not running — and must
+       still join a thread that already self-terminated, so
+       no joinable thread is ever left for the destructor. */
     virtual void        Stop()                       = 0;
     virtual bool        Running() const              = 0;
     /* Last state/error for honest UI reporting. */
@@ -167,7 +177,15 @@ public:
        source — a failure leaves the slot disabled and
        returns false with the source's own reason. Disabling
        stops the source so a disabled input captures
-       nothing. Unknown id -> false + err. */
+       nothing. Unknown id -> false + err.
+       Transitions SERIALIZE per input: a command arriving
+       while a Start/Stop for the same input is in flight
+       waits for it to settle, then applies on the settled
+       state — a disable issued during an in-flight enable
+       stops the source right after it starts (last command
+       wins, in arrival order). Two commands can therefore
+       never interleave inside a source's thread lifecycle:
+       exactly one capture thread exists per input. */
     bool SetEnabled(const std::string& id, bool enabled,
                     std::string& err);
 
@@ -210,6 +228,17 @@ public:
         bool        enabled      = false;
         float       sensitivity  = 1.0f;
         int         screen_index = 0;
+
+        bool operator==(const PersistedInput& o) const
+        {
+            return id == o.id && enabled == o.enabled &&
+                   sensitivity == o.sensitivity &&
+                   screen_index == o.screen_index;
+        }
+        bool operator!=(const PersistedInput& o) const
+        {
+            return !(*this == o);
+        }
     };
     std::vector<PersistedInput> PersistedState() const;
     void                        Restore(
@@ -224,6 +253,11 @@ private:
     {
         std::unique_ptr<IReactiveSource> source;
         bool        enabled      = false;
+        /* A Start/Stop is in flight with mutex_ dropped —
+           concurrent commands for THIS slot wait on
+           transition_cv_ so source thread lifecycles never
+           interleave (the SetEnabled TOCTOU fix). */
+        bool        busy         = false;
         float       sensitivity  = 1.0f;
         int         screen_index = 0;
     };
@@ -234,6 +268,7 @@ private:
     Deps                    deps_;
     studio::InputBus        bus_;
     mutable std::mutex      mutex_;
+    std::condition_variable transition_cv_;
     Slot                    audio_;
     Slot                    screen_;
     Slot                    key_;

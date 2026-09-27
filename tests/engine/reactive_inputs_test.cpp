@@ -25,10 +25,13 @@
 #include "effects/EffectTypes.h"
 #include "scene/SceneTypes.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace openrgb2;
@@ -86,6 +89,66 @@ public:
     int                screen = 0;
     int                starts = 0;
     int                stops  = 0;
+};
+
+/*---------------------------------------------------------*\
+||| A fake whose Start really spawns a capture thread — the ||
+||| regression hook for the enable/disable TOCTOU: racing   ||
+||| commands for one input must yield exactly ONE live      ||
+||| capture thread, and disable must join it. block_start   ||
+||| holds the transition open so a racer reliably lands in  ||
+||| the serialization window.                               ||
+\*---------------------------------------------------------*/
+class ThreadedSource final : public IReactiveSource
+{
+public:
+    ~ThreadedSource() override { Stop(); }
+
+    bool Start(studio::InputBus* b) override
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if(running_.load())
+            return false;
+        ++start_calls;
+        bus_ = b;
+        while(block_start.load())
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(1));
+        running_ = true;
+        thread_ = std::thread([this]
+        {
+            int live = ++live_threads;
+            int prev = max_live.load();
+            while(live > prev &&
+                  !max_live.compare_exchange_weak(prev, live))
+            {
+            }
+            while(running_.load())
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(1));
+            --live_threads;
+        });
+        return true;
+    }
+    void Stop() override
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        running_ = false;
+        if(thread_.joinable())
+            thread_.join();
+        bus_ = nullptr;
+    }
+    bool        Running() const override { return running_.load(); }
+    std::string Status() const override  { return "fake"; }
+
+    std::mutex         mu_;
+    std::thread        thread_;
+    studio::InputBus*  bus_ = nullptr;
+    std::atomic<bool>  running_     { false };
+    std::atomic<bool>  block_start  { false };
+    std::atomic<int>   start_calls  { 0 };
+    std::atomic<int>   live_threads { 0 };
+    std::atomic<int>   max_live     { 0 };
 };
 
 /* A manager with per-id fakes; factory order matches
@@ -406,6 +469,98 @@ static void TestPersistRestore()
     CHECK(m2.Status()[1].screen_index == 1);
 }
 
+/* The Task-4.6-review TOCTOU: two sessions racing
+   set_enabled for the same input while Start() is in flight.
+   Commands serialize per slot — exactly one Start runs, one
+   capture thread lives, and a disable issued mid-enable
+   still wins after the start settles (it joins the thread). */
+static void TestConcurrentEnableSerialized()
+{
+    ThreadedSource* src = nullptr;
+    ReactiveInputs::Deps deps;
+    deps.now = [] { return 0.0; };
+    deps.source_factory =
+        [&src](const std::string& id)
+            -> std::unique_ptr<IReactiveSource>
+        {
+            if(id != "audio")
+                return std::make_unique<FakeSource>();
+            auto s = std::make_unique<ThreadedSource>();
+            src = s.get();
+            return s;
+        };
+    ReactiveInputs m(std::move(deps));
+    CHECK(src != nullptr);
+
+    /*--- concurrent enable + enable --------------------------*/
+    src->block_start = true;      /* hold Start() open */
+    bool r1 = false, r2 = false;
+    std::string e1, e2;
+    std::thread t1([&] { r1 = m.SetEnabled("audio", true, e1); });
+    while(src->start_calls.load() == 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    /* t1 is inside Start() with the manager mutex dropped and
+       the slot marked busy — t2 must serialize behind it,
+       never enter the source a second time. */
+    std::thread t2([&] { r2 = m.SetEnabled("audio", true, e2); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    src->block_start = false;
+    t1.join();
+    t2.join();
+    CHECK(r1);
+    CHECK(r2);                     /* second is idempotent */
+    CHECK(src->start_calls.load() == 1);
+    /* The spawned capture thread may not have run its first
+       instruction yet — poll briefly for liveness. */
+    for(int i = 0; i < 200 && src->live_threads.load() != 1; i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(src->live_threads.load() == 1);
+    CHECK(src->max_live.load() == 1);
+    {
+        const ReactiveInputStatus st = m.Status().front();
+        CHECK(st.enabled && st.running);
+    }
+
+    /*--- disable issued while an enable is in flight ---------*/
+    /* Re-disable first, then re-enable with Start held open
+       and race a disable — the disable applies right after
+       the start settles (last command wins). */
+    std::string err;
+    CHECK(m.SetEnabled("audio", false, err));
+    CHECK(src->live_threads.load() == 0);
+
+    src->block_start = true;
+    bool r3 = false, r4 = false;
+    std::string e3, e4;
+    std::thread t3([&] { r3 = m.SetEnabled("audio", true, e3); });
+    while(src->start_calls.load() == 1)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::thread t4([&] { r4 = m.SetEnabled("audio", false, e4); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    src->block_start = false;
+    t3.join();
+    t4.join();
+    CHECK(r3);
+    CHECK(r4);
+    /* Deterministic end state: the disable won — nothing
+       captures for a disabled input, no orphan thread. */
+    CHECK(src->start_calls.load() == 2);
+    CHECK(src->live_threads.load() == 0);
+    {
+        const ReactiveInputStatus st = m.Status().front();
+        CHECK(!st.enabled && !st.running);
+    }
+
+    /*--- and a clean enable still works afterwards -----------*/
+    CHECK(m.SetEnabled("audio", true, err));
+    CHECK(src->start_calls.load() == 3);
+    for(int i = 0; i < 200 && src->live_threads.load() != 1; i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(src->live_threads.load() == 1);
+    CHECK(m.SetEnabled("audio", false, err));
+    CHECK(src->live_threads.load() == 0);
+}
+
 static void TestReactiveSceneReason()
 {
     /* Inline reactive layers -> Live-only playback with the
@@ -461,6 +616,7 @@ int main()
     TestPauseGate();
     TestPauseReachesScene();
     TestPersistRestore();
+    TestConcurrentEnableSerialized();
     TestReactiveSceneReason();
 
     std::printf("%d checks, %d failures\n", checks, failures);

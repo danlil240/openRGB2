@@ -91,18 +91,43 @@ bool ReactiveInputs::SetEnabled(const std::string& id,
         err = id + " input is not available on this system";
         return false;
     }
+    /* Serialize transitions per input: while a Start/Stop is
+       in flight with the mutex dropped, a concurrent command
+       for THIS slot waits on transition_cv_, then applies on
+       the settled state. A disable issued mid-enable stops
+       the source right after it starts — last command wins
+       in arrival order, and two commands can never both be
+       inside the source's thread lifecycle at once (the
+       TOCTOU that could double-spawn a capture thread is
+       closed). */
+    while(s->busy)
+        transition_cv_.wait(lock);
+
     if(s->enabled == enabled && (!enabled || s->source->Running()))
         return true; /* idempotent */
 
+    s->busy = true;
     if(enabled)
     {
-        /* Start OUTSIDE the manager mutex — source start may
-           block on device init (WASAPI, hook install). The
-           slot is marked enabling so a concurrent Snapshot
-           still reports correctly. */
+        /* Params + the pause gate land BEFORE Start: the
+           source's synchronous pre-flight then probes the
+           real configuration (the right display index; a
+           paused screen source skips its grab) and a starting
+           source never comes up on defaults — the restore
+           path records them on the slot for exactly this. */
+        s->source->SetPaused(paused_);
+        s->source->SetSensitivity(s->sensitivity);
+        s->source->SetScreenIndex(s->screen_index);
+
+        /* Start OUTSIDE the manager mutex — the pre-flight
+           probe + thread spawn may block on device init
+           (WASAPI, hook install). `busy` keeps concurrent
+           commands serialized while the lock is dropped. */
         lock.unlock();
         const bool ok = s->source->Start(&bus_);
         lock.lock();
+        s->busy = false;
+        transition_cv_.notify_all();
         if(!ok)
         {
             s->enabled = false;
@@ -114,12 +139,6 @@ bool ReactiveInputs::SetEnabled(const std::string& id,
             return false;
         }
         s->enabled = true;
-        s->source->SetPaused(paused_);
-        /* Recorded params land on the STARTING source — the
-           restore path sets them before enable, so the source
-           must not come up on defaults. */
-        s->source->SetSensitivity(s->sensitivity);
-        s->source->SetScreenIndex(s->screen_index);
     }
     else
     {
@@ -130,6 +149,8 @@ bool ReactiveInputs::SetEnabled(const std::string& id,
         lock.unlock();
         s->source->Stop();
         lock.lock();
+        s->busy = false;
+        transition_cv_.notify_all();
     }
 
     lock.unlock();
@@ -318,8 +339,15 @@ void ReactiveInputs::Restore(
 
 void ReactiveInputs::Shutdown()
 {
+    std::unique_lock<std::mutex> lock(mutex_);
     for(Slot* s : { &audio_, &screen_, &key_ })
     {
+        /* Never Stop() underneath an in-flight Start() —
+           wait for the transition to settle first (same
+           serialization SetEnabled uses). */
+        while(s->busy)
+            transition_cv_.wait(lock);
+        s->enabled = false;
         if(s->source)
             s->source->Stop();
     }

@@ -142,8 +142,26 @@ public:
 
     bool Start(studio::InputBus* b) override
     {
+        /* lifecycle_mu_ closes the check-then-spawn race:
+           two concurrent Starts can never both pass the
+           running check, and a Stop can never slip between
+           the flag set and the thread_ assignment. */
+        std::lock_guard<std::mutex> lock(lifecycle_mu_);
         if(running_.load())
             return false;
+        /* Synchronous pre-flight: prove a loopback session
+           CAN be opened right now so a genuinely unavailable
+           source (no default render endpoint, init denied)
+           refuses Start honestly — the reply contract
+           promises Unavailable + stays-disabled. Failures
+           that only appear mid-capture (device removed)
+           still surface asynchronously via Status(). */
+        std::string err;
+        if(!Probe(err))
+        {
+            SetStatus(err);
+            return false;
+        }
         bus_       = b;
         running_   = true;
         reinit_    = false;
@@ -154,9 +172,13 @@ public:
 
     void Stop() override
     {
-        if(!running_.load())
-            return;
+        std::lock_guard<std::mutex> lock(lifecycle_mu_);
         running_ = false;
+        /* Join whenever a thread exists — INCLUDING one that
+           already self-terminated (COM init / unsupported
+           format set running_=false inside ThreadMain), or
+           the joinable std::thread would hit terminate in
+           the destructor. */
         if(thread_.joinable())
             thread_.join();
         bus_ = nullptr;
@@ -182,6 +204,68 @@ public:
     }
 
 private:
+    /* Cheap pre-flight under lifecycle_mu_: open and close
+       the same session setup Pump() uses. Only conditions
+       visible at open time are checked — mix-format support
+       still needs a real buffer and stays an async status. */
+    bool Probe(std::string& err)
+    {
+        const HRESULT hr_com =
+            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const bool uninit = SUCCEEDED(hr_com); /* S_OK/S_FALSE */
+        if(FAILED(hr_com) && hr_com != RPC_E_CHANGED_MODE)
+        {
+            err = "audio: COM init failed";
+            return false;
+        }
+
+        ComPtr<IMMDeviceEnumerator> enumerator;
+        ComPtr<IMMDevice>           device;
+        ComPtr<IAudioClient>        client;
+        ComPtr<IAudioCaptureClient> capture;
+        WAVEFORMATEX*               wfx = nullptr;
+
+        HRESULT hr = CoCreateInstance(
+            __uuidof(MMDeviceEnumerator), nullptr,
+            CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
+        if(FAILED(hr))
+        {
+            err = "audio: no device enumerator";
+        }
+        else
+        {
+            hr = enumerator->GetDefaultAudioEndpoint(
+                eRender, eConsole, &device);
+            if(FAILED(hr))
+            {
+                err = "audio: no default output device";
+            }
+            else
+            {
+                hr = device->Activate(__uuidof(IAudioClient),
+                                      CLSCTX_ALL, nullptr,
+                                      &client);
+                if(SUCCEEDED(hr))
+                    hr = client->GetMixFormat(&wfx);
+                if(SUCCEEDED(hr))
+                    hr = client->Initialize(
+                        AUDCLNT_SHAREMODE_SHARED,
+                        AUDCLNT_STREAMFLAGS_LOOPBACK,
+                        0, 0, wfx, nullptr);
+                if(SUCCEEDED(hr))
+                    hr = client->GetService(
+                        IID_PPV_ARGS(&capture));
+                if(FAILED(hr) || capture == nullptr)
+                    err = "audio: loopback init failed";
+            }
+        }
+        if(wfx != nullptr)
+            CoTaskMemFree(wfx);
+        if(uninit)
+            CoUninitialize();
+        return err.empty();
+    }
+
     void SetStatus(const std::string& s)
     {
         std::lock_guard<std::mutex> lock(status_mu_);
@@ -334,6 +418,7 @@ private:
 
     studio::InputBus*    bus_ = nullptr;
     studio::OnsetDetect  onset_;
+    std::mutex           lifecycle_mu_; /* Start/Stop body */
     std::thread          thread_;
     std::atomic<bool>    running_ { false };
     std::atomic<bool>    reinit_  { false };

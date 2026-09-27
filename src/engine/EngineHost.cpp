@@ -954,9 +954,19 @@ void EngineHost::OnReactiveChanged()
     {
         return;
     }
+    /* Persist ONLY when the recorded selection actually
+       moved — pause transitions and unchanged-value param
+       writes (slider debounce ticks) must not rewrite the
+       profile: PersistedState doesn't record pause. */
+    const std::vector<ReactiveInputs::PersistedInput>
+        persisted = reactive_->PersistedState();
     std::string serr;
     std::lock_guard<std::mutex> g(state_mutex_);
-    engine_state_.reactive = reactive_->PersistedState();
+    if(persisted == engine_state_.reactive)
+    {
+        return;
+    }
+    engine_state_.reactive = persisted;
     if(!profile_->Save(engine_state_, serr))
     {
         Log("profile save failed: " + serr);

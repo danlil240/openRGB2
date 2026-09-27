@@ -92,8 +92,30 @@ public:
 
     bool Start(studio::InputBus* b) override
     {
+        /* lifecycle_mu_ closes the check-then-spawn race:
+           two concurrent Starts can never both pass the
+           running check, and a Stop can never slip between
+           the flag set and the thread_ assignment. */
+        std::lock_guard<std::mutex> lock(lifecycle_mu_);
         if(running_.load())
             return false;
+        /* Synchronous pre-flight: prove the hook CAN install
+           right now — install + uninstall is cheap and side-
+           effect-free (an LL hook only fires through the
+           installing thread's message pump, which this
+           caller doesn't run). A denied install refuses
+           honestly instead of spawning a thread that fails
+           asynchronously. */
+        HHOOK probe = SetWindowsHookExW(WH_KEYBOARD_LL,
+                                        LowLevelKeyProc,
+                                        GetModuleHandleW(nullptr),
+                                        0);
+        if(probe == nullptr)
+        {
+            SetStatus("keys: hook install failed");
+            return false;
+        }
+        UnhookWindowsHookEx(probe);
         bus_     = b;
         running_ = true;
         thread_ = std::thread(&WinKeyHook::ThreadMain, this);
@@ -102,8 +124,7 @@ public:
 
     void Stop() override
     {
-        if(!running_.load())
-            return;
+        std::lock_guard<std::mutex> lock(lifecycle_mu_);
         running_ = false;
         /* The hook thread may not have published its id yet —
            give it a moment before posting, otherwise the quit
@@ -120,6 +141,11 @@ public:
         }
         if(id != 0)
             PostThreadMessage(id, WM_QUIT, 0, 0);
+        /* Join whenever a thread exists — INCLUDING one that
+           already self-terminated (hook install failure sets
+           running_=false inside ThreadMain), or the joinable
+           std::thread would hit terminate in the
+           destructor. */
         if(thread_.joinable())
             thread_.join();
         tid_ = 0;
@@ -184,6 +210,7 @@ private:
     }
 
     studio::InputBus*  bus_ = nullptr;
+    std::mutex         lifecycle_mu_; /* Start/Stop body */
     std::thread        thread_;
     std::atomic<bool>  running_ { false };
     std::atomic<bool>  paused_  { false };
