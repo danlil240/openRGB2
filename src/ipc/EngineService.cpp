@@ -754,6 +754,22 @@ void EngineService::EmitReactive()
     Emit(event_kind::kReactive, ReactiveJson());
 }
 
+nlohmann::json EngineService::OwnershipJson() const
+{
+    /* Task 4.7: no provider wired -> honest null (the IPC
+       schema marks the field "null when no ownership report
+       is wired"), never an empty conflict list that would
+       read as "verified clean". A non-object provider result
+       is a bug in the owner — null is still the honest
+       surface. */
+    if(!deps_.ownership)
+    {
+        return nullptr;
+    }
+    const nlohmann::json j = deps_.ownership();
+    return j.is_object() ? j : nullptr;
+}
+
 nlohmann::json EngineService::StateJson() const
 {
     nlohmann::json ipc_stats = nullptr;
@@ -785,6 +801,7 @@ nlohmann::json EngineService::StateJson() const
         { "playback",   PlaybackJson()                       },
         { "power",      PowerJson()                          },
         { "reactive",   ReactiveJson()                       },
+        { "ownership",  OwnershipJson()                      },
         { "ipc",        ipc_stats                            },
     });
 }
@@ -811,6 +828,7 @@ nlohmann::json EngineService::DiagnosticsJson(TimePoint now) const
         { "sdk",              ConnectionJson()               },
         { "power",            PowerJson()                    },
         { "reactive",         ReactiveJson()                 },
+        { "ownership",        OwnershipJson()                },
         { "ipc",              deps_.server_stats
                                   ? StateJson()["ipc"]
                                   : nlohmann::json(nullptr)  },

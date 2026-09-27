@@ -67,6 +67,14 @@ ui_suite(ui_layout_test)
 # toggles). A real EngineBridge over the in-process pipe.
 ui_suite(ui_reactive_test)
 
+# Task 4.7: the Devices & Diagnostics surface — the four
+# labeled rates (configured / physical / transport-admitted /
+# preview) with honest provenance, engine-reported ownership
+# conflicts verbatim, controller+binding join, bounded event
+# journal, and the redacted export bundle. A real EngineBridge
+# + DiagnosticsController over the in-process pipe.
+ui_suite(ui_diagnostics_test)
+
 # The QML smoke test additionally needs the module's compiled
 # plugin + Qt Quick runtime on its link line.
 add_executable(qml_smoke_test qml_smoke_test.cpp)
@@ -106,6 +114,28 @@ set_target_properties(qml_focused_save_test PROPERTIES AUTOMOC ON)
 qt_import_qml_plugins(qml_focused_save_test)
 add_test(NAME qml_focused_save_test COMMAND qml_focused_save_test)
 set_tests_properties(qml_focused_save_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
+
+# Task 4.7: the real DevicesPage.qml headless — the four rate
+# fields render with honest labels, unmeasured stays
+# unmeasured (never zeros), ownership absence is honest, and
+# export is gated on a live engine connection.
+add_executable(qml_diagnostics_test qml_diagnostics_test.cpp)
+target_link_libraries(qml_diagnostics_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+target_include_directories(qml_diagnostics_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(qml_diagnostics_test PRIVATE NDEBUG)
+set_target_properties(qml_diagnostics_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(qml_diagnostics_test)
+add_test(NAME qml_diagnostics_test COMMAND qml_diagnostics_test)
+set_tests_properties(qml_diagnostics_test PROPERTIES
     LABELS ui
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     ENVIRONMENT_MODIFICATION

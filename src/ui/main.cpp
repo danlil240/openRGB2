@@ -11,6 +11,7 @@
 |||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 |\*---------------------------------------------------------*/
 
+#include "DiagnosticsController.h"
 #include "EngineBridge.h"
 #include "LayoutController.h"
 #include "SceneEditController.h"
@@ -51,6 +52,10 @@ int main(int argc, char** argv)
     /* The Layout view's edit session — arrangement ops ride
        LAYOUT_COMMAND, undo/redo reverts via SET_SCENE. */
     openrgb2::ui::LayoutController layout_ctl(&bridge);
+    /* The Devices & Diagnostics view's read-only surface —
+       derived rate/ownership/conflict views over the bridge
+       stores plus the redacted export bundle (Task 4.7). */
+    openrgb2::ui::DiagnosticsController diag_ctl(&bridge);
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"),
@@ -59,6 +64,8 @@ int main(int argc, char** argv)
                                              &scene_edit);
     engine.rootContext()->setContextProperty(QStringLiteral("layoutCtl"),
                                              &layout_ctl);
+    engine.rootContext()->setContextProperty(QStringLiteral("diagCtl"),
+                                             &diag_ctl);
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed,
         &app, [] { QCoreApplication::exit(-1); },

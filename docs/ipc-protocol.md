@@ -238,9 +238,41 @@ mean_interval_s,interval_count,provenance}`.
 "displayed" (plan section 4).
 
 **STATE** — `{engine:{running,scene_clock_hz,scene_sequence}, scene:{...},
-sdk:{...}, playback:{...}, power:{...}, reactive:{...}, ipc:{sessions_active,
-messages_in, responses_out, events_sent, events_dropped, queued_events,
-resync_bytes, rejected_hellos, rate_limited, refused_busy}}`.
+sdk:{...}, playback:{...}, power:{...}, reactive:{...}, ownership:{...}|null,
+ipc:{sessions_active, messages_in, responses_out, events_sent, events_dropped,
+queued_events, resync_bytes, rejected_hellos, rate_limited, refused_busy}}`.
+
+**OWNERSHIP** (STATE/DIAGNOSTICS field, `null` when no ownership
+report is wired) — the Task-3.9 startup scan's verbatim,
+report-only findings (plan section 4: competing owners are
+surfaced, never killed or taken over from this surface):
+
+```json
+{ "scanned": true,
+  "backend":  {"listening": true, "attached": true},
+  "conflicts": [ {"owner":"L-Connect","exe":"LConnect.exe",
+                  "pid":1234,"detail":"competing RGB owner (Lian Li)"} ],
+  "notices":   [ {"owner":"FanControl","exe":"FanControl.exe",
+                  "pid":4321,"detail":"cooling owner — expected"} ],
+  "config":   {"checked": true, "findings": ["..."],
+               "enabled_plugins": ["..."],
+               "legacy_producers": ["..."] } }
+```
+
+`scanned:false` means the startup ownership scan never ran —
+that is honest absence, NOT a "no conflicts" result; clients
+must not render an empty conflict list as a verified-clean
+scan. `conflicts` are processes that can write RGB hardware
+(a second OpenRGB, L-Connect, GCC/RGB Fusion, Synapse, G Hub,
+iCUE, SignalRGB); `notices` are informational (the managed
+backend itself, FanControl — expected and required to keep
+running). `config` is the managed-config sole-writer check:
+`findings`/`legacy_producers` carry the human-readable report
+including legacy Studio/Effects producer warnings on BOTH
+plugin-load paths (`<config>/plugins` and the backend exe
+dir's system `plugins` folder). There is deliberately no
+verb to act on a finding — takeover is the operator's
+decision (plan section 4).
 
 **QUIT** — the "Quit All" hook (plan section 4): requests the engine's
 ordered, bounded shutdown (the power monitor, IPC intake, scene worker,
@@ -412,6 +444,8 @@ capability path as every other unsupported scene.
   "sdk":      {"state":..., "protocol_version":N, "reconnect_attempt":N, ...},
   "power":    {"display_on":B, "suspended":B, "output_paused":B, ...},
   "reactive": {"available":B, "capture_paused":B, "inputs":[...], "displays":[...]},
+  "ownership":{"scanned":B, "backend":{...}, "conflicts":[...], "notices":[...],
+               "config":{...}},
   "ipc":      {"sessions_active":N, "queued_events":N, "events_dropped":N, ...},
   "clock":    {"steady_ms":F},
   "backend_counters": null }

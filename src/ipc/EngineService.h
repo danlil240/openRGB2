@@ -125,6 +125,16 @@ public:
            owner loop's stop flag so owned components shut down in
            order (OrderlyShutdown). Empty -> Unavailable. */
         std::function<void()> request_shutdown;
+
+        /* Task 4.7: the Task-3.9 ownership report (competing-
+           owner scan + managed-config sole-writer check)
+           surfaced read-only in STATE/DIAGNOSTICS — the
+           Devices & Diagnostics view's conflict list is the
+           engine's report, never a UI-side guess. The provider
+           returns the serialized OwnershipReport; empty -> the
+           field is an honest null (no scan wired), never a
+           fabricated "no conflicts". */
+        std::function<nlohmann::json()> ownership;
     };
 
     explicit EngineService(Engine& engine);
@@ -230,6 +240,7 @@ private:
     nlohmann::json DeliveryStatsJson(const nlohmann::json& body) const;
     nlohmann::json ConnectionJson() const;
     nlohmann::json FrameStatusJson() const;
+    nlohmann::json OwnershipJson() const;
 };
 
 } /* namespace ipc */

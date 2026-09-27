@@ -10,6 +10,7 @@
 //   - Dashboard's honest empty-preview placeholder is visible
 //     when no frame data exists
 
+#include "DiagnosticsController.h"
 #include "EngineBridge.h"
 #include "LayoutController.h"
 #include "SceneEditController.h"
@@ -53,6 +54,11 @@ int main(int argc, char** argv)
     ui::LayoutController layout_ctl(&bridge);
     engine.rootContext()->setContextProperty(
         QStringLiteral("layoutCtl"), &layout_ctl);
+    /* Task 4.7: the Devices & Diagnostics controller —
+       offline bridge, so every rate renders unmeasured. */
+    ui::DiagnosticsController diag_ctl(&bridge);
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("diagCtl"), &diag_ctl);
 
     const QString base = QStringLiteral("qrc:/qt/qml/OpenRGB2/UI/");
     const char*   files[] = {

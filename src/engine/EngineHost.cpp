@@ -290,6 +290,43 @@ void EngineHost::ScanOwners()
     }
 }
 
+nlohmann::json EngineHost::OwnershipJson() const
+{
+    /* Findings verbatim — the report-only contract (plan
+       section 4) means the UI shows the scan's conflicts,
+       never a kill button or a UI-side re-classification. */
+    nlohmann::json conflicts = nlohmann::json::array();
+    nlohmann::json notices   = nlohmann::json::array();
+    for(const OwnerFinding& f : ownership_.findings)
+    {
+        nlohmann::json e = nlohmann::json::object({
+            { "owner",  f.owner  },
+            { "exe",    f.exe    },
+            { "pid",    f.pid    },
+            { "detail", f.detail },
+        });
+        (f.conflict ? conflicts : notices).push_back(
+            std::move(e));
+    }
+    return nlohmann::json::object({
+        { "scanned", ownership_.scanned },
+        { "backend", nlohmann::json::object({
+            { "listening", ownership_.backend_listening },
+            { "attached",  ownership_.backend_attached  },
+        })},
+        { "conflicts", std::move(conflicts) },
+        { "notices",   std::move(notices)   },
+        { "config", nlohmann::json::object({
+            { "checked",           ownership_.config_checked },
+            { "findings",          ownership_.config.findings },
+            { "enabled_plugins",
+              ownership_.config.enabled_plugins },
+            { "legacy_producers",
+              ownership_.config.legacy_producers },
+        })},
+    });
+}
+
 /*---------------------------------------------------------*\
 || Injected deps (Tasks 3.6/3.7)                            ||
 \*---------------------------------------------------------*/
@@ -810,6 +847,13 @@ bool EngineHost::Start(std::string& err)
            runs in Stop() (OrderlyShutdown). */
         ipc_deps.request_shutdown =
             [this] { stop_.store(true); };
+        /* Task 4.7: the startup ownership scan surfaced
+           read-only in STATE/DIAGNOSTICS. ownership_ is
+           written during Start() before the IPC surface
+           exists — the publish order (scan -> service ->
+           listeners) makes the provider race-free. */
+        ipc_deps.ownership =
+            [this] { return OwnershipJson(); };
         /* Task 3.8 offline bindings: a persisted resolved
            identity completes name-only scene bindings before
            apply — the same binding id keeps pointing at the

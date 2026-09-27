@@ -178,6 +178,12 @@ public:
     PowerLifecycle*          GetLifecycle()  { return lifecycle_.get(); }
     ReactiveInputs*          GetReactive()   { return reactive_.get(); }
     const OwnershipReport&   Ownership() const { return ownership_; }
+    /* Task 4.7: the wire form of the ownership report —
+       serialized for STATE/DIAGNOSTICS (docs/ipc-protocol.md
+       §5). Conflicts and notices are the scan's findings
+       verbatim; "scanned:false" is the honest surface when
+       the scan never ran. */
+    nlohmann::json           OwnershipJson() const;
     uint64_t                 FramesProduced() const;
 
     void Log(const std::string& line) const;

@@ -17,6 +17,7 @@
 //
 // CHECK-macro main like the other UI suites — no framework.
 
+#include "DiagnosticsController.h"
 #include "EngineBridge.h"
 #include "LayoutController.h"
 #include "SceneEditController.h"
@@ -224,8 +225,9 @@ int main(int argc, char** argv)
     wopts.keepalive_ms = 0;
     bridge.setWireOptionsForTesting(wopts);
 
-    SceneEditController scene_edit(&bridge);
-    LayoutController    layout_ctl(&bridge);
+    SceneEditController    scene_edit(&bridge);
+    LayoutController       layout_ctl(&bridge);
+    DiagnosticsController  diag_ctl(&bridge);
 
     QQmlEngine engine;
     engine.rootContext()->setContextProperty(
@@ -234,6 +236,8 @@ int main(int argc, char** argv)
         QStringLiteral("sceneEdit"), &scene_edit);
     engine.rootContext()->setContextProperty(
         QStringLiteral("layoutCtl"), &layout_ctl);
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("diagCtl"), &diag_ctl);
 
     bridge.start();
     CHECK(PumpBoth(s, [&] { return scene_edit.hasScene(); }));
