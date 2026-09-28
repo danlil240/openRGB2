@@ -61,6 +61,12 @@ powershell -File packaging\windows\stage-release.ps1 -VerifyOnly -OutDir <dir>
 - `OpenRGB2.cmd` — double-click launcher shipped at the package root.
   The copy in this source directory launches the staged release under
   `build/package/` when one is present.
+- `OpenRGB2.vbs` — terminal-free launcher for a desktop shortcut. It
+  starts the managed stack with `-TakeOver`, keeps competing applications
+  running, and logs startup to `state/startup.log`. The GUI wrapper shows
+  an error dialog when startup fails.
+- `create-desktop-shortcut.ps1` — creates `OpenRGB2.lnk` on the current
+  user's desktop, using the packaged OpenRGB icon.
 - `install-recovery.md` — install/startup/ownership/update/rollback
   guide (staged as `INSTALL.md`).
 - `NOTICES.txt` — shipped license/provenance manifest.

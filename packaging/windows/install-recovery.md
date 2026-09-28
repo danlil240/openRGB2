@@ -16,6 +16,8 @@ app-locally. No installer and no PATH changes.
 | `state\` | **user state** (created at runtime) — backend private config (`state\backend\`), run file, update journal |
 | `scripts\*.ps1` | managed startup / shutdown / update / rollback |
 | `OpenRGB2.cmd` | double-click entry point (runs `scripts\start-openrgb2.ps1`) |
+| `OpenRGB2.vbs` | desktop entry point; starts silently with `-TakeOver` and writes `state\startup.log` |
+| `OpenRGB2.ico` | desktop shortcut icon (from the pinned OpenRGB fork) |
 | `manifest.json` | per-file SHA-256 + provenance for the whole package |
 
 ### State written OUTSIDE the install dir
@@ -56,6 +58,20 @@ Three processes, strict dependency order (plan §4):
 powershell -ExecutionPolicy Bypass -File scripts\start-openrgb2.ps1
 # or double-click OpenRGB2.cmd
 ```
+
+For a desktop icon with no terminal window, run this once from the
+package directory:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\create-desktop-shortcut.ps1
+```
+
+The shortcut starts `OpenRGB2.vbs`, which acknowledges process-name
+ownership warnings with `-TakeOver` while leaving Logitech G Hub and
+FanControl running. Startup output goes to `state\startup.log`; a
+Windows dialog points to that file if startup fails. The shortcut does
+not change Windows Application Control policy, so an unsigned binary
+blocked by that policy still cannot launch.
 
 Options: `-NoUI` headless · `-Scene <file>` startup scene ·
 `-ScanOnly` ownership report only · `-TakeOver` explicit takeover ·

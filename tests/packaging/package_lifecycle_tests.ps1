@@ -39,6 +39,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 
 $script:Pass = 0
 $script:Fail = 0

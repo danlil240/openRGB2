@@ -100,6 +100,9 @@ param(
     # already-elevated launch inherit elevation.
     [switch]$Elevated,
 
+    # GUI shortcut only: keep the engine's console window hidden.
+    [switch]$HideWindows,
+
     # Bound on waiting for the backend's SDK listener.
     [int]$BackendWaitSeconds = 90,
 
@@ -267,6 +270,7 @@ function Invoke-ManagedStart {
         [bool]$TakeOver,
         [bool]$ScanOnly,
         [bool]$Elevated,
+        [bool]$HideWindows,
         [int]$BackendWaitSeconds,
         [object[]]$ProcessList,
         [int]$ListenerPidOverride
@@ -277,7 +281,6 @@ function Invoke-ManagedStart {
 
     $UiExe      = Join-Path $InstallDir "openrgb2-ui.exe"
     $EngineExe  = Join-Path $InstallDir "openrgb2-engine.exe"
-    $CtlExe     = Join-Path $InstallDir "openrgb2-ctl.exe"
     $BackendExe = Join-Path $InstallDir "backend\OpenRGB.exe"
     $StateDir   = Join-Path $InstallDir "state"
     $BackendCfg = Join-Path $StateDir   "backend"
@@ -292,14 +295,15 @@ function Invoke-ManagedStart {
 
     # Optional self-elevation -- UAC prompt is the user-visible step.
     if($Elevated) {
-        $args = @("-NoProfile","-ExecutionPolicy","Bypass","-File",
-                  "`"$PSCommandPath`"",
-                  "-InstallDir","`"$InstallDir`"")
-        if($Scene)  { $args += @("-Scene","`"$Scene`"") }
-        if($NoUI)   { $args += "-NoUI" }
-        if($TakeOver){ $args += "-TakeOver" }
+        $elevArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File",
+                      "`"$PSCommandPath`"",
+                      "-InstallDir","`"$InstallDir`"")
+        if($Scene)  { $elevArgs += @("-Scene","`"$Scene`"") }
+        if($NoUI)   { $elevArgs += "-NoUI" }
+        if($TakeOver){ $elevArgs += "-TakeOver" }
+        if($HideWindows) { $elevArgs += "-HideWindows" }
         Write-Host "re-launching elevated (UAC prompt)..."
-        Start-Process powershell.exe -Verb RunAs -ArgumentList ($args -join " ")
+        Start-Process powershell.exe -Verb RunAs -ArgumentList ($elevArgs -join " ")
         return 0
     }
 
@@ -482,8 +486,14 @@ function Invoke-ManagedStart {
         Write-Host "==> engine already running (pid $engineProcId) -- not starting a second instance" -ForegroundColor Yellow
     } else {
         Write-Host "==> starting engine (attaches to :$ManagedPort; state: profiles\local\engine-state.json)" -ForegroundColor Cyan
-        $ep = Start-Process -FilePath $EngineExe -PassThru `
-              -WorkingDirectory $InstallDir -ArgumentList $engineArgLine
+        $engineStart = @{
+            FilePath = $EngineExe
+            PassThru = $true
+            WorkingDirectory = $InstallDir
+            ArgumentList = $engineArgLine
+        }
+        if($HideWindows) { $engineStart.WindowStyle = 'Hidden' }
+        $ep = Start-Process @engineStart
         $engineProcId = $ep.Id
         Start-Sleep -Milliseconds 500
         $ep.Refresh()
@@ -523,6 +533,7 @@ if($MyInvocation.InvocationName -ne '.') {
     exit (Invoke-ManagedStart `
         -InstallDir $InstallDir -Scene $Scene -NoUI $NoUI `
         -TakeOver $TakeOver -ScanOnly $ScanOnly -Elevated $Elevated `
+        -HideWindows $HideWindows `
         -BackendWaitSeconds $BackendWaitSeconds -ProcessList $ProcessList `
         -ListenerPidOverride $ListenerPidOverride)
 }

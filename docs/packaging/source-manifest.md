@@ -54,7 +54,8 @@ Re-verify an existing tree without re-staging:
 | Backend non-Qt payloads | `hidapi-hotplug.dll`, `libusb-1.0.dll`, `PawnIOLib.dll`, `*.bin` PawnIO modules, `dxcompiler.dll`/`dxil.dll` | per-file — see `NOTICES.txt` / `licenses/` | `backend/` |
 | Preset library | `src/core/presets/{devices,effects}` | GPL-2.0-or-later | `presets/` |
 | Topology profiles | `profiles/*.json` (committed; no unique IDs) | GPL-2.0-or-later | `profiles/` |
-| Lifecycle scripts + docs | `packaging/windows/` | GPL-2.0-or-later | `scripts/`, `OpenRGB2.cmd`, `INSTALL.md`, `RELEASE.md`, `NOTICES.txt`, `licenses/` |
+| Lifecycle scripts + docs | `packaging/windows/` | GPL-2.0-or-later | `scripts/`, `OpenRGB2.cmd`, `OpenRGB2.vbs`, `INSTALL.md`, `RELEASE.md`, `NOTICES.txt`, `licenses/` |
+| Desktop shortcut icon | `vendor/OpenRGB/qt/OpenRGB.ico` | GPL-2.0-or-later | `OpenRGB2.ico` |
 
 **Compression stack:** tinyuz + HDiffPatch are compiled from the MIT-licensed
 sources vendored inside `vendor/OpenRGB/dependencies/` — the installed

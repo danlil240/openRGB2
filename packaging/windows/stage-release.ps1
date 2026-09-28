@@ -19,6 +19,7 @@
         scripts/*.ps1          managed lifecycle (Task 6.2): start /
                                stop / update / rollback
         OpenRGB2.cmd           double-click launcher -> scripts\start
+        OpenRGB2.vbs + .ico    hidden desktop launcher and icon
         INSTALL.md             install/startup/recovery guide
         manifest.json          source/build manifest (per-file SHA-256)
 
@@ -177,14 +178,47 @@ if(-not $VerifyOnly) {
     Require (Join-Path $RepoRoot "src\core\presets\effects") "bundled effect presets" | Out-Null
     Require (Join-Path $PkgDir "NOTICES.txt") "notices manifest source" | Out-Null
     Require (Join-Path $PkgDir "licenses")    "license texts" | Out-Null
-    foreach($s in @("start-openrgb2.ps1","stop-openrgb2.ps1",
-                    "update-openrgb2.ps1","rollback-openrgb2.ps1",
-                    "OpenRGB2.cmd","install-recovery.md","RELEASE.md")) {
+    foreach($s in @("start-openrgb2.ps1","start-openrgb2-gui.ps1",
+                    "stop-openrgb2.ps1","update-openrgb2.ps1",
+                    "rollback-openrgb2.ps1","create-desktop-shortcut.ps1",
+                    "OpenRGB2.cmd","OpenRGB2.vbs","OpenRGB2.ico",
+                    "install-recovery.md","RELEASE.md")) {
         Require (Join-Path $PkgDir $s) "managed-lifecycle file $s" | Out-Null
     }
 
     Step "Staging OpenRGB2 $version -> $OutDir"
-    if(Test-Path $OutDir) { Remove-Item -Recurse -Force $OutDir }
+    if(Test-Path $OutDir) {
+        # A running staged stack holds its payload DLLs locked -- refuse
+        # the wipe with a pointer at the managed stop instead of dying
+        # mid-delete on UnauthorizedAccess. Elevated processes hide
+        # their image path from a non-elevated Get-Process, so also
+        # match by executable name (conservative: flags any same-named
+        # process even when the path can't be verified as ours).
+        $outFull  = (Resolve-Path $OutDir).Path
+        $locking  = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            try { $_.Path -and $_.Path.StartsWith($outFull,
+                    [StringComparison]::OrdinalIgnoreCase) }
+            catch { $false }
+        })
+        $locking += @(Get-Process -Name "openrgb2-engine","openrgb2-ui",
+                      "openrgb2-ctl","OpenRGB" -ErrorAction SilentlyContinue |
+            Where-Object { $locking.Id -notcontains $_.Id })
+        if($locking.Count -gt 0) {
+            Fail ("staged binaries are still running (" +
+                  (($locking | ForEach-Object { "$($_.ProcessName)#$($_.Id)" }) -join ', ') +
+                  ") -- stop them first: scripts\stop-openrgb2.ps1 " +
+                  "(elevated instances need an elevated shell)")
+        }
+        # Retry past transient locks (AV/indexer), then give up cleanly.
+        $wiped = $false
+        foreach($try_ in 1..3) {
+            try { Remove-Item -Recurse -Force $OutDir -ErrorAction Stop; $wiped = $true; break }
+            catch { Start-Sleep -Seconds 2 }
+        }
+        if(-not $wiped) {
+            Fail "could not clear $OutDir -- a process still holds a file/dir handle inside it (check for an elevated OpenRGB2 stack or a shell parked in that directory)"
+        }
+    }
     New-Item -ItemType Directory -Force -Path $OutDir          | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $OutDir "backend") | Out-Null
 
@@ -288,11 +322,14 @@ if(-not $VerifyOnly) {
     # root, and the install/recovery guide as INSTALL.md.           #
     #--------------------------------------------------------------#
     New-Item -ItemType Directory -Force -Path (Join-Path $OutDir "scripts") | Out-Null
-    foreach($s in @("start-openrgb2.ps1","stop-openrgb2.ps1",
-                    "update-openrgb2.ps1","rollback-openrgb2.ps1")) {
+    foreach($s in @("start-openrgb2.ps1","start-openrgb2-gui.ps1",
+                    "stop-openrgb2.ps1","update-openrgb2.ps1",
+                    "rollback-openrgb2.ps1","create-desktop-shortcut.ps1")) {
         Copy-Item (Join-Path $PkgDir $s) (Join-Path $OutDir "scripts")
     }
     Copy-Item (Join-Path $PkgDir "OpenRGB2.cmd") $OutDir
+    Copy-Item (Join-Path $PkgDir "OpenRGB2.vbs") $OutDir
+    Copy-Item (Join-Path $PkgDir "OpenRGB2.ico") $OutDir
     Copy-Item (Join-Path $PkgDir "install-recovery.md") `
               (Join-Path $OutDir "INSTALL.md")
     Copy-Item (Join-Path $PkgDir "RELEASE.md") $OutDir
@@ -321,7 +358,9 @@ if(-not $VerifyOnly) {
                 elseif($rel -like "profiles/*")     { "profiles" }
                 elseif($rel -like "licenses/*")     { "packaging/windows/licenses" }
                 elseif($rel -like "scripts/*")      { "packaging/windows" }
+                elseif($rel -eq "OpenRGB2.ico")  { "vendor/OpenRGB/qt/OpenRGB.ico" }
                 elseif($rel -eq "NOTICES.txt" -or $rel -eq "OpenRGB2.cmd" -or
+                       $rel -eq "OpenRGB2.vbs" -or
                        $rel -eq "INSTALL.md" -or $rel -eq "RELEASE.md") {
                                                        "packaging/windows" }
                 elseif($_.Name -like "Qt6*.dll" -or
@@ -386,10 +425,14 @@ $required = @(
     "NOTICES.txt",
     "licenses",
     "scripts\start-openrgb2.ps1",
+    "scripts\start-openrgb2-gui.ps1",
     "scripts\stop-openrgb2.ps1",
     "scripts\update-openrgb2.ps1",
     "scripts\rollback-openrgb2.ps1",
+    "scripts\create-desktop-shortcut.ps1",
     "OpenRGB2.cmd",
+    "OpenRGB2.vbs",
+    "OpenRGB2.ico",
     "INSTALL.md",
     "RELEASE.md"
 )
