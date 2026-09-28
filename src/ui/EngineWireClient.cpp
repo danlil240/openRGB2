@@ -361,16 +361,34 @@ EngineWireClient::EndReason EngineWireClient::Run(
     }
 
     /*---- Read loop -------------------------------------------
-      Deadline semantics: a Timeout means no complete message
-      arrived inside the bound — idle stream, not a dead peer;
-      loop (and send a bounded keepalive PING on cadence to
-      prove the pipe). Peer close / transport error end it.  */
+      The engine closes sessions after five seconds without an
+      inbound request. Check the PING cadence on every iteration:
+      frequent inbound EVENTs must not starve the outbound ping.
+      A read Timeout means an idle stream, not a dead peer.  */
     auto last_ping = std::chrono::steady_clock::now();
     for(;;)
     {
         if(Cancelled())
         {
             return finish(EndReason::Stopped, "stopped by client");
+        }
+        if(options.keepalive_ms != 0)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if(std::chrono::duration_cast<
+                   std::chrono::milliseconds>(now - last_ping)
+                   .count() >= (long long)options.keepalive_ms)
+            {
+                last_ping = now;
+                uint32_t    id = 0;
+                std::string e2;
+                if(!SendRequest(ipc::MsgType::Ping,
+                                nlohmann::json::object(), id, e2))
+                {
+                    return finish(EndReason::TransportError,
+                                  "keepalive write failed: " + e2);
+                }
+            }
         }
         ipc::Message in;
         std::string det;
@@ -415,24 +433,6 @@ EngineWireClient::EndReason EngineWireClient::Run(
             }
             break;
         case ipc::ReadResult::Timeout:
-            if(options.keepalive_ms != 0)
-            {
-                const auto now = std::chrono::steady_clock::now();
-                if(std::chrono::duration_cast<
-                       std::chrono::milliseconds>(now - last_ping)
-                       .count() >= (long long)options.keepalive_ms)
-                {
-                    last_ping = now;
-                    uint32_t    id = 0;
-                    std::string e2;
-                    if(!SendRequest(ipc::MsgType::Ping,
-                                    nlohmann::json::object(), id, e2))
-                    {
-                        return finish(EndReason::TransportError,
-                                      "keepalive write failed: " + e2);
-                    }
-                }
-            }
             break;
         case ipc::ReadResult::TooLarge:
             /* Body skipped by resync; stream survives. */

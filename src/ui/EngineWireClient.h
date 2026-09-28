@@ -52,8 +52,8 @@ public:
         bool        subscribe_all     = true;
         uint32_t    hello_deadline_ms = 5000;   /* protocol: 5 s from connect */
         uint32_t    write_deadline_ms = 5000;   /* protocol: 5 s per message  */
-        uint32_t    read_deadline_ms  = 5000;   /* per-message read bound     */
-        uint32_t    keepalive_ms      = 15000;  /* PING cadence; 0 = disabled */
+        uint32_t    read_deadline_ms  = 1000;   /* check keepalive while idle */
+        uint32_t    keepalive_ms      = 2000;   /* engine closes after 5 s idle */
         /* Bounded outbound queue: SendRequest only encodes + enqueues
            — a session writer thread does the (deadline-bounded) pipe
            I/O so callers on a GUI thread are never blocked by a

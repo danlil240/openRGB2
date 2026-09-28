@@ -777,6 +777,88 @@ void Test_KeepRunningCancel()
     CHECK(!srv.RecvMsg(m, 300));   /* no HELLO ever sent       */
 }
 
+/* The engine's command session closes after five idle seconds.
+   The default UI session must send a keepalive before that bound,
+   even when there are no scene or control requests. */
+void Test_DefaultKeepaliveBeforeEngineIdleClose()
+{
+    std::printf("-- default keepalive before engine idle close\n");
+    auto st = std::make_shared<PipeShared>();
+    ServerPeer srv(st);
+    EngineWireClient client;
+    Capture cap;
+    EngineWireClient::EndReason end =
+        EngineWireClient::EndReason::Stopped;
+    std::string detail;
+    std::thread th([&] {
+        end = client.Run(
+            std::unique_ptr<IIpcChannel>(new PipeEnd(st, true)),
+            MakeHandlers(cap), EngineWireClient::Options(), detail);
+    });
+
+    uint32_t sub_id = 0;
+    CHECK(DriveHandshake(srv, cap, sub_id));
+    Message m;
+    const bool ping_before_idle_close = srv.RecvMsg(m, 4500);
+    CHECK(ping_before_idle_close);
+    if(ping_before_idle_close)
+    {
+        CHECK(m.type == MsgType::Ping);
+        srv.SendMsg(MsgType::Pong, m.request_id,
+                    nlohmann::json::object());
+    }
+    client.Stop();
+    th.join();
+    CHECK(end == EngineWireClient::EndReason::Stopped);
+}
+
+/* Server events can keep the client read loop busy even while the
+   server receives no requests. Keepalive must still go outbound. */
+void Test_DefaultKeepaliveDuringEvents()
+{
+    std::printf("-- default keepalive during events\n");
+    auto st = std::make_shared<PipeShared>();
+    ServerPeer srv(st);
+    EngineWireClient client;
+    Capture cap;
+    EngineWireClient::EndReason end =
+        EngineWireClient::EndReason::Stopped;
+    std::string detail;
+    std::thread th([&] {
+        end = client.Run(
+            std::unique_ptr<IIpcChannel>(new PipeEnd(st, true)),
+            MakeHandlers(cap), EngineWireClient::Options(), detail);
+    });
+
+    uint32_t sub_id = 0;
+    CHECK(DriveHandshake(srv, cap, sub_id));
+    std::atomic<bool> send_events{ true };
+    std::thread events([&] {
+        while(send_events.load())
+        {
+            srv.SendMsg(MsgType::Event, 0,
+                nlohmann::json::object({
+                    { "kind", "frame_status" },
+                    { "data", nlohmann::json::object() },
+                }));
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(100));
+        }
+    });
+    Message m;
+    const bool ping_during_events = srv.RecvMsg(m, 4500);
+    CHECK(ping_during_events);
+    if(ping_during_events)
+    {
+        CHECK(m.type == MsgType::Ping);
+    }
+    send_events.store(false);
+    events.join();
+    client.Stop();
+    th.join();
+    CHECK(end == EngineWireClient::EndReason::Stopped);
+}
+
 } /* anonymous namespace */
 
 int main()
@@ -791,6 +873,8 @@ int main()
     Test_NonObjectSessionBodies();
     Test_QueuedWritesUnderWedge();
     Test_KeepRunningCancel();
+    Test_DefaultKeepaliveBeforeEngineIdleClose();
+    Test_DefaultKeepaliveDuringEvents();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

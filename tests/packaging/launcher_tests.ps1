@@ -1,7 +1,7 @@
 param([Parameter(Mandatory)][string]$Launcher)
 
 $ErrorActionPreference = 'Stop'
-$testRoot = Join-Path $env:TEMP ('openrgb2-launcher-' + [guid]::NewGuid().ToString('N'))
+$testRoot = Join-Path $env:TEMP ('openrgb2 launcher-' + [guid]::NewGuid().ToString('N'))
 $oldPath = $env:PATH
 $oldLog = $env:ORGB2_TEST_LOG
 
@@ -60,5 +60,12 @@ if not exist "%~5" exit /b 81
 } finally {
     $env:PATH = $oldPath
     $env:ORGB2_TEST_LOG = $oldLog
-    if(Test-Path $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
+    if(Test-Path $testRoot) {
+        $tempRoot = (Resolve-Path -LiteralPath $env:TEMP).Path.TrimEnd('\')
+        $cleanupPath = (Resolve-Path -LiteralPath $testRoot).Path
+        if(-not $cleanupPath.StartsWith($tempRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing cleanup outside temp directory: $cleanupPath"
+        }
+        Remove-Item -LiteralPath $cleanupPath -Recurse -Force
+    }
 }
