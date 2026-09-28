@@ -38,6 +38,12 @@
 .EXAMPLE
     # Re-check an already staged tree
     powershell -File packaging\windows\stage-release.ps1 -VerifyOnly -OutDir build\package\OpenRGB2-0.1.0-win64
+
+.EXAMPLE
+    # Stage and Authenticode-sign every staged .exe via Azure Trusted
+    # Signing (needs signtool 10.0.22621+, the Microsoft.Trusted.Signing
+    # .Client NuGet dlib, and a signed-in Azure credential):
+    powershell -File packaging\windows\stage-release.ps1 -Sign -SignMetadata .\trusted-signing.json
 #>
 [CmdletBinding()]
 param(
@@ -62,9 +68,44 @@ param(
     # MSVC redist CRT folder (contains vcruntime140.dll etc.).
     # Falls back to $env:OPENRGB2_VC_REDIST, then the newest
     # VC\Redist\MSVC\<ver>\x64\Microsoft.VC143.CRT under BuildTools.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSAvoidUsingPlainTextForPassword', 'VcRedistDir',
+        Justification = 'Filesystem path, not a credential -- the rule heuristic matches "cred" inside "VcRedist".')]
     [string]$VcRedistDir,
 
-    # Skip re-staging; only verify an existing -OutDir.
+    # Authenticode-sign every staged *.exe with Azure Trusted Signing
+    # after staging, before hashing/verification (Smart App Control
+    # blocks the unsigned local builds). Auth is whatever the dlib's
+    # DefaultAzureCredential chain resolves -- `az login`, the
+    # AZURE_* service-principal env vars, managed identity, etc.
+    [switch]$Sign,
+
+    # Trusted Signing metadata.json containing Endpoint,
+    # CodeSigningAccountName and CertificateProfileName. Falls back to
+    # $env:OPENRGB2_TS_METADATA; when neither is set it is synthesized
+    # from -TsEndpoint/-TsAccount/-TsProfile (env: OPENRGB2_TS_*).
+    [string]$SignMetadata,
+
+    # Azure.CodeSigning.Dlib.dll from the Microsoft.Trusted.Signing.Client
+    # NuGet package. Falls back to $env:OPENRGB2_TS_DLIB, then the newest
+    # copy under the per-user NuGet cache.
+    [string]$SignDlib,
+
+    # signtool.exe path. Falls back to $env:OPENRGB2_SIGNTOOL, then the
+    # newest Windows SDK copy under Windows Kits\10\bin (needs
+    # 10.0.22621+ for the Trusted Signing dlib flow).
+    [string]$SignTool,
+
+    # Trusted Signing account fields -- only used to synthesize a
+    # metadata.json when -SignMetadata/OPENRGB2_TS_METADATA is unset.
+    # Endpoint example: https://wus2.codesigning.azure.net/
+    [string]$TsEndpoint,
+    [string]$TsAccount,
+    [string]$TsProfile,
+
+    # Skip re-staging; only verify an existing -OutDir. With -Sign this
+    # asserts the staged .exe files carry a Valid signature instead of
+    # signing anything.
     [switch]$VerifyOnly
 )
 
@@ -336,6 +377,86 @@ if(-not $VerifyOnly) {
     Info "managed-lifecycle scripts + INSTALL.md staged"
 
     #--------------------------------------------------------------#
+    # Authenticode signing (Azure Trusted Signing)                  #
+    #                                                              #
+    # Runs AFTER all binaries are staged and BEFORE the manifest is #
+    # collected, so the shipped SHA-256s describe the signed files. #
+    # Smart App Control has no exclusion list and blocks the        #
+    # unsigned local builds on sight (CodeIntegrity 3077/3118); a   #
+    # valid Authenticode signature is the only per-file pass it     #
+    # honors.                                                      #
+    #--------------------------------------------------------------#
+    $signedRel = @()
+    if($Sign) {
+        Step "Signing staged executables via Azure Trusted Signing"
+
+        if(-not $SignTool -and $env:OPENRGB2_SIGNTOOL) { $SignTool = $env:OPENRGB2_SIGNTOOL }
+        if(-not $SignTool) {
+            $kitsBin = "C:\Program Files (x86)\Windows Kits\10\bin"
+            $newestKit = Get-ChildItem $kitsBin -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' -and
+                               (Test-Path (Join-Path $_.FullName "x64\signtool.exe")) } |
+                Sort-Object { [version]$_.Name } -Descending |
+                Select-Object -First 1
+            if($newestKit) { $SignTool = Join-Path $newestKit.FullName "x64\signtool.exe" }
+        }
+        if(-not $SignTool) {
+            Fail "signtool.exe not found (needs Windows SDK 10.0.22621+; set -SignTool or OPENRGB2_SIGNTOOL)"
+        }
+        $SignTool = (Require $SignTool "signtool.exe")
+
+        if(-not $SignDlib -and $env:OPENRGB2_TS_DLIB) { $SignDlib = $env:OPENRGB2_TS_DLIB }
+        if(-not $SignDlib) {
+            $pkgRoot = Join-Path $env:USERPROFILE ".nuget\packages\microsoft.trusted.signing.client"
+            $newestPkg = Get-ChildItem $pkgRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^\d+\.\d+' } |
+                Sort-Object { [version]($_.Name -replace '[^0-9\.]','') } -Descending |
+                Select-Object -First 1
+            if($newestPkg) {
+                $cand = Join-Path $newestPkg.FullName "bin\x64\Azure.CodeSigning.Dlib.dll"
+                if(Test-Path $cand) { $SignDlib = $cand }
+            }
+        }
+        if(-not $SignDlib) {
+            Fail "Azure.CodeSigning.Dlib.dll not found (nuget install Microsoft.Trusted.Signing.Client, or set -SignDlib / OPENRGB2_TS_DLIB)"
+        }
+        $SignDlib = (Require $SignDlib "Trusted Signing dlib")
+
+        # Metadata json: an explicit file wins; otherwise synthesize
+        # one from the three account fields (params or env).
+        if(-not $SignMetadata -and $env:OPENRGB2_TS_METADATA) {
+            $SignMetadata = $env:OPENRGB2_TS_METADATA
+        }
+        if($SignMetadata) {
+            $metaPath = (Require $SignMetadata "Trusted Signing metadata json")
+        } else {
+            if(-not $TsEndpoint) { $TsEndpoint = $env:OPENRGB2_TS_ENDPOINT }
+            if(-not $TsAccount)  { $TsAccount  = $env:OPENRGB2_TS_ACCOUNT }
+            if(-not $TsProfile)  { $TsProfile  = $env:OPENRGB2_TS_PROFILE }
+            if(-not ($TsEndpoint -and $TsAccount -and $TsProfile)) {
+                Fail "no Trusted Signing metadata: pass -SignMetadata/OPENRGB2_TS_METADATA or -TsEndpoint+-TsAccount+-TsProfile (OPENRGB2_TS_ENDPOINT/_ACCOUNT/_PROFILE)"
+            }
+            $metaPath = Join-Path $BuildDir "openrgb2-ts-metadata.json"
+            [ordered]@{
+                Endpoint               = $TsEndpoint
+                CodeSigningAccountName = $TsAccount
+                CertificateProfileName = $TsProfile
+            } | ConvertTo-Json | Set-Content -Encoding UTF8 $metaPath
+        }
+
+        foreach($exe in (Get-ChildItem $OutDir -Recurse -File -Filter *.exe)) {
+            & $SignTool sign /fd SHA256 `
+                /tr http://timestamp.acs.microsoft.com /td SHA256 `
+                /dlib $SignDlib /dmdf $metaPath $exe.FullName
+            if($LASTEXITCODE -ne 0) {
+                Fail "signtool failed for $($exe.Name) (exit $LASTEXITCODE) -- check Azure credential (az login / AZURE_* env) and the Trusted Signing metadata"
+            }
+            $signedRel += ($exe.FullName.Substring($OutDir.Length).TrimStart('\','/') -replace '\\','/')
+        }
+        Info "signed $($signedRel.Count) executable(s): $($signedRel -join ', ')"
+    }
+
+    #--------------------------------------------------------------#
     # Source/build manifest -- collected now, but only WRITTEN after #
     # the verification pass below succeeds, so a failed package can  #
     # never carry an "exclusions_verified" claim.                    #
@@ -372,6 +493,7 @@ if(-not $VerifyOnly) {
                 sha256 = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
                 bytes  = $_.Length
                 origin = $origin
+                signed = [bool]($signedRel -contains $rel)
             }
         }
 
@@ -396,6 +518,13 @@ if(-not $VerifyOnly) {
             "installed L-Connect yuz.dll"
         )
         files = $files
+    }
+    if($Sign) {
+        $manifest.signing = [ordered]@{
+            provider = "azure-trusted-signing"
+            signtool = ConvertTo-ManifestPath $SignTool
+            files    = $signedRel
+        }
     }
     Info "manifest content collected ($($files.Count) files) -- written after verification"
 }
@@ -509,6 +638,17 @@ if($forbidden.Count -gt 0) {
     Write-Host "FORBIDDEN package members:" -ForegroundColor Red
     $forbidden | ForEach-Object { Write-Host "  $($_.FullName)" -ForegroundColor Red }
     Fail "package contains excluded components (effect plugins / WinRing0 / yuz.dll / debug DLLs / user state)"
+}
+
+# Signature assert -- runs for both staging and -VerifyOnly: with -Sign
+# every staged executable must carry a Valid Authenticode signature.
+if($Sign) {
+    $badSig = @(Get-ChildItem $OutDir -Recurse -File -Filter *.exe |
+        Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -ne 'Valid' })
+    if($badSig.Count -gt 0) {
+        Fail "executables without a Valid signature: $($badSig.Name -join ', ')"
+    }
+    Info "signature check passed on all staged executables"
 }
 
 # Verification passed -- only now is it truthful to stamp the manifest
