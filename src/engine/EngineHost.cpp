@@ -1153,10 +1153,25 @@ void EngineHost::ReprobeSdk(TimePoint now)
 
 void EngineHost::Run()
 {
+    /* frame_status rides a fast tick beside the ~500 ms
+       maintenance loop — the UI preview repaints on that
+       feed, so it cannot wait for PollOnce's cadence. The
+       push rate stays bounded by frame_status_min_interval_ms;
+       the tick only decides how soon a due push is noticed. */
+    TimePoint next_maint = Clock::now();
     while(!stop_.load())
     {
-        PollOnce();
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        const TimePoint now = Clock::now();
+        if(now >= next_maint)
+        {
+            PollOnce();
+            next_maint = now + std::chrono::milliseconds(500);
+        }
+        if(service_)
+        {
+            service_->PollFrameStatus();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 }
 

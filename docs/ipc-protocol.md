@@ -482,7 +482,7 @@ matches the corresponding pull body:
 | `playback` | PLAYBACK body | requested-mode or applied-status change |
 | `connection` | `sdk` object | SDK link state change |
 | `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |
-| `frame_status` | `{aggregate, controllers:[{key,sequence,colors,stats}]}` | ≤ 1 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses |
+| `frame_status` | `{aggregate, controllers:[{key,sequence,colors,stats}]}` | ≤ ~30 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses |
 
 An `events` field that is neither `"all"` nor an array of strings, or any
 unknown kind name → `bad_request` (subscription unchanged). Queue overflow

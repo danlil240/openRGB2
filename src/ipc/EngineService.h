@@ -58,8 +58,10 @@ struct EngineServiceOptions
 {
     /* Minimum interval between frame_status pushes — the
        push channel is a status feed, not a per-frame fire
-       hose. */
-    uint32_t frame_status_min_interval_ms = 1000;
+       hose, but the UI preview repaints on this feed so it
+       must stay fluid: ~30 Hz cap (~25 Hz delivered on the
+       owner loop's 20 ms fast tick). */
+    uint32_t frame_status_min_interval_ms = 33;
 };
 
 class EngineService final : public IIpcService
@@ -171,6 +173,15 @@ public:
        stats moved. Single-caller: the diffing signatures are
        not mutex-guarded (same contract as SceneWorker::Step). */
     void PollEvents(TimePoint now = Clock::now());
+
+    /* The frame_status feed on its own tick. PollEvents calls
+       this too, but the owner loop also calls it on a faster
+       cadence so the UI preview — which repaints on
+       frame_status — is not gated by the ~500 ms maintenance
+       poll. Rate stays bounded by
+       frame_status_min_interval_ms; same single-caller
+       contract as PollEvents. */
+    void PollFrameStatus(TimePoint now = Clock::now());
 
     /* Emits the "reactive" event with the current reactive
        state — the ReactiveInputs manager's changed hook

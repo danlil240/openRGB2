@@ -1993,8 +1993,20 @@ void EngineService::PollEvents(TimePoint now)
         pending.push_back(IpcEvent{ event_kind::kReactive, react });
     }
 
-    /* frame_status: bounded rate, only when the aggregate
-       counters actually moved. */
+    for(const IpcEvent& ev : pending)
+    {
+        Emit(ev.kind, ev.data);
+    }
+
+    /* frame_status emits last — the same ordering it had as
+       the final entry of the pending batch. */
+    PollFrameStatus(now);
+}
+
+void EngineService::PollFrameStatus(TimePoint now)
+{
+    /* Bounded rate, only when the aggregate counters
+       actually moved. */
     const DeliveryStats agg =
         deps_.pipeline ? deps_.pipeline->Stats() : DeliveryStats{};
     std::ostringstream sig;
@@ -2011,9 +2023,7 @@ void EngineService::PollEvents(TimePoint now)
            since_last >= options_.frame_status_min_interval_ms)
         {
             last_frame_status_ = now;
-            pending.push_back(
-                IpcEvent{ event_kind::kFrameStatus,
-                          FrameStatusJson() });
+            Emit(event_kind::kFrameStatus, FrameStatusJson());
         }
         else
         {
@@ -2022,11 +2032,6 @@ void EngineService::PollEvents(TimePoint now)
                so the burst coalesces into the next push. */
             last_stats_sig_.clear();
         }
-    }
-
-    for(const IpcEvent& ev : pending)
-    {
-        Emit(ev.kind, ev.data);
     }
 }
 
