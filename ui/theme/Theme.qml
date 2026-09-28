@@ -21,7 +21,10 @@ QtObject {
     /*---- Text ----------------------------------------------*/
     readonly property color textPrimary:   "#E9EEF4"
     readonly property color textSecondary: "#9AA8B8"
-    readonly property color textDisabled:  "#5B6774"
+    /* #7B8794 is the dimmest text token that still clears
+       WCAG 4.5:1 on `surface` — supporting copy must stay
+       readable, not just de-emphasized. */
+    readonly property color textDisabled:  "#7B8794"
 
     /*---- Accent — ICE (ice-blue / white) --------------------*/
     readonly property color accent:        "#7FCFFF"

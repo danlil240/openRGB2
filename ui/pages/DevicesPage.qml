@@ -337,6 +337,7 @@ Item {
                     title: qsTr("ENGINE")
                     Layout.fillWidth: true
                     Column {
+                        width: parent.width
                         spacing: Theme.spaceS
                         Text {
                             text: qsTr("state: %1").arg(
@@ -374,6 +375,7 @@ Item {
                         Row {
                             spacing: Theme.spaceM
                             AppButton {
+                                objectName: "refreshButton"
                                 text: qsTr("Refresh")
                                 enabled: root.engineUp
                                 onClicked:
@@ -396,6 +398,7 @@ Item {
                     title: qsTr("BACKEND LINK")
                     Layout.fillWidth: true
                     Column {
+                        width: parent.width
                         spacing: Theme.spaceS
                         StatusPill {
                             text: root.engineUp
@@ -437,6 +440,7 @@ Item {
                     title: qsTr("PLAYBACK & SYNC")
                     Layout.fillWidth: true
                     Column {
+                        width: parent.width
                         spacing: Theme.spaceS
                         Text {
                             text: {
@@ -493,8 +497,10 @@ Item {
 
                 Card {
                     title: qsTr("REACTIVE INPUTS")
+                    objectName: "reactiveCard"
                     Layout.fillWidth: true
                     Column {
+                        width: parent.width
                         spacing: Theme.spaceS
                         Text {
                             visible: !root.engineUp

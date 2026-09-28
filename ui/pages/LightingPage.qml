@@ -193,6 +193,7 @@ Item {
                 Component {
                     id: presetCard
                     Rectangle {
+                        objectName: "preset_" + pid
                         width: 260
                         implicitHeight: cardCol.implicitHeight + 2 * Theme.spaceL
                         radius: Theme.radiusM
@@ -300,7 +301,15 @@ Item {
                    what the device actually runs, so a pending
                    transition never reports applied before the
                    engine confirms it.                      */
-                RowLayout {
+                /* A plain Row, not RowLayout: the card's implicit
+                   width is circular through body.childrenRect (the
+                   inner column binds parent.width), which corrupts
+                   the layout engine's free-space distribution — one
+                   card collapsed to a sliver while the other took
+                   the row (ui-first-look-2026-09-28, UI-02). An
+                   explicit half-width binding is deterministic. */
+                Row {
+                    id: modeRow
                     objectName: "modeSelector"
                     width: parent.width - 2 * col.padding
                     spacing: Theme.spaceL
@@ -320,7 +329,8 @@ Item {
                         ]
 
                         Card {
-                            Layout.fillWidth: true
+                            objectName: "mode_" + modelData.key
+                            width: (modeRow.width - modeRow.spacing) / 2
                             readonly property string modeKey: modelData.key
                             readonly property bool requested:
                                 root.requestedMode === modeKey
@@ -355,6 +365,7 @@ Item {
                             border.width: requested || activeFocus ? 2 : 1
 
                             Column {
+                                width: parent.width
                                 spacing: Theme.spaceXS
                                 Text {
                                     text: modelData.title
@@ -531,6 +542,7 @@ Item {
                                        engine forces Playing in live
                                        mode, so offering pause there
                                        would fake a dead button. */
+                                    objectName: "transport_" + modelData.key
                                     visible: root.animationRequested
                                              || root.animationApplied
                                     text: modelData.label
@@ -731,9 +743,11 @@ Item {
                    pending edits — Save sends them.        */
                 Card {
                     title: qsTr("PALETTE")
+                    objectName: "paletteCard"
                     width: parent.width - 2 * col.padding
 
                     Column {
+                        width: parent.width
                         spacing: Theme.spaceM
 
                         /* Supported-control filtering (plan
@@ -800,39 +814,98 @@ Item {
                                 /* Palette position is a UI-owned
                                    preference (Task 4.8): seeded
                                    once from uiPrefs, written back
-                                   on each move. */
-                                AppSlider {
-                                    id: palH
+                                   on each move. Each slider carries
+                                   a visible label + live value —
+                                   accessibility names alone don't
+                                   tell the eye what a bare track
+                                   adjusts. */
+                                RowLayout {
                                     width: parent.width
-                                    from: 0; to: 1; stepSize: 0.001
-                                    value: 0.55
-                                    enabled: root.liveControlsEnabled
-                                    Accessible.name: qsTr("palette hue")
-                                    onMoved: if(root.prefsUp)
-                                        uiPrefs.paletteHue = value;
+                                    spacing: Theme.spaceS
+                                    Text {
+                                        text: qsTr("Hue")
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        Layout.preferredWidth: 44
+                                    }
+                                    AppSlider {
+                                        id: palH
+                                        objectName: "paletteHue"
+                                        Layout.fillWidth: true
+                                        from: 0; to: 1; stepSize: 0.001
+                                        value: 0.55
+                                        enabled: root.liveControlsEnabled
+                                        Accessible.name: qsTr("palette hue")
+                                        onMoved: if(root.prefsUp)
+                                            uiPrefs.paletteHue = value;
+                                    }
+                                    Text {
+                                        text: Math.round(palH.value * 360) + "°"
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        horizontalAlignment: Text.AlignRight
+                                        Layout.preferredWidth: 38
+                                    }
                                 }
-                                AppSlider {
-                                    id: palS
+                                RowLayout {
                                     width: parent.width
-                                    from: 0; to: 1; stepSize: 0.001
-                                    value: 0.6
-                                    enabled: root.liveControlsEnabled
-                                    Accessible.name: qsTr("palette saturation")
-                                    onMoved: if(root.prefsUp)
-                                        uiPrefs.paletteSat = value;
+                                    spacing: Theme.spaceS
+                                    Text {
+                                        text: qsTr("Sat")
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        Layout.preferredWidth: 44
+                                    }
+                                    AppSlider {
+                                        id: palS
+                                        objectName: "paletteSat"
+                                        Layout.fillWidth: true
+                                        from: 0; to: 1; stepSize: 0.001
+                                        value: 0.6
+                                        enabled: root.liveControlsEnabled
+                                        Accessible.name: qsTr("palette saturation")
+                                        onMoved: if(root.prefsUp)
+                                            uiPrefs.paletteSat = value;
+                                    }
+                                    Text {
+                                        text: Math.round(palS.value * 100) + "%"
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        horizontalAlignment: Text.AlignRight
+                                        Layout.preferredWidth: 38
+                                    }
                                 }
-                                AppSlider {
-                                    id: palV
+                                RowLayout {
                                     width: parent.width
-                                    from: 0; to: 1; stepSize: 0.001
-                                    value: 1.0
-                                    enabled: root.liveControlsEnabled
-                                    Accessible.name: qsTr("palette brightness")
-                                    onMoved: if(root.prefsUp)
-                                        uiPrefs.paletteVal = value;
+                                    spacing: Theme.spaceS
+                                    Text {
+                                        text: qsTr("Bright")
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        Layout.preferredWidth: 44
+                                    }
+                                    AppSlider {
+                                        id: palV
+                                        objectName: "paletteVal"
+                                        Layout.fillWidth: true
+                                        from: 0; to: 1; stepSize: 0.001
+                                        value: 1.0
+                                        enabled: root.liveControlsEnabled
+                                        Accessible.name: qsTr("palette brightness")
+                                        onMoved: if(root.prefsUp)
+                                            uiPrefs.paletteVal = value;
+                                    }
+                                    Text {
+                                        text: Math.round(palV.value * 100) + "%"
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        horizontalAlignment: Text.AlignRight
+                                        Layout.preferredWidth: 38
+                                    }
                                 }
                             }
                             AppButton {
+                                objectName: "paletteApply"
                                 text: qsTr("Apply to selected")
                                 primary: true
                                 enabled: root.liveControlsEnabled
@@ -854,6 +927,7 @@ Item {
                             Repeater {
                                 model: Theme.paletteSwatches
                                 PaletteSwatch {
+                                    objectName: "quickSwatch" + index
                                     swatch: modelData
                                     enabled: root.liveControlsEnabled
                                     onPicked: hex => sceneEdit.setGroupColor(hex)
@@ -871,9 +945,11 @@ Item {
                    Speed/intensity multiply the resolved look. */
                 Card {
                     title: qsTr("SCENE CONTROLS")
+                    objectName: "sceneControlsCard"
                     width: parent.width - 2 * col.padding
 
                     Column {
+                        width: parent.width
                         spacing: Theme.spaceM
 
                         Text {
@@ -896,6 +972,7 @@ Item {
                             }
                             AppSlider {
                                 id: brightSlider
+                                objectName: "sceneBrightness"
                                 Accessible.name: qsTr("scene brightness")
                                 Layout.fillWidth: true
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
@@ -928,6 +1005,7 @@ Item {
                             }
                             AppSlider {
                                 id: fxSpeedSlider
+                                objectName: "sceneSpeed"
                                 Accessible.name: qsTr("effect speed")
                                 Layout.fillWidth: true
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
@@ -960,6 +1038,7 @@ Item {
                             }
                             AppSlider {
                                 id: fxIntSlider
+                                objectName: "sceneIntensity"
                                 Accessible.name: qsTr("effect intensity")
                                 Layout.fillWidth: true
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
@@ -996,10 +1075,12 @@ Item {
                    silently resume a paused upload.           */
                 Card {
                     title: qsTr("UPLOADED PRESET")
+                    objectName: "uploadedPresetCard"
                     width: parent.width - 2 * col.padding
                     visible: root.editorUp && sceneEdit.presetSupport.playback === true
 
                     Column {
+                        width: parent.width
                         spacing: Theme.spaceM
 
                         Text {
@@ -1080,8 +1161,9 @@ Item {
                                 font.pixelSize: Theme.fontSizeBody
                                 Layout.preferredWidth: 110
                             }
-                            CheckBox {
+                            AppCheckBox {
                                 id: dirCheck
+                                objectName: "directionReverse"
                                 enabled: root.editorUp && root.engineUp
                                          && root.animationRequested
                                          && root.pv.phase !== "applying"
@@ -1126,6 +1208,7 @@ Item {
                                 Layout.fillWidth: true
                                 AppSlider {
                                     id: upH
+                                    objectName: "upHue"
                                     Accessible.name: qsTr("uploaded preset color hue")
                                     width: parent.width
                                     from: 0; to: 1; stepSize: 0.001; value: 0
@@ -1141,6 +1224,7 @@ Item {
                                 }
                                 AppSlider {
                                     id: upS
+                                    objectName: "upSat"
                                     Accessible.name: qsTr("uploaded preset color saturation")
                                     width: parent.width
                                     from: 0; to: 1; stepSize: 0.001; value: 1
@@ -1153,6 +1237,7 @@ Item {
                                 }
                                 AppSlider {
                                     id: upV
+                                    objectName: "upVal"
                                     Accessible.name: qsTr("uploaded preset color brightness")
                                     width: parent.width
                                     from: 0; to: 1; stepSize: 0.001; value: 1
@@ -1216,6 +1301,7 @@ Item {
                     }
 
                     Column {
+                        width: parent.width
                         spacing: Theme.spaceM
 
                         /* Engine surface absent — the honest
@@ -1284,7 +1370,7 @@ Item {
                                 RowLayout {
                                     width: parent.width
                                     spacing: Theme.spaceL
-                                    CheckBox {
+                                    AppCheckBox {
                                         id: inputCheck
                                         objectName: inputId + "Check"
                                         text: modelData.label
@@ -1398,7 +1484,7 @@ Item {
                                         font.pixelSize: Theme.fontSizeBody
                                         Layout.preferredWidth: 110
                                     }
-                                    ComboBox {
+                                    AppComboBox {
                                         id: dispCombo
                                         objectName: "screenDisplay"
                                         Accessible.name: qsTr("screen input display")
@@ -1475,6 +1561,7 @@ Item {
                     width: parent.width - 2 * col.padding
 
                     Column {
+                        width: parent.width
                         spacing: Theme.spaceM
 
                         Repeater {
@@ -1497,7 +1584,7 @@ Item {
 
                         Text {
                             visible: root.engineUp
-                            text: qsTr("preview ≈ %1 updates/s — engine frame_status event cadence (≤ 1 Hz), not the output rate")
+                            text: qsTr("preview ≈ %1 updates/s — engine frame_status event cadence (≤ ~30 Hz), not the output rate")
                                 .arg(root.previewFps.toFixed(1))
                             color: Theme.textDisabled
                             font.pixelSize: Theme.fontSizeSmall
@@ -1533,6 +1620,7 @@ Item {
                     width: parent.width - 2 * col.padding
 
                     Column {
+                        width: parent.width
                         spacing: Theme.spaceM
 
                         RowLayout {
@@ -1595,6 +1683,7 @@ Item {
                                 }
                             }
                             AppButton {
+                                objectName: "saveProfileButton"
                                 text: qsTr("Save to library")
                                 enabled: root.editorUp && sceneEdit.hasWorking
                                 onClicked: sceneEdit.saveProfile(
@@ -1638,11 +1727,13 @@ Item {
                                     font.pixelSize: Theme.fontSizeSmall
                                 }
                                 AppButton {
+                                    objectName: "profileLoad_" + index
                                     text: qsTr("Load")
                                     enabled: root.editorUp
                                     onClicked: sceneEdit.loadProfile(modelData.name)
                                 }
                                 AppButton {
+                                    objectName: "profileDelete_" + index
                                     text: qsTr("Delete")
                                     enabled: root.editorUp
                                     onClicked: sceneEdit.deleteProfile(modelData.name)
@@ -1752,12 +1843,14 @@ Item {
                 }
 
                 AppButton {
+                    objectName: "reloadApplied"
                     text: qsTr("Reload applied")
                     visible: root.editorUp
                     enabled: root.engineUp
                     onClicked: sceneEdit.reloadFromEngine()
                 }
                 AppButton {
+                    objectName: "discardEdits"
                     text: qsTr("Discard")
                     visible: root.editorUp && sceneEdit.dirty
                     enabled: root.editorUp && !sceneEdit.saving

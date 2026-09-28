@@ -15,7 +15,6 @@
 //     The two are deliberately never the same button.
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Controls
 import OpenRGB2.UI.theme
 import OpenRGB2.UI.components
 
@@ -107,7 +106,7 @@ Item {
                 title: qsTr("Engine connection")
 
                 ColumnLayout {
-                    Layout.fillWidth: true
+                    width: parent.width
                     spacing: Theme.spaceS
 
                     Repeater {
@@ -198,10 +197,10 @@ Item {
                 title: qsTr("UI preferences")
 
                 ColumnLayout {
-                    Layout.fillWidth: true
+                    width: parent.width
                     spacing: Theme.spaceS
 
-                    CheckBox {
+                    AppCheckBox {
                         objectName: "restoreViewCheck"
                         text: qsTr("Reopen on the last-used page")
                         Accessible.name: text
@@ -251,7 +250,7 @@ Item {
                 title: qsTr("Session")
 
                 ColumnLayout {
-                    Layout.fillWidth: true
+                    width: parent.width
                     spacing: Theme.spaceM
 
                     /* Close UI — engine keeps running. */

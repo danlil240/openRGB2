@@ -179,6 +179,7 @@ Item {
                     onClicked: layoutCtl.redo()
                 }
                 AppButton {
+                    objectName: "reloadLayout"
                     text: qsTr("Reload")
                     enabled: root.ctlUp && root.engineUp
                     onClicked: layoutCtl.reload()
@@ -230,16 +231,27 @@ Item {
 
                 Card {
                     title: qsTr("ARRANGEMENT")
+                    objectName: "arrangementCard"
                     width: parent.width - inspector.width
                            - Theme.spaceL
 
+                    /* The instruction line lives BELOW the canvas —
+                       the wrapper's height must cover both, or the
+                       text paints past the card's reserved area and
+                       the next card covers it. */
                     Item {
                         width: parent.width
-                        height: 430
+                        height: 430 + Theme.spaceS
+                                + canvasHint.implicitHeight
 
                         Rectangle {
                             id: canvasRect
-                            anchors.fill: parent
+                            anchors {
+                                left: parent.left
+                                right: parent.right
+                                top: parent.top
+                            }
+                            height: 430
                             radius: Theme.radiusM
                             color: Theme.bg
                             border.width: 1
@@ -276,6 +288,7 @@ Item {
                                 model: root.itemList
                                 delegate: Item {
                                     id: d
+                                    objectName: "canvasObj_" + o.id
                                     property var o: modelData
                                     property bool dragging: false
                                     /* Keyboard parity with drag
@@ -458,6 +471,8 @@ Item {
                             }
                         }
                         Text {
+                            id: canvasHint
+                            objectName: "canvasInstructions"
                             anchors.top: canvasRect.bottom
                             anchors.topMargin: Theme.spaceS
                             width: parent.width
@@ -480,7 +495,7 @@ Item {
                         width: parent.width
                         Column {
                             spacing: Theme.spaceM
-                            width: parent.width - 2 * Theme.spaceL
+                            width: parent.width
                             property var sel: root.ctlUp
                                 ? layoutCtl.selectedItem : ({})
                             visible: sel.id !== undefined
@@ -558,7 +573,7 @@ Item {
                                     !== undefined
                         Column {
                             spacing: Theme.spaceM
-                            width: parent.width - 2 * Theme.spaceL
+                            width: parent.width
                             RowLayout {
                                 width: parent.width
                                 spacing: Theme.spaceS
@@ -575,6 +590,7 @@ Item {
                                 Repeater {
                                     model: [-45, -15, 15, 45]
                                     AppButton {
+                                        objectName: "rotStep_" + index
                                         text: (modelData > 0 ? "+" : "")
                                               + modelData + "°"
                                         enabled: root.editable
@@ -586,6 +602,7 @@ Item {
                                 }
                             }
                             AppButton {
+                                objectName: "rotateReset"
                                 text: qsTr("Reset to 0°")
                                 enabled: root.editable
                                 onClicked: layoutCtl.rotateObject(
@@ -606,7 +623,7 @@ Item {
                                         === "linked")
                         Column {
                             spacing: Theme.spaceM
-                            width: parent.width - 2 * Theme.spaceL
+                            width: parent.width
                             Text {
                                 visible: layoutCtl.selectedItem
                                          .kind === "linked"
@@ -619,6 +636,7 @@ Item {
                                 width: parent.width
                             }
                             AppButton {
+                                objectName: "unlinkMirror"
                                 visible: layoutCtl.selectedItem
                                          .kind === "linked"
                                 text: qsTr("Unlink")
@@ -626,8 +644,9 @@ Item {
                                 onClicked: layoutCtl.unlinkMirror(
                                     layoutCtl.selectedId)
                             }
-                            ComboBox {
+                            AppComboBox {
                                 id: linkPick
+                                objectName: "linkPick"
                                 Accessible.name: qsTr("mirror source")
                                 visible: layoutCtl.selectedItem
                                          .kind === "device"
@@ -638,6 +657,7 @@ Item {
                                 valueRole: "id"
                             }
                             AppButton {
+                                objectName: "linkMirror"
                                 visible: layoutCtl.selectedItem
                                          .kind === "device"
                                 text: qsTr("Link as mirrored copy")
@@ -669,9 +689,10 @@ Item {
                                     === "device"
                         Column {
                             spacing: Theme.spaceM
-                            width: parent.width - 2 * Theme.spaceL
-                            ComboBox {
+                            width: parent.width
+                            AppComboBox {
                                 id: bindPick
+                                objectName: "bindPick"
                                 Accessible.name: qsTr("scene binding")
                                 width: parent.width
                                 model: root.ctlUp
@@ -688,6 +709,7 @@ Item {
                                 width: parent.width
                                 spacing: Theme.spaceS
                                 AppButton {
+                                    objectName: "assignBinding"
                                     text: qsTr("Assign")
                                     enabled: root.editable
                                         && bindPick.currentValue
@@ -698,6 +720,7 @@ Item {
                                         bindPick.currentValue)
                                 }
                                 AppButton {
+                                    objectName: "unbindObject"
                                     text: qsTr("Unbind")
                                     enabled: root.editable
                                     onClicked: layoutCtl.assignBinding(
@@ -711,8 +734,9 @@ Item {
                                 wrapMode: Text.WordWrap
                                 width: parent.width
                             }
-                            ComboBox {
+                            AppComboBox {
                                 id: ctrlPick
+                                objectName: "ctrlPick"
                                 Accessible.name: qsTr("live controller to bind")
                                 width: parent.width
                                 textRole: "label"
@@ -741,6 +765,7 @@ Item {
                                 }
                             }
                             AppButton {
+                                objectName: "bindController"
                                 text: qsTr("Bind selected controller")
                                 enabled: root.editable
                                     && ctrlPick.currentIndex >= 0
@@ -767,7 +792,7 @@ Item {
                                     .emitter_count > 0
                         Column {
                             spacing: Theme.spaceM
-                            width: parent.width - 2 * Theme.spaceL
+                            width: parent.width
                             Text {
                                 text: root.ctlUp
                                     && layoutCtl.zoneBound > 0
@@ -806,6 +831,7 @@ Item {
                                         }
                                         TextField {
                                             id: addrField
+                                            objectName: "ledAddr_" + modelData.index
                                             Accessible.name:
                                                 qsTr("emitter %1 LED address")
                                                     .arg(modelData.index)
@@ -883,7 +909,7 @@ Item {
                 width: parent.width - 2 * col.padding
                 Column {
                     spacing: Theme.spaceM
-                    width: parent.width - 2 * Theme.spaceL
+                    width: parent.width
                     Text {
                         text: qsTr("Blink a controller's LEDs through the engine's normal frame path — bounded, and never applied while an uploaded animation loop owns the group.")
                         color: Theme.textSecondary
@@ -934,8 +960,9 @@ Item {
                             RowLayout {
                                 width: parent.width
                                 spacing: Theme.spaceS
-                                ComboBox {
+                                AppComboBox {
                                     id: zonePick
+                                    objectName: "identifyZone"
                                     Accessible.name:
                                         qsTr("identify zone")
                                     Layout.preferredWidth: 220
@@ -949,6 +976,7 @@ Item {
                                 }
                                 TextField {
                                     id: ledField
+                                    objectName: "identifyLed"
                                     Accessible.name:
                                         qsTr("identify LED index")
                                     Layout.preferredWidth: 120
@@ -967,6 +995,7 @@ Item {
                                 }
                                 TextField {
                                     id: durField
+                                    objectName: "identifyDuration"
                                     Accessible.name:
                                         qsTr("identify duration milliseconds")
                                     Layout.preferredWidth: 90
@@ -985,6 +1014,7 @@ Item {
                                     }
                                 }
                                 AppButton {
+                                    objectName: "identifyStart"
                                     text: qsTr("Identify")
                                     enabled: root.ctlUp
                                         && root.engineUp
@@ -1027,6 +1057,7 @@ Item {
                                        controller's identify doesn't
                                        displace this row's state
                                        (Task 4.8). */
+                                    objectName: "identifyStop_" + index
                                     Accessible.name: qsTr("Stop identifying %1").arg(
                                         snap.name || snap.key.device || "")
                                     text: qsTr("Stop")

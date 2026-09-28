@@ -39,6 +39,8 @@ qt_add_qml_module(openrgb2_ui
         Main.qml
         theme/Theme.qml
         components/AppButton.qml
+        components/AppCheckBox.qml
+        components/AppComboBox.qml
         components/AppSlider.qml
         components/Card.qml
         components/ColorWell.qml

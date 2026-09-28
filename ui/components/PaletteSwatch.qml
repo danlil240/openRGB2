@@ -14,7 +14,9 @@ ItemDelegate {
 
     signal picked(string hex)
 
-    implicitWidth: 30; implicitHeight: 30
+    /* 40px hit target, 30px visible swatch — the earlier 20px
+       dot inside 30px was too small to aim at or tell apart. */
+    implicitWidth: 40; implicitHeight: 40
     focusPolicy: Qt.StrongFocus
     activeFocusOnTab: true
     Accessible.name: qsTr("palette color %1").arg(root.swatch)
@@ -24,7 +26,7 @@ ItemDelegate {
 
     contentItem: Rectangle {
         anchors.centerIn: parent
-        width: 20; height: 20; radius: Theme.radiusS
+        width: 30; height: 30; radius: Theme.radiusS
         color: root.swatch
         border.color: Theme.borderStrong
         border.width: 1

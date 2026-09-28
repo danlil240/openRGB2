@@ -494,6 +494,7 @@ int main(int argc, char** argv)
             "    property color surface:       Theme.surface\n"
             "    property color textPrimary:   Theme.textPrimary\n"
             "    property color textSecondary: Theme.textSecondary\n"
+            "    property color textDisabled:  Theme.textDisabled\n"
             "    property color accent:        Theme.accent\n"
             "    property color accentText:    Theme.accentText\n"
             "    property color ok:            Theme.ok\n"
@@ -521,6 +522,15 @@ int main(int argc, char** argv)
                 { "textSecondary/surface",
                   t->property("textSecondary").value<QColor>(),
                   surface },
+                /* Supporting copy token — "de-emphasized" must
+                   still be readable on both surfaces it lands
+                   on (ui-first-look-2026-09-28, UI-07). */
+                { "textDisabled/surface",
+                  t->property("textDisabled").value<QColor>(),
+                  surface },
+                { "textDisabled/bg",
+                  t->property("textDisabled").value<QColor>(),
+                  bg },
                 { "accent/bg",        accent,  bg      },
                 { "accentText/accent",
                   t->property("accentText").value<QColor>(),

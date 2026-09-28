@@ -59,6 +59,7 @@ Item {
                     title: qsTr("SCENE")
                     Layout.fillWidth: true
                     Column {
+                        width: parent.width
                         spacing: Theme.spaceXS
                         Text {
                             text: root.engineUp
@@ -90,6 +91,7 @@ Item {
                     title: qsTr("PLAYBACK")
                     Layout.fillWidth: true
                     Column {
+                        width: parent.width
                         spacing: Theme.spaceS
                         StatusPill {
                             text: {
@@ -147,6 +149,7 @@ Item {
                     title: qsTr("DEVICES")
                     Layout.fillWidth: true
                     Column {
+                        width: parent.width
                         spacing: Theme.spaceXS
                         Text {
                             text: {
@@ -181,6 +184,7 @@ Item {
                     title: qsTr("WIRELESS PERFORMANCE")
                     Layout.fillWidth: true
                     Column {
+                        width: parent.width
                         spacing: Theme.spaceXS
                         Text {
                             id: perfValue
@@ -227,6 +231,7 @@ Item {
                 width: parent.width - 2 * col.padding
 
                 Column {
+                    width: parent.width
                     spacing: Theme.spaceM
 
                     Repeater {

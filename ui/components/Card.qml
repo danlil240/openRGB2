@@ -38,6 +38,7 @@ Rectangle {
 
         Item {
             id: body
+            objectName: "cardBody"
             width: parent.width
             implicitHeight: childrenRect.height
             implicitWidth: childrenRect.width
