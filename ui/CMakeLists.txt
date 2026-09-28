@@ -11,7 +11,7 @@
 #   OpenRGB2.UI.pages      (Dashboard/Lighting/Layout/Devices)
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS
-    Core Gui Qml Quick QuickControls2)
+    Core Gui Qml Quick QuickControls2 Network)
 
 # Scoped here (not project-wide) so the Qt-free engine/core
 # targets never pick up AUTOMOC.
@@ -75,7 +75,9 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/ProfileLibrary.h
         ${CMAKE_SOURCE_DIR}/src/ui/ProfileLibrary.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/UiSettings.h
-        ${CMAKE_SOURCE_DIR}/src/ui/UiSettings.cpp)
+        ${CMAKE_SOURCE_DIR}/src/ui/UiSettings.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/QaServer.h
+        ${CMAKE_SOURCE_DIR}/src/ui/QaServer.cpp)
 
 set_target_properties(openrgb2_ui PROPERTIES AUTOMOC ON)
 
@@ -96,4 +98,5 @@ target_link_libraries(openrgb2_ui PUBLIC
     Qt6::Qml
     Qt6::Quick
 PRIVATE
+    Qt6::Network
     openrgb2_ipc_wire)

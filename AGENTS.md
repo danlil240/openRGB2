@@ -45,6 +45,20 @@ CM="/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/C
 cd vendor/OpenRGB && cmd //c "scripts\\build-windows.bat 6.8.3 2022 64"
 ```
 
+## QA automation harness
+
+`openrgb2-ui --qa [port]` (or `OPENRGB2_QA=1` + `OPENRGB2_QA_PORT`)
+opens a loopback-only JSON-lines socket (`127.0.0.1:5583` default)
+exposing the live QML tree for scripted QA — see
+`src/ui/QaServer.h` for the op catalogue (`ping`, `state`, `tree`,
+`find`, `click`, `set`, `get`, `geom`, `type`, `key`, `scroll`,
+`shot`, `wait`, `eval`). `tools/qa/qa.py` is the CLI driver:
+`qa.py click navLighting`, `qa.py shot out.png`, `qa.py tree`.
+Selectors: `objectName`, `text:`, `type:`, `path:`, or a JSON
+object. `tools/engine_ctl` covers the engine pipe — the QA socket
+is UI-only. Regression coverage: `ui_qa_harness_test` (CTest
+label `ui`).
+
 ## Rules
 
 - Never modify `C:\Users\daniel\tools\openrgb-unified` — it is the preserved

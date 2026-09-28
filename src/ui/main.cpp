@@ -14,6 +14,7 @@
 #include "DiagnosticsController.h"
 #include "EngineBridge.h"
 #include "LayoutController.h"
+#include "QaServer.h"
 #include "SceneEditController.h"
 #include "UiSettings.h"
 
@@ -22,6 +23,9 @@
 #include <QQmlContext>
 #include <QQuickStyle>
 
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 int main(int argc, char** argv)
@@ -29,11 +33,36 @@ int main(int argc, char** argv)
     /* --pipe <name> overrides the well-known command pipe —
        used by manual verification against a fixture engine. */
     QString pipe;
+    /* --qa[=port] (or OPENRGB2_QA=1, optional OPENRGB2_QA_PORT)
+       starts the loopback QA automation socket. Off by
+       default — the shipped UI never opens a port. */
+    bool qa_enabled =
+        qEnvironmentVariableIsSet("OPENRGB2_QA") &&
+        qEnvironmentVariable("OPENRGB2_QA") != "0";
+    int  qa_port = openrgb2::ui::QaServer::kDefaultPort;
+    if(qEnvironmentVariableIsSet("OPENRGB2_QA_PORT"))
+    {
+        qa_port = qEnvironmentVariable("OPENRGB2_QA_PORT").toInt();
+    }
     for(int i = 1; i < argc; ++i)
     {
         if(std::strcmp(argv[i], "--pipe") == 0 && i + 1 < argc)
         {
             pipe = QString::fromUtf8(argv[++i]);
+        }
+        else if(std::strcmp(argv[i], "--qa") == 0)
+        {
+            qa_enabled = true;
+            if(i + 1 < argc && std::isdigit(
+                   (unsigned char)argv[i + 1][0]))
+            {
+                qa_port = std::atoi(argv[++i]);
+            }
+        }
+        else if(std::strncmp(argv[i], "--qa=", 5) == 0)
+        {
+            qa_enabled = true;
+            qa_port = std::atoi(argv[i] + 5);
         }
     }
 
@@ -81,6 +110,26 @@ int main(int argc, char** argv)
         Qt::QueuedConnection);
     engine.loadFromModule(QStringLiteral("OpenRGB2.UI"),
                           QStringLiteral("Main"));
+
+    /* QA harness is opt-in and needs the loaded root object —
+       it walks the live item tree and synthesizes input. */
+    openrgb2::ui::QaServer qa_server(engine);
+    if(qa_enabled)
+    {
+        QString qa_err;
+        if(qa_server.Start((quint16)qa_port, qa_err))
+        {
+            std::fprintf(stderr,
+                "QA socket: 127.0.0.1:%u\n",
+                (unsigned)qa_server.Port());
+        }
+        else
+        {
+            std::fprintf(stderr,
+                "QA socket failed: %s\n",
+                qa_err.toUtf8().constData());
+        }
+    }
 
     /* Connect AFTER the UI is up: degraded/offline states must
        render honestly even when the engine never answers. */

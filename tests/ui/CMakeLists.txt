@@ -181,3 +181,25 @@ foreach(scale 1.00 1.25 1.50 2.00)
         ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:${QT_BIN_DIR};QT_SCALE_FACTOR=set:${scale}")
 endforeach()
+
+# QA harness (QaServer) — the real shell headless, driven over
+# the loopback QA socket like tools/qa/qa.py drives a live
+# window: selector resolution, synthesized click/type/key,
+# property get/set, wait, eval, honest error replies.
+add_executable(ui_qa_harness_test ui_qa_harness_test.cpp)
+target_link_libraries(ui_qa_harness_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Network)
+target_include_directories(ui_qa_harness_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(ui_qa_harness_test PRIVATE NDEBUG)
+set_target_properties(ui_qa_harness_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(ui_qa_harness_test)
+add_test(NAME ui_qa_harness_test COMMAND ui_qa_harness_test)
+set_tests_properties(ui_qa_harness_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
