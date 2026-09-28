@@ -569,6 +569,38 @@ int main(int argc, char** argv)
     CHECK(std::abs(s.doc["brightness"].get<double>() - 0.25)
           < 0.001);
 
+    /*---- empty draft refuses before send -------------------*/
+    std::printf("-- empty scene refused\n");
+    {
+        /* A staged-but-empty working document (a profile that
+           was never given objects, or a fresh draft) must
+           never reach the wire: the engine accepts a doc with
+           no device objects and applies it — every binding
+           drops, output freezes on the last frame, and the
+           save reports success. save() refuses before send
+           with the same rule setGroupColor already enforces. */
+        nlohmann::json empty = s.doc;
+        empty["objects"]        = nlohmann::json::array();
+        empty["bindings"]       = nlohmann::json::array();
+        empty["object_colors"]  = nlohmann::json::object();
+        empty["emitter_colors"] = nlohmann::json::object();
+        edit.ModelForTesting().LoadWorking(empty);
+        CHECK(edit.dirty());
+        const int saves_before = s.scene_saves;
+        edit.save();
+        /* Give the wire a beat — nothing may arrive. */
+        CHECK(!PumpBoth(s, [&] {
+                  return s.scene_saves > saves_before;
+              }, 400));
+        CHECK(!edit.saving());
+        CHECK(edit.saveErrorSource() == QStringLiteral("input"));
+        CHECK(edit.saveError().contains(
+            QStringLiteral("no device objects")));
+        CHECK(edit.dirty());         /* staged doc kept */
+        edit.discardEdits();
+        CHECK(PumpBoth(s, [&] { return !edit.dirty(); }));
+    }
+
     /*---- params emit only touched supported fields ----------*/
     std::printf("-- playback param filtering\n");
     /* A speed-only change on a FRESH controller must not emit

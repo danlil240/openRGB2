@@ -548,6 +548,19 @@ void SceneEditController::save()
                      QStringLiteral("input"));
         return;
     }
+    if(model_.DeviceGroups().empty())
+    {
+        /* The engine applies whatever SET_SCENE carries — a
+           document with no device objects drops every binding
+           and freezes output on the last frame while the save
+           reports success. Same rule setGroupColor enforces;
+           a deliberate empty apply stays available through
+           `openrgb2-ctl set-scene`. */
+        SetSaveError(QStringLiteral("no device objects in the "
+                                    "scene"),
+                     QStringLiteral("input"));
+        return;
+    }
     const int id = bridge_->setScene(
         JsonToVariant(model_.Working()).toMap());
     if(id == 0)
