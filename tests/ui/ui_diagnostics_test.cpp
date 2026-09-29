@@ -601,6 +601,76 @@ int main(int argc, char** argv)
         CHECK(error_still);
     }
 
+    /*---- journal: pushed events carry detail (BUG-6) -----------*/
+    std::printf("-- event log: event details\n");
+    {
+        diag.clearEventLog();
+        s.srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "scene" }, { "data", SceneBody() } }));
+        s.srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "playback" },
+                { "data", PlaybackBody() } }));
+        s.srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "topology" },
+                { "data", SnapshotsBody() } }));
+        const nlohmann::json reactive_body =
+            nlohmann::json::object({
+                { "available", true },
+                { "inputs", nlohmann::json::array({
+                    nlohmann::json::object({
+                        { "id", "audio" },
+                        { "enabled", true },
+                        { "running", true },
+                        { "status", "listening" } }) }) } });
+        s.srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "reactive" },
+                { "data", reactive_body } }));
+
+        /* Wait until all four landed (queued coalesced signal). */
+        CHECK(PumpBoth(s, [&] {
+            return diag.eventLog().size() >= 4; }));
+
+        /* Every pushed event must journal a NON-EMPTY detail —
+           the pre-fix handler dropped the payload outright. */
+        bool scene_d = false, play_d = false,
+             topo_d = false, react_d = false;
+        for(const QVariant& e : diag.eventLog())
+        {
+            const QVariantMap ev = e.toMap();
+            const QString k =
+                ev.value(QStringLiteral("kind")).toString();
+            const QString d =
+                ev.value(QStringLiteral("detail")).toString();
+            CHECK(!d.isEmpty());
+            if(k == QStringLiteral("scene"))
+            {
+                scene_d = d.contains(QStringLiteral("desk")) &&
+                          d.contains(QStringLiteral("3"));
+            }
+            else if(k == QStringLiteral("playback"))
+            {
+                play_d = d.contains(
+                    QStringLiteral("animation_playback")) &&
+                    d.contains(QStringLiteral("playing"));
+            }
+            else if(k == QStringLiteral("topology"))
+            {
+                topo_d = d.contains(QStringLiteral("2")) &&
+                         d.contains(QStringLiteral("128"));
+            }
+            else if(k == QStringLiteral("reactive"))
+            {
+                react_d = d.contains(QStringLiteral("audio")) &&
+                          d.contains(QStringLiteral("listening"));
+            }
+        }
+        CHECK(scene_d && play_d && topo_d && react_d);
+    }
+
     /*---- export: redacted bundle -------------------------------*/
     std::printf("-- export redaction\n");
     {

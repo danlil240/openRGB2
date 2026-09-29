@@ -270,7 +270,7 @@ private:
     nlohmann::json PowerJson() const;
     nlohmann::json StateJson() const;
     nlohmann::json ReactiveJson() const;
-    nlohmann::json SnapshotsJson() const;
+    nlohmann::json SnapshotsJson(bool include_colors = true) const;
     nlohmann::json DeliveryStatsJson(const nlohmann::json& body) const;
     nlohmann::json ConnectionJson() const;
     nlohmann::json FrameStatusJson() const;

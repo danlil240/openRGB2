@@ -18,6 +18,8 @@ extended (see "Harness notes").
 | BUG-2 | `MsgType::ReactiveCommand` added to `IsRequestType`; wire-level regression test | `2896921` | Live: audio checkbox → `enabled:true, running:true, "audio: listening"` |
 | BUG-3 | `frame_status` filtered out of `event_log_` | `c36d47b` | Live: journal holds real events only |
 | BUG-4 | Refused name reverts field; `nameResyncPending` latch covers Discard/Reload; `saveError` clears | `b4f0137` | Live: refused name → field resyncs → next save applies |
+| BUG-5 | Topology diff signature now excludes per-frame `colors` (`SnapshotsJson(include_colors)`); payload still carries colors on real changes | this pass | `e2e_responsiveness_test` asserts `topology` pushes == 0 across a 10 s / 60 Hz animation window; live `subscribe`: 1 topology (replay only) vs 4 in 5.5 s before; journal flat at 7 entries over 10 s of `aurora` |
+| BUG-6 | `OnEventReceived` renders a compact per-kind detail (scene name+rev, mode/control, input statuses, controller/LED counts, bounded JSON fallback) | this pass | `ui_diagnostics_test` pushes each kind and asserts non-empty/specific detail; live journal shows `audio: listening, screen: off, keys: off` / `7 controllers, 321 LEDs` |
 
 Also landed: `test(engine)` `4a3af46` (e2e fixtures opt out of
 scene restore — leftover snapshots voided clean-start assumptions)
@@ -194,7 +196,7 @@ topology. All four fixes verified end-to-end in the live UI (table
 above). Two **new** confirmed defects below; neither is a regression of
 the earlier fixes.
 
-### BUG-5 — `topology` events churn continuously while effects animate (medium)
+### BUG-5 — `topology` events churn continuously while effects animate (medium) — FIXED
 
 `EngineService::PollEvents` (`src/ipc/EngineService.cpp:2268`) diffs
 `SnapshotsJson()` to decide whether a `topology` event is pending — but
@@ -222,7 +224,15 @@ Consequences:
 (`SnapshotToJson(snap, colors=false)`) — colors already stream in
 `frame_status` at frame rate; nothing needs them in the topology event.
 
-### BUG-6 — Event journal drops every event payload (low)
+**Fix applied** (this pass): `SnapshotsJson` takes
+`include_colors` (default true — `GET_SNAPSHOTS`/`SnapshotEvent`
+unchanged); `PollEvents` diffs `SnapshotsJson(false)` and emits the
+full color-carrying payload only on real structural change.
+Regression: `e2e_responsiveness_test` counts `topology` events
+arriving at a subscribed pipe client during the 300-sample /
+~10 s / 60 Hz measurement window and asserts zero.
+
+### BUG-6 — Event journal drops every event payload (low) — FIXED
 
 `DiagnosticsController::OnEventReceived(const QString& kind,
 const QVariantMap&)` (`src/ui/DiagnosticsController.cpp`) ignores the
@@ -236,6 +246,15 @@ detail while events flowed.
 
 **Suggested fix area**: render a compact per-kind detail (e.g. scene
 name + revision, mode, snapshot count) — the payload is already on hand.
+
+**Fix applied** (this pass): `OnEventReceived` now calls
+`EventDetail(kind, data)` — scene → `name rev N (applied M)`,
+playback → `requested → mode/control` (+ `unavailable_reason` when
+present), connection → `state` (+ `last_error`), topology →
+`N controllers, M LEDs`, reactive → joined input status strings,
+unknown kinds → bounded compact JSON (160 chars). Regression:
+`ui_diagnostics_test` pushes each kind and asserts populated,
+kind-specific detail.
 
 ### Second-pass verified working (in addition to the first-pass list)
 

@@ -14,6 +14,7 @@
 #include <QDir>
 #include <QFile>
 #include <QHash>
+#include <QJsonDocument>
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <QTime>
@@ -172,6 +173,88 @@ QString RedactString(const QString& s)
     out.replace(MacPattern(), QStringLiteral("[redacted]"));
     ScrubPrivatePaths(out);
     return out;
+}
+
+/* Compact per-kind journal detail — the payload is on hand,
+   a blank detail column tells the reader nothing (BUG-6). */
+QString EventDetail(const QString& kind, const QVariantMap& data)
+{
+    if(kind == QLatin1String(ipc::event_kind::kScene))
+    {
+        return QStringLiteral("%1 rev %2 (applied %3)")
+            .arg(data.value(QStringLiteral("name")).toString())
+            .arg(data.value(QStringLiteral("revision")).toLongLong())
+            .arg(data.value(QStringLiteral("applied_revision"))
+                     .toLongLong());
+    }
+    if(kind == QLatin1String(ipc::event_kind::kPlayback))
+    {
+        const QVariantMap st =
+            data.value(QStringLiteral("status")).toMap();
+        QString s = QStringLiteral("%1 → %2/%3")
+            .arg(data.value(QStringLiteral("requested_mode"))
+                     .toString())
+            .arg(st.value(QStringLiteral("mode")).toString())
+            .arg(st.value(QStringLiteral("control")).toString());
+        const QString reason =
+            data.value(QStringLiteral("unavailable_reason"))
+                .toString();
+        if(!reason.isEmpty())
+        {
+            s += QStringLiteral(" — ") + reason;
+        }
+        return s;
+    }
+    if(kind == QLatin1String(ipc::event_kind::kConnection))
+    {
+        QString s = data.value(QStringLiteral("state")).toString();
+        const QString err =
+            data.value(QStringLiteral("last_error")).toString();
+        if(!err.isEmpty())
+        {
+            s += QStringLiteral(" — ") + err;
+        }
+        return s;
+    }
+    if(kind == QLatin1String(ipc::event_kind::kTopology))
+    {
+        const QVariantList snaps =
+            data.value(QStringLiteral("snapshots")).toList();
+        qint64 leds = 0;
+        for(const QVariant& v : snaps)
+        {
+            leds += v.toMap()
+                        .value(QStringLiteral("led_count"))
+                        .toLongLong();
+        }
+        return QStringLiteral("%1 controllers, %2 LEDs")
+            .arg(snaps.size())
+            .arg(leds);
+    }
+    if(kind == QLatin1String(ipc::event_kind::kReactive))
+    {
+        /* Status strings are already self-describing
+           ("audio: listening") — id is in the string. */
+        QStringList parts;
+        for(const QVariant& v :
+            data.value(QStringLiteral("inputs")).toList())
+        {
+            parts << v.toMap()
+                         .value(QStringLiteral("status"))
+                         .toString();
+        }
+        return parts.join(QStringLiteral(", "));
+    }
+    /* Unknown/future kinds: a bounded compact dump beats a
+       blank row. */
+    QString s = QString::fromUtf8(
+        QJsonDocument::fromVariant(data)
+            .toJson(QJsonDocument::Compact));
+    if(s.size() > 160)
+    {
+        s = s.left(157) + QStringLiteral("...");
+    }
+    return s;
 }
 
 } /* anonymous namespace */
@@ -639,7 +722,7 @@ void DiagnosticsController::OnFrameStatus()
 }
 
 void DiagnosticsController::OnEventReceived(const QString& kind,
-                                            const QVariantMap&)
+                                            const QVariantMap& data)
 {
     /* frame_status is per-frame telemetry (up to ~30 Hz), not
        a journal entry: it already lands in the bridge's
@@ -652,7 +735,7 @@ void DiagnosticsController::OnEventReceived(const QString& kind,
     {
         return;
     }
-    AppendEvent(kind, QString());
+    AppendEvent(kind, EventDetail(kind, data));
 }
 
 void DiagnosticsController::AppendEvent(const QString& kind,

@@ -585,14 +585,14 @@ nlohmann::json EngineService::ConnectionJson() const
     return out;
 }
 
-nlohmann::json EngineService::SnapshotsJson() const
+nlohmann::json EngineService::SnapshotsJson(bool include_colors) const
 {
     nlohmann::json snaps = nlohmann::json::array();
     if(deps_.sdk)
     {
         for(const DeviceSnapshot& snap : deps_.sdk->Snapshots())
         {
-            snaps.push_back(SnapshotToJson(snap, /*colors*/ true));
+            snaps.push_back(SnapshotToJson(snap, include_colors));
         }
     }
     return nlohmann::json::object({
@@ -2265,11 +2265,20 @@ void EngineService::PollEvents(TimePoint now)
         pending.push_back(IpcEvent{ event_kind::kConnection, conn });
     }
 
-    const nlohmann::json snaps = SnapshotsJson();
-    if(snaps.dump() != last_topology_sig_)
+    /* Topology is structure, not pixels: the diff signature
+       excludes per-frame `colors` — with them, any animated
+       frame flipped the signature and a full color-carrying
+       snapshot pushed every poll tick (BUG-5). The emitted
+       payload still carries colors so consumers get a fresh
+       frame on real changes; per-frame colors stream via
+       frame_status regardless. */
+    const nlohmann::json sig =
+        SnapshotsJson(/*include_colors*/ false);
+    if(sig.dump() != last_topology_sig_)
     {
-        last_topology_sig_ = snaps.dump();
-        pending.push_back(IpcEvent{ event_kind::kTopology, snaps });
+        last_topology_sig_ = sig.dump();
+        pending.push_back(IpcEvent{ event_kind::kTopology,
+                                    SnapshotsJson() });
     }
 
     const nlohmann::json play = PlaybackJson();

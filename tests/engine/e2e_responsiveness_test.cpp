@@ -203,6 +203,7 @@ struct PipeClient
     std::unique_ptr<ipc::MessageReader> reader;
     uint32_t                            req_id = 0;
     uint64_t                            events_seen = 0;
+    uint64_t                            topo_seen   = 0;
 
     bool Connect(const std::string& pipe)
     {
@@ -256,6 +257,11 @@ struct PipeClient
                m.request_id == 0)
             {
                 ++events_seen;
+                /* Per-kind count: topology is a structural
+                   event — it must NOT fire per poll tick while
+                   only frame colors animate (BUG-5). */
+                topo_seen += m.Body().value("kind", std::string())
+                             == ipc::event_kind::kTopology;
                 continue;
             }
             if(m.request_id != want_id)
@@ -510,6 +516,7 @@ int main(int argc, char** argv)
     const uint64_t frames0  = host.FramesProduced();
     const size_t   upd0     = server.CountEvents(sdk::kPktUpdateLEDs);
     const uint64_t events0  = client.events_seen;
+    const uint64_t topo0    = client.topo_seen;
     const auto win0 = std::chrono::steady_clock::now();
 
     int failed_at = -1;
@@ -539,16 +546,19 @@ int main(int argc, char** argv)
     const size_t   upd_d    =
         server.CountEvents(sdk::kPktUpdateLEDs) - upd0;
     const uint64_t events_d = client.events_seen - events0;
+    const uint64_t topo_d   = client.topo_seen - topo0;
     const double frames_hz = frames_d / window_s;
     const double writes_s  = (double)upd_d / window_s;
 
     /*---- report -----------------------------------------*/
     std::printf("\n== UI responsiveness under full output ==\n");
     std::printf("window %.2f s | scene frames %llu (%.1f Hz) "
-                "| UPDATELEDS %zu (%.1f/s) | events skipped %llu\n",
+                "| UPDATELEDS %zu (%.1f/s) | events skipped %llu "
+                "(topology %llu)\n",
                 window_s, (unsigned long long)frames_d, frames_hz,
                 upd_d, writes_s,
-                (unsigned long long)events_d);
+                (unsigned long long)events_d,
+                (unsigned long long)topo_d);
     std::printf("samples %d over %zu verbs — client-side "
                 "request->reply wall time over real named pipes\n",
                 kSamples, kVerbs);
@@ -563,6 +573,17 @@ int main(int argc, char** argv)
     std::printf("criterion: p95 < 100 ms -> overall p95 %.3f ms "
                 "=> %s\n", all.p95,
                 all.p95 < 100.0 ? "PASS" : "FAIL");
+
+    /* BUG-5 regression: topology is a structural event — while
+       only per-frame colors animate (60 Hz scene running the
+       whole window), the diffed signature must stay stable and
+       ZERO topology pushes reach the subscriber. The buggy
+       signature included `colors`, so every owner poll (~500 ms)
+       pushed one — a hard count, not a rate estimate. */
+    CHECKV(topo_d == 0,
+           "topology events fired during pure animation: %llu "
+           "(colors leaked into the topology diff signature)",
+           (unsigned long long)topo_d);
 
     if(!out_json.empty())
     {
