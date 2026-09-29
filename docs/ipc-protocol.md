@@ -306,7 +306,7 @@ preset cards.
 
 **LAYOUT_COMMAND** — the Layout view's verb space (plan section 5).
 Every request carries `{verb:"<name>", ...args}`; unknown verbs →
-`bad_request`. Six verbs exist (Task 4.4):
+`bad_request`. Seven verbs exist (Task 4.4 + `add_object`):
 
 | verb | body | reply (OK) |
 | --- | --- | --- |
@@ -316,6 +316,7 @@ Every request carries `{verb:"<name>", ...args}`; unknown verbs →
 | `set_mirror` | `{object_id, mirror_of:"id"|""}` | `{object_id, mirror_of, revision}` |
 | `calibrate_led` | `{object_id, emitter_index:int, address:int}` | `{object_id, emitter_index, address, revision}` |
 | `set_binding` | `{object_id, binding:"id"|""[, controller:<DeviceKey>]}` | `{object_id, binding, revision}` |
+| `add_object` | `{controllers:[<DeviceKey>,...][, position:{x,y,z}]}` | `{added:[{object_id,binding,zone,zone_leds}], skipped?, revision}` |
 
 `identify` is a **transient** operation — it never touches the scene
 document. The engine runs a bounded blink overlay in the frame path
@@ -365,6 +366,26 @@ loaded scene → `unavailable`. Fields:
   identity (name/vendor/serial/location/type/zone/count) from the
   live snapshot — absent topology → `unavailable`; clients cannot
   fabricate controller identities.
+- `add_object` is how a scene is built FROM live hardware: each
+  entry in `controllers` is a `<DeviceKey>` whose `zone` names the
+  zone to place. Every key resolves against the current topology
+  snapshot (same lookup as `set_binding` — keys absent from
+  topology can't be bound; a disconnected-but-enumerated device
+  CAN, matching the offline-binding rule). Resolved keys get a
+  `DeviceBinding`
+  (an identical existing binding is reused rather than
+  duplicated) and a `device` object with `verified:true` and a
+  `zone_leds` emitter strip in a default arrangement — 1 LED →
+  point, 2–12 → row, more → ring — at `position` when given,
+  else cascading right of the last object so repeated adds
+  don't stack on the origin. Per-key failures land in the
+  reply's `skipped` list `{controller, error}` (present even
+  when empty) while the good ones still apply. If EVERY key
+  fails the
+  request is an ERROR (`unavailable`) carrying the `skipped`
+  list. An empty/missing `controllers` array or a malformed key →
+  `bad_request`. The batch applies as ONE SceneDocument edit — a
+  single undo step and a single `scene` event.
 
 `set_position` was added in Task 4.4 alongside the reserved five —
 the Layout view's arrangement editing needed an explicit move op.

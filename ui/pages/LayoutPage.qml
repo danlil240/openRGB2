@@ -184,6 +184,44 @@ Item {
                     enabled: root.ctlUp && root.engineUp
                     onClicked: layoutCtl.reload()
                 }
+                /* New scene applies an EMPTY document — a
+                   staging state the engine accepts but never
+                   snapshots (an object-less apply can't
+                   clobber the last-scene file). Replacing a
+                   populated scene needs a second click. */
+                AppButton {
+                    id: newSceneBtn
+                    objectName: "newSceneButton"
+                    property bool armed: false
+                    text: armed
+                          ? qsTr("Replace current scene — click again")
+                          : qsTr("New scene")
+                    enabled: root.ctlUp && root.engineUp
+                             && !layoutCtl.busy
+                    onClicked: {
+                        if(root.itemList.length === 0 || armed) {
+                            armed = false;
+                            newSceneTimer.stop();
+                            layoutCtl.newScene();
+                        } else {
+                            armed = true;
+                            newSceneTimer.restart();
+                        }
+                    }
+                    Timer {
+                        id: newSceneTimer
+                        interval: 4000
+                        onTriggered: newSceneBtn.armed = false
+                    }
+                }
+                AppButton {
+                    objectName: "addAllDevicesButton"
+                    text: qsTr("Add all devices")
+                    enabled: root.ctlUp && root.engineUp
+                             && layoutCtl.hasScene
+                             && !layoutCtl.busy
+                    onClicked: layoutCtl.addAllDevices()
+                }
                 Text {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignRight
@@ -459,15 +497,36 @@ Item {
                                 }
                             }
 
-                            EmptyState {
+                            Column {
                                 anchors.centerIn: parent
                                 visible: root.itemList.length === 0
-                                title: root.engineUp
-                                       ? qsTr("No scene objects")
-                                       : qsTr("Engine offline")
-                                detail: root.engineUp
-                                        ? qsTr("Apply a scene on the Lighting page — its objects arrange here.")
-                                        : qsTr("The arrangement renders once the engine reports a scene.")
+                                spacing: Theme.spaceM
+                                EmptyState {
+                                    anchors.horizontalCenter:
+                                        parent.horizontalCenter
+                                    title: root.engineUp
+                                           ? (root.ctlUp
+                                              && layoutCtl.hasScene
+                                              ? qsTr("No scene objects")
+                                              : qsTr("No scene"))
+                                           : qsTr("Engine offline")
+                                    detail: root.engineUp
+                                            ? (root.ctlUp
+                                               && layoutCtl.hasScene
+                                               ? qsTr("Add detected devices from the ADD DEVICES card — they become scene objects here.")
+                                               : qsTr("Create a scene to start arranging detected devices."))
+                                            : qsTr("The arrangement renders once the engine reports a scene.")
+                                }
+                                AppButton {
+                                    objectName: "emptyNewScene"
+                                    anchors.horizontalCenter:
+                                        parent.horizontalCenter
+                                    text: qsTr("New scene")
+                                    visible: root.ctlUp
+                                             && root.engineUp
+                                    enabled: !layoutCtl.busy
+                                    onClicked: layoutCtl.newScene()
+                                }
                             }
                         }
                         Text {
@@ -562,6 +621,131 @@ Item {
                                 parent.horizontalCenter
                             title: qsTr("Nothing selected")
                             detail: qsTr("Click an object on the canvas.")
+                        }
+                    }
+
+                    /*---- ADD DEVICES: live topology -> scene
+                           objects (LAYOUT_COMMAND add_object).
+                           Rows come from the engine's snapshot
+                           feed — never fabricated. Adding needs
+                           a scene: the engine answers
+                           Unavailable honestly if none is
+                           loaded, so the buttons gate on
+                           hasScene and the hint explains. ----*/
+                    Card {
+                        title: qsTr("ADD DEVICES")
+                        objectName: "addDevicesCard"
+                        width: parent.width
+                        visible: root.engineUp
+                        Column {
+                            spacing: Theme.spaceS
+                            width: parent.width
+                            Text {
+                                visible: root.ctlUp
+                                         && !layoutCtl.hasScene
+                                text: qsTr("Create a scene first — detected devices add as scene objects.")
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                                wrapMode: Text.WordWrap
+                                width: parent.width
+                            }
+                            AppButton {
+                                objectName: "addAllCard"
+                                text: qsTr("Add all devices")
+                                enabled: root.ctlUp
+                                         && layoutCtl.hasScene
+                                         && !layoutCtl.busy
+                                onClicked: layoutCtl.addAllDevices()
+                            }
+                            Repeater {
+                                model: root.engineUp
+                                       ? bridge.snapshots : []
+                                delegate: Column {
+                                    id: devGroup
+                                    required property var modelData
+                                    readonly property var snap:
+                                        modelData
+                                    width: parent.width
+                                    spacing: Theme.spaceS
+                                    Repeater {
+                                        model: devGroup.snap.zones
+                                               || []
+                                        delegate: RowLayout {
+                                            id: zoneRow
+                                            required property var modelData
+                                            required property int index
+                                            width: parent.width
+                                            spacing: Theme.spaceS
+                                            Column {
+                                                Layout.fillWidth: true
+                                                spacing: 0
+                                                Text {
+                                                    width: parent.width
+                                                    text: (devGroup.snap.name
+                                                           || devGroup.snap.key.device
+                                                           || qsTr("device"))
+                                                          + " · "
+                                                          + zoneRow.modelData.name
+                                                    color: Theme.textPrimary
+                                                    font.pixelSize:
+                                                        Theme.fontSizeBody
+                                                    elide: Text.ElideRight
+                                                }
+                                                Text {
+                                                    width: parent.width
+                                                    text: qsTr("%1 LEDs · %2")
+                                                        .arg(zoneRow.modelData
+                                                             .led_count || 0)
+                                                        .arg(devGroup.snap
+                                                             .connection
+                                                             || qsTr("unknown"))
+                                                    color: Theme.textDisabled
+                                                    font.pixelSize:
+                                                        Theme.fontSizeSmall
+                                                    elide: Text.ElideRight
+                                                }
+                                            }
+                                            AppButton {
+                                                objectName:
+                                                    "addZone_" + zoneRow.index
+                                                text: qsTr("Add")
+                                                enabled: root.ctlUp
+                                                    && layoutCtl.hasScene
+                                                    && !layoutCtl.busy
+                                                onClicked: {
+                                                    /* fresh key
+                                                       object — never
+                                                       mutate the
+                                                       snapshot map */
+                                                    var src =
+                                                        devGroup.snap.key
+                                                        || ({});
+                                                    layoutCtl.addObject({
+                                                        "device":
+                                                            src.device || "",
+                                                        "serial":
+                                                            src.serial || "",
+                                                        "location":
+                                                            src.location || "",
+                                                        "zone":
+                                                            zoneRow.modelData
+                                                                .name || ""
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Text {
+                                visible: root.engineUp
+                                         && bridge.snapshots.length === 0
+                                text: qsTr("No devices detected — connect hardware or check the backend.")
+                                color: Theme.textDisabled
+                                font.pixelSize: Theme.fontSizeSmall
+                                wrapMode: Text.WordWrap
+                                width: parent.width
+                            }
                         }
                     }
 

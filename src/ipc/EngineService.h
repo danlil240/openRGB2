@@ -251,6 +251,10 @@ private:
        and scene event as SET_SCENE). */
     IpcReply       HandleLayoutCommand(const std::string& verb,
                                        const nlohmann::json& body);
+    /* add_object: creates device objects + bindings from LIVE
+       topology keys ({controllers:[<DeviceKey>...],
+       position?}) — the scene-authoring bootstrap path. */
+    IpcReply       HandleAddObjects(const nlohmann::json& body);
     /* Task 4.6 REACTIVE_COMMAND surface (docs/ipc-protocol.md):
        set_enabled / set_params drive the ReactiveInputs
        manager; every reply carries the full reactive body so

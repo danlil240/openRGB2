@@ -251,6 +251,7 @@ bool IsKnownLayoutVerb(const std::string& verb)
         "set_mirror",        /* link/mirror objects (linked fans)   */
         "calibrate_led",     /* LED address calibration             */
         "set_binding",       /* re-bind a scene binding             */
+        "add_object",        /* create device objects from topology */
     };
     for(const char* v : kVerbs)
     {
@@ -1372,6 +1373,10 @@ IpcReply EngineService::HandleLayoutCommand(
     {
         return HandleIdentify(body);
     }
+    if(verb == "add_object")
+    {
+        return HandleAddObjects(body);
+    }
     return HandleLayoutMutate(verb, body);
 }
 
@@ -1862,6 +1867,272 @@ IpcReply EngineService::HandleLayoutMutate(
     }
     detail["revision"] = SceneRevision();
     return IpcReply::Success(MsgType::Ok, std::move(detail));
+}
+
+/*---------------------------------------------------------*\
+||| add_object — scene authoring from live topology        |||
+|||                                                          |||
+|||   {controllers:[<DeviceKey>...], position?:{x,y,z}}      |||
+|||                                                          |||
+|||   Each DeviceKey resolves against LayoutSnapshots() —    |||
+|||   the engine writes the binding identity from the        |||
+|||   enumerated snapshot (name/vendor/type + key            |||
+|||   serial/location + resolved zone), exactly like         |||
+|||   set_binding's create path; a client can never          |||
+|||   fabricate a controller. An identical existing          |||
+|||   binding (same snapshot identity + zone) is reused —    |||
+|||   adding the same zone twice yields two objects on ONE   |||
+|||   binding, never a duplicate binding row.                |||
+|||                                                          |||
+|||   Emitters default by zone LED count: 1 -> a point,      |||
+|||   2..12 -> a row along x, >12 -> a ring in the x/z       |||
+|||   plane; addresses run 0..n-1 inside the zone. New       |||
+|||   objects are VERIFIED: the binding identity came from   |||
+|||   live topology, and DeviceMapper only writes verified   |||
+|||   objects — an unverified add would be a device that     |||
+|||   never lights, with no verb to flip it.                 |||
+|||                                                          |||
+|||   Batch semantics: per-entry failures report in          |||
+|||   `skipped` ([{controller, error}]) while successes      |||
+|||   apply as ONE document mutation — one revision, one     |||
+|||   scene event, one undo step on the client. Every entry  |||
+|||   failing is an error reply, scene untouched.            |||
+\*---------------------------------------------------------*/
+IpcReply EngineService::HandleAddObjects(const nlohmann::json& body)
+{
+    if(!body.is_object() ||
+       !body.value("controllers", nlohmann::json()).is_array() ||
+       body["controllers"].empty())
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "add_object requires "
+            "{controllers:[<DeviceKey>...]}");
+    }
+
+    std::shared_ptr<const studio::SceneDocument> cur = Scene();
+    if(!cur)
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "no scene is loaded — apply a scene before "
+            "layout edits");
+    }
+    auto doc = std::make_shared<studio::SceneDocument>(*cur);
+
+    /* Optional shared placement hint; without it each new
+       object cascades right of the last so repeated adds
+       don't stack on the origin. */
+    bool         have_pos = false;
+    studio::Vec3 pos;
+    if(const auto pit = body.find("position");
+       pit != body.end())
+    {
+        if(!Vec3FromJson(*pit, pos))
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "add_object position must be {x,y,z} finite "
+                "numbers");
+        }
+        have_pos = true;
+    }
+
+    const std::vector<DeviceSnapshot> snaps =
+        LayoutSnapshots();
+
+    /* Smallest "p<N>" id not already taken — deterministic,
+       bounded by the document size. */
+    const auto next_id = [](const char* prefix, auto&& taken)
+    {
+        for(unsigned int i = 1;; ++i)
+        {
+            const std::string cand =
+                prefix + std::to_string(i);
+            if(!taken(cand))
+            {
+                return cand;
+            }
+        }
+    };
+    const auto object_id_taken = [&doc](const std::string& id)
+    {
+        return studio::FindObject(*doc, id) != nullptr;
+    };
+    const auto binding_id_taken = [&doc](const std::string& id)
+    {
+        for(const studio::DeviceBinding& b : doc->bindings)
+        {
+            if(b.id == id)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    nlohmann::json added   = nlohmann::json::array();
+    nlohmann::json skipped = nlohmann::json::array();
+    const auto skip = [&skipped](const nlohmann::json& cj,
+                                 const std::string& e)
+    {
+        skipped.push_back(nlohmann::json::object({
+            { "controller", cj.is_object()
+                                ? cj : nlohmann::json() },
+            { "error",      e },
+        }));
+    };
+
+    for(const nlohmann::json& cj : body["controllers"])
+    {
+        if(!KeyFieldsOk(cj))
+        {
+            skip(cj, "controller entries are DeviceKey objects "
+                     "with string fields");
+            continue;
+        }
+        const DeviceKey ck = KeyFromJson(cj);
+        const DeviceSnapshot* snap = FindSnapshot(snaps, ck);
+        if(snap == nullptr)
+        {
+            skip(cj, "controller '" + ck.device +
+                     "' is not in the current topology");
+            continue;
+        }
+        uint32_t    zstart = 0, zleds = snap->LedCount();
+        std::string zone = ck.zone;
+        if(!zone.empty() &&
+           !ZoneOffset(*snap, zone, zstart, zleds))
+        {
+            skip(cj, "controller '" + snap->name +
+                     "' has no zone '" + zone + "'");
+            continue;
+        }
+        if(zone.empty() && !snap->zones.empty())
+        {
+            zone  = snap->zones[0].name;
+            zleds = snap->zones[0].led_count;
+        }
+        if(zleds == 0)
+        {
+            skip(cj, "zone '" + zone + "' on '" + snap->name +
+                     "' has no LEDs");
+            continue;
+        }
+
+        /* Binding reuse: an identical snapshot-derived binding
+           (same controller identity + zone) is reused —
+           repeated adds never duplicate the row. */
+        std::string bid;
+        for(const studio::DeviceBinding& b : doc->bindings)
+        {
+            if(b.controller_name == snap->name &&
+               b.serial          == ck.serial &&
+               b.location        == ck.location &&
+               b.zone_name       == zone)
+            {
+                bid = b.id;
+                break;
+            }
+        }
+        if(bid.empty())
+        {
+            bid = next_id("b", binding_id_taken);
+            studio::DeviceBinding b;
+            b.id              = bid;
+            b.controller_name = snap->name;
+            b.vendor          = snap->vendor;
+            b.serial          = ck.serial;
+            b.location        = ck.location;
+            b.device_type     = snap->device_type;
+            b.zone_name       = zone;
+            b.zone_leds       = zleds;
+            doc->bindings.push_back(std::move(b));
+        }
+
+        studio::SceneObject o;
+        o.id      = next_id("o", object_id_taken);
+        o.label   = snap->name +
+                    (zone.empty() ? std::string()
+                                  : " / " + zone);
+        o.kind     = studio::ObjectKind::Device;
+        o.binding  = bid;
+        o.verified = true;
+        if(have_pos)
+        {
+            o.transform.position = pos;
+        }
+        else
+        {
+            o.transform.position.x =
+                0.08f * (float)doc->objects.size();
+        }
+        for(uint32_t i = 0; i < zleds; ++i)
+        {
+            studio::Emitter e;
+            e.address = (int)i;
+            e.group   = o.id;
+            if(zleds == 1)
+            {
+                /* a single point at the object origin */
+            }
+            else if(zleds <= 12)
+            {
+                /* a row across the body, centred on origin */
+                e.local_pos.x =
+                    ((float)i - (float)(zleds - 1) * 0.5f) *
+                    0.008f;
+            }
+            else
+            {
+                /* a ring in the footprint plane (~8 mm pitch) */
+                const float r =
+                    std::max(0.03f,
+                             (float)zleds * 0.008f /
+                                 (2.0f * 3.14159265f));
+                const float a =
+                    2.0f * 3.14159265f * (float)i /
+                    (float)zleds;
+                e.local_pos.x = r * std::cos(a);
+                e.local_pos.z = r * std::sin(a);
+            }
+            o.emitters.push_back(e);
+        }
+
+        added.push_back(nlohmann::json::object({
+            { "object_id", o.id   },
+            { "binding",   bid    },
+            { "zone",      zone   },
+            { "zone_leds", zleds  },
+        }));
+        doc->objects.push_back(std::move(o));
+    }
+
+    if(added.empty())
+    {
+        /* Nothing landed — the per-entry reasons ride in
+           `skipped`; the scene stays untouched. */
+        std::string msg = "no requested controller could be "
+                          "added";
+        if(!skipped.empty() &&
+           !skipped[0].value("error", std::string()).empty())
+        {
+            msg = skipped[0]["error"].get<std::string>();
+        }
+        IpcReply r = IpcReply::Fail(ErrCode::Unavailable, msg);
+        r.body = nlohmann::json::object(
+            { { "skipped", std::move(skipped) } });
+        return r;
+    }
+
+    std::string err;
+    if(!ApplySceneDocument(doc, err))
+    {
+        return IpcReply::Fail(ErrCode::BadRequest, err);
+    }
+    return IpcReply::Success(MsgType::Ok,
+        nlohmann::json::object({
+            { "added",    std::move(added)   },
+            { "skipped",  std::move(skipped) },
+            { "revision", SceneRevision()    },
+        }));
 }
 
 /*---------------------------------------------------------*\

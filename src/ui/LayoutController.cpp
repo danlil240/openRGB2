@@ -8,6 +8,7 @@
 
 #include "EngineBridge.h"
 #include "JsonVariant.h"
+#include "SceneEditModel.h"
 
 #include <QDateTime>
 
@@ -434,6 +435,117 @@ bool LayoutController::calibrateEmitter(const QString& objectId,
                                  err))
     {
         SetLastError(QString::fromStdString(err),
+                     QStringLiteral("input"));
+        return false;
+    }
+    return Issue(op);
+}
+
+/*---- scene authoring ------------------------------------------*/
+
+bool LayoutController::newScene()
+{
+    if(pending_.id != 0)
+    {
+        SetLastError(QStringLiteral(
+            "an edit is still applying — wait for it"),
+                     QStringLiteral("input"));
+        return false;
+    }
+    /* SET_SCENE of a fresh empty document — the engine applies
+       it (clearing the arrangement for authoring) but, carrying
+       no objects, it never overwrites the last-scene snapshot.
+       Undo restores the replaced document whole. */
+    model_.PushUndo("new scene");
+    const int req = bridge_->setScene(
+        JsonToVariant(SceneEditModel::NewDocument()).toMap());
+    if(req <= 0)
+    {
+        model_.DropUndo();
+        SetLastError(QStringLiteral(
+            "not sent — no live engine connection"),
+                     QStringLiteral("connection"));
+        return false;
+    }
+    pending_ = Pending{ req, QStringLiteral("apply"),
+                        QStringLiteral("new scene"),
+                        nlohmann::json(nullptr) };
+    SetLastError(QString());
+    emit busyChanged();
+    emit historyChanged();
+    return true;
+}
+
+bool LayoutController::addObject(const QVariantMap& controllerKey)
+{
+    return addObjects(QVariantList{ controllerKey });
+}
+
+bool LayoutController::addObjects(const QVariantList& controllerKeys)
+{
+    nlohmann::json controllers = nlohmann::json::array();
+    for(const QVariant& v : controllerKeys)
+    {
+        controllers.push_back(VariantToJson(v));
+    }
+    LayoutOp    op;
+    std::string err;
+    if(!model_.BuildAddObjects(controllers, op, err))
+    {
+        SetLastError(QString::fromStdString(err),
+                     QStringLiteral("input"));
+        return false;
+    }
+    return Issue(op);
+}
+
+bool LayoutController::addAllDevices()
+{
+    /* Expand every live zone into a DeviceKey request — the
+       engine resolves each against its own topology and
+       reports per-entry failures in `skipped`, so a stale or
+       disconnected entry is an honest skip, never a phantom
+       device. */
+    nlohmann::json controllers = nlohmann::json::array();
+    for(const nlohmann::json& snap : model_.Snapshots())
+    {
+        const nlohmann::json key =
+            snap.value("key", nlohmann::json::object());
+        if(!key.is_object())
+        {
+            continue;
+        }
+        const auto zit = snap.find("zones");
+        if(zit == snap.end() || !zit->is_array() || zit->empty())
+        {
+            /* a zone-less controller adds as its whole self —
+               the engine resolves the default zone */
+            controllers.push_back(key);
+            continue;
+        }
+        for(const nlohmann::json& z : *zit)
+        {
+            if(!z.is_object())
+            {
+                continue;
+            }
+            const std::string zn =
+                z.value("name", std::string());
+            nlohmann::json ck = key;
+            ck["zone"] = zn;
+            controllers.push_back(std::move(ck));
+        }
+    }
+    LayoutOp    op;
+    std::string err;
+    if(!model_.BuildAddObjects(controllers, op, err))
+    {
+        SetLastError(controllers.empty()
+                         ? QStringLiteral(
+                               "no detected devices to add — "
+                               "the engine reports no live "
+                               "topology")
+                         : QString::fromStdString(err),
                      QStringLiteral("input"));
         return false;
     }

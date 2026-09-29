@@ -153,6 +153,24 @@ public:
                                       int emitterIndex,
                                       int address);
 
+    /*---- scene authoring -------------------------------------
+       newScene applies a fresh EMPTY document through
+       SET_SCENE — a deliberate staging state the engine
+       applies but never snapshots (an object-less apply
+       can't clobber the last good scene). addObject(s) turns
+       live topology keys into device objects through the
+       add_object verb — one apply, one undo step. Both are
+       undoable like any edit. */
+    Q_INVOKABLE bool newScene();
+    /* controllerKey: a snapshot's `key` map with `zone` set
+       to the zone being added. */
+    Q_INVOKABLE bool addObject(const QVariantMap& controllerKey);
+    Q_INVOKABLE bool addObjects(const QVariantList& controllerKeys);
+    /* Every live zone on every enumerated controller —
+       expansion is local (model snapshots), resolution is
+       the engine's. */
+    Q_INVOKABLE bool addAllDevices();
+
     /*---- undo/redo -----------------------------------------*/
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();

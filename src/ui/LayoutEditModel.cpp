@@ -696,6 +696,53 @@ bool LayoutEditModel::BuildCalibrateLed(const std::string& id,
     return true;
 }
 
+bool LayoutEditModel::BuildAddObjects(
+    const nlohmann::json& controllers,
+    LayoutOp& out, std::string& err) const
+{
+    if(!controllers.is_array() || controllers.empty())
+    {
+        err = "add_object needs at least one controller key";
+        return false;
+    }
+    for(const nlohmann::json& cj : controllers)
+    {
+        /* The engine resolves identity/LED counts against live
+           topology — the UI boundary only refuses shapes that
+           can't be a DeviceKey. */
+        if(!cj.is_object() || JStr(cj, "device").empty())
+        {
+            err = "each controller must be a DeviceKey object "
+                  "with a non-empty device name";
+            return false;
+        }
+        bool fields_ok = true;
+        for(const char* f : { "serial", "location", "zone" })
+        {
+            const auto it = cj.find(f);
+            if(it != cj.end() && !it->is_string())
+            {
+                err = "controller key '" + std::string(f) +
+                      "' must be a string";
+                fields_ok = false;
+                break;
+            }
+        }
+        if(!fields_ok)
+        {
+            return false;
+        }
+    }
+    out.label = "add " + std::to_string(controllers.size()) +
+                (controllers.size() == 1 ? " device"
+                                         : " devices");
+    out.body  = nlohmann::json::object({
+        { "verb",        "add_object" },
+        { "controllers", controllers  },
+    });
+    return true;
+}
+
 /*---------------------------------------------------------*\
 ||| History                                                  ||
 \*---------------------------------------------------------*/

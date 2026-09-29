@@ -158,6 +158,18 @@ public:
     bool BuildCalibrateLed(const std::string& id,
                            int emitter_index, int address,
                            LayoutOp& out, std::string& err) const;
+    /* add_object: create device objects from live topology.
+       `controllers` is a json array of DeviceKey objects
+       ({device,serial,location,zone}); identity and LED
+       counts resolve engine-side — this boundary only
+       refuses shapes that can't be keys (never fabricates
+       a controller). */
+    bool BuildAddObjects(const nlohmann::json& controllers,
+                         LayoutOp& out, std::string& err) const;
+    /* The topology snapshots SetSnapshots received — the
+       "add all devices" expansion source (raw engine rows). */
+    const std::vector<nlohmann::json>& Snapshots() const
+    { return snapshots_; }
 
     /*---- undo/redo (whole-document snapshot reversion) ------
        PushUndo snapshots Applied() at issue time under

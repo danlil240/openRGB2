@@ -1266,6 +1266,357 @@ int main()
         CHECK(ctl2.CurrentParams().color.g == 0xFF);
     }
 
+    /*---- add_object: scene objects authored from LIVE
+           topology -------------------------------------------
+           The scene-creation verb: a DeviceKey array resolves
+           against the snapshot seam (the same one identify and
+           set_binding use) into a DeviceBinding + device object
+           with a default emitter layout — one apply, one
+           revision, one scene event. Clients never fabricate
+           controller identity; the engine derives it. */
+    {
+        Engine           engine6;
+        DeliveryPipeline pipe6;
+        DeviceMapper     mapper6;
+
+        DeviceSnapshot add_snap;
+        add_snap.key = DeviceKey{ "Lian Li: SL Wireless",
+                                  "AABBCCDDEEFF",
+                                  "Wireless: AA:BB:CC:DD:EE:FF",
+                                  "" };
+        add_snap.name        = "Lian Li UNI FAN SL Wireless";
+        add_snap.vendor      = "Lian Li";
+        add_snap.device_type = 2;
+        add_snap.zones       = { ZoneSnapshot{ "Fan 1", 40 },
+                                 ZoneSnapshot{ "Fan 2", 40 },
+                                 ZoneSnapshot{ "Fan 3", 40 } };
+        add_snap.connection  = ConnectionState::Connected;
+        /* Two small zones pin the emitter-layout rules:
+           12 LEDs -> a row, 1 LED -> a single point. */
+        DeviceSnapshot dimm;
+        dimm.key  = DeviceKey{ "Corsair: Vengeance RGB",
+                               "DDR5-1", "smbus:0-DDR5-1", "" };
+        dimm.name        = "Corsair Vengeance RGB DDR5";
+        dimm.vendor      = "Corsair";
+        dimm.device_type = 3;
+        dimm.zones       = { ZoneSnapshot{ "DIMM", 12 },
+                             ZoneSnapshot{ "Logo", 1 } };
+        dimm.connection  = ConnectionState::Connected;
+
+        EngineService::Deps d6;
+        d6.pipeline  = &pipe6;
+        d6.mapper    = &mapper6;
+        d6.snapshots = [&add_snap, &dimm]
+        {
+            return std::vector<DeviceSnapshot>{ add_snap, dimm };
+        };
+        /* persist_scene — the last-scene snapshot hook: fires
+           once per successful apply that carries objects. */
+        int         persist_calls = 0;
+        std::string persisted_name;
+        d6.persist_scene =
+            [&](const studio::SceneDocument& dd)
+            {
+                ++persist_calls;
+                persisted_name = dd.name;
+            };
+        EngineService svc6(engine6, d6);
+
+        const nlohmann::json fan3 = nlohmann::json::object({
+            { "device",   "Lian Li: SL Wireless" },
+            { "serial",   "AABBCCDDEEFF" },
+            { "location", "Wireless: AA:BB:CC:DD:EE:FF" },
+            { "zone",     "Fan 3" } });
+
+        /* No scene loaded -> Unavailable, like its
+           object-mutation siblings. */
+        IpcReply r = svc6.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb",        "add_object" },
+                { "controllers", nlohmann::json::array({ fan3 }) },
+            }));
+        CHECK(r.code == ErrCode::Unavailable);
+
+        /* Malformed payloads refuse BEFORE any resolution. */
+        r = svc6.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({{ "verb", "add_object" }}));
+        CHECK(r.code == ErrCode::BadRequest);
+        r = svc6.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb",        "add_object" },
+                { "controllers", "Fan 3" },
+            }));
+        CHECK(r.code == ErrCode::BadRequest);
+        r = svc6.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb",        "add_object" },
+                { "controllers", nlohmann::json::array() },
+            }));
+        CHECK(r.code == ErrCode::BadRequest);
+
+        /* Seed a non-empty scene — one apply, one persist. */
+        const nlohmann::json seed_doc = nlohmann::json::object({
+            { "version", 2 }, { "name", "seed" },
+            { "bindings", nlohmann::json::array() },
+            { "objects", nlohmann::json::array({
+                nlohmann::json::object({
+                    { "id", "case" }, { "kind", "decor" } }) }) },
+        });
+        r = svc6.Dispatch(MsgType::SetScene,
+            nlohmann::json::object({{ "document", seed_doc }}));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(persist_calls == 1);
+        CHECK(persisted_name == "seed");
+
+        /* All-fail batch: an unknown controller -> Unavailable;
+           the per-entry reason lands in `skipped` and the scene
+           is untouched (no revision bump, no persist). */
+        const uint64_t rev0 = svc6.SceneRevision();
+        r = svc6.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "add_object" },
+                { "controllers", nlohmann::json::array({
+                    nlohmann::json::object({
+                        {"device","ghost"},{"serial",""},
+                        {"location",""},{"zone",""}}) }) },
+            }));
+        CHECK(r.code == ErrCode::Unavailable);
+        CHECK(r.body["skipped"].is_array());
+        CHECK(r.body["skipped"].size() == 1);
+        CHECK(svc6.SceneRevision() == rev0);
+        CHECK(persist_calls == 1);
+
+        /* Happy path: Fan 3 (40 LEDs) -> one new binding whose
+           identity is snapshot-derived, one device object with
+           40 addressed emitters. */
+        r = svc6.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb",        "add_object" },
+                { "controllers", nlohmann::json::array({ fan3 }) },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["added"].is_array());
+        CHECK(r.body["added"].size() == 1);
+        if(r.body["added"].size() == 1)
+        {
+            CHECK(!r.body["added"][0]["object_id"]
+                       .get<std::string>().empty());
+            CHECK(!r.body["added"][0]["binding"]
+                       .get<std::string>().empty());
+            CHECK(r.body["added"][0]["zone"].get<std::string>()
+                  == "Fan 3");
+            CHECK(r.body["added"][0]["zone_leds"].get<int>()
+                  == 40);
+        }
+        const std::string fan3_oid =
+            r.body["added"][0].value("object_id", std::string());
+        const std::string fan3_bid =
+            r.body["added"][0].value("binding", std::string());
+        CHECK(persist_calls == 2);
+
+        r = svc6.Dispatch(MsgType::GetScene, nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        if(r.code == ErrCode::Ok)
+        {
+            const nlohmann::json& doc = r.body["document"];
+            bool binding_found = false;
+            for(const nlohmann::json& b : doc["bindings"])
+            {
+                if(b.value("id", std::string()) == fan3_bid)
+                {
+                    binding_found = true;
+                    /* identity came from the snapshot, never
+                       the client body */
+                    CHECK(b["controller_name"].get<std::string>()
+                          == "Lian Li UNI FAN SL Wireless");
+                    CHECK(b["serial"].get<std::string>()
+                          == "AABBCCDDEEFF");
+                    CHECK(b["zone_name"].get<std::string>()
+                          == "Fan 3");
+                    CHECK(b["zone_leds"].get<unsigned int>()
+                          == 40);
+                }
+            }
+            CHECK(binding_found);
+            bool object_found = false;
+            for(const nlohmann::json& o : doc["objects"])
+            {
+                if(o.value("id", std::string()) == fan3_oid)
+                {
+                    object_found = true;
+                    CHECK(o["kind"].get<std::string>() ==
+                          "device");
+                    CHECK(o["binding"].get<std::string>() ==
+                          fan3_bid);
+                    /* verified — the identity resolved against
+                       live topology, and verified is what lets
+                       the mapper write the zone's LEDs */
+                    CHECK(o["verified"].get<bool>() == true);
+                    CHECK(o["emitters"].size() == 40);
+                    /* ring layout for >12 LEDs — positions span
+                       a disc, not a line */
+                    bool spans_z = false;
+                    for(size_t i = 0;
+                        i < o["emitters"].size(); ++i)
+                    {
+                        const nlohmann::json& e =
+                            o["emitters"][i];
+                        CHECK(e["address"].get<int>() ==
+                              (int)i);
+                        if(e["pos"]["z"].get<double>() != 0.0)
+                        {
+                            spans_z = true;
+                        }
+                    }
+                    CHECK(spans_z);
+                }
+            }
+            CHECK(object_found);
+        }
+
+        /* Binding dedupe: the identical key reuses the existing
+           binding — a second object, never a second row. */
+        r = svc6.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb",        "add_object" },
+                { "controllers", nlohmann::json::array({ fan3 }) },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["added"][0]["binding"].get<std::string>()
+              == fan3_bid);
+        CHECK(r.body["added"][0]["object_id"].get<std::string>()
+              != fan3_oid);
+        r = svc6.Dispatch(MsgType::GetScene, nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        if(r.code == ErrCode::Ok)
+        {
+            CHECK(r.body["document"]["bindings"].size() == 1);
+            /* objects: seed decor + fan3 obj + fan3 obj2 */
+            CHECK(r.body["document"]["objects"].size() == 3);
+        }
+
+        /* Partial batch: one good, one ghost, one bad zone —
+           successes apply; every failure reports in skipped. */
+        r = svc6.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "add_object" },
+                { "controllers", nlohmann::json::array({
+                    nlohmann::json::object({
+                        {"device","Corsair: Vengeance RGB"},
+                        {"serial","DDR5-1"},
+                        {"location","smbus:0-DDR5-1"},
+                        {"zone","DIMM"}}),
+                    nlohmann::json::object({
+                        {"device","ghost"},{"serial",""},
+                        {"location",""},{"zone",""}}),
+                    nlohmann::json::object({
+                        {"device","Lian Li: SL Wireless"},
+                        {"serial","AABBCCDDEEFF"},
+                        {"location","Wireless: AA:BB:CC:DD:EE:FF"},
+                        {"zone","Nope"}}),
+                }) },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["added"].size() == 1);
+        CHECK(r.body["skipped"].size() == 2);
+        /* 12-LED zone -> row layout along x, addresses 0..11 */
+        {
+            const std::string dimm_oid =
+                r.body["added"][0].value("object_id",
+                                         std::string());
+            r = svc6.Dispatch(MsgType::GetScene,
+                              nlohmann::json::object());
+            for(const nlohmann::json& o :
+                    r.body["document"]["objects"])
+            {
+                if(o.value("id", std::string()) != dimm_oid)
+                {
+                    continue;
+                }
+                CHECK(o["emitters"].size() == 12);
+                for(size_t i = 0; i < o["emitters"].size(); ++i)
+                {
+                    const nlohmann::json& e = o["emitters"][i];
+                    CHECK(e["address"].get<int>() == (int)i);
+                    CHECK(e["pos"]["z"].get<double>() == 0.0);
+                    if(i > 0)
+                    {
+                        CHECK(e["pos"]["x"].get<double>() >
+                              o["emitters"][i - 1]["pos"]["x"]
+                                  .get<double>());
+                    }
+                }
+            }
+        }
+
+        /* 1-LED zone -> a single point emitter. */
+        r = svc6.Dispatch(MsgType::LayoutCommand,
+            nlohmann::json::object({
+                { "verb", "add_object" },
+                { "controllers", nlohmann::json::array({
+                    nlohmann::json::object({
+                        {"device","Corsair: Vengeance RGB"},
+                        {"serial","DDR5-1"},
+                        {"location","smbus:0-DDR5-1"},
+                        {"zone","Logo"}}) }) },
+            }));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["added"].size() == 1);
+        {
+            const std::string logo_oid =
+                r.body["added"][0].value("object_id",
+                                         std::string());
+            r = svc6.Dispatch(MsgType::GetScene,
+                              nlohmann::json::object());
+            for(const nlohmann::json& o :
+                    r.body["document"]["objects"])
+            {
+                if(o.value("id", std::string()) == logo_oid)
+                {
+                    CHECK(o["emitters"].size() == 1);
+                    CHECK(o["emitters"][0]["address"].get<int>()
+                          == 0);
+                }
+            }
+        }
+
+        /* An EMPTY scene apply is a deliberate "new scene" —
+           it applies, but persist_scene does NOT fire: an
+           empty apply never clobbers the last good snapshot. */
+        {
+            const int pc = persist_calls;
+            r = svc6.Dispatch(MsgType::SetScene,
+                nlohmann::json::object({
+                    { "document", nlohmann::json::object({
+                        { "version",  2 },
+                        { "name",     "scratch" },
+                        { "bindings", nlohmann::json::array() },
+                        { "objects",  nlohmann::json::array() },
+                    }) },
+                }));
+            CHECK(r.code == ErrCode::Ok);
+            CHECK(persist_calls == pc);
+
+            /* ...and the bootstrap path: adding a device to the
+               empty scene applies AND persists — the first
+               added object makes the scene saveable again. */
+            r = svc6.Dispatch(MsgType::LayoutCommand,
+                nlohmann::json::object({
+                    { "verb", "add_object" },
+                    { "controllers", nlohmann::json::array({
+                        nlohmann::json::object({
+                            {"device","Lian Li: SL Wireless"},
+                            {"serial","AABBCCDDEEFF"},
+                            {"location",
+                             "Wireless: AA:BB:CC:DD:EE:FF"},
+                            {"zone","Fan 1"}}) }) },
+                }));
+            CHECK(r.code == ErrCode::Ok);
+            CHECK(persist_calls == pc + 1);
+            CHECK(persisted_name == "scratch");
+        }
+    }
+
     std::printf("ipc_engine_service_test: %d checks, %d failures\n",
                 checks, failures);
     return failures ? 1 : 0;

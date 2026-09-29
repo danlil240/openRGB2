@@ -294,6 +294,48 @@ static void ModelTests()
     CHECK(!m.BuildSetBindingFromController("ghost", "b2",
           nlohmann::json::object(), op, err));   /* no key */
 
+    /*---- add_object op builder: scene creation from live
+           DeviceKeys — the body carries the keys verbatim;
+           the engine resolves identity/LED counts -------*/
+    {
+        LayoutOp  ao;
+        std::string ae;
+        const nlohmann::json k1 = nlohmann::json::object({
+            { "device",   "Lian Li: SL Wireless" },
+            { "serial",   "AABBCCDDEEFF" },
+            { "location", "Wireless: AA:BB:CC:DD:EE:FF" },
+            { "zone",     "Fan 3" } });
+        CHECK(m.BuildAddObjects(nlohmann::json::array({ k1 }),
+                                ao, ae));
+        CHECK(ae.empty());
+        CHECK(ao.body["verb"] == "add_object");
+        CHECK(ao.body["controllers"].is_array());
+        CHECK(ao.body["controllers"].size() == 1);
+        CHECK(ao.body["controllers"][0]["device"] ==
+              "Lian Li: SL Wireless");
+        CHECK(ao.body["controllers"][0]["zone"] == "Fan 3");
+        CHECK(!ao.label.empty());
+        /* batch */
+        CHECK(m.BuildAddObjects(
+            nlohmann::json::array({ k1, k1 }), ao, ae));
+        CHECK(ao.body["controllers"].size() == 2);
+        /* refusals: empty/absent array, non-array, malformed
+           elements — nothing is fabricated */
+        CHECK(!m.BuildAddObjects(nlohmann::json::array(),
+                                 ao, ae));
+        CHECK(!ae.empty());
+        CHECK(!m.BuildAddObjects(nlohmann::json::object(),
+                                 ao, ae));
+        CHECK(!m.BuildAddObjects(nlohmann::json::array({ 42 }),
+                                 ao, ae));
+        CHECK(!m.BuildAddObjects(nlohmann::json::array({
+            nlohmann::json::object({{ "device", "" }}) }),
+            ao, ae));
+        CHECK(!m.BuildAddObjects(nlohmann::json::array({
+            nlohmann::json::object({{ "device", 7 }}) }),
+            ao, ae));
+    }
+
     /*---- calibration: the UI is the FIRST rejection boundary —
            out-of-range indices refuse BEFORE any body exists */
     CHECK(m.BoundZoneLeds("fan0") == 40);
@@ -577,7 +619,11 @@ static bool ServeOnce(Server& s, uint32_t wait_ms = 15)
         break;
     case MsgType::GetSnapshots:
         s.srv.SendMsg(MsgType::Snapshots, m.request_id,
-                      nlohmann::json::object());
+                      nlohmann::json::object({
+                          { "snapshots",
+                            nlohmann::json::array(
+                                { SnapFixture() }) },
+                      }));
         break;
     case MsgType::GetState:
         s.srv.SendMsg(MsgType::State, m.request_id,
@@ -671,6 +717,90 @@ static bool ServeOnce(Server& s, uint32_t wait_ms = 15)
                           (uint32_t)ErrCode::BadRequest },
                         { "error",   "bad_request" },
                         { "message", "refused by test" },
+                    }));
+            }
+            else if(verb == "add_object")
+            {
+                /* Engine parity (add_object): each controller
+                   key resolves against the served snapshot —
+                   good keys get a binding + device object,
+                   unknown ones land in skipped. */
+                nlohmann::json added   = nlohmann::json::array();
+                nlohmann::json skipped = nlohmann::json::array();
+                for(const nlohmann::json& ck :
+                        body.value("controllers",
+                                   nlohmann::json::array()))
+                {
+                    const std::string dev =
+                        ck.value("device", std::string());
+                    const std::string zone =
+                        ck.value("zone", std::string());
+                    const nlohmann::json snap = SnapFixture();
+                    bool zone_ok = false;
+                    for(const nlohmann::json& z : snap["zones"])
+                    {
+                        if(z.value("name", std::string()) == zone)
+                        {
+                            zone_ok = true;
+                        }
+                    }
+                    if(dev != "Lian Li: SL Wireless" || !zone_ok)
+                    {
+                        skipped.push_back(nlohmann::json::object(
+                            { { "controller", ck },
+                              { "error",
+                                "not in the current topology" } }));
+                        continue;
+                    }
+                    /* unique ids per call — count what's there */
+                    const std::string tag = std::to_string(
+                        s.doc["objects"].size());
+                    const std::string bid = "b_auto_" + tag;
+                    const std::string oid = "o_auto_" + tag;
+                    s.doc["bindings"].push_back(
+                        nlohmann::json::object({
+                            { "id", bid },
+                            { "controller_name", dev },
+                            { "zone_name", zone },
+                            { "zone_leds", 40 } }));
+                    s.doc["objects"].push_back(
+                        nlohmann::json::object({
+                            { "id", oid }, { "label", oid },
+                            { "kind", "device" },
+                            { "binding", bid },
+                            { "verified", true },
+                            { "emitters", nlohmann::json::array({
+                                nlohmann::json::object({
+                                    {"pos", V3(0,0,0)},
+                                    {"address", 0}}) }) }}));
+                    added.push_back(nlohmann::json::object({
+                        { "object_id", oid },
+                        { "binding",   bid },
+                        { "zone",      zone },
+                        { "zone_leds", 40 } }));
+                }
+                if(added.empty())
+                {
+                    s.srv.SendMsg(MsgType::Error, m.request_id,
+                        nlohmann::json::object({
+                            { "code",
+                              (uint32_t)ErrCode::Unavailable },
+                            { "error",   "unavailable" },
+                            { "message", "nothing added" },
+                            { "skipped", skipped } }));
+                    break;
+                }
+                ++s.revision;
+                s.srv.SendMsg(MsgType::Ok, m.request_id,
+                    nlohmann::json::object({
+                        { "added",    added      },
+                        { "skipped",  skipped    },
+                        { "revision", s.revision },
+                    }));
+                s.srv.SendMsg(MsgType::Event, 0,
+                    nlohmann::json::object({
+                        { "kind", "scene" },
+                        { "data", SceneEnvelope(s) },
                     }));
             }
             else
@@ -1043,6 +1173,87 @@ static void BridgeTests()
         CHECK(ctl.identifyingFor(key).isEmpty());
         CHECK(!ctl.identifyingFor(key2).isEmpty());
         CHECK(ctl.undoCount() == undo_before);
+    }
+
+    /*---- add devices: live zones -> add_object --------------
+       The snapshot feed carries one controller with three
+       zones; addAllDevices expands every live zone into a
+       DeviceKey and the engine reply repaints the canvas. */
+    std::printf("-- add_object\n");
+    {
+        /* pull the topology feed into the model first —
+           pump until the reply lands in the bridge store */
+        CHECK(bridge.getSnapshots() > 0);
+        CHECK(PumpBoth(s, [&] {
+            return bridge.snapshots().size() == 1;
+        }));
+        const int lc = s.layout_commands;
+        CHECK(ctl.addAllDevices());
+        CHECK(PumpBoth(s, [&] {
+            return s.layout_commands == lc + 1 && !ctl.busy();
+        }));
+        const nlohmann::json& b = s.last_layout_body;
+        CHECK(b["verb"] == "add_object");
+        CHECK(b["controllers"].size() == 3);      /* Fan 1..3 */
+        CHECK(b["controllers"][0]["zone"] == "Fan 1");
+        CHECK(b["controllers"][2]["zone"] == "Fan 3");
+        /* the scene event repaint shows the three new objects
+           — 5 authored + 3 added */
+        CHECK(PumpBoth(s, [&] { return ctl.items().size() == 8; }));
+        CHECK(ctl.canUndo());    /* one apply = one undo step */
+        ctl.clearHistory();
+    }
+
+    /*---- a per-device add carries exactly that zone's key ---*/
+    {
+        const int lc = s.layout_commands;
+        QVariantMap key;
+        key.insert(QStringLiteral("device"),
+                   QStringLiteral("Lian Li: SL Wireless"));
+        key.insert(QStringLiteral("serial"),
+                   QStringLiteral("AABBCCDDEEFF"));
+        key.insert(QStringLiteral("location"),
+                   QStringLiteral("Wireless: AA:BB:CC:DD:EE:FF"));
+        key.insert(QStringLiteral("zone"),
+                   QStringLiteral("Fan 3"));
+        CHECK(ctl.addObject(key));
+        CHECK(PumpBoth(s, [&] {
+            return s.layout_commands == lc + 1 && !ctl.busy();
+        }));
+        CHECK(s.last_layout_body["verb"] == "add_object");
+        CHECK(s.last_layout_body["controllers"].size() == 1);
+        CHECK(s.last_layout_body["controllers"][0]["zone"]
+              == "Fan 3");
+        /* the scene EVENT trails the LAYOUT reply — let it
+           land before newScene snapshots applied_ for undo */
+        CHECK(PumpBoth(s, [&] {
+            return ctl.items().size() == 9;
+        }));
+        ctl.clearHistory();
+    }
+
+    /*---- newScene: an empty document through SET_SCENE,
+           undoable like any edit ----------------------------*/
+    std::printf("-- newScene\n");
+    {
+        const int sc = s.scene_saves;
+        CHECK(ctl.newScene());
+        CHECK(PumpBoth(s, [&] {
+            return s.scene_saves == sc + 1 && !ctl.busy();
+        }));
+        /* the wire body IS the empty document — no fabricated
+           objects; the canvas shows nothing until devices
+           are added */
+        CHECK(s.last_scene_body["document"]["objects"]
+                  .empty());
+        CHECK(PumpBoth(s, [&] { return ctl.items().empty(); }));
+        CHECK(ctl.canUndo());
+        /* undo restores the previous applied document whole */
+        ctl.undo();
+        CHECK(PumpBoth(s, [&] {
+            return s.scene_saves == sc + 2 && !ctl.busy()
+                   && ctl.items().size() == 9;
+        }));
     }
 
     bridge.stop();
