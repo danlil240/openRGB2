@@ -185,6 +185,8 @@ nlohmann::json SnapshotToJson(const DeviceSnapshot& snap,
         zones.push_back(nlohmann::json::object({
             { "name",      z.name      },
             { "led_count", z.led_count },
+            { "leds_min",  z.leds_min  },
+            { "leds_max",  z.leds_max  },
         }));
     }
     nlohmann::json out = nlohmann::json::object({

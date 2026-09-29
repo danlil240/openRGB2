@@ -226,6 +226,17 @@ private:
        client's bounded backoff latches to Disconnected. */
     void ReprobeSdk(TimePoint now);
 
+    /* Zone-size reconciliation: a scene binding's declared
+       zone_leds is the intended size — a backend that drops
+       persisted zone sizes (e.g. a headless --localconfig
+       server that never saves its controllers section)
+       enumerates resizable zones smaller/empty and the
+       binding writes nothing. RESIZEZONE each resolved
+       mismatch within the zone's [leds_min, leds_max] bounds,
+       bounded retries per observed count, then Enumerate so
+       the new topology lands in `snaps` this same poll. */
+    void ReconcileZoneSizes(std::vector<DeviceSnapshot>& snaps);
+
     EngineHostOptions        opts_;
     /* Built in Start() with opts_.instance_name — the option is
        a real seam: tests take a test-scoped guard name so a
@@ -256,6 +267,17 @@ private:
     TimePoint                                last_reprobe_{};
     TimePoint                                last_topology_poll_{};
     std::map<DeviceKey, uint64_t>            custom_mode_done_;
+    /* Per-binding resize bookkeeping for ReconcileZoneSizes:
+       binding id -> {observed led_count, attempts}. Attempts
+       are bounded per OBSERVED count — a backend that keeps
+       clamping to a different size stops being poked, while
+       a count change (replug, external owner) re-arms. */
+    struct ZoneResizeAttempts
+    {
+        uint32_t observed = 0;
+        uint32_t tries    = 0;
+    };
+    std::map<std::string, ZoneResizeAttempts>  zone_resize_tries_;
     bool                                     started_ = false;
     OrderlyShutdown::Result                  shutdown_result_;
     bool                                     stopped_ = false;

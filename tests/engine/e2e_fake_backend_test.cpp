@@ -78,8 +78,13 @@ static sdk_test::FakeController Wired()
     sdk_test::FakeMode m;
     m.name = "Direct";
     c.modes.push_back(m);
-    c.zones = { { "ARGB_V2_1", 0, 8, 8, 8 } };
-    c.colors.assign(8, 0x00010101u);
+    /* The zone enumerates EMPTY (resizable 0-256) like a real
+       Gigabyte ARGB header after the backend loses its saved
+       zone sizes — the scene binding declares 8 LEDs, and the
+       engine's zone-size reconciliation must RESIZEZONE it
+       back before frames can flow (the "motherboard scene not
+       configured" recurrence this regression pins). */
+    c.zones = { { "ARGB_V2_1", 0, 0, 256, 0 } };
     return c;
 }
 
@@ -332,6 +337,40 @@ int main()
     /* Custom-mode upkeep ran on bound controllers
        (SETCUSTOMMODE — live output requires direct mode). */
     CHECK(server.CountEvents(sdk::kPktSetCustomMode) >= 1);
+
+    /* Zone-size reconciliation: the scene declares 8 LEDs on a
+       zone the backend enumerated at 0 — the owner loop must
+       have sent RESIZEZONE(dev 1, zone 0 -> 8), and the
+       re-enumerated snapshot must report the grown zone. The
+       UPDATELEDS-on-dev-1 check above is the "frames flowed"
+       half of the proof — a 0-LED zone emits nothing. */
+    {
+        size_t resize_hits = 0;
+        for(const sdk_test::ServerEvent& e : server.SnapshotEvents())
+        {
+            if(e.pkt_id == sdk::kPktResizeZone && e.dev_id == 1 &&
+               e.body.size() >= 8)
+            {
+                int32_t zi = 0, ns = 0;
+                memcpy(&zi, e.body.data(), 4);
+                memcpy(&ns, e.body.data() + 4, 4);
+                if(zi == 0 && ns == 8) { ++resize_hits; }
+            }
+        }
+        CHECK(resize_hits >= 1);
+        /* Snapshots come back key-ordered, not enumeration
+           order — find the wired controller by name. */
+        bool healed = false;
+        for(const DeviceSnapshot& s : client->Snapshots())
+        {
+            if(s.name.find("X870E") != std::string::npos &&
+               s.zones.size() == 1 && s.zones[0].led_count == 8)
+            {
+                healed = true;
+            }
+        }
+        CHECK(healed);
+    }
 
     /*---- shutdown ordering -----------------------------------*/
     run.store(false);
