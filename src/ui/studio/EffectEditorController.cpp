@@ -109,6 +109,7 @@ EffectEditorController::EffectEditorController(EngineBridge* bridge,
                            button doesn't wedge, and fail the
                            outcome honestly. */
                         pending_catalog_ = 0;
+                        pending_catalog_entries_.clear();
                         if(pending_save_req_ != 0
                            || pending_save_job_ != 0
                            || saving_look_)
@@ -666,16 +667,24 @@ void EffectEditorController::ApplyEffectsCatalog(
         /* File-supplied entries carry their document — feed
            the local registry so a saved look resolves across
            sessions/restarts, not only in the saving session. */
+        /* document_text keeps the serialized ordered_json byte
+           order — remix draws consume the RNG stream in field
+           order, so a re-keyed JSON object would resolve the
+           same look differently UI-side vs engine-side. The
+           legacy `document` object remains a fallback. */
+        const QVariant doct = e.value("document_text");
         const QVariant docv = e.value("document");
-        if(docv.isValid())
+        if(doct.isValid() || docv.isValid())
         {
+            const nlohmann::ordered_json j =
+                nlohmann::ordered_json::parse(
+                    doct.isValid()
+                        ? doct.toString().toStdString()
+                        : VariantToJson(docv).dump(),
+                    nullptr, false);
             studio::EffectDocument d;
             std::vector<std::string> errs;
-            if(studio::EffectDocumentFromJson(
-                   nlohmann::ordered_json::parse(
-                       VariantToJson(docv).dump(), nullptr,
-                       false),
-                   d, &errs) &&
+            if(studio::EffectDocumentFromJson(j, d, &errs) &&
                ui_looks_.Add(d, nullptr))
             {
                 registered = true;
@@ -713,6 +722,8 @@ void EffectEditorController::RequestEffectsCatalog()
     {
         return;
     }
+    pending_catalog_entries_.clear();
+    pending_catalog_off_ = 0;
     pending_catalog_ = bridge_->workspaceCommand(
         QStringLiteral("catalog"),
         QVariantMap{{"kind", QStringLiteral("effects")}});
@@ -734,9 +745,34 @@ void EffectEditorController::OnReplyReceived(int requestId,
         if(typeName != QLatin1String("OK") ||
            body.value("kind").toString() != QLatin1String("effects"))
         {
+            pending_catalog_entries_.clear();
             return;   /* Unavailable/ERROR — local rows stand */
         }
-        ApplyEffectsCatalog(body.value("entries").toList());
+        pending_catalog_entries_.append(
+            body.value("entries").toList());
+        /* Byte-budgeted pages: keep walking while the engine
+           reports more — every look stays reachable across
+           pages without any reply exceeding the 1 MiB body
+           cap. next_offset MUST advance: a stalled walk stops
+           here with the entries gathered so far rather than
+           spinning forever. */
+        const quint64 next =
+            body.value("next_offset").toULongLong();
+        if(body.value("more").toBool() &&
+           next > pending_catalog_off_ &&
+           bridge_ != nullptr && bridge_->connected())
+        {
+            pending_catalog_off_ = next;
+            pending_catalog_ = bridge_->workspaceCommand(
+                QStringLiteral("catalog"),
+                QVariantMap{
+                    {"kind",   QStringLiteral("effects")},
+                    {"offset", next}});
+            return;
+        }
+        const QVariantList all = pending_catalog_entries_;
+        pending_catalog_entries_.clear();
+        ApplyEffectsCatalog(all);
         return;
     }
 

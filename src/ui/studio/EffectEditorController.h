@@ -310,6 +310,10 @@ private:
     QString      pending_save_name_;
     /* catalog kind=effects request correlator. */
     int          pending_catalog_  = 0;
+    /* Byte-budgeted catalog pages arrive in more/next_offset
+       steps — entries accumulate here until the walk ends. */
+    QVariantList pending_catalog_entries_;
+    quint64      pending_catalog_off_ = 0;
 };
 
 } /* namespace ui */

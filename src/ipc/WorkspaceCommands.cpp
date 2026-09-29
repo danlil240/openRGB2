@@ -425,6 +425,8 @@ IpcReply WorkspaceCommands::HandleCatalog(const nlohmann::json& body)
     const std::string kind = body.value("kind", std::string());
     nlohmann::json entries = nlohmann::json::array();
     uint64_t total = 0;
+    bool more = false;
+    uint64_t next_offset = 0;
     if(kind == "devices")
     {
         /* Cached effective library — an unchanged library is
@@ -450,32 +452,81 @@ IpcReply WorkspaceCommands::HandleCatalog(const nlohmann::json& body)
             CachedEffects();
         const auto items = reg->List();
         total = items.size();
-        entries = Paged(items, p,
-            [reg](const studio::EffectRegistry::EffectInfo& i)
-            {
-                nlohmann::json e = nlohmann::json::object({
-                    { "id",          i.id          },
-                    { "name",        i.name        },
-                    { "description", i.description },
-                    { "needs",       i.needs       },
-                    { "from_file",   i.from_file   },
-                });
-                /* File-supplied looks carry their document so the
-                   UI session can resolve them without a second
-                   round-trip — a saved look stays usable across
-                   restarts. Packaged looks resolve from the
-                   client's compiled-in registry already. */
-                if(i.from_file)
-                {
-                    if(const studio::EffectDocument* d =
-                           reg->Find(i.id))
-                    {
-                        e["document"] =
-                            studio::EffectDocumentToJson(*d);
-                    }
-                }
-                return e;
+        /* Byte-budgeted page: `from_file` entries inline their
+           document, and a heavy look library must not push the
+           reply past kMaxBodyBytes (EncodeMessage would drop the
+           send and the session would tear down — a reconnecting
+           client would then loop). Entries accumulate while the
+           serialized page stays under ~3/4 of the 1 MiB body cap
+           (envelope headroom); the remainder rides the next page
+           via more/next_offset. */
+        constexpr size_t kCatalogPageBytes = 768u * 1024u;
+        size_t bytes = 2;                    /* "[]" */
+        uint64_t i = p.offset;
+        for(; i < items.size() && entries.size() < p.limit; ++i)
+        {
+            const auto& info = items[(size_t)i];
+            nlohmann::json e = nlohmann::json::object({
+                { "id",          info.id          },
+                { "name",        info.name        },
+                { "description", info.description },
+                { "needs",       info.needs       },
+                { "from_file",   info.from_file   },
             });
+            /* File-supplied looks carry their document so the
+               UI session can resolve them without a second
+               round-trip — a saved look stays usable across
+               restarts. document_text keeps the ordered_json
+               byte order (remix draws consume the RNG stream in
+               field order — a re-keyed JSON object would
+               diverge). Packaged looks resolve from the
+               client's compiled-in registry already. */
+            if(info.from_file)
+            {
+                if(const studio::EffectDocument* d =
+                       reg->Find(info.id))
+                {
+                    e["document_text"] =
+                        studio::EffectDocumentToJson(*d).dump();
+                }
+            }
+            std::string ser = e.dump();
+            if(bytes + ser.size() + 1 > kCatalogPageBytes)
+            {
+                /* An entry that ALONE exceeds the budget degrades
+                   to metadata + an honest flag — never a dropped
+                   session. */
+                if(entries.empty() && e.contains("document_text"))
+                {
+                    e.erase("document_text");
+                    e["document_omitted"] = true;
+                    ser = e.dump();
+                }
+                /* The metadata itself can still exceed the page
+                   (a giant description rides it AND the doc) —
+                   bound it too. A lone entry always emits
+                   SOMETHING, so the walk can never stall on
+                   next_offset == offset with an empty page. */
+                if(entries.empty() &&
+                   bytes + ser.size() + 1 > kCatalogPageBytes)
+                {
+                    e["description"] = std::string();
+                    e["description_omitted"] = true;
+                    ser = e.dump();
+                }
+                if(bytes + ser.size() + 1 > kCatalogPageBytes)
+                {
+                    break;
+                }
+            }
+            bytes += ser.size() + 1;
+            entries.push_back(std::move(e));
+        }
+        if(i < items.size())
+        {
+            more        = true;
+            next_offset = i;
+        }
     }
     else if(kind == "workspaces")
     {
@@ -495,12 +546,21 @@ IpcReply WorkspaceCommands::HandleCatalog(const nlohmann::json& body)
             "catalog kind must be devices|effects|workspaces",
             "bad_request");
     }
+    /* For the bounded kinds, `more`+`next_offset` continue the
+       walk when a count- or byte-limited page truncated early. */
+    if(!more && p.offset + entries.size() < total)
+    {
+        more        = true;
+        next_offset = p.offset + entries.size();
+    }
     return IpcReply::Success(MsgType::Ok, nlohmann::json::object({
-        { "kind",    kind    },
-        { "entries", entries },
-        { "total",   total   },
-        { "offset",  p.offset },
-        { "limit",   p.limit  },
+        { "kind",        kind        },
+        { "entries",     entries     },
+        { "total",       total       },
+        { "offset",      p.offset    },
+        { "limit",       p.limit     },
+        { "more",        more        },
+        { "next_offset", next_offset },
     }));
 }
 

@@ -543,8 +543,10 @@ int main(int argc, char** argv)
         QVariantMap e;
         e["id"] = "my_look"; e["name"] = "My Look";
         e["needs"] = ""; e["from_file"] = true;
-        e["document"] =
-            JsonToVariant(studio::EffectDocumentToJson(d));
+        /* document_text preserves the ordered_json field order
+           (a re-keyed object would diverge remix RNG draws). */
+        e["document_text"] = QString::fromStdString(
+            studio::EffectDocumentToJson(d).dump());
         /* A file-supplied row under a PACKAGED id is not a
            personal look — the compiled-in id set filters it
            (bridge_->presets() merges file looks, so it cannot
@@ -728,8 +730,8 @@ int main(int argc, char** argv)
         QVariantMap e;
         e["id"] = "shelf_look"; e["name"] = "Shelf Look";
         e["needs"] = ""; e["from_file"] = true;
-        e["document"] =
-            JsonToVariant(studio::EffectDocumentToJson(d));
+        e["document_text"] = QString::fromStdString(
+            studio::EffectDocumentToJson(d).dump());
         rig.ctl.FeedEffectsCatalogForTesting({ e });
 
         QQmlEngine eng;

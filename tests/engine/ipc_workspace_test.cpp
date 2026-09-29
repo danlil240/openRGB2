@@ -51,6 +51,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -1167,6 +1168,100 @@ int main()
             found_fan |= e.value("id", "") == "test-fan";
         }
         CHECK(found_fan);
+        WsCallErr(c, seq, json::object({
+            { "verb", "catalog" }, { "kind", "bogus" },
+        }), ErrCode::BadRequest);
+    }
+
+    /*---- effects catalog: byte-budgeted pages ---------------*/
+    {
+        /* A look library whose inlined document_texts would
+           overflow the 1 MiB body cap must page instead of
+           tearing the session down (fix round 2 — the round-1
+           document inline made the reply byte-unbounded). */
+        Rig& rig = *mainrig;
+        const fs::path elib = rig.ws->Store().LibraryEffectsDir();
+        fs::create_directories(elib);
+        auto write_look = [&elib](const std::string& id,
+                                  size_t desc_bytes)
+        {
+            nlohmann::ordered_json d;
+            d["schema_version"] = studio::EFFECT_SCHEMA_VERSION;
+            d["id"]   = id;
+            d["name"] = id;
+            d["description"] = std::string(desc_bytes, 'x');
+            d["needs"] = "";
+            d["layers"] = nlohmann::ordered_json::array({
+                nlohmann::ordered_json::object(
+                    {{ "primitive", "static" }}),
+            });
+            std::ofstream(elib / (id + ".effect.json"))
+                << d.dump();
+        };
+        /* ~100 KiB descriptions ride the metadata AND the
+           document_text (~200 KiB per entry) → ~3 per 768 KiB
+           page → pages. */
+        for(int i = 0; i < 6; ++i)
+        {
+            write_look("cat_fat_" + std::to_string(i),
+                       100 * 1024);
+        }
+        /* One look whose doc AND whose metadata both exceed the
+           budget — it degrades twice (document flag, then a
+           bounded description) but must still emit a row: an
+           empty page with next_offset == offset would stall
+           the walk forever. */
+        write_look("cat_huge", 900 * 1024);
+
+        TestClient c;
+        Welcome(c, *rig.server);
+        std::set<std::string> seen;
+        bool omitted = false;
+        uint64_t off = 0, last = 0;
+        for(int page = 0; page < 16; ++page)
+        {
+            const json r = WsCall(c, seq, json::object({
+                { "verb", "catalog" }, { "kind", "effects" },
+                { "offset", off },
+            }));
+            /* Every page fits the wire envelope — the reply
+               itself is the bound that was missing. */
+            CHECK(r.dump().size() < kMaxBodyBytes);
+            CHECK(r.value("total", 0ull) == 7);
+            /* No empty progress-free page: a truncated page
+               must advance the offset or the walk stalls. */
+            if(r.value("more", false))
+            {
+                CHECK(!r["entries"].empty());
+                CHECK(r.value("next_offset", 0ull) > off);
+            }
+            for(const json& e : r["entries"])
+            {
+                seen.insert(e.value("id", ""));
+                if(e.value("document_omitted", false))
+                {
+                    omitted = true;
+                    CHECK(e.value("id", "") == "cat_huge");
+                    CHECK(!e.contains("document_text"));
+                }
+            }
+            if(!r.value("more", false))
+            {
+                break;
+            }
+            last = off;
+            off = r.value("next_offset", off);
+            CHECK(off > last);
+        }
+        /* Every look is reachable across the page walk. */
+        for(int i = 0; i < 6; ++i)
+        {
+            CHECK(seen.count("cat_fat_" + std::to_string(i)) == 1);
+        }
+        CHECK(seen.count("cat_huge") == 1);
+        CHECK(omitted);
+        /* Session is alive — the catalog loop never tore it
+           down (WsCall itself fails if no reply arrives). */
         WsCallErr(c, seq, json::object({
             { "verb", "catalog" }, { "kind", "bogus" },
         }), ErrCode::BadRequest);
