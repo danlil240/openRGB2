@@ -10,6 +10,21 @@ engine-side truth via `openrgb2-ctl` (`scene`, `playback`, `diag`,
 readback. No product code was changed; only `tools/qa/qa.py` was
 extended (see "Harness notes").
 
+## Resolution status (post-fix)
+
+| Bug | Fix | Commit | Verified |
+| --- | --- | --- | --- |
+| BUG-1 | Engine refuses the live switch for uploaded-only presets (symmetric with the existing animation refusal); reason surfaces via `unavailable_reason` / card gating | `81fabe2` | Unit + e2e tests; live: `capabilities.live_effects=false` + reason while preset-only scene applied |
+| BUG-2 | `MsgType::ReactiveCommand` added to `IsRequestType`; wire-level regression test | `2896921` | Live: audio checkbox → `enabled:true, running:true, "audio: listening"` |
+| BUG-3 | `frame_status` filtered out of `event_log_` | `c36d47b` | Live: journal holds real events only |
+| BUG-4 | Refused name reverts field; `nameResyncPending` latch covers Discard/Reload; `saveError` clears | `b4f0137` | Live: refused name → field resyncs → next save applies |
+
+Also landed: `test(engine)` `4a3af46` (e2e fixtures opt out of
+scene restore — leftover snapshots voided clean-start assumptions)
+and cherry-picked `1540a3d` (UI test fixtures got a real device
+object; the empty-objects fixtures had been red since `0b6916c`'s
+save guard — ui_playback/ui_hardening/qml_focused_save+qml_hardening).
+
 ---
 
 ## Confirmed bugs
