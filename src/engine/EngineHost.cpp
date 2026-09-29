@@ -954,6 +954,12 @@ bool EngineHost::StartIpc()
     ipc_server_ = std::make_unique<ipc::IpcServer>(*service_);
     service_->SetEventSink(
         [this](const ipc::IpcEvent& ev) { ipc_server_->Emit(ev); });
+    /* Task 7: the session-bound draft preview feed — targeted
+       delivery to the owning session, never a broadcast. */
+    service_->SetSessionEventSink(
+        [this](uint64_t sid, const ipc::IpcEvent& ev,
+               const std::string& key)
+        { ipc_server_->EmitTo(sid, ev, key); });
     service_->SetServerStatsProvider(
         [this]() { return ipc_server_->Stats(); });
 

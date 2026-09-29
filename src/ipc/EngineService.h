@@ -72,6 +72,20 @@ struct EngineServiceOptions
        injects shorter expiries/smaller caps. Only consulted
        when Deps::workspace is wired. */
     WorkspaceTransfer::Options transfers;
+
+    /* studio-import Task 7: the session-bound draft preview
+       (plan 3.4). One PreviewSession per IPC session up to
+       this bound; publishing capped at min_interval_ms and
+       chunked below the 1 MiB body cap; above the display
+       budget a reduced, clearly-labelled frame goes out. */
+    struct PreviewOptions
+    {
+        size_t   max_sessions        = 2;
+        uint32_t min_interval_ms     = 33;      /* ~30 Hz  */
+        size_t   chunk_bytes         = 768u * 1024u;
+        size_t   display_budget_leds = 4096;
+    };
+    PreviewOptions preview;
 };
 
 class EngineService final : public IIpcService
@@ -180,6 +194,15 @@ public:
     /* Event fanout — wire to IpcServer::Emit. */
     void SetEventSink(std::function<void(const IpcEvent&)> sink);
 
+    /* Targeted fanout for session-bound events (Task 7's
+       "preview" feed): wire to IpcServer::EmitTo. The key is
+       the per-kind coalescing slot — "status" or
+       "frame/<seq>/<chunk>". */
+    void SetSessionEventSink(
+        std::function<void(uint64_t session_id,
+                           const IpcEvent& ev,
+                           const std::string& coalesce_key)> sink);
+
     /* Post-construction wiring for deps_.server_stats (the
        server exists after the service). */
     void SetServerStatsProvider(
@@ -240,10 +263,16 @@ public:
                                    MsgType type,
                                    const nlohmann::json& body) override;
     /* Session teardown: queued workspace jobs + staged
-       transfers of the dead session are cancelled. */
+       transfers of the dead session are cancelled — and its
+       draft preview released (plan 3.4). */
     void           OnSessionEnd(uint64_t session_id) override;
     bool           SnapshotEvent(const std::string& kind,
                                  nlohmann::json& out) override;
+    /* Session-bound snapshot: the "preview" kind reports THIS
+       session's preview state, not a global one. */
+    bool           SnapshotEventFor(uint64_t session_id,
+                                    const std::string& kind,
+                                    nlohmann::json& out) override;
 
     /* Read-only aggregate snapshot — the diagnostics channel's
        single verb and the Diagnostics event payload share
@@ -269,6 +298,10 @@ private:
     TimePoint           started_;
 
     std::function<void(const IpcEvent&)> event_sink_;
+    /* Task 7 targeted feed — preview chunks/statuses go to
+       the OWNING session only. */
+    std::function<void(uint64_t, const IpcEvent&,
+                       const std::string&)> session_sink_;
 
     /* PollEvents diffing state. */
     std::string         last_connection_sig_;

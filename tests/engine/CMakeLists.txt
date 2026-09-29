@@ -51,6 +51,25 @@ engine_suite(reactive_inputs_test)
 # the VK->world key-position lookup the worker/preview share.
 engine_suite(studio_scene_preparation_test)
 
+# Studio-import Task 7 — the bounded draft preview: deterministic
+# equivalence with the worker's evaluated colors (mapper
+# brightness parity), unbound-object rendering, latest-wins
+# candidate replacement, hidden/display-off pause, the two-
+# session bound, disconnect release, chunked publishing under
+# the IPC cap, and preview NEVER touching the output path or
+# starting a capture source.
+add_executable(preview_session_test preview_session_test.cpp)
+target_link_libraries(preview_session_test PRIVATE
+    openrgb2_engine
+    openrgb2_ipc)
+target_include_directories(preview_session_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(preview_session_test PRIVATE NDEBUG)
+add_test(NAME preview_session_test COMMAND preview_session_test)
+set_tests_properties(preview_session_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Task 4.9-parallel IPC surface for the same task: REACTIVE_COMMAND
 # verb bounds, honest Unavailable paths, STATE/DIAGNOSTICS surface,
 # the reactive event, and the reactive-scene playback reason.

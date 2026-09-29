@@ -128,6 +128,19 @@ public:
        produce a snapshot (subscriber gets none). */
     virtual bool SnapshotEvent(const std::string& kind,
                                nlohmann::json& out) = 0;
+
+    /* Session-aware variant (studio-import Task 7): kinds
+       whose snapshot is session-bound (the "preview" feed —
+       each session owns at most one draft preview) override
+       this. The default forwards to SnapshotEvent so
+       session-neutral services override nothing. */
+    virtual bool SnapshotEventFor(uint64_t session_id,
+                                  const std::string& kind,
+                                  nlohmann::json& out)
+    {
+        (void)session_id;
+        return SnapshotEvent(kind, out);
+    }
 };
 
 } /* namespace ipc */

@@ -322,6 +322,38 @@ EngineService::EngineService(Engine& engine, Deps deps,
                 Emit(event_kind::kWorkspace,
                      JobStatusToJson(st));
             });
+
+        /* studio-import Task 7: the session-bound draft
+           preview. Topology reads share the layout seam's
+           provider; input is a Snapshot() consume — never a
+           source start; the scene epoch is the worker's own
+           clock so drafts animate on the output timeline.
+           Delivery is targeted through SetSessionEventSink —
+           wire it BEFORE preview_begin or frames go nowhere
+           (the verbs then answer Unavailable honestly via the
+           empty deps.emit check). */
+        WorkspaceCommands::PreviewDeps pd;
+        pd.snapshots  = deps_.snapshots;
+        pd.power      = deps_.power;
+        pd.reactive   = deps_.reactive;
+        pd.scene_epoch =
+            [this]() { return engine_.Worker().Epoch(); };
+        pd.emit =
+            [this](uint64_t sid, const IpcEvent& ev,
+                   const std::string& key)
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if(session_sink_)
+                {
+                    session_sink_(sid, ev, key);
+                }
+            };
+        pd.max_sessions        = options_.preview.max_sessions;
+        pd.min_interval_ms     = options_.preview.min_interval_ms;
+        pd.chunk_bytes         = options_.preview.chunk_bytes;
+        pd.display_budget_leds =
+            options_.preview.display_budget_leds;
+        ws_commands_->SetPreviewDeps(std::move(pd));
     }
 }
 
@@ -340,6 +372,14 @@ void EngineService::SetEventSink(
 {
     std::lock_guard<std::mutex> lock(mutex_);
     event_sink_ = std::move(sink);
+}
+
+void EngineService::SetSessionEventSink(
+    std::function<void(uint64_t, const IpcEvent&,
+                       const std::string&)> sink)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    session_sink_ = std::move(sink);
 }
 
 void EngineService::SetServerStatsProvider(
@@ -982,6 +1022,27 @@ bool EngineService::SnapshotEvent(const std::string& kind,
         return true;
     }
     return false;
+}
+
+bool EngineService::SnapshotEventFor(uint64_t session_id,
+                                     const std::string& kind,
+                                     nlohmann::json& out)
+{
+    if(kind == event_kind::kPreview)
+    {
+        /* Session-bound: "preview" reports THIS session's
+           preview state — a status record, never another
+           session's frames and never a global broadcast. */
+        out = ws_commands_
+                  ? ws_commands_->PreviewStatusJson(session_id)
+                  : nlohmann::json::object({
+                        { "type",   "status" },
+                        { "active", false    },
+                        { "paused", false    },
+                    });
+        return true;
+    }
+    return SnapshotEvent(kind, out);
 }
 
 bool EngineService::WorkspaceManaged() const
@@ -2255,6 +2316,13 @@ void EngineService::PollFrameStatus(TimePoint now)
                so the burst coalesces into the next push. */
             last_stats_sig_.clear();
         }
+    }
+
+    /* Task 7 draft previews ride the same fast tick; the
+       per-session 30 Hz cap lives inside PollPreviews. */
+    if(ws_commands_)
+    {
+        ws_commands_->PollPreviews(now);
     }
 }
 

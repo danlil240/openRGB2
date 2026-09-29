@@ -496,7 +496,23 @@ telemetry stay live — the plan only gates document mutation.
 | `transfer_chunk` | `{transfer_id,offset,data:<base64>}` (upload) / `{transfer_id,offset,max_bytes?}` (download) | upload: `{offset,received}`; download: `{offset,data:<base64>,eof}` — ordered, ≤192 KiB decoded per chunk |
 | `transfer_finish` | `{transfer_id}` | `{finished:true,staged?,bytes?}` — upload verifies declared length + SHA-256 before minting the `staged` token |
 | `transfer_cancel` | `{transfer_id}` | `{cancelled:true}` |
-| `preview_begin`/`preview_update`/`preview_end` | `{...}` | stable `ERROR(unavailable)` until the preview engine lands (Task 7) |
+| `preview_begin` | `{document?|staged?, draft_revision?, visible?}` | `OK {active:true,draft_revision,rate_hz}` — begins (or re-begins) this session's draft preview; `document` is the same compact v3 authoring document `commit` accepts and `staged` a finished upload token owned by this session. Errors: `bad_request`+`invalid_document` (parse/resolve failure), `bad_request`+`bad_request` (no document/staged), `busy`+`preview_limit` (global session cap reached) |
+| `preview_update` | `{document?|staged?, draft_revision?, visible?}` | `OK {active:true,draft_revision}` — latest-wins candidate replacement and/or visibility on this session's preview; `ERROR bad_request`+`no_preview` when none is active |
+| `preview_end` | `{}` | `OK {active:false}` — idempotent; ends this session's preview |
+
+The preview verbs drive the bounded draft-preview feed (Task 7,
+plan §3.4): ONE `PreviewSession` per IPC session, at most two
+concurrent sessions engine-wide (configurable bound). The candidate
+is parsed through the SAME `ParseWorkspaceCandidate` path a commit
+uses, prepared by the shared `PrepareStudioScene` (runtime layers +
+key positions + matrix expansion against the live topology), and
+evaluated by the same `EffectEngine` at the same scene-clock epoch —
+draft colors are the bytes output WOULD carry after the document's
+brightness scale. The preview owns no `IFrameSink`, SDK reference,
+output lane, or capture source: it consumes a `ReactiveInputs`
+snapshot read-only and never writes a device frame or starts an
+input. A hidden view (`visible:false`) or a display-off event pauses
+sampling and publishing without ending the session.
 
 Job status record (`job_status` reply and terminal `workspace` EVENT
 `data`):
@@ -546,11 +562,46 @@ matches the corresponding pull body:
 | `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |
 | `frame_status` | `{aggregate, controllers:[{key,sequence,colors,stats}]}` | ≤ ~30 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses |
 | `workspace` | `get` body (initial snapshot) / job status record (terminal job event) | SUBSCRIBE initial push; a workspace job reaching a terminal state |
+| `preview` | `{type:"status"\|"frame", ...}` (below) | ≤ 30 Hz, **session-targeted** — delivered only to the session that owns the preview, never broadcast |
+
+The `preview` feed is the draft-preview push channel (Task 7). It is
+session-bound: `EmitTo` delivers only to the owning session, the
+SUBSCRIBE initial snapshot reports `{type:"status",active:false}`
+for a session without a preview, and session teardown destroys the
+session's preview. Two record types:
+
+- `status`: `{type:"status", active, paused, reason?, error?,
+  draft_revision?, sequence?}` — sent on begin/end, on pause/
+  resume transitions (`reason:"hidden"` when the UI hid the surface,
+  `"display_off"` on a power-lifecycle display-off), and once when a
+  draft fails to prepare (`error` describes it honestly).
+- `frame`: `{type:"frame", sequence, draft_revision, scene_time_s,
+  chunk, chunks, objects:[...], reduced, emitter_total,
+  emitter_sent, object_total}` — one evaluated draft frame split
+  into `chunks` pieces so every EVENT stays well below the 1 MiB
+  body cap. `objects` entries carry `{id, kind, x,y,z,rx,ry,rz,
+  w,h,d, bound, verified, emitter_total, colors:["#RRGGBB"],
+  indices?}`; `colors` are evaluated draft colors (brightness
+  applied — output parity, NOT transport-accepted measurements).
+  When the scene exceeds the display budget, `reduced:true` and
+  each object carries the sampled `indices` — a sparse result is
+  never presented as complete. Reassembly is strict: a client paints
+  a frame only when all `chunks` of one `sequence` arrive intact;
+  stale or partial sequences are dropped. Latest-wins coalescing in
+  the per-session queue keys on `frame/<sequence>/<chunk>`, so a
+  superseded frame never eats a newer chunk of the same slot.
+
+Draft-preview `colors` and `frame_status` `colors` answer different
+questions — what the unsaved draft evaluates to vs. what transport
+accepted for delivery — and are never interchangeable physical
+measurements.
 
 An `events` field that is neither `"all"` nor an array of strings, or any
 unknown kind name → `bad_request` (subscription unchanged). Queue overflow
 drops the oldest queued event (counted in `ipc.events_dropped`); a queued
-event of a kind is replaced by a newer one rather than appended.
+event of a kind is replaced by a newer one rather than appended (for
+`preview`, replacement additionally partitions on the coalesce key:
+`status` for status records, `frame/<sequence>/<chunk>` for chunks).
 
 ## 8. Notes for implementers
 

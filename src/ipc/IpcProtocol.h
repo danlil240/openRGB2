@@ -61,6 +61,9 @@ constexpr const char* kFrameStatus = "frame_status";  /* delivery stats/colors  
 constexpr const char* kReactive    = "reactive";      /* reactive input state   */
 constexpr const char* kWorkspace   = "workspace";     /* workspace job result —
                                                          data = job_status body */
+constexpr const char* kPreview     = "preview";       /* draft preview — TARGETED:
+                                                         data = preview status or
+                                                         one frame chunk (Task 7) */
 }
 
 /* The set SnapshotEvent/SUBSCRIBE validation knows. */

@@ -23,9 +23,12 @@
 |||     / transfer_cancel: session-bound bounded staging   ||
 |||   - job_status / job_cancel: poll/cancel by id within  ||
 |||     the owning session                                 ||
-|||   - preview_begin / preview_update / preview_end: the  ||
-|||     stable surface is defined now and answers          ||
-|||     Unavailable until the Task-7 preview engine lands  ||
+|||   - preview_begin / preview_update / preview_end:     ||
+|||     bounded draft preview (Task 7, plan 3.4) — one    ||
+|||     PreviewSession per IPC session, a global two-     ||
+|||     session bound, 30 Hz chunked publishing to the    ||
+|||     owning session only. NO hardware path exists in   ||
+|||     this code — the preview feed is pure evaluation.  ||
 |||                                                           ||
 |||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 \*---------------------------------------------------------*/
@@ -35,6 +38,9 @@
 #include "IpcService.h"
 #include "WorkspaceTransfer.h"
 
+#include "PreviewSession.h"
+#include "PowerLifecycle.h"
+#include "ReactiveInputs.h"
 #include "WorkspaceService.h"
 #include "presets/PresetRegistry.h"
 #include "presets/EffectRegistry.h"
@@ -85,6 +91,52 @@ public:
        a ticking caller. */
     void           SweepExpired();
 
+    /*-----------------------------------------------------*\
+    || studio-import Task 7 — bounded draft preview.        ||
+    ||                                                      ||
+    ||   EngineService wires these deps once the event     ||
+    ||   sink exists. While deps.emit is empty the         ||
+    ||   preview_* verbs keep answering Unavailable —      ||
+    ||   honestly, never half-active.                       ||
+    \*-----------------------------------------------------*/
+    struct PreviewDeps
+    {
+        /* Read-only topology for candidate application —
+           the same provider EngineService's layout surface
+           uses. */
+        std::function<std::vector<DeviceSnapshot>()> snapshots;
+        /* Display-off gating: nullptr = display always on. */
+        const PowerLifecycle*  power    = nullptr;
+        /* Transient input snapshots ONLY — preview consumes
+           Snapshot() and NEVER starts/enables a source. */
+        ReactiveInputs*        reactive = nullptr;
+        /* The output clock's epoch: preview samples the SAME
+           scene-time origin the worker uses, so a draft and
+           its committed form animate identically. */
+        std::function<TimePoint()>     scene_epoch;
+        /* Targeted delivery: (session_id, event, coalesce
+           key) -> IpcServer::EmitTo. */
+        std::function<void(uint64_t, const IpcEvent&,
+                           const std::string&)> emit;
+
+        size_t   max_sessions        = 2;
+        uint32_t min_interval_ms     = 33;  /* 30 Hz cap    */
+        size_t   chunk_bytes         = 768u * 1024u;
+        size_t   display_budget_leds = 4096;
+    };
+    void           SetPreviewDeps(PreviewDeps deps);
+
+    /* The owner-loop publish tick — called from
+       EngineService::PollFrameStatus (~20 ms cadence); the
+       per-session 30 Hz cap lives inside. Bounded work per
+       call: one Sample per due session. */
+    void           PollPreviews(TimePoint now = Clock::now());
+
+    /* The "preview" event's session-bound snapshot — always a
+       status record; {active:false} for a session with no
+       preview. */
+    nlohmann::json PreviewStatusJson(uint64_t session_id) const;
+
     /* Job-surface wiring consumed by EngineService (the job
        worker reads staged uploads and stages downloads
        through these). */
@@ -114,6 +166,11 @@ private:
                              const nlohmann::json& body);
     IpcReply HandleJobCancel(uint64_t session_id,
                              const nlohmann::json& body);
+    IpcReply HandlePreviewBegin(uint64_t session_id,
+                                const nlohmann::json& body);
+    IpcReply HandlePreviewUpdate(uint64_t session_id,
+                                 const nlohmann::json& body);
+    IpcReply HandlePreviewEnd(uint64_t session_id);
 
     /* Reader-side caches — handlers must not re-run file work
        per request (plan 3.3). The library cache keys on the
@@ -160,6 +217,30 @@ private:
     mutable uint64_t         doc_cache_seq_ = 1;
     /* Document cache bound: 4 entries x the 4 MiB document cap. */
     static constexpr size_t kMaxDocCacheEntries = 4;
+
+    /* Task 7 preview state — one PreviewSession per IPC
+       session, bounded by PreviewDeps::max_sessions. The map
+       mutex guards membership only; a PreviewSession's own
+       mutex guards its slots (Sample runs under this lock —
+       bounded, single-owner-thread). */
+    struct PreviewSlot
+    {
+        std::unique_ptr<PreviewSession> session;
+        TimePoint    last_emit{};              /* 30 Hz cap    */
+        std::string  paused_reason;            /* "" = running */
+        std::string  reported_error;           /* dedupe       */
+    };
+    PreviewDeps                       preview_deps_;
+    mutable std::mutex                preview_mutex_;
+    std::map<uint64_t, PreviewSlot>   previews_;
+
+    /* Shared tail of begin/update: parse the document body
+       (inline or staged-upload token) into an immutable
+       candidate the session then owns read-only. */
+    IpcReply PreviewCandidate(uint64_t session_id,
+                              const nlohmann::json& body,
+                              std::shared_ptr<WorkspaceCandidate>& out,
+                              uint64_t& draft_revision);
 };
 
 } /* namespace ipc */

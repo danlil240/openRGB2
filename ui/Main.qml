@@ -56,13 +56,25 @@ ApplicationWindow {
                 root.y = uiPrefs.windowY;
             }
         }
+        root.syncViewportVisible();
+    }
+
+    /* studio-import Task 7: the draft preview publishes only
+       while a surface that can show it is on screen — the
+       engine pauses (paused/hidden) when it isn't. */
+    function syncViewportVisible() {
+        if(typeof viewport !== "undefined")
+            viewport.visible =
+                root.currentView === 1 || root.currentView === 2;
     }
     /* Geometry + last view are UI-owned — saved on close and
        on view change (write-through; QSettings batches the
        platform write). */
-    onCurrentViewChanged:
+    onCurrentViewChanged: {
+        syncViewportVisible();
         if(root.prefsUp)
             uiPrefs.lastView = root.currentView;
+    }
     onClosing: function(close) {
         if(root.prefsUp)
             uiPrefs.saveGeometry(root.x, root.y,

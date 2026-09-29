@@ -1652,13 +1652,78 @@ Item {
                     }
                 }
 
-                /*---- Preview ------------------------------------
-                   Same colors as output: frame_status carries
-                   the last transport-accepted frame per
-                   controller (protocol §7). Rate labelled
-                   separately from measured output rates. */
+                /*---- Draft preview (Task 7) ----------------------
+                   The UNSAVED workspace draft, evaluated
+                   engine-side and pushed back on the
+                   session-bound "preview" feed — distinct
+                   from the applied-output strip below:
+                   these colors were NEVER delivered to
+                   hardware. */
                 Card {
-                    title: qsTr("PREVIEW")
+                    title: qsTr("DRAFT PREVIEW — UNSAVED")
+                    objectName: "draftPreviewCard"
+                    width: parent.width - 2 * col.padding
+                    visible: typeof viewport !== "undefined"
+
+                    Column {
+                        width: parent.width
+                        spacing: Theme.spaceM
+
+                        Repeater {
+                            model: (typeof viewport !== "undefined"
+                                    && viewport.previewActive)
+                                   ? (viewport.objects || []) : []
+                            Column {
+                                spacing: Theme.spaceXS
+                                Text {
+                                    text: modelData.id +
+                                          (modelData.kind === "linked"
+                                           ? " (linked)" :
+                                           (!modelData.bound
+                                            ? " (unbound)" : ""))
+                                    color: Theme.textSecondary
+                                    font.pixelSize: Theme.fontSizeSmall
+                                }
+                                FrameStrip {
+                                    objectName: "draftStrip"
+                                    colors: modelData.colors || []
+                                }
+                            }
+                        }
+
+                        Text {
+                            visible: typeof viewport !== "undefined"
+                            text: (typeof viewport !== "undefined"
+                                   ? viewport.label : "")
+                                  + (typeof viewport !== "undefined"
+                                     && viewport.lastError !== ""
+                                     ? " — " + viewport.lastError : "")
+                            color: Theme.textDisabled
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                            width: parent.width
+                        }
+
+                        EmptyState {
+                            objectName: "draftPreviewEmpty"
+                            anchors.horizontalCenter:
+                                parent.horizontalCenter
+                            visible: typeof viewport === "undefined"
+                                     || !viewport.previewActive
+                            title: qsTr("No draft preview")
+                            detail: qsTr("Edits to the shared workspace draft preview here before Save applies them to lights.")
+                        }
+                    }
+                }
+
+                /*---- Applied output --------------------------------
+                   frame_status carries the last TRANSPORT-ACCEPTED
+                   frame per controller (protocol §7) — output that
+                   actually passed the writer, never draft colors.
+                   Rate labelled separately from measured output
+                   rates. */
+                Card {
+                    title: qsTr("APPLIED OUTPUT")
                     width: parent.width - 2 * col.padding
 
                     Column {
@@ -1685,7 +1750,7 @@ Item {
 
                         Text {
                             visible: root.engineUp
-                            text: qsTr("preview ≈ %1 updates/s — engine frame_status event cadence (≤ ~30 Hz), not the output rate")
+                            text: qsTr("applied output ≈ %1 updates/s — engine frame_status event cadence (≤ ~30 Hz), not the output rate")
                                 .arg(root.previewFps.toFixed(1))
                             color: Theme.textDisabled
                             font.pixelSize: Theme.fontSizeSmall
@@ -1701,7 +1766,7 @@ Item {
                                      || bridge.frameStatus.controllers.length === 0
                             title: qsTr("No frame data")
                             detail: root.engineUp
-                                    ? qsTr("The preview fills in when the engine delivers frames.")
+                                    ? qsTr("The applied-output strip fills in when the engine delivers frames.")
                                     : qsTr("Engine not connected — nothing is being driven.")
                         }
                     }

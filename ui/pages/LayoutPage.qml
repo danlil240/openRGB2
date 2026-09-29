@@ -44,6 +44,22 @@ Item {
             || (typeof workspace !== "undefined"
                 && workspace.ready))
 
+    /* studio-import Task 7: the unsaved-draft preview feed —
+       engine-evaluated colors for objects the draft carries,
+       distinctly labelled and never confused with delivered
+       output (frame_status). */
+    readonly property bool previewUp:
+        typeof viewport !== "undefined" && viewport.previewActive
+
+    function draftColorsFor(id) {
+        if(!root.previewUp) return [];
+        const objs = viewport.objects || [];
+        for(let i = 0; i < objs.length; ++i)
+            if(objs[i].id === id)
+                return objs[i].colors || [];
+        return [];
+    }
+
     /* items() / linkPairs() feed the canvas — both recompute
        whenever layoutCtl re-emits itemsChanged (its property
        reads are binding-tracked by QML). */
@@ -272,6 +288,9 @@ Item {
                         width: parent.width
                         height: 430 + Theme.spaceS
                                 + canvasHint.implicitHeight
+                                + (draftPreviewStatus.visible
+                                   ? draftPreviewStatus.implicitHeight
+                                     + Theme.spaceXS : 0)
 
                         Rectangle {
                             id: canvasRect
@@ -439,6 +458,25 @@ Item {
                                                 font.pixelSize: 9
                                             }
                                         }
+                                        /* Task 7: the draft's
+                                           evaluated colors under the
+                                           object — unsaved preview
+                                           data, labelled at the page
+                                           level; never presented as
+                                           delivered output. */
+                                        FrameStrip {
+                                            anchors {
+                                                left: parent.left
+                                                right: parent.right
+                                                bottom: parent.bottom
+                                                margins: 2
+                                            }
+                                            visible: root.previewUp
+                                            colors:
+                                                root.draftColorsFor(
+                                                    d.o.id)
+                                            maxSwatches: 12
+                                        }
                                     }
                                     MouseArea {
                                         anchors.fill: parent
@@ -594,6 +632,22 @@ Item {
                             anchors.topMargin: Theme.spaceS
                             width: parent.width
                             text: qsTr("Top view, meters. Drag objects to arrange — or Tab to an object and nudge with the arrow keys (Shift for fine steps). Edits apply immediately and are undoable (Ctrl+Z / Ctrl+Shift+Z). Linked copies (LINK) share their source's output.")
+                            color: Theme.textDisabled
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                        }
+                        /* Draft-preview status — the honest label
+                           (unsaved / paused / reduced) so colors on
+                           objects are never mistaken for hardware
+                           output. */
+                        Text {
+                            id: draftPreviewStatus
+                            objectName: "draftPreviewStatus"
+                            anchors.top: canvasHint.bottom
+                            anchors.topMargin: Theme.spaceXS
+                            width: parent.width
+                            visible: root.previewUp
+                            text: root.previewUp ? viewport.label : ""
                             color: Theme.textDisabled
                             font.pixelSize: Theme.fontSizeSmall
                             wrapMode: Text.WordWrap

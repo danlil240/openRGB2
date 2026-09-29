@@ -17,6 +17,7 @@
 #include "QaServer.h"
 #include "SceneEditController.h"
 #include "StartupTaskController.h"
+#include "StudioViewportModel.h"
 #include "UiSettings.h"
 #include "WorkspaceController.h"
 #include "studio/EffectEditorController.h"
@@ -247,6 +248,13 @@ int main(int argc, char** argv)
        or undo stack). */
     openrgb2::ui::EffectEditorController effect_ctl(
         &bridge, &workspace_ctl);
+    /* studio-import Task 7: the bounded draft preview — the
+       UNSAVED workspace draft evaluated engine-side and
+       pushed back over the session-bound "preview" event
+       feed. Distinct from frame_status (transport-accepted
+       output): draft colors never claim physical delivery. */
+    openrgb2::ui::StudioViewportModel viewport_model(
+        &bridge, &workspace_ctl);
     /* Normal close flushes the debounced draft record so a
        crash-free exit still preserves unsaved work. */
     QObject::connect(&app, &QCoreApplication::aboutToQuit,
@@ -280,6 +288,8 @@ int main(int argc, char** argv)
                                              &object_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("effectEdit"),
                                              &effect_ctl);
+    engine.rootContext()->setContextProperty(QStringLiteral("viewport"),
+                                             &viewport_model);
     engine.rootContext()->setContextProperty(QStringLiteral("diagCtl"),
                                              &diag_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("uiPrefs"),

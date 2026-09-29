@@ -92,6 +92,8 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceDraftStore.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceController.h
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceController.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/StudioViewportModel.h
+        ${CMAKE_SOURCE_DIR}/src/ui/StudioViewportModel.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/studio/SceneObjectModel.h
         ${CMAKE_SOURCE_DIR}/src/ui/studio/SceneObjectModel.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/studio/PresetListModel.h

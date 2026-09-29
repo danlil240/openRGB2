@@ -269,6 +269,94 @@ void IpcServer::Emit(const IpcEvent& ev)
     }
 }
 
+void IpcServer::EmitTo(uint64_t session_id, const IpcEvent& ev,
+                       const std::string& coalesce_key)
+{
+    Sweep();
+
+    const std::vector<uint8_t> bytes =
+        EncodeMessage(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", ev.kind },
+                { "data", ev.data },
+            }));
+    if(bytes.empty())
+    {
+        return;
+    }
+
+    std::shared_ptr<Session> target;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for(const std::shared_ptr<Session>& s : sessions_)
+        {
+            if(s->id == session_id && !s->dead.load())
+            {
+                target = s;
+                break;
+            }
+        }
+    }
+    if(!target)
+    {
+        return;                    /* session died — honest drop */
+    }
+    {
+        std::lock_guard<std::mutex> lock(target->sub_mutex);
+        if(target->subscribed.find(ev.kind)
+           == target->subscribed.end())
+        {
+            return;                /* not subscribed to this kind */
+        }
+    }
+    /* The coalesce key partitions latest-wins INSIDE the kind:
+       a queued chunk of a superseded sequence is replaced only
+       by the same (sequence,chunk) slot — never by a different
+       chunk, so a partial frame can never assemble across
+       sequences. */
+    const std::string qkey =
+        coalesce_key.empty()
+            ? ev.kind
+            : ev.kind + "\x1f" + coalesce_key;
+
+    bool coalesced = false;
+    bool dropped   = false;
+    {
+        std::lock_guard<std::mutex> lock(target->out_mutex);
+        for(Session::OutMsg& m : target->out_queue)
+        {
+            if(m.kind == qkey)
+            {
+                m.bytes   = bytes;
+                coalesced = true;
+                break;
+            }
+        }
+        if(!coalesced)
+        {
+            if(target->out_queue.size() >= options_.max_queued_events)
+            {
+                target->out_queue.pop_front();
+                dropped = true;
+            }
+            target->out_queue.push_back(
+                Session::OutMsg{ qkey, bytes });
+        }
+    }
+    target->out_cv.notify_one();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(coalesced)
+        {
+            ++stats_.events_dropped;
+        }
+        if(dropped)
+        {
+            ++stats_.events_dropped;
+        }
+    }
+}
+
 void IpcServer::Stop()
 {
     std::vector<std::shared_ptr<Session>> all;
@@ -801,7 +889,7 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
                 bool           have = false;
                 try
                 {
-                    have = service_.SnapshotEvent(k, snap)
+                    have = service_.SnapshotEventFor(s->id, k, snap)
                            && !snap.is_discarded();
                 }
                 catch(...)

@@ -39,6 +39,7 @@ add_library(openrgb2_engine STATIC
     ReactiveInputs.cpp
     SceneLoader.cpp
     StudioScenePreparation.cpp
+    PreviewSession.cpp
     WorkspaceStore.cpp
     WorkspaceService.cpp
     SingleInstance.cpp

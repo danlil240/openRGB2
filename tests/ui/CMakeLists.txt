@@ -113,6 +113,30 @@ set_tests_properties(ui_workspace_test PROPERTIES
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${QT_BIN_DIR}")
 
+# studio-import Task 7: the bounded draft preview surface — a
+# real EngineBridge + WorkspaceController + StudioViewportModel
+# over the in-process pipe against a scripted engine
+# (begin/update/end verbs, chunked sequence reassembly, stale
+# drops, reduced labeling, status pauses, refusal honesty,
+# reconnect re-begin, and the hard separation from the
+# transport-accepted frame_status feed).
+add_executable(ui_studio_preview_test ui_studio_preview_test.cpp)
+target_link_libraries(ui_studio_preview_test PRIVATE
+    openrgb2_ui
+    openrgb2_ipc_wire
+    openrgb2_studio_core)
+target_include_directories(ui_studio_preview_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(ui_studio_preview_test PRIVATE NDEBUG)
+set_target_properties(ui_studio_preview_test PROPERTIES AUTOMOC ON)
+add_test(NAME ui_studio_preview_test COMMAND ui_studio_preview_test)
+set_tests_properties(ui_studio_preview_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
+
 # The QML smoke test additionally needs the module's compiled
 # plugin + Qt Quick runtime on its link line.
 add_executable(qml_smoke_test qml_smoke_test.cpp)

@@ -89,6 +89,18 @@ public:
        including inside a Dispatch handler. */
     void    Emit(const IpcEvent& ev);
 
+    /* Targeted push to ONE session (studio-import Task 7 —
+       the draft-preview feed is per-session state, never a
+       broadcast). Delivers only when that session subscribed
+       to ev.kind. `coalesce_key` partitions the latest-wins
+       replacement INSIDE the kind: two queued messages with
+       the same key replace, different keys coexist — chunked
+       frames pass "frame/<seq>/<chunk>" so one superseded
+       frame never silently eats a newer chunk. Same bounded
+       queue + counted drops as Emit. */
+    void    EmitTo(uint64_t session_id, const IpcEvent& ev,
+                   const std::string& coalesce_key = "");
+
     void    Stop();
     bool    Stopped() const;
 

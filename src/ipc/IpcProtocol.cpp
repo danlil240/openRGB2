@@ -71,6 +71,7 @@ const std::vector<std::string>& EventKinds()
         event_kind::kFrameStatus,
         event_kind::kReactive,
         event_kind::kWorkspace,
+        event_kind::kPreview,
     };
     return kinds;
 }

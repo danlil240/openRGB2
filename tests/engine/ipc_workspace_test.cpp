@@ -26,8 +26,9 @@
 //   - managed-workspace gate: SET_SCENE and layout mutations
 //     are refused with "workspace_required" once a workspace
 //     is active; GET_SCENE, identify, telemetry stay
-//   - preview verbs answer Unavailable honestly until the
-//     Task-7 preview engine lands
+//   - preview verbs (Task 7 wired them for real) answer with
+//     honest pre-session errors — the full bounded-preview
+//     surface lives in preview_session_test
 
 #include "IpcProtocol.h"
 #include "IpcServer.h"
@@ -1088,18 +1089,26 @@ int main()
         CHECK(cs.value("state", "") == "cancelled");
     }
 
-    /*---- preview verbs: stable surface, honest Unavailable ---*/
+    /*---- preview verbs: honest errors before any session ---*/
     {
+        /* Task 7 replaced the Unavailable stubs with the real
+           bounded draft preview (preview_session_test covers
+           the full surface). Here we only pin the honest
+           pre-session failures: begin needs a document or a
+           staged token, update needs an existing session, end
+           is idempotent {active:false}. */
         Rig rig(g_tmp / "preview");
         rig.Start();
         TestClient c;
         Welcome(c, *rig.server);
-        for(const char* v : { "preview_begin", "preview_update",
-                              "preview_end" })
-        {
-            WsCallErr(c, seq, json::object({{ "verb", v }}),
-                      ErrCode::Unavailable);
-        }
+        WsCallErr(c, seq, json::object({{ "verb",
+            "preview_begin" }}), ErrCode::BadRequest);
+        WsCallErr(c, seq, json::object({{ "verb",
+            "preview_update" }}), ErrCode::BadRequest,
+            "no_preview");
+        const json end = WsCall(c, seq, json::object({
+            { "verb", "preview_end" } }));
+        CHECK(end.value("active", true) == false);
     }
 
     /*---- validate verb ----------------------------------------*/

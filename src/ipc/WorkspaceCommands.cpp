@@ -22,6 +22,7 @@
 #include "WorkspaceCommands.h"
 
 #include "config/StudioConfig.h"       /* studio::ToJson(doc)  */
+#include "config/WorkspaceCandidate.h" /* ParseWorkspaceCandidate */
 #include "presets/PresetRegistry.h"
 #include "presets/EffectRegistry.h"
 
@@ -914,16 +915,11 @@ IpcReply WorkspaceCommands::Handle(uint64_t session_id,
     if(verb == "job_status") return HandleJobStatus(session_id, body);
     if(verb == "job_cancel") return HandleJobCancel(session_id, body);
 
-    /* The preview surface is stable NOW; the Task-7 preview
-       engine is what answers Unavailable honestly. */
-    if(verb == "preview_begin" || verb == "preview_update" ||
-       verb == "preview_end")
-    {
-        return FailDetail(ErrCode::Unavailable,
-            "the preview engine lands with Task 7 — the verb "
-            "surface is stable",
-            "unavailable");
-    }
+    /* Task 7 draft preview — session-bound, bounded, and
+       never a hardware path. */
+    if(verb == "preview_begin")  return HandlePreviewBegin(session_id, body);
+    if(verb == "preview_update") return HandlePreviewUpdate(session_id, body);
+    if(verb == "preview_end")    return HandlePreviewEnd(session_id);
 
     return FailDetail(ErrCode::BadRequest,
                       "unknown workspace verb '" + verb + "'",
@@ -935,12 +931,17 @@ void WorkspaceCommands::OnSessionEnd(uint64_t session_id)
     /* Queued jobs + staged transfers of the dead session are
        cancelled — a commit already past the durable marker is
        NEVER rolled back; the reconnect reconciles by
-       revision/content hash. */
+       revision/content hash. Its draft preview dies too (plan
+       3.4: "release on disconnect"). */
     if(service_)
     {
         service_->CancelSession(session_id);
     }
     transfers_.CancelSession(session_id);
+    {
+        std::lock_guard<std::mutex> lock(preview_mutex_);
+        previews_.erase(session_id);
+    }
 }
 
 void WorkspaceCommands::SweepExpired()
@@ -971,6 +972,503 @@ bool WorkspaceCommands::StageDownload(uint64_t session_id,
     }
     token = r.transfer_id;
     return true;
+}
+
+/*---------------------------------------------------------*\
+|| Task 7 — bounded draft preview                          ||
+||                                                          ||
+||   preview_begin/update/end manage ONE PreviewSession    ||
+||   per IPC session (global bound PreviewDeps::max_       ||
+||   sessions). Frames publish ONLY to the owning session  ||
+||   through deps.emit -> IpcServer::EmitTo, chunked below ||
+||   the body cap, latest-wins per (sequence,chunk). No    ||
+||   sink, no SDK, no capture: the engine-side object is   ||
+||   pure evaluation over the shared prepared scene.       ||
+\*---------------------------------------------------------*/
+
+void WorkspaceCommands::SetPreviewDeps(PreviewDeps deps)
+{
+    std::lock_guard<std::mutex> lock(preview_mutex_);
+    preview_deps_ = std::move(deps);
+}
+
+/* The "preview" event's initial snapshot for a subscribing
+   session — a status record, so a UI that subscribes BEFORE
+   beginning still learns the honest inactive state. */
+nlohmann::json WorkspaceCommands::PreviewStatusJson(
+    uint64_t session_id) const
+{
+    nlohmann::json out = nlohmann::json::object({
+        { "type",   "status" },
+        { "active", false    },
+        { "paused", false    },
+    });
+    std::lock_guard<std::mutex> lock(preview_mutex_);
+    const auto it = previews_.find(session_id);
+    if(it != previews_.end() && it->second.session)
+    {
+        out["active"]         = it->second.session->Active();
+        out["paused"]         = !it->second.paused_reason.empty();
+        if(!it->second.paused_reason.empty())
+        {
+            out["reason"] = it->second.paused_reason;
+        }
+        out["draft_revision"] = it->second.session->DraftRevision();
+        out["sequence"]       = it->second.session->Sequence();
+        const std::string err = it->second.session->Error();
+        if(!err.empty())
+        {
+            out["error"] = err;
+        }
+    }
+    return out;
+}
+
+/* Parse the document half of begin/update — inline
+   {document} or a session-bound staged upload token
+   {staged}. The candidate is immutable; the session owns it
+   read-only. */
+IpcReply WorkspaceCommands::PreviewCandidate(
+    uint64_t session_id, const nlohmann::json& body,
+    std::shared_ptr<WorkspaceCandidate>& out,
+    uint64_t& draft_revision)
+{
+    nlohmann::json doc;
+    const auto dit = body.find("document");
+    const auto sit = body.find("staged");
+    if(dit != body.end())
+    {
+        doc = *dit;
+    }
+    else if(sit != body.end())
+    {
+        if(!sit->is_string())
+        {
+            return FailDetail(ErrCode::BadRequest,
+                              "staged must be a token string",
+                              "bad_request");
+        }
+        /* Session-bound consumption, same rule the job verbs
+           enforce. */
+        if(!transfers_.StagedFor(session_id,
+                                 sit->get<std::string>()))
+        {
+            return FailDetail(ErrCode::BadRequest,
+                "staged token is not consumable by this session",
+                "bad_request");
+        }
+        std::string bytes, err;
+        if(!transfers_.ReadStaged(sit->get<std::string>(),
+                                  bytes, err))
+        {
+            return FailDetail(ErrCode::BadRequest,
+                              err.empty() ? "staged token unreadable"
+                                          : err,
+                              "bad_request");
+        }
+        doc = nlohmann::json::parse(bytes, nullptr, false);
+        if(doc.is_discarded())
+        {
+            return FailDetail(ErrCode::BadRequest,
+                              "staged document is not valid JSON",
+                              "invalid_document");
+        }
+    }
+    else
+    {
+        return FailDetail(ErrCode::BadRequest,
+            "preview requires {document} or {staged}",
+            "bad_request");
+    }
+
+    draft_revision = 0;
+    if(body.contains("draft_revision") &&
+       !BodyU64(body, "draft_revision", draft_revision))
+    {
+        return FailDetail(ErrCode::BadRequest,
+            "draft_revision must be an unsigned integer",
+            "bad_request");
+    }
+
+    /* The ONE candidate path — identical to validate/commit:
+       the same registry snapshots, migration, and resolve
+       feed the draft the workspace would commit. */
+    auto cand = std::make_shared<WorkspaceCandidate>();
+    std::vector<std::string> errors, warnings;
+    if(!ParseWorkspaceCandidate(doc, *CachedDevices(),
+                                *CachedEffects(), *cand,
+                                errors, warnings))
+    {
+        return FailDetail(ErrCode::BadRequest,
+            errors.empty() ? "document failed to parse"
+                           : errors.front(),
+            "invalid_document");
+    }
+    out = std::move(cand);
+    return IpcReply::Success(MsgType::Ok, nlohmann::json::object());
+}
+
+IpcReply WorkspaceCommands::HandlePreviewBegin(
+    uint64_t session_id, const nlohmann::json& body)
+{
+    if(!preview_deps_.emit)
+    {
+        /* Unwired preview engine — the stable stub answer. */
+        return FailDetail(ErrCode::Unavailable,
+            "the preview engine is not wired on this server",
+            "unavailable");
+    }
+    std::shared_ptr<WorkspaceCandidate> cand;
+    uint64_t rev = 0;
+    const IpcReply parsed =
+        PreviewCandidate(session_id, body, cand, rev);
+    if(parsed.code != ErrCode::Ok)
+    {
+        return parsed;
+    }
+
+    std::lock_guard<std::mutex> lock(preview_mutex_);
+    auto it = previews_.find(session_id);
+    if(it == previews_.end())
+    {
+        /* One preview per session; a global bound across
+           sessions (plan 3.4). A re-begin replaces the
+           session's OWN preview and never consumes a second
+           slot. */
+        if(previews_.size() >= preview_deps_.max_sessions)
+        {
+            return FailDetail(ErrCode::Busy,
+                "the concurrent preview limit is reached",
+                "preview_limit");
+        }
+        PreviewSession::Options popts;
+        popts.display_budget_leds =
+            preview_deps_.display_budget_leds;
+        PreviewSession::Deps pdeps;
+        pdeps.snapshots = preview_deps_.snapshots;
+        auto slot = std::make_unique<PreviewSession>(
+            std::move(pdeps), popts);
+        it = previews_.emplace(session_id,
+                               PreviewSlot{ std::move(slot) })
+                 .first;
+    }
+    std::string err;
+    if(!it->second.session->SetCandidate(std::move(cand), rev,
+                                         err))
+    {
+        return FailDetail(ErrCode::BadRequest, err,
+                          "invalid_document");
+    }
+    if(body.contains("visible"))
+    {
+        if(!body["visible"].is_boolean())
+        {
+            return FailDetail(ErrCode::BadRequest,
+                              "visible must be a boolean",
+                              "bad_request");
+        }
+        it->second.session->SetVisible(
+            body["visible"].get<bool>());
+    }
+    it->second.paused_reason.clear();
+    it->second.reported_error.clear();
+    it->second.last_emit = TimePoint{};
+
+    /* Honest status push — the client lands on real state. */
+    preview_deps_.emit(session_id,
+        IpcEvent{ event_kind::kPreview,
+                  nlohmann::json::object({
+                      { "type",   "status" },
+                      { "active", true     },
+                      { "paused", false    },
+                      { "draft_revision", rev },
+                  }) },
+        "status");
+    return IpcReply::Success(MsgType::Ok, nlohmann::json::object({
+        { "active",         true },
+        { "draft_revision", rev  },
+        { "rate_hz",        1000 / preview_deps_.min_interval_ms },
+    }));
+}
+
+IpcReply WorkspaceCommands::HandlePreviewUpdate(
+    uint64_t session_id, const nlohmann::json& body)
+{
+    if(!preview_deps_.emit)
+    {
+        return FailDetail(ErrCode::Unavailable,
+            "the preview engine is not wired on this server",
+            "unavailable");
+    }
+    std::lock_guard<std::mutex> lock(preview_mutex_);
+    auto it = previews_.find(session_id);
+    if(it == previews_.end())
+    {
+        return FailDetail(ErrCode::BadRequest,
+            "no preview session is active — begin first",
+            "no_preview");
+    }
+    if(body.contains("document") || body.contains("staged"))
+    {
+        std::shared_ptr<WorkspaceCandidate> cand;
+        uint64_t rev = it->second.session->DraftRevision();
+        const IpcReply parsed =
+            PreviewCandidate(session_id, body, cand, rev);
+        if(parsed.code != ErrCode::Ok)
+        {
+            return parsed;
+        }
+        std::string err;
+        /* Latest-wins: the newer draft replaces the held
+           candidate outright — nothing queues. */
+        if(!it->second.session->SetCandidate(std::move(cand),
+                                             rev, err))
+        {
+            return FailDetail(ErrCode::BadRequest, err,
+                              "invalid_document");
+        }
+        it->second.reported_error.clear();
+    }
+    if(body.contains("visible"))
+    {
+        if(!body["visible"].is_boolean())
+        {
+            return FailDetail(ErrCode::BadRequest,
+                              "visible must be a boolean",
+                              "bad_request");
+        }
+        it->second.session->SetVisible(
+            body["visible"].get<bool>());
+    }
+    return IpcReply::Success(MsgType::Ok, nlohmann::json::object({
+        { "active",         true },
+        { "draft_revision",
+          it->second.session->DraftRevision() },
+    }));
+}
+
+IpcReply WorkspaceCommands::HandlePreviewEnd(uint64_t session_id)
+{
+    bool had = false;
+    {
+        std::lock_guard<std::mutex> lock(preview_mutex_);
+        had = previews_.erase(session_id) > 0;
+    }
+    if(had && preview_deps_.emit)
+    {
+        preview_deps_.emit(session_id,
+            IpcEvent{ event_kind::kPreview,
+                      nlohmann::json::object({
+                          { "type",   "status" },
+                          { "active", false    },
+                          { "paused", false    },
+                      }) },
+            "status");
+    }
+    /* Idempotent: ending a non-existent preview is still a
+       truthful {active:false}. */
+    return IpcReply::Success(MsgType::Ok,
+        nlohmann::json::object({{ "active", false }}));
+}
+
+/* Object -> wire form. Geometry rides every chunk so a frame
+   needs no second source of truth to paint. */
+static nlohmann::json PreviewObjectJson(
+    const PreviewObjectColors& o)
+{
+    nlohmann::json j = nlohmann::json::object({
+        { "id",       o.object_id  },
+        { "kind",     o.kind       },
+        { "x",  o.position.x }, { "y",  o.position.y },
+        { "z",  o.position.z },
+        { "rx", o.rotation_deg.x }, { "ry", o.rotation_deg.y },
+        { "rz", o.rotation_deg.z },
+        { "w",  o.size_m.x }, { "h",  o.size_m.y },
+        { "d",  o.size_m.z },
+        { "bound",         o.bound    },
+        { "verified",      o.verified },
+        { "emitter_total", o.emitter_total },
+    });
+    if(!o.parent_id.empty())
+    {
+        j["parent"] = o.parent_id;
+    }
+    nlohmann::json colors = nlohmann::json::array();
+    for(const RgbColor& c : o.colors)
+    {
+        char hex[8];
+        std::snprintf(hex, sizeof(hex), "#%02X%02X%02X",
+                      c.r, c.g, c.b);
+        colors.push_back(hex);
+    }
+    j["colors"] = std::move(colors);
+    if(!o.indices.empty())
+    {
+        /* Reduced frames carry the sampled indices — a sparse
+           array can never pass for a complete one. */
+        j["indices"] = o.indices;
+    }
+    return j;
+}
+
+void WorkspaceCommands::PollPreviews(TimePoint now)
+{
+    if(!preview_deps_.emit)
+    {
+        return;
+    }
+    /* Display-off pauses every preview without ending the
+       session (plan 3.4) — evaluation and publishing stop;
+       the state survives for the display's return. */
+    const bool display_on =
+        preview_deps_.power == nullptr ||
+        preview_deps_.power->DisplayOn();
+    const TimePoint epoch =
+        preview_deps_.scene_epoch
+            ? preview_deps_.scene_epoch() : TimePoint{};
+    const double t =
+        std::chrono::duration<double>(now - epoch).count();
+
+    std::lock_guard<std::mutex> lock(preview_mutex_);
+    for(auto& kv : previews_)
+    {
+        const uint64_t sid = kv.first;
+        PreviewSlot&   sl  = kv.second;
+        PreviewSession& ps = *sl.session;
+
+        /* Hidden view and display-off are the two pause
+           reasons — a transition publishes ONE status event,
+           never a stream. */
+        std::string reason;
+        if(!ps.Visible())
+        {
+            reason = "hidden";
+        }
+        else if(!display_on)
+        {
+            reason = "display_off";
+        }
+        if(reason != sl.paused_reason)
+        {
+            sl.paused_reason = reason;
+            nlohmann::json st = nlohmann::json::object({
+                { "type",           "status"               },
+                { "active",         ps.Active()            },
+                { "paused",         !reason.empty()        },
+                { "draft_revision", ps.DraftRevision()     },
+                { "sequence",       ps.Sequence()          },
+            });
+            if(!reason.empty())
+            {
+                st["reason"] = reason;
+            }
+            preview_deps_.emit(sid,
+                IpcEvent{ event_kind::kPreview, std::move(st) },
+                "status");
+        }
+        if(!reason.empty())
+        {
+            continue;
+        }
+
+        /* 30 Hz publish cap — the tick may arrive faster;
+           due-ness, not the loop, decides. */
+        if(sl.last_emit != TimePoint{})
+        {
+            const auto since =
+                std::chrono::duration_cast<
+                    std::chrono::milliseconds>(
+                        now - sl.last_emit).count();
+            if(since < preview_deps_.min_interval_ms)
+            {
+                continue;
+            }
+        }
+
+        /* Transient input snapshot — consumed read-only;
+           preview NEVER starts a capture source. */
+        std::shared_ptr<const studio::InputState> input;
+        if(preview_deps_.reactive)
+        {
+            input = preview_deps_.reactive->Snapshot();
+        }
+
+        PreviewFrame frame;
+        if(!ps.Sample(t, input.get(), frame))
+        {
+            const std::string err = ps.Error();
+            if(!err.empty() && err != sl.reported_error)
+            {
+                /* A malformed draft says so ONCE — not per
+                   tick. */
+                sl.reported_error = err;
+                preview_deps_.emit(sid,
+                    IpcEvent{ event_kind::kPreview,
+                        nlohmann::json::object({
+                            { "type",   "status" },
+                            { "active", true     },
+                            { "paused", false    },
+                            { "error",  err      },
+                            { "draft_revision",
+                              ps.DraftRevision() },
+                        }) },
+                    "status");
+            }
+            continue;
+        }
+        sl.reported_error.clear();
+        sl.last_emit = now;
+
+        /* Chunked publish: object records accumulate while the
+           serialized budget lasts; every chunk carries the
+           frame's completeness metadata so the client can
+           reassemble strictly by sequence and never present a
+           partial set as complete. */
+        const size_t budget = preview_deps_.chunk_bytes;
+        nlohmann::json objects = nlohmann::json::array();
+        size_t bytes = 2;
+        int    chunk = 0;
+        /* Two passes: count chunks first so every chunk knows
+           `chunks` — a single-object overflow still emits (the
+           1 MiB envelope bound applies at encode, honestly). */
+        std::vector<nlohmann::json> chunks;
+        for(const PreviewObjectColors& o : frame.objects)
+        {
+            nlohmann::json jo = PreviewObjectJson(o);
+            const size_t n = jo.dump().size() + 1;
+            if(bytes + n > budget && !objects.empty())
+            {
+                chunks.push_back(std::move(objects));
+                objects = nlohmann::json::array();
+                bytes = 2;
+            }
+            objects.push_back(std::move(jo));
+            bytes += n;
+        }
+        chunks.push_back(std::move(objects));
+        const int total = (int)chunks.size();
+        for(nlohmann::json& objs : chunks)
+        {
+            nlohmann::json data = nlohmann::json::object({
+                { "type",           "frame"              },
+                { "sequence",       frame.sequence       },
+                { "draft_revision", frame.draft_revision },
+                { "scene_time_s",   frame.scene_time_s   },
+                { "chunk",          chunk                },
+                { "chunks",         total                },
+                { "objects",        std::move(objs)      },
+                { "reduced",        frame.reduced        },
+                { "emitter_total",  frame.emitter_total  },
+                { "emitter_sent",   frame.emitter_sent   },
+                { "object_total",   frame.object_total   },
+            });
+            preview_deps_.emit(sid,
+                IpcEvent{ event_kind::kPreview, std::move(data) },
+                "frame/" + std::to_string(frame.sequence)
+                       + "/" + std::to_string(chunk));
+            ++chunk;
+        }
+    }
 }
 
 }} // namespace openrgb2::ipc
