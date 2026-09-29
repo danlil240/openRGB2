@@ -146,7 +146,7 @@ Request → reply. `request_id` echoes.
 | 0x0109 | UNSUBSCRIBE | `{}` | OK `{subscribed:[]}` |
 | 0x010A | PING | `{}` | PONG `{}` |
 | 0x010B | GET_PRESETS | `{}` | PRESETS |
-| 0x010C | QUIT | `{}` | OK `{shutting_down:true, ordered:true}` / ERROR |
+| 0x010C | QUIT | `{}` or `{stop_backend:true}` | OK `{shutting_down:true, ordered:true, stop_backend:bool, backend?}` / ERROR |
 | 0x010D | REACTIVE_COMMAND | `{verb, ...args}` | OK `<reactive body>` / ERROR |
 | 0x0300 | DIAG_GET | `{}` | DIAGNOSTICS (valid on both pipes) |
 
@@ -280,8 +280,17 @@ decision (plan section 4).
 ordered, bounded shutdown (the power monitor, IPC intake, scene worker,
 delivery lanes, and SDK transport stop in order; the reply is prepared
 before the hook fires). `unavailable` when the process has no shutdown
-hook wired. Owning the backend's process is the caller's concern — the
-engine never spawns it.
+hook wired. Owning the backend's process is normally the caller's
+concern — the engine never spawns it — **except** the opt-in
+`stop_backend` handoff: when the request body carries
+`{"stop_backend": true}`, the engine's ordered teardown gains a final
+*backend-handoff* step that gracefully closes the managed backend
+(WM_CLOSE to its top-level windows — the same verified-own, never-kill
+standard as `stop-openrgb2.ps1`). Only a process whose image path
+equals the declared `--backend-exe` EXACTLY is ever signaled; the OK
+reply reports the decision honestly in `backend` (`closing`,
+`not_configured`, `not_found`, `unverifiable`) — `closing` is a
+decision at request time, not a guarantee the process exited.
 
 **POWER** (STATE/DIAGNOSTICS field, `null` when unwired) —
 `{display_on, suspended, output_paused, power_hold, restore_pending,

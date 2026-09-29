@@ -85,6 +85,7 @@ struct Engine
     int            revision         = 3;
     int            scene_saves      = 0;
     int            quits            = 0;
+    int            stop_backend_seen = -1;
     bool           fail_set_scene   = false;
     bool           swallow_set_scene = false;
     std::vector<MsgType> seen;
@@ -228,10 +229,14 @@ static bool ServeOnce(Engine& e, uint32_t wait_ms = 15)
         break;
     case MsgType::Quit:
         ++e.quits;
+        e.stop_backend_seen =
+            body.value("stop_backend", false) ? 1 : 0;
         e.srv.SendMsg(MsgType::Ok, m.request_id,
             nlohmann::json::object({
                 { "shutting_down", true },
                 { "ordered",       true },
+                { "stop_backend",
+                    e.stop_backend_seen == 1 },
             }));
         break;
     case MsgType::Ping:
@@ -340,7 +345,7 @@ int main(int argc, char** argv)
                     reply_body = body;
                 }
             });
-        reply_id = bridge.quitEngine();
+        reply_id = bridge.quitEngine(false);
         CHECK(reply_id > 0);
         CHECK(PumpUntil(e, [&] { return e.quits == 1; }));
         CHECK(Counted(e, MsgType::Quit));
@@ -349,10 +354,11 @@ int main(int argc, char** argv)
         }));
         CHECK(reply_body.value("ordered").toBool());
         CHECK(reply_body.value("shutting_down").toBool());
+        CHECK(e.stop_backend_seen == 0);
 
         /* A QUIT that the engine refuses still surfaces
            through the same correlator as an ERROR. */
-        reply_id   = bridge.quitEngine();
+        reply_id   = bridge.quitEngine(true);
         reply_type.clear();
         reply_body = QVariantMap();
         /* ServeOnce auto-OKs QUIT — force the error by

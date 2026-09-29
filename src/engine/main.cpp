@@ -43,7 +43,8 @@ void Usage(const char* argv0)
         "usage: %s [--scene <file>] [--effects-dir <dir>]\n"
         "          [--devices-dir <dir>] [--state <file>]\n"
         "          [--sdk [host:port]] [--ipc | --no-ipc]\n"
-        "          [--backend-config <dir>] [--no-scan]\n"
+        "          [--backend-config <dir>] [--backend-exe <path>]\n"
+        "          [--no-scan]\n"
         "          [--no-instance-guard]\n"
         "\n"
         "  Runs the lighting engine until SIGINT/SIGTERM. No UI is\n"
@@ -66,7 +67,13 @@ void Usage(const char* argv0)
         "  backend. --backend-config points at that private config\n"
         "  dir so startup can verify the legacy Studio/Effects/\n"
         "  HardwareSync scene producers are not enabled there\n"
-        "  (sole-scene-writer check, report only). Startup also\n"
+        "  (sole-scene-writer check, report only). --backend-exe\n"
+        "  declares the managed backend's image path so an\n"
+        "  explicit QUIT {stop_backend:true} can close ONLY a\n"
+        "  process whose image matches it exactly (graceful\n"
+        "  WM_CLOSE, same verified-own standard as\n"
+        "  scripts\\stop-openrgb2.ps1). Without it the handoff\n"
+        "  never signals anything. Startup also\n"
         "  scans for competing RGB owners (other OpenRGB\n"
         "  instances, L-Connect, GCC/RGB Fusion, Synapse, G Hub,\n"
         "  iCUE, SignalRGB) and reports them -- never kills\n"
@@ -115,6 +122,10 @@ int main(int argc, char** argv)
         else if((arg == "--backend-config") && i + 1 < argc)
         {
             opts.backend_config_dir = argv[++i];
+        }
+        else if((arg == "--backend-exe") && i + 1 < argc)
+        {
+            opts.backend_exe = argv[++i];
         }
         else if(arg == "--sdk")
         {

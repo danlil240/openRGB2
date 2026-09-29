@@ -477,20 +477,69 @@ struct FakeOwner
 ||| Main                                                   ||
 \*---------------------------------------------------------*/
 
+#ifdef _WIN32
+/* The fixture processes' only window: an invisible top-level
+   window that honors WM_CLOSE — the same graceful route the
+   quit-all backend handoff uses on the real tray/headless
+   backend (taskkill-without-/F semantics). */
+static LRESULT CALLBACK SleeperWndProc(HWND h, UINT m,
+                                       WPARAM w, LPARAM l)
+{
+    if(m == WM_CLOSE)
+    {
+        DestroyWindow(h);
+        return 0;
+    }
+    if(m == WM_DESTROY)
+    {
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcA(h, m, w, l);
+}
+
+static int SleeperMain(int secs)
+{
+    WNDCLASSA wc{};
+    wc.lpfnWndProc   = SleeperWndProc;
+    wc.lpszClassName = "openrgb2-lifecycle-sleeper";
+    RegisterClassA(&wc);
+    CreateWindowExA(0, wc.lpszClassName, "sleeper",
+                    WS_OVERLAPPED, 0, 0, 0, 0,
+                    nullptr, nullptr, nullptr, nullptr);
+    const DWORD deadline = GetTickCount() + (DWORD)secs * 1000u;
+    MSG msg;
+    while(GetTickCount() < deadline)
+    {
+        while(PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE))
+        {
+            if(msg.message == WM_QUIT)
+            {
+                return 0;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        Sleep(20);
+    }
+    return 0;
+}
+#endif
+
 static int TestBody(const std::filesystem::path& self_exe);
 int main(int argc, char** argv)
 {
 #ifdef _WIN32
-    /* Competing-owner fixture mode: launched as a file named
-       "OpenRGB.exe"; just sleeps so the ownership scan has a
-       real process to classify. */
+    /* Competing-owner/managed-backend fixture mode: launched as
+       a renamed copy of this binary; sleeps on a message loop
+       so the ownership scan sees a real process AND a quit-all
+       WM_CLOSE can actually close it. */
     for(int i = 1; i < argc; ++i)
     {
         if(std::strcmp(argv[i], "--sleeper") == 0)
         {
             const int secs = i + 1 < argc ? atoi(argv[i + 1]) : 60;
-            Sleep((DWORD)secs * 1000u);
-            return 0;
+            return SleeperMain(secs);
         }
     }
     try
@@ -537,6 +586,18 @@ static int TestBody(const std::filesystem::path& self_exe)
     fprintf(stderr, "competing owner fixture: OpenRGB.exe pid %lu\n",
             (unsigned long)competitor_pid);
 
+    /* The MANAGED backend fixture: a second sleeper copy under
+       backend\ — its image path is exactly what the launcher
+       would pass as --backend-exe, so the quit-all handoff may
+       close it while the foreign competitor above must survive. */
+    std::filesystem::create_directories(tmpdir / "backend", ec);
+    FakeOwner backend_fixture;
+    CHECKV(backend_fixture.Spawn(self_exe, tmpdir / "backend"),
+           "managed-backend fixture failed to spawn");
+    fprintf(stderr,
+            "managed backend fixture: backend\\OpenRGB.exe pid %lu\n",
+            (unsigned long)backend_fixture.pid);
+
     /*------------------------------------------------*/
     /* Row: cold start, backend DOWN first              */
     /*------------------------------------------------*/
@@ -563,6 +624,10 @@ static int TestBody(const std::filesystem::path& self_exe)
     opts.state_path         =
         (tmpdir / "engine-state.json").generic_string();
     opts.backend_config_dir = "";
+    /* What the launcher would pass: quit-all may close ONLY a
+       process whose image equals this path. */
+    opts.backend_exe        =
+        (tmpdir / "backend" / "OpenRGB.exe").generic_string();
     /* An unused port keeps the ownership scan's listener
        probe honest on rigs where a REAL backend is already
        serving 127.0.0.1:6744 — the fake stream injects the
@@ -1030,17 +1095,56 @@ static int TestBody(const std::filesystem::path& self_exe)
     }
 
     /*------------------------------------------------*/
-    /* Teardown — the competing owner outlived us       */
+    /* Teardown — real wire QUIT with the backend     */
+    /* handoff: the verified managed backend must     */
+    /* exit on WM_CLOSE; the foreign competitor must  */
+    /* NOT be signaled.                               */
     /*------------------------------------------------*/
-    CHECKV(competitor.Alive(),
-           "competing owner died during the run — the engine "
-           "must never kill it");
-    competitor.Kill();
+    {
+        PipeClient quit_ui;
+        CHECKV(quit_ui.Connect(cmd_pipe),
+               "quit-all client could not connect");
+        CHECKV(quit_ui.Hello(), "quit-all client HELLO failed");
+        CHECKV(quit_ui.Send(ipc::MsgType::Quit, 99,
+                   json::object({{ "stop_backend", true }})),
+               "QUIT send failed");
+        ipc::Message qm;
+        CHECKV(quit_ui.Recv(qm, 3000) && qm.type == ipc::MsgType::Ok,
+               "QUIT reply was not OK");
+        const json qb = qm.Body();
+        CHECKV(qb.value("stop_backend", false),
+               "reply lost the stop_backend echo");
+        CHECKV(qb.value("backend", std::string()) == "closing",
+               "managed backend not resolved for handoff: %s",
+               qb.dump().c_str());
+    }
 
-    host.RequestStop();
+    /* The hook only armed the handoff — the ordered teardown
+       runs here, exactly like main()'s Stop() path. */
     const OrderlyShutdown::Result& sd = host.Stop();
     CHECKV(sd.all_within_bound, "stop overrun");
     CHECK(client->State() == ConnectionState::Disconnected);
+
+    /* backend-handoff step ran and the fixture took WM_CLOSE. */
+    CHECKV(WaitForSingleObject(backend_fixture.proc, 15000) ==
+           WAIT_OBJECT_0,
+           "managed backend fixture did not exit on quit-all");
+    backend_fixture.Kill();          /* releases the handle */
+    {
+        bool step_ran = false;
+        for(const OrderlyShutdown::StepResult& s : sd.steps)
+        {
+            step_ran |= s.name == "backend-handoff";
+        }
+        CHECKV(step_ran, "backend-handoff step never ran");
+    }
+
+    /* The foreign OpenRGB.exe lives at a DIFFERENT path than
+       --backend-exe — it must never be signaled. */
+    CHECKV(competitor.Alive(),
+           "foreign OpenRGB.exe was signaled — only the verified "
+           "managed backend may close");
+    competitor.Kill();
 
     fprintf(stderr, "e2e lifecycle matrix OK\n");
     {

@@ -556,7 +556,11 @@ int EngineBridge::getPresets()     { return Issue(ipc::MsgType::GetPresets, nloh
 int EngineBridge::getDiagnostics() { return Issue(ipc::MsgType::DiagGet, nlohmann::json::object()); }
 int EngineBridge::ping()           { return Issue(ipc::MsgType::Ping, nlohmann::json::object()); }
 int EngineBridge::unsubscribe()    { return Issue(ipc::MsgType::Unsubscribe, nlohmann::json::object()); }
-int EngineBridge::quitEngine()     { return Issue(ipc::MsgType::Quit, nlohmann::json::object()); }
+int EngineBridge::quitEngine(bool stopBackend)
+{
+    return Issue(ipc::MsgType::Quit, nlohmann::json::object({
+        { "stop_backend", stopBackend } }));
+}
 
 int EngineBridge::resubscribe()
 {

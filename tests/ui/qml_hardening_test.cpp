@@ -85,6 +85,7 @@ struct Server
     int            revision    = 1;
     int            scene_saves = 0;
     int            quits       = 0;
+    int            stop_backend_seen = -1;
     nlohmann::json last_scene_body;
 };
 
@@ -194,10 +195,15 @@ static bool ServeOnce(Server& s, uint32_t wait_ms = 15)
         break;
     case MsgType::Quit:
         ++s.quits;
+        s.stop_backend_seen =
+            body.value("stop_backend", false) ? 1 : 0;
         s.srv.SendMsg(MsgType::Ok, m.request_id,
             nlohmann::json::object({
                 { "shutting_down", true },
                 { "ordered",       true },
+                { "stop_backend",
+                    s.stop_backend_seen == 1 },
+                { "backend", "closing" },
             }));
         break;
     default:
@@ -272,6 +278,7 @@ static double Contrast(const QColor& a, const QColor& b)
 
 int main(int argc, char** argv)
 {
+    setvbuf(stdout, nullptr, _IONBF, 0);   /* TEMP debug */
     qputenv("QT_QPA_PLATFORM", "offscreen");
     /* QT_SCALE_FACTOR comes from the CTest entry's env —
        reported here so the log shows which pass ran. */
@@ -638,6 +645,9 @@ int main(int argc, char** argv)
             QMetaObject::invokeMethod(confirmBtn, "clicked",
                                       Qt::DirectConnection);
             CHECK(PumpBoth(s, [&] { return s.quits == 1; }));
+            /* Quit all is the full-stack teardown — the page
+               must ask for the managed-backend handoff too. */
+            CHECK(s.stop_backend_seen == 1);
             /* the OK's ordered-shutdown reply closes the
                shell — the page handled it, not a timer. */
             CHECK(PumpBoth(s, [&] {

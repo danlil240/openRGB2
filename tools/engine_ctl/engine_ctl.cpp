@@ -51,7 +51,7 @@ void Usage(const char* argv0)
         "\n"
         "IPC commands (command pipe, default %s):\n"
         "  ping | state | scene | snapshots | playback | stats\n"
-        "  presets | quit\n"
+        "  presets | quit [--stop-backend]\n"
         "  diag                       DIAG_GET on the diagnostics pipe\n"
         "  set-scene <file>           apply a SceneDocument JSON file\n"
         "  set-playback <mode> [control=playing|paused|stopped]\n"
@@ -543,7 +543,20 @@ int main(int argc, char** argv)
     else if(cmd == "playback")  { type = ipc::MsgType::GetPlayback; }
     else if(cmd == "stats")     { type = ipc::MsgType::GetDeliveryStats; }
     else if(cmd == "presets")   { type = ipc::MsgType::GetPresets; }
-    else if(cmd == "quit")      { type = ipc::MsgType::Quit; }
+    else if(cmd == "quit")
+    {
+        type = ipc::MsgType::Quit;
+        for(size_t i = 1; i < args.size(); ++i)
+        {
+            if(args[i] == "--stop-backend")
+            {
+                /* Quit-all semantics: ask the engine to also
+                   close the VERIFIED managed backend (graceful
+                   WM_CLOSE after the transport drains). */
+                body["stop_backend"] = true;
+            }
+        }
+    }
     else if(cmd == "diag")
     {
         type            = ipc::MsgType::DiagGet;

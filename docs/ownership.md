@@ -63,5 +63,12 @@ section 4 ("Process ownership").
   backend's SDK on loopback TCP 6744.
 - Never kills or signals another process (competing owners, the old
   Studio path, a second OpenRGB) — conflicts are reported honestly.
+  The ONE exception is the operator's own explicit request: IPC QUIT
+  `{"stop_backend":true}` ("Quit all") adds a backend-handoff step to
+  the ordered shutdown that posts a graceful WM_CLOSE to the managed
+  backend — but ONLY when the pid's image path equals the declared
+  `--backend-exe` exactly (the same verified-own standard
+  `stop-openrgb2.ps1` enforces; a foreign or unverifiable process is
+  reported and left running, and nothing is ever hard-killed).
 - Never spawns the backend (Milestone 6 adds managed startup).
 - Never touches FanControl, PWM, pump/fan speed, PawnIO, or sensors.

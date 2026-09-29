@@ -483,8 +483,15 @@ int main()
         openrgb2::Engine engine;
         EngineService::Deps deps;
         bool shutdown_requested = false;
+        int  stop_backend_seen  = -1;
         deps.request_shutdown =
-            [&] { shutdown_requested = true; };
+            [&](bool stop_backend) -> nlohmann::json
+            {
+                shutdown_requested = true;
+                stop_backend_seen  = stop_backend ? 1 : 0;
+                return nlohmann::json::object(
+                    { { "backend", "closing" } });
+            };
         EngineService svc(engine, deps);
         IpcServer server(svc);
         TestClient c;
@@ -502,6 +509,20 @@ int main()
         CHECK(b["shutting_down"].get<bool>() == true);
         CHECK(b["ordered"].get<bool>() == true);
         CHECK(shutdown_requested);
+        CHECK(stop_backend_seen == 0);
+        CHECK(b["stop_backend"].get<bool>() == false);
+        /* The hook's returned fields merge into the same OK. */
+        CHECK(b["backend"].get<std::string>() == "closing");
+
+        /* The opt-in flag reaches the hook verbatim. */
+        shutdown_requested = false;
+        c.SendMsg(MsgType::Quit, 93, nlohmann::json::object(
+            { { "stop_backend", true } }));
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Ok);
+        CHECK(shutdown_requested);
+        CHECK(stop_backend_seen == 1);
+        CHECK(m.Body()["stop_backend"].get<bool>() == true);
 
         /* ...and on the read-only diagnostics pipe the verb is
            refused before dispatch — the hook never fires. */

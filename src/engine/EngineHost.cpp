@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <thread>
@@ -175,6 +176,108 @@ bool RecordResolvedBindings(
     }
     return changed;
 }
+
+/*---------------------------------------------------------*\
+|| Quit-all managed-backend handoff (plan section 4 — the ||
+|| operator's explicit "close everything" is what delegates||
+|| teardown; the engine still never kills a foreign        ||
+|| process). Verification matches the standard             ||
+|| stop-openrgb2.ps1 enforces: a pid is only ours when its ||
+|| image path equals the declared --backend-exe EXACTLY.  ||
+\*---------------------------------------------------------*/
+#ifdef _WIN32
+
+std::string LowerAscii(std::string s)
+{
+    std::transform(s.begin(), s.end(), s.begin(),
+        [](unsigned char c) { return (char)std::tolower(c); });
+    return s;
+}
+
+std::string NormalizeImagePath(const std::string& p)
+{
+    return LowerAscii(
+        std::filesystem::path(p).lexically_normal()
+            .generic_string());
+}
+
+bool IsManagedBackendImage(uint32_t pid,
+                           const std::string& expected_norm)
+{
+    const std::string img = ProcessImagePath(pid);
+    return !img.empty() &&
+           NormalizeImagePath(img) == expected_norm;
+}
+
+struct BackendResolution
+{
+    uint32_t    pid      = 0;
+    const char* decision = "not_found";
+};
+
+/* Resolve the managed backend for an operator-requested
+   teardown — the same two routes stop-openrgb2.ps1 uses:
+   the pid owning the SDK listener when it is verifiably
+   ours, else image-path discovery across the process list.
+   A listener held by a foreign or unreadable image never
+   becomes a target on its own. */
+BackendResolution ResolveManagedBackend(const std::string& backend_exe,
+                                        uint16_t sdk_port)
+{
+    BackendResolution r;
+    const std::string expected = NormalizeImagePath(backend_exe);
+    const uint32_t listener = FindTcpListenerPid(sdk_port);
+    if(listener != 0 && IsManagedBackendImage(listener, expected))
+    {
+        r.pid      = listener;
+        r.decision = "closing";
+        return r;
+    }
+    const std::string want_name = LowerAscii(
+        std::filesystem::path(backend_exe).filename().string());
+    for(const ProcessEntry& p : EnumerateProcesses())
+    {
+        if(p.pid == 0 || LowerAscii(p.exe) != want_name)
+        {
+            continue;
+        }
+        if(IsManagedBackendImage(p.pid, expected))
+        {
+            r.pid      = p.pid;
+            r.decision = "closing";
+            return r;
+        }
+    }
+    r.decision = listener != 0 ? "unverifiable" : "not_found";
+    return r;
+}
+
+/* Graceful close for a VERIFIED-OWN backend (taskkill-without-/F
+   semantics): WM_CLOSE posted to every top-level window the pid
+   owns — the tray/headless server has no main window, so
+   CloseMainWindow alone cannot reach it. Returns the count
+   posted; the caller's bounded wait reports the outcome. */
+size_t PostCloseToProcessWindows(uint32_t pid)
+{
+    struct Ctx { DWORD pid; size_t posted; } ctx{ pid, 0 };
+    EnumWindows(
+        [](HWND hwnd, LPARAM lp) -> BOOL
+        {
+            Ctx*  c    = reinterpret_cast<Ctx*>(lp);
+            DWORD wpid = 0;
+            GetWindowThreadProcessId(hwnd, &wpid);
+            if(wpid == c->pid &&
+               PostMessageW(hwnd, WM_CLOSE, 0, 0))
+            {
+                ++c->posted;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&ctx));
+    return ctx.posted;
+}
+
+#endif /* _WIN32 */
 
 } /* anonymous namespace */
 
@@ -847,9 +950,49 @@ bool EngineHost::Start(std::string& err)
             };
         /* The "Quit All" hook (plan section 4): QUIT flips the
            owner loop's stop flag; the ordered, bounded teardown
-           runs in Stop() (OrderlyShutdown). */
+           runs in Stop() (OrderlyShutdown). The opt-in
+           stop_backend flag resolves the managed backend NOW so
+           the OK reply can honestly report the handoff decision
+           — "closing" means a verified-own pid was resolved and
+           WM_CLOSE will be posted during teardown, never that
+           the process already exited. */
         ipc_deps.request_shutdown =
-            [this] { stop_.store(true); };
+            [this](bool stop_backend) -> nlohmann::json
+            {
+                stop_.store(true);
+                if(!stop_backend)
+                {
+                    return nlohmann::json::object();
+                }
+                if(opts_.backend_exe.empty())
+                {
+                    Log("quit-all: backend teardown requested but "
+                        "no --backend-exe was declared — nothing "
+                        "can be verified as ours; left running");
+                    return nlohmann::json::object({
+                        { "backend", "not_configured" } });
+                }
+#ifdef _WIN32
+                const BackendResolution r =
+                    ResolveManagedBackend(opts_.backend_exe,
+                                          opts_.sdk_port);
+                if(r.pid == 0)
+                {
+                    Log(std::string("quit-all: no verifiably-"
+                        "managed backend to close (") +
+                        r.decision + ")");
+                    return nlohmann::json::object({
+                        { "backend", r.decision } });
+                }
+                pending_backend_pid_.store(r.pid);
+                return nlohmann::json::object({
+                    { "backend",     r.decision },
+                    { "backend_pid", r.pid      } });
+#else
+                return nlohmann::json::object({
+                    { "backend", "unverifiable" } });
+#endif
+            };
         /* Task 4.7: the startup ownership scan surfaced
            read-only in STATE/DIAGNOSTICS. ownership_ is
            written during Start() before the IPC surface
@@ -1330,9 +1473,75 @@ const OrderlyShutdown::Result& EngineHost::Stop()
     shutdown.Add("sdk-transport",
                  std::chrono::milliseconds(1000),
                  [this] { if(sdk_) sdk_->Disconnect(); });
+    /* Quit-all backend handoff — last, AFTER the transport
+       drains (the same ordering stop-openrgb2.ps1 enforces:
+       engine exits before the backend closes). Verified-own
+       only and graceful: WM_CLOSE lets the backend persist
+       its own config; a missed bound is reported, never
+       escalated to a kill. */
+    if(pending_backend_pid_.load() != 0)
+    {
+        shutdown.Add("backend-handoff",
+                     std::chrono::milliseconds(12000),
+                     [this] { SignalPendingBackend(); });
+    }
 
     shutdown_result_ = shutdown.Run();
     return shutdown_result_;
+}
+
+void EngineHost::SignalPendingBackend()
+{
+#ifdef _WIN32
+    const uint32_t pid = pending_backend_pid_.load();
+    if(pid == 0 || opts_.backend_exe.empty())
+    {
+        return;
+    }
+    /* Re-verify at signal time: the pid was resolved when the
+       request landed — a recycle in between must never inherit
+       the close. */
+    if(!IsManagedBackendImage(pid,
+           NormalizeImagePath(opts_.backend_exe)))
+    {
+        Log("backend-handoff: pid " + std::to_string(pid) +
+            " no longer resolves to " + opts_.backend_exe +
+            " — left alone");
+        return;
+    }
+    const size_t posted = PostCloseToProcessWindows(pid);
+    if(posted == 0)
+    {
+        Log("backend-handoff: backend (pid " +
+            std::to_string(pid) + ") owns no top-level windows "
+            "— WM_CLOSE unreachable; finish with "
+            "scripts\\stop-openrgb2.ps1");
+        return;
+    }
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    if(h == nullptr)
+    {
+        Log("backend-handoff: backend (pid " +
+            std::to_string(pid) + ") already exited");
+        return;
+    }
+    const bool exited =
+        WaitForSingleObject(h, 8000) == WAIT_OBJECT_0;
+    CloseHandle(h);
+    if(exited)
+    {
+        Log("backend-handoff: backend (pid " +
+            std::to_string(pid) + ") exited on WM_CLOSE");
+    }
+    else
+    {
+        Log("backend-handoff: posted WM_CLOSE to " +
+            std::to_string(posted) + " window(s) of backend "
+            "(pid " + std::to_string(pid) + ") but it is still "
+            "running after the bound — finish with "
+            "scripts\\stop-openrgb2.ps1 -Force if needed");
+    }
+#endif
 }
 
 } /* namespace openrgb2 */

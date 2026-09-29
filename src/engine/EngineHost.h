@@ -29,7 +29,11 @@
 ||   Shutdown is the OrderlyShutdown sequence: power        ||
 ||   monitor -> IPC intake -> IPC server -> scene worker ->||
 ||   delivery lanes -> SDK transport, each bounded and     ||
-||   measured.                                              ||
+||   measured. An opt-in final step — the QUIT             ||
+||   "stop_backend" handoff — closes the VERIFIED managed  ||
+||   backend (graceful WM_CLOSE, image == --backend-exe)   ||
+||   after the transport drains; a foreign process is      ||
+||   never signaled.                                      ||
 ||                                                           ||
 ||   Seams for the offline suite: transport_factory        ||
 ||   injects the SDK byte stream (FakeStream), pipe names  ||
@@ -129,6 +133,14 @@ struct EngineHostOptions
                                             private config dir;
                                             empty = skip the
                                             sole-writer check  */
+    /* The managed backend's declared image path (--backend-exe;
+       the launcher passes <install>\backend\OpenRGB.exe). The
+       QUIT "stop_backend" handoff only ever signals a process
+       whose image path equals this EXACTLY — the same
+       verified-own standard stop-openrgb2.ps1 enforces. Empty ->
+       no backend can ever be verified, so the handoff never
+       signals anything. */
+    std::string backend_exe;
     bool        power_monitor   = true;
 
     /* Task 4.6 reactive inputs (audio/screen/key). True wires
@@ -218,6 +230,10 @@ private:
     bool StartIpc();
     bool ApplyStartupScene(std::string& err);
     void ScanOwners();
+    /* QUIT stop_backend teardown: re-verifies the pending
+       pid's image against opts_.backend_exe, posts WM_CLOSE
+       to its top-level windows, and waits out the bound. */
+    void SignalPendingBackend();
     /* ReactiveInputs changed hook: emit the IPC event +
        persist the selection through the profile store. */
     void OnReactiveChanged();
@@ -264,6 +280,11 @@ private:
 
     std::atomic<uint64_t>                    frames_{ 0 };
     std::atomic<bool>                        capture_paused_{ false };
+    /* The managed-backend pid a QUIT stop_backend request
+       resolved at ask time (0 = none pending). Stop() re-
+       verifies before signaling — the pid is a handle to
+       close, never proof on its own. */
+    std::atomic<uint32_t>                    pending_backend_pid_{ 0 };
     TimePoint                                last_reprobe_{};
     TimePoint                                last_topology_poll_{};
     std::map<DeviceKey, uint64_t>            custom_mode_done_;

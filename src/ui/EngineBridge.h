@@ -139,7 +139,7 @@ public:
        reactive body; the "reactive" event updates the store. */
     Q_INVOKABLE int reactiveCommand(const QString& verb,
                                     const QVariantMap& args);
-    Q_INVOKABLE int quitEngine();
+    Q_INVOKABLE int quitEngine(bool stopBackend);
 
     /*---- state ------------------------------------------------*/
     QString     connectionState() const;

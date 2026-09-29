@@ -125,8 +125,14 @@ public:
         /* The "Quit All" hook (plan section 4): QUIT invokes this
            AFTER the reply is prepared; production wires it to the
            owner loop's stop flag so owned components shut down in
-           order (OrderlyShutdown). Empty -> Unavailable. */
-        std::function<void()> request_shutdown;
+           order (OrderlyShutdown). `stop_backend` is the request's
+           opt-in managed-backend handoff; the returned object is
+           merged into the OK body so the hook can report its
+           backend decision honestly ("closing" is a decision at
+           request time, never a guarantee the process exited).
+           Empty -> Unavailable. */
+        std::function<nlohmann::json(bool stop_backend)>
+            request_shutdown;
 
         /* Task 4.7: the Task-3.9 ownership report (competing-
            owner scan + managed-config sole-writer check)

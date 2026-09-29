@@ -11,7 +11,8 @@
 //     those and nothing else.
 //   - Session: "Close UI" exits THIS process (the engine
 //     keeps running); "Quit all" asks the ENGINE to shut
-//     down — confirmed, acknowledged, ordered (IPC QUIT).
+//     down AND hand off the managed backend — confirmed,
+//     acknowledged, ordered (IPC QUIT stop_backend).
 //     The two are deliberately never the same button.
 import QtQuick
 import QtQuick.Layouts
@@ -55,10 +56,18 @@ Item {
                    && body && body.ordered === true
                    && body.shutting_down === true) {
                     /* Ordered shutdown acknowledged — the engine
-                       is going down; this shell's job is done. */
-                    root.quitStatus = qsTr("Engine is shutting down.");
-                    if(root.appWindow)
+                       is going down; this shell's job is done.
+                       backend === "closing" is the engine's
+                       verified-own decision reported at request
+                       time (a foreign or unverifiable backend
+                       is left running — reported honestly). */
+                    root.quitStatus = body.backend === "closing"
+                        ? qsTr("Engine and managed backend are shutting down.")
+                        : qsTr("Engine is shutting down.");
+                    if(root.appWindow) {
+                        root.appWindow.exitRequested = true;
                         root.appWindow.close();
+                    }
                 } else if(type === "OK") {
                     /* A bare OK is not a confirmed shutdown — the
                        wire contract carries ordered +
@@ -345,13 +354,13 @@ Item {
                                 objectName: "quitAllButton"
                                 text: qsTr("Quit all…")
                                 Accessible.name:
-                                    qsTr("Shut down the engine and close the UI")
+                                    qsTr("Shut down the engine, the managed backend, and the UI")
                                 enabled: root.engineUp
                                          && root.pendingQuitId === 0
                                 onClicked: quitConfirm.visible = true
                             }
                             Text {
-                                text: qsTr("Asks the engine to shut down — lighting stops. Requires a connected engine.")
+                                text: qsTr("Asks the engine to shut down and closes the managed OpenRGB backend — lighting stops. Requires a connected engine.")
                                 color: Theme.textSecondary
                                 font.pixelSize: Theme.fontSizeSmall
                                 Layout.fillWidth: true
@@ -364,7 +373,7 @@ Item {
                             visible: false
                             spacing: Theme.spaceM
                             Text {
-                                text: qsTr("Stop the engine now? An ordered shutdown saves engine state first.")
+                                text: qsTr("Shut down the engine and the managed OpenRGB backend now? An ordered shutdown saves engine state first.")
                                 color: Theme.warn
                                 font.pixelSize: Theme.fontSizeSmall
                                 wrapMode: Text.WordWrap
@@ -373,13 +382,13 @@ Item {
                             }
                             AppButton {
                                 objectName: "quitAllConfirm"
-                                text: qsTr("Shut down engine")
+                                text: qsTr("Shut down all")
                                 Accessible.name: text
                                 onClicked: {
                                     quitConfirm.visible = false;
                                     root.quitError = "";
                                     root.quitStatus = "";
-                                    const id = bridge.quitEngine();
+                                    const id = bridge.quitEngine(true);
                                     if(id > 0) {
                                         root.pendingQuitId = id;
                                         root.quitStatus =
