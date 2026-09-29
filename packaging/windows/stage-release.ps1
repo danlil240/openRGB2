@@ -242,9 +242,10 @@ if(-not $VerifyOnly) {
                     [StringComparison]::OrdinalIgnoreCase) }
             catch { $false }
         })
+        $lockingIds = @($locking | ForEach-Object { $_.Id })
         $locking += @(Get-Process -Name "openrgb2-engine","openrgb2-ui",
                       "openrgb2-ctl","OpenRGB" -ErrorAction SilentlyContinue |
-            Where-Object { $locking.Id -notcontains $_.Id })
+            Where-Object { $lockingIds -notcontains $_.Id })
         if($locking.Count -gt 0) {
             Fail ("staged binaries are still running (" +
                   (($locking | ForEach-Object { "$($_.ProcessName)#$($_.Id)" }) -join ', ') +
