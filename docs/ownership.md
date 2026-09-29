@@ -65,8 +65,11 @@ section 4 ("Process ownership").
   Studio path, a second OpenRGB) — conflicts are reported honestly.
   The ONE exception is the operator's own explicit request: IPC QUIT
   `{"stop_backend":true}` ("Quit all") adds a backend-handoff step to
-  the ordered shutdown that posts a graceful WM_CLOSE to the managed
-  backend — but ONLY when the pid's image path equals the declared
+  the ordered shutdown that signals the managed backend's PID-scoped
+  shutdown event (`Local\OpenRGB2-Backend-Shutdown-<pid>` — the
+  headless `--server` backend owns no windows, so the event is the
+  channel WM_CLOSE cannot be; WM_CLOSE stays as the fallback for a
+  windowed build) — but ONLY when the pid's image path equals the declared
   `--backend-exe` exactly (the same verified-own standard
   `stop-openrgb2.ps1` enforces; a foreign or unverifiable process is
   reported and left running, and nothing is ever hard-killed).

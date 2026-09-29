@@ -31,7 +31,8 @@
 ||   delivery lanes -> SDK transport, each bounded and     ||
 ||   measured. An opt-in final step — the QUIT             ||
 ||   "stop_backend" handoff — closes the VERIFIED managed  ||
-||   backend (graceful WM_CLOSE, image == --backend-exe)   ||
+||   backend (graceful shutdown event, WM_CLOSE fallback; ||
+||   image == --backend-exe)                              ||
 ||   after the transport drains; a foreign process is      ||
 ||   never signaled.                                      ||
 ||                                                           ||
@@ -231,8 +232,9 @@ private:
     bool ApplyStartupScene(std::string& err);
     void ScanOwners();
     /* QUIT stop_backend teardown: re-verifies the pending
-       pid's image against opts_.backend_exe, posts WM_CLOSE
-       to its top-level windows, and waits out the bound. */
+       pid's image against opts_.backend_exe, signals its
+       shutdown event (WM_CLOSE fallback for windowed
+       backends), and waits out the bound. */
     void SignalPendingBackend();
     /* ReactiveInputs changed hook: emit the IPC event +
        persist the selection through the profile store. */

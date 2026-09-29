@@ -285,7 +285,11 @@ concern — the engine never spawns it — **except** the opt-in
 `stop_backend` handoff: when the request body carries
 `{"stop_backend": true}`, the engine's ordered teardown gains a final
 *backend-handoff* step that gracefully closes the managed backend
-(WM_CLOSE to its top-level windows — the same verified-own, never-kill
+(signals the PID-scoped shutdown event
+`Local\OpenRGB2-Backend-Shutdown-<pid>` the vendored backend polls in
+its headless server wait — the same graceful `StopServer()` path as an
+SCM stop; WM_CLOSE to top-level windows remains the fallback for a
+windowed build — the same verified-own, never-kill
 standard as `stop-openrgb2.ps1`). Only a process whose image path
 equals the declared `--backend-exe` EXACTLY is ever signaled; the OK
 reply reports the decision honestly in `backend` (`closing`,

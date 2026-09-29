@@ -1476,9 +1476,10 @@ const OrderlyShutdown::Result& EngineHost::Stop()
     /* Quit-all backend handoff — last, AFTER the transport
        drains (the same ordering stop-openrgb2.ps1 enforces:
        engine exits before the backend closes). Verified-own
-       only and graceful: WM_CLOSE lets the backend persist
-       its own config; a missed bound is reported, never
-       escalated to a kill. */
+       only and graceful: the backend's shutdown event (or
+       WM_CLOSE for a windowed build) lets it persist its own
+       config; a missed bound is reported, never escalated to
+       a kill. */
     if(pending_backend_pid_.load() != 0)
     {
         shutdown.Add("backend-handoff",
@@ -1509,13 +1510,40 @@ void EngineHost::SignalPendingBackend()
             " — left alone");
         return;
     }
+    /* Preferred channel: the vendored backend's PID-scoped
+       session event (main_Windows.cpp WaitWhileServerOnline).
+       The headless --server process owns no windows, so
+       WM_CLOSE cannot reach it; the event takes the same
+       graceful StopServer() path as an SCM stop. CreateEvent
+       (not OpenEvent) latches the signal for a backend that is
+       still starting and has not created its handle yet. */
+    const std::wstring ev_name =
+        L"Local\\OpenRGB2-Backend-Shutdown-" + std::to_wstring(pid);
+    /* Held open until after the wait: if the backend is still
+       starting and has not reached its own CreateEvent yet, our
+       outstanding handle keeps the named object alive — its first
+       poll then observes the already-signaled state. */
+    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, ev_name.c_str());
+    const bool ev_signaled = (ev != nullptr);
+    if(ev_signaled)
+    {
+        SetEvent(ev);
+        Log("backend-handoff: signaled shutdown event for backend "
+            "(pid " + std::to_string(pid) + ")");
+    }
     const size_t posted = PostCloseToProcessWindows(pid);
-    if(posted == 0)
+    if(posted > 0)
+    {
+        Log("backend-handoff: posted WM_CLOSE to " +
+            std::to_string(posted) + " window(s) of backend (pid " +
+            std::to_string(pid) + ")");
+    }
+    if(!ev_signaled && posted == 0)
     {
         Log("backend-handoff: backend (pid " +
-            std::to_string(pid) + ") owns no top-level windows "
-            "— WM_CLOSE unreachable; finish with "
-            "scripts\\stop-openrgb2.ps1");
+            std::to_string(pid) + ") exposes no shutdown event and "
+            "owns no top-level windows — unreachable; finish with "
+            "scripts\\stop-openrgb2.ps1 -Force");
         return;
     }
     HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
@@ -1523,23 +1551,23 @@ void EngineHost::SignalPendingBackend()
     {
         Log("backend-handoff: backend (pid " +
             std::to_string(pid) + ") already exited");
+        if(ev) { CloseHandle(ev); }
         return;
     }
     const bool exited =
         WaitForSingleObject(h, 8000) == WAIT_OBJECT_0;
     CloseHandle(h);
+    if(ev) { CloseHandle(ev); }
     if(exited)
     {
         Log("backend-handoff: backend (pid " +
-            std::to_string(pid) + ") exited on WM_CLOSE");
+            std::to_string(pid) + ") exited on shutdown request");
     }
     else
     {
-        Log("backend-handoff: posted WM_CLOSE to " +
-            std::to_string(posted) + " window(s) of backend "
-            "(pid " + std::to_string(pid) + ") but it is still "
-            "running after the bound — finish with "
-            "scripts\\stop-openrgb2.ps1 -Force if needed");
+        Log("backend-handoff: backend (pid " +
+            std::to_string(pid) + ") still running after the bound "
+            "— finish with scripts\\stop-openrgb2.ps1 -Force if needed");
     }
 #endif
 }

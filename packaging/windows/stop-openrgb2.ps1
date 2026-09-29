@@ -13,12 +13,12 @@
          within the bound.
       2. backend handoff -- the backend stays the sole hardware owner;
          it is closed AFTER the engine fully exits with a graceful
-         WM_CLOSE, never a hard kill -- so it can persist its own
-         config (state\backend\OpenRGB.json). CloseMainWindow reaches
-         only a MAIN window; a tray/headless backend has none, so the
-         fallback posts WM_CLOSE to every top-level window the pid
-         owns (taskkill without /F -- still graceful, still
-         verified-own only).
+         signal, never a hard kill -- so it can persist its own
+         config (state\backend\OpenRGB.json). Preferred channel: the
+         vendored backend's PID-scoped shutdown event (a headless
+         --server backend owns no windows at all, so WM_CLOSE cannot
+         reach it). CloseMainWindow / taskkill-without-/F remain as
+         the fallback for windowed backends.
 
     Only processes VERIFIED as ours are ever touched: a PID is only
     signaled when its image path matches this install's executables
@@ -293,19 +293,33 @@ function Invoke-ManagedStop {
             $backendGone = $true
         }
     } else {
-        Step "backend (pid $backendPid): WM_CLOSE -- graceful handoff"
+        Step "backend (pid $backendPid): shutdown event -- graceful handoff"
         $bkProc = Get-Process -Id $backendPid -ErrorAction SilentlyContinue
-        $closed = $false
-        try { $closed = $bkProc.CloseMainWindow() } catch { $closed = $false }
-        if(-not $closed) {
-            # Tray/headless backends have no MAIN window (handle 0) so
-            # CloseMainWindow can't reach them. taskkill WITHOUT /F
-            # posts the same WM_CLOSE to every top-level window the
-            # pid owns -- graceful, and this pid is already verified
-            # ours. It errors harmlessly when the process owns no
-            # windows at all; the bounded wait below still applies.
-            Info "no main window (tray/headless) -- posting WM_CLOSE to all its top-level windows"
-            $null = & taskkill.exe /PID $backendPid 2>&1
+        # Preferred channel: the vendored backend's PID-scoped session
+        # event (vendor/OpenRGB/startup/main_Windows.cpp
+        # WaitWhileServerOnline). A headless --server backend owns NO
+        # windows, so WM_CLOSE/taskkill cannot reach it -- the event
+        # takes the same graceful StopServer() path as an SCM stop.
+        $evName = "Local\OpenRGB2-Backend-Shutdown-$backendPid"
+        try {
+            $ev = [System.Threading.EventWaitHandle]::OpenExisting($evName)
+            $ev.Set() | Out-Null
+            $ev.Dispose()
+            Info "signaled shutdown event $evName"
+        } catch {
+            # Older/unpatched backend: fall back to window messages.
+            $closed = $false
+            try { $closed = $bkProc.CloseMainWindow() } catch { $closed = $false }
+            if(-not $closed) {
+                # Tray/headless backends have no MAIN window (handle 0) so
+                # CloseMainWindow can't reach them. taskkill WITHOUT /F
+                # posts the same WM_CLOSE to every top-level window the
+                # pid owns -- graceful, and this pid is already verified
+                # ours. It errors harmlessly when the process owns no
+                # windows at all; the bounded wait below still applies.
+                Info "no shutdown event or main window -- posting WM_CLOSE to all its top-level windows"
+                $null = & taskkill.exe /PID $backendPid 2>&1
+            }
         }
         if($bkProc -and -not $bkProc.WaitForExit($TimeoutSeconds * 1000)) {
             if($Force -and (Test-OwnProcess $backendPid $BackendExe)) {

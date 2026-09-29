@@ -826,16 +826,36 @@ void InitializeTimerResolutionThreadFunction()
 \*---------------------------------------------------------*/
 static void WaitWhileServerOnline(NetworkServer* srv)
 {
+    /*-----------------------------------------------------*\
+    | Managed-stack stop channel: the headless server owns    |
+    | no windows, so a launcher cannot reach it with          |
+    | WM_CLOSE.  A PID-scoped session event gives the owning  |
+    | engine a graceful signal that takes the same exit path  |
+    | as SERVICE_CONTROL_STOP.  Auto-reset; a signal latched  |
+    | before this point is still honored on the first pass.   |
+    \*-----------------------------------------------------*/
+    const std::wstring stop_event_name =
+        L"Local\\OpenRGB2-Backend-Shutdown-" +
+        std::to_wstring(GetCurrentProcessId());
+    HANDLE stop_event = CreateEventW(nullptr, FALSE, FALSE,
+                                   stop_event_name.c_str());
+
     std::unique_lock<std::mutex> lock(service_stop_mutex);
     while(srv->GetOnline())
     {
-        if(service_stop_requested)
+        if(service_stop_requested
+        || (stop_event && WaitForSingleObject(stop_event, 0) == WAIT_OBJECT_0))
         {
             srv->StopServer();
             break;
         }
         service_stop_cv.wait_for(lock, 1s);
     };
+
+    if(stop_event)
+    {
+        CloseHandle(stop_event);
+    }
 }
 
 /*---------------------------------------------------------*\
