@@ -296,6 +296,19 @@ int main(int argc, char** argv)
                                              &ui_prefs);
     engine.rootContext()->setContextProperty(
         QStringLiteral("startupTask"), &startup_task);
+    /* studio-import Task 8: the Layout 3D viewport's capability
+       gate — the Quick3D subtree is only compiled into the module
+       in the full-Studio build; basic builds read false and keep
+       the 2D canvas (the page's Loader also fails honestly if the
+       runtime module is missing). */
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("quick3dAvailable"),
+#ifdef OPENRGB2_WITH_QUICK3D
+        true
+#else
+        false
+#endif
+    );
     engine.rootContext()->setContextProperty(
         QStringLiteral("trayAvailable"), tray_available);
     engine.rootContext()->setContextProperty(

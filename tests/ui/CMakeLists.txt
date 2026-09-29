@@ -313,6 +313,57 @@ set_tests_properties(ui_studio_effects_test PROPERTIES
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${QT_BIN_DIR};DLS_EFFECT_DIR=set:${CMAKE_SOURCE_DIR}/src/core/presets/effects")
 
+# studio-import Task 8: the Quick3D Layout viewport — the real
+# WorkspaceController/ObjectEditorController offline drive the
+# adapted SelectionController/CameraController (gesture routing,
+# one undo record, Escape restore, deferred pose persistence,
+# paint exclusivity) plus the real StudioViewport.qml headless
+# (delegates from the shared model, meta.camera persistence,
+# quality-tier writes, the pick seam, the undo gate). Only in the
+# Quick3D build — the subtree isn't in the module otherwise.
+if(OPENRGB2_HAVE_QUICK3D)
+    add_executable(qml_studio_viewport_test
+        qml_studio_viewport_test.cpp)
+    target_link_libraries(qml_studio_viewport_test PRIVATE
+        openrgb2_ui
+        openrgb2_uiplugin
+        openrgb2_studio_core
+        Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Test)
+    target_include_directories(qml_studio_viewport_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/src/ui)
+    target_compile_definitions(qml_studio_viewport_test PRIVATE NDEBUG)
+    set_target_properties(qml_studio_viewport_test PROPERTIES
+        AUTOMOC ON)
+    qt_import_qml_plugins(qml_studio_viewport_test)
+    add_test(NAME qml_studio_viewport_test
+             COMMAND qml_studio_viewport_test)
+    set_tests_properties(qml_studio_viewport_test PROPERTIES
+        LABELS ui
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:${QT_BIN_DIR};DLS_PRESET_DIR=set:${CMAKE_SOURCE_DIR}/src/core/presets/devices")
+
+    # The pure-QML halves of the adapted source suite run under
+    # Qt's signed qmltestrunner (tst_controllers, tst_devices,
+    # tst_viewport). Resolved against the source tree — the same
+    # files the module packs; the path is relative inside the test
+    # files themselves. Skipped silently when the tool is absent.
+    find_program(QMLTESTRUNNER_EXE
+        NAMES qmltestrunner qmltestrunner.exe
+        HINTS "${QT_BIN_DIR}")
+    if(QMLTESTRUNNER_EXE)
+        add_test(NAME qml_studio_qml
+            COMMAND "${QMLTESTRUNNER_EXE}"
+                    -input "${CMAKE_CURRENT_SOURCE_DIR}/studio_qml")
+        set_tests_properties(qml_studio_qml PROPERTIES
+            LABELS ui
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${QT_BIN_DIR}")
+    endif()
+endif()
+
 # QA harness (QaServer) — the real shell headless, driven over
 # the loopback QA socket like tools/qa/qa.py drives a live
 # window: selector resolution, synthesized click/type/key,

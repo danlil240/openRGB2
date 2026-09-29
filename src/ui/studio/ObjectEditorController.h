@@ -116,7 +116,10 @@ public:
     QColor       paintColor() const { return paint_color_; }
     bool         resolvedFromApplied() const
         { return resolved_src_ == ResolvedSrc::Applied; }
-    bool         gestureActive() const;
+    /* QML-callable — the 3D viewport's gesture router gates
+       undo/redo and frame commands on a live transform gesture
+       (Task 8). */
+    Q_INVOKABLE bool gestureActive() const;
 
     /*---- selection -------------------------------------------*/
     /* Resolved object id or instance id → select its owning
@@ -202,6 +205,11 @@ public:
        (which has no snap param), so the page rounds the released
        position here — the same 10 mm step the gestures use. */
     Q_INVOKABLE double snapMeters(double meters) const;
+
+    /* Transient status line — the viewport's input router uses
+       this for swallowed-shortcut explanations ("finish the
+       drag first") instead of a silent ignore (Task 8). */
+    Q_INVOKABLE void setStatusMessage(const QString& text);
 
     /*---- undo/redo — the shared session's history --------------*/
     Q_INVOKABLE void undo();

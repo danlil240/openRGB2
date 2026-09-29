@@ -107,6 +107,20 @@ class WorkspaceController : public QObject
     Q_PROPERTY(QString statusText READ statusText
                    NOTIFY statusTextChanged)
 
+    /*---- studio-import Task 8: viewport editor prefs ----------
+       meta.camera / meta.render / meta.ui are document editor
+       preferences — they ride the draft (dirty + draft-store
+       record) but NEVER the undo stack, the same rule the
+       source SceneBridge honored for setCameraState /
+       setRenderQuality. Reads return the compact defaults when
+       no draft is loaded. */
+    Q_PROPERTY(QVariantMap cameraState READ cameraState
+                   NOTIFY cameraChanged)
+    Q_PROPERTY(QString renderQuality READ renderQuality
+                   WRITE setRenderQuality NOTIFY renderPrefsChanged)
+    Q_PROPERTY(bool renderBloom READ renderBloom
+                   WRITE setRenderBloom NOTIFY renderPrefsChanged)
+
 public:
     explicit WorkspaceController(EngineBridge* bridge,
                                  QObject* parent = nullptr);
@@ -189,6 +203,23 @@ public:
     bool        recoveryStale() const;
     QString     statusText() const;
 
+    /*---- viewport editor prefs (Task 8) -------------------------*/
+    /* {view,projection,tx,ty,tz,yaw,pitch,distance,span,
+        middle_drag} — the viewport's CameraController mirrors
+        this at gesture end through setCameraState. Writes go
+        through WorkspaceEditSession::SetMeta — document prefs,
+        never undo records. */
+    QVariantMap cameraState() const;
+    Q_INVOKABLE void setCameraState(const QVariantMap& state);
+    QString     renderQuality() const;
+    void        setRenderQuality(const QString& q);
+    bool        renderBloom() const;
+    void        setRenderBloom(bool on);
+    /* meta.ui.reduced_motion — the viewport reads the document
+       pref through this; the shell-level default lives on
+       UiSettings.viewportReducedMotion. */
+    Q_INVOKABLE bool reducedMotion() const;
+
     /*---- test hooks --------------------------------------------*/
     void setDraftDirForTesting(const QString& dir);
     void setDebounceForTesting(int ms);
@@ -224,6 +255,10 @@ signals:
     /* save() completed — `ok` distinguishes committed from
        refused so pages can surface honestly. */
     void saveFinished(bool ok);
+    /* meta.camera changed (setCameraState or a workspace load). */
+    void cameraChanged();
+    /* meta.render/meta.ui editor prefs changed. */
+    void renderPrefsChanged();
 
 private:
     /*---- bridge feeds ---------------------------------------*/

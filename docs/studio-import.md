@@ -41,13 +41,13 @@ of the shared model.
 
 ## Prerequisites
 
-- **Qt Quick3D is required for Task 8 (3D viewport).** Qt 6.8.3
-  Quick3D is **absent** from the pinned kit at
-  `C:\Qt\6.8.3\msvc2022_64` (no `Qt6Quick3D` CMake config, DLL, or
-  QML directory). It is an additional component of the pinned kit,
-  not a toolkit upgrade — install `qtquick3d` for Qt 6.8.3
-  msvc2022_64 before Task 8. Its absence does not disable any
-  existing UI target and does not block Tasks 2–7.
+- **Qt Quick3D provisioned for Task 8 (3D viewport).** `qtquick3d`
+  for Qt 6.8.3 msvc2022_64 is installed at
+  `C:\Qt\6.8.3\msvc2022_64` (`Qt6Quick3D` CMake config + QML module
+  present; verified by the `OPENRGB2_WITH_QUICK3D` configure probe).
+  The viewport subtree is capability-gated: a kit without Quick3D
+  configures and builds fine, `quick3dAvailable` is false, and the
+  Layout page keeps its 2D canvas with the 3D controls hidden.
 
 ## Parity status (high level)
 
@@ -63,7 +63,7 @@ of the shared model.
 | Layer/palette/personal-look editing | Done (Task 6): `src/ui/studio/` `EffectLayerModel` (row-granular diff model) + `EffectEditorController` (stack/palette/path/source/targets edits, gesture commit/cancel, named-look materialization, `saveLookAs` via `resource_install`, persisted draft `inputs.*`) + `ui/studio/` panels (`EffectEditor`, `EffectInspector`, `LayerStack`, `PaletteEditor`, `LookShelf`) mounted on the Lighting page; `ui_studio_effects_test` covers the seam headless |
 | Engine prepared scene (`PreparedStudioScene`) | Done (Task 6): `src/engine/StudioScenePreparation` expands matrix emitters + builds `key_positions` against matched hardware and applies `inputs.decay_pct` to runtime ripple density on a copy (authored data untouched); consumed by `SceneWorker` now and preview later; `studio_scene_preparation_test` covers it |
 | SDK topology fidelity | Done (Task 6): bounded zone matrix maps + LED names ride `SdkWire`/`OpenRgbClient`/`DeviceSnapshot` end to end |
-| 3D viewport (`StudioScene.qml` → `StudioViewport`) | Blocked on Quick3D prerequisite (Task 8) |
+| 3D viewport (`StudioScene.qml` → `StudioViewport`) | Done (Task 8): `ui/studio/viewport/` (`StudioViewport` + `editor/` camera/selection/gizmo + `devices/` families + `materials/StudioEnvironment`) on explicit `objectCtl`/`workspaceCtl`/`viewport`/`prefs` collaborators — no global `bridge`/`studioHost`; camera pose persists via `WorkspaceController.setCameraState` (meta.camera, never undo), quality/bloom via `renderQuality`/`renderBloom`, reduced-motion via `reducedMotion()`; Layout page keeps the 2D canvas + a persisted `uiPrefs.layoutShow3d` toggle gated on `quick3dAvailable`; `qml_studio_viewport_test` + `tests/ui/studio_qml/` cover the seam |
 | Device-type authoring + portable bundles | Not started (Task 9) |
 | Workspace file actions + external-change recovery | Not started (Task 10) |
 | Single-LED calibration + diagnostics parity | Not started (Task 11) |

@@ -51,6 +51,29 @@ Item {
     readonly property bool previewUp:
         typeof viewport !== "undefined" && viewport.previewActive
 
+    /* studio-import Task 8: the optional Quick3D viewport. The
+       studio/viewport subtree only compiles into the module in
+       the full-Studio build (main.cpp's quick3dAvailable); a
+       failed Loader degrades honestly — the 2D canvas below is
+       the always-available path and stays the default until the
+       user toggles (the choice persists in uiPrefs). */
+    readonly property bool quick3dUp:
+        typeof quick3dAvailable !== "undefined"
+        && quick3dAvailable === true
+    property bool show3d:
+        (typeof uiPrefs !== "undefined" ? uiPrefs.layoutShow3d : false)
+        && quick3dUp
+    /* The loaded viewport item (null in 2D mode / on load
+       failure) — panels read editorCam/editorCtl off it. */
+    property var viewport3d: null
+    property bool viewportLoadFailed: false
+
+    function setShow3d(on) {
+        show3d = on && quick3dUp;
+        if(typeof uiPrefs !== "undefined")
+            uiPrefs.layoutShow3d = show3d;
+    }
+
     function draftColorsFor(id) {
         if(!root.previewUp) return [];
         const objs = viewport.objects || [];
@@ -286,20 +309,193 @@ Item {
                        the next card covers it. */
                     Item {
                         width: parent.width
-                        height: 430 + Theme.spaceS
+                        height: viewBar.implicitHeight + Theme.spaceS
+                                + 430 + Theme.spaceS
                                 + canvasHint.implicitHeight
                                 + (draftPreviewStatus.visible
                                    ? draftPreviewStatus.implicitHeight
                                      + Theme.spaceXS : 0)
+
+                        /* studio-import Task 8: the 2D/3D view
+                           toggle + the 3D-only render controls.
+                           Hidden entirely without Quick3D — the 2D
+                           canvas never degrades. */
+                        Row {
+                            id: viewBar
+                            objectName: "viewBar"
+                            visible: root.quick3dUp
+                            height: visible ? implicitHeight : 0
+                            spacing: Theme.spaceS
+                            AppButton {
+                                objectName: "view2dButton"
+                                text: qsTr("2D")
+                                checkable: true
+                                checked: !root.show3d
+                                onClicked: root.setShow3d(false)
+                            }
+                            AppButton {
+                                objectName: "view3dButton"
+                                text: qsTr("3D")
+                                checkable: true
+                                checked: root.show3d
+                                onClicked: root.setShow3d(true)
+                            }
+                            /* Render quality tier — persisted as
+                               meta.render.quality on the draft
+                               (workspace.renderQuality) with the
+                               UiSettings shell fallback; routed
+                               through the viewport's setter. */
+                            AppComboBox {
+                                id: qualityPick
+                                objectName: "viewportQualityPick"
+                                Accessible.name:
+                                    qsTr("3D render quality")
+                                visible: root.show3d
+                                width: 130
+                                model: ["low", "balanced", "high"]
+                                currentIndex: root.viewport3d
+                                    ? Math.max(0, model.indexOf(
+                                          root.viewport3d.qualityTier))
+                                    : 1
+                                onActivated: function(i) {
+                                    if(root.viewport3d)
+                                        root.viewport3d.setQualityTier(
+                                            model[i]);
+                                }
+                            }
+                            /* Case-shell ghosting — a display-only
+                               shell pref (UiSettings), never a
+                               document edit; the shell stays
+                               non-pickable either way. */
+                            AppCheckBox {
+                                objectName: "viewportGhostCheck"
+                                text: qsTr("ghost case")
+                                visible: root.show3d
+                                checked: typeof uiPrefs !== "undefined"
+                                         && uiPrefs.viewportCaseGhost
+                                onToggled: {
+                                    if(typeof uiPrefs !== "undefined")
+                                        uiPrefs.viewportCaseGhost =
+                                            checked;
+                                }
+                            }
+                            /* Bloom — meta.render.bloom on the
+                               draft with the UiSettings fallback;
+                               display-only, never delivered to
+                               hardware. */
+                            AppCheckBox {
+                                objectName: "viewportBloomCheck"
+                                text: qsTr("bloom")
+                                visible: root.show3d
+                                checked: {
+                                    if(root.studioUp
+                                       && typeof workspace
+                                          !== "undefined"
+                                       && workspace.ready)
+                                        return workspace.renderBloom;
+                                    return typeof uiPrefs
+                                           !== "undefined"
+                                           && uiPrefs.viewportBloom;
+                                }
+                                onToggled: {
+                                    if(root.studioUp
+                                       && typeof workspace
+                                          !== "undefined"
+                                       && workspace.ready)
+                                        workspace.renderBloom = checked;
+                                    if(typeof uiPrefs !== "undefined")
+                                        uiPrefs.viewportBloom = checked;
+                                }
+                            }
+                        }
+
+                        /* studio-import Task 8: the Quick3D
+                           viewport, lazily created — every
+                           collaborator is wired EXPLICITLY (the
+                           shared objectCtl/workspace/viewport
+                           context surfaces), never a global inside
+                           the subtree. A load failure keeps the
+                           page on the 2D path with an honest
+                           message. */
+                        Loader {
+                            id: viewportLoader
+                            objectName: "viewportLoader"
+                            anchors {
+                                left: parent.left
+                                right: parent.right
+                                top: viewBar.bottom
+                                topMargin: Theme.spaceS
+                            }
+                            height: 430
+                            clip: true
+                            active: root.quick3dUp && root.show3d
+                            source: Qt.resolvedUrl(
+                                "../studio/viewport/StudioViewport.qml")
+                            visible: status === Loader.Ready
+                            onStatusChanged: {
+                                if(status === Loader.Error)
+                                    root.viewportLoadFailed = true;
+                            }
+                            onLoaded: {
+                                item.objectCtl =
+                                    (typeof objectCtl !== "undefined")
+                                    ? objectCtl : null;
+                                item.workspaceCtl =
+                                    (typeof workspace !== "undefined")
+                                    ? workspace : null;
+                                item.viewport =
+                                    (typeof viewport !== "undefined")
+                                    ? viewport : null;
+                                item.prefs =
+                                    (typeof uiPrefs !== "undefined")
+                                    ? uiPrefs : null;
+                                item.focusPeer = transformInspector;
+                                /* LIVE = the transport-accepted
+                                   frame_status feed — draft preview
+                                   colors are labelled separately,
+                                   never hardware output. */
+                                item.outputLive = Qt.binding(
+                                    function() {
+                                        if(!root.engineUp)
+                                            return false;
+                                        const ag =
+                                            bridge.frameStatus.aggregate;
+                                        return !!(ag
+                                                  && ag.mean_interval_s
+                                                     > 0);
+                                    });
+                                root.viewport3d = item;
+                            }
+                            onActiveChanged: {
+                                if(!active)
+                                    root.viewport3d = null;
+                            }
+                        }
+                        Text {
+                            anchors.fill: viewportLoader
+                            visible: root.show3d
+                                     && (root.viewportLoadFailed
+                                         || viewportLoader.status
+                                            === Loader.Error)
+                            text: qsTr("3D viewport unavailable — Quick3D did not load. The 2D view stays fully functional.")
+                            color: Theme.warn
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
 
                         Rectangle {
                             id: canvasRect
                             anchors {
                                 left: parent.left
                                 right: parent.right
-                                top: parent.top
+                                top: viewBar.bottom
+                                topMargin: Theme.spaceS
                             }
                             height: 430
+                            visible: !root.show3d
+                                     || root.viewport3d === null
                             radius: Theme.radiusM
                             color: Theme.bg
                             border.width: 1
@@ -631,7 +827,9 @@ Item {
                             anchors.top: canvasRect.bottom
                             anchors.topMargin: Theme.spaceS
                             width: parent.width
-                            text: qsTr("Top view, meters. Drag objects to arrange — or Tab to an object and nudge with the arrow keys (Shift for fine steps). Edits apply immediately and are undoable (Ctrl+Z / Ctrl+Shift+Z). Linked copies (LINK) share their source's output.")
+                            text: root.show3d
+                                  ? qsTr("3D view. Click selects · drag orbits · Ctrl+drag moves/rotates · Shift+drag marquee · MMB/Space pans · wheel zooms · W/E/P tools · F/Home frame · Esc cancels. Edits are undoable (Ctrl+Z / Ctrl+Shift+Z). Emitter dots show the unsaved draft preview — not delivered output.")
+                                  : qsTr("Top view, meters. Drag objects to arrange — or Tab to an object and nudge with the arrow keys (Shift for fine steps). Edits apply immediately and are undoable (Ctrl+Z / Ctrl+Shift+Z). Linked copies (LINK) share their source's output.")
                             color: Theme.textDisabled
                             font.pixelSize: Theme.fontSizeSmall
                             wrapMode: Text.WordWrap
@@ -1152,16 +1350,25 @@ Item {
                             objectName: "deviceLibraryPanel"
                             width: 340
                             height: 430
-                            sceneView: root
+                            /* Task 8: while the 3D viewport is
+                               active the library's button-add
+                               targets the desk plane through the
+                               viewport camera (its editorCam
+                               answers planeHitPoint); the 2D
+                               canvas keeps canvasCenter(). */
+                            sceneView: root.viewport3d
+                                       ? root.viewport3d : root
                         }
                         TransformInspector {
                             id: transformInspector
                             objectName: "transformInspectorPanel"
                             /* `ctl` feeds tool/plane/snap reads — the
-                               ObjectEditorController answers; there is
-                               no 3D camera on the 2D page so the view
-                               presets stay hidden until Task 8. */
+                               ObjectEditorController answers. Task 8:
+                               `cam` unhides the camera preset chips
+                               while the 3D viewport is live. */
                             ctl: root.studioUp ? objectCtl : null
+                            cam: root.viewport3d
+                                 ? root.viewport3d.editorCam : null
                         }
                     }
 

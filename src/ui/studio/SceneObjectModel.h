@@ -67,6 +67,11 @@ public:
         ParentIdRole,    /* row id of the parent row ("" = root)        */
         XRole, YRole, ZRole,     /* LOCAL transform (m/deg)             */
         RxRole, RyRole, RzRole,
+        /* The same rotation as a unit quaternion (RotationQuat —
+           THE core conversion). The 3D viewport's Node.rotation
+           consumes quaternions because eulerRotation would apply
+           ZXY instead of the stored Rz*Ry*Rx convention. */
+        QwRole, QxRole, QyRole, QzRole,
         WxRole, WyRole, WzRole,  /* WORLD position (m) — 2D canvas      */
         WryRole,                 /* world yaw (deg)                     */
         SxRole, SyRole, SzRole,

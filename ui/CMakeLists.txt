@@ -31,6 +31,32 @@ if(COMMAND qt_policy)
     qt_policy(SET QTP0004 NEW)
 endif()
 
+# studio-import Task 8: the Quick3D viewport subtree
+# (studio/viewport/) ships only in the full-Studio build —
+# OPENRGB2_HAVE_QUICK3D is set by the root CMakeLists when the
+# component is provisioned and the opt-out is off. The subtree is
+# QML-only (no C++ Quick3D linkage); Layout's 2D canvas stays the
+# fallback in basic builds. The PUBLIC definition exposes the gate
+# to the openrgb2-ui entry point (main.cpp) and tests.
+set(_viewport_qml)
+if(OPENRGB2_HAVE_QUICK3D)
+    set(_viewport_qml
+        studio/viewport/StudioViewport.qml
+        studio/viewport/editor/CameraController.qml
+        studio/viewport/editor/SelectionController.qml
+        studio/viewport/editor/TransformGizmo.qml
+        studio/viewport/devices/Case.qml
+        studio/viewport/devices/Fan.qml
+        studio/viewport/devices/Gpu.qml
+        studio/viewport/devices/Keyboard.qml
+        studio/viewport/devices/Monitor.qml
+        studio/viewport/devices/Mouse.qml
+        studio/viewport/devices/Ram.qml
+        studio/viewport/devices/SelectionFrame.qml
+        studio/viewport/devices/Strip.qml
+        studio/viewport/materials/StudioEnvironment.qml)
+endif()
+
 qt_add_qml_module(openrgb2_ui
     URI OpenRGB2.UI
     VERSION 1.0
@@ -64,6 +90,7 @@ qt_add_qml_module(openrgb2_ui
         studio/LayerStack.qml
         studio/LookShelf.qml
         studio/PaletteEditor.qml
+        ${_viewport_qml}
     SOURCES
         ${CMAKE_SOURCE_DIR}/src/ui/EngineBridge.h
         ${CMAKE_SOURCE_DIR}/src/ui/EngineBridge.cpp
@@ -106,6 +133,12 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/studio/EffectEditorController.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/QaServer.h
         ${CMAKE_SOURCE_DIR}/src/ui/QaServer.cpp)
+
+if(OPENRGB2_HAVE_QUICK3D)
+    # QML-only usage — no C++ Quick3D linkage needed; the definition
+    # exposes the gate to main.cpp (quick3dAvailable) and tests.
+    target_compile_definitions(openrgb2_ui PUBLIC OPENRGB2_WITH_QUICK3D)
+endif()
 
 set_target_properties(openrgb2_ui PROPERTIES AUTOMOC ON)
 

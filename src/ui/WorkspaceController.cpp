@@ -590,6 +590,11 @@ void WorkspaceController::AdoptFetchedDocument(
         ready_cached_ = r;
         emit draftChanged();
     }
+    /* A freshly applied/recovered document carries its own
+       camera + render editor prefs — the viewport re-reads
+       them on this pair (Task 8). */
+    emit cameraChanged();
+    emit renderPrefsChanged();
     NoteDraftEdited();
     CheckRecoveryOffer();
     SetStatus(session_.Dirty()
@@ -704,6 +709,8 @@ void WorkspaceController::recoverDraft()
         ready_cached_ = true;
         emit draftChanged();
     }
+    emit cameraChanged();
+    emit renderPrefsChanged();
     NoteDraftEdited();
 }
 
@@ -1691,6 +1698,162 @@ void WorkspaceController::PollPendingJobForTesting()
                        QVariant::fromValue<qulonglong>(
                            pending_job_id_) }}),
         QStringLiteral("job_status"));
+}
+
+/*---------------------------------------------------------*\
+|| viewport editor prefs (studio-import Task 8)              ||
+||                                                           ||
+||   meta.camera / meta.render / meta.ui are editor prefs   ||
+||   inside the shared draft — SetMeta mutates them        ||
+||   WITHOUT an undo record (the same rule the source       ||
+||   SceneBridge::setCameraState documented); the change    ||
+||   still rides the dirty + durable-draft path through      ||
+||   NoteDraftEdited. With no draft the reads return the     ||
+||   compact-document defaults and writes are refused.       ||
+\*---------------------------------------------------------*/
+
+QVariantMap WorkspaceController::cameraState() const
+{
+    studio::CameraPrefs c;                 /* compact defaults */
+    std::string middle = "pan";
+    if(session_.HasWorking())
+    {
+        c      = session_.Working().meta.camera;
+        middle = session_.Working().meta.controls.middle_drag;
+    }
+    QVariantMap m;
+    m[QStringLiteral("view")]       = QString::fromStdString(c.view);
+    m[QStringLiteral("projection")] =
+        QString::fromStdString(c.projection);
+    m[QStringLiteral("tx")] = (double)c.target.x;
+    m[QStringLiteral("ty")] = (double)c.target.y;
+    m[QStringLiteral("tz")] = (double)c.target.z;
+    m[QStringLiteral("yaw")]      = (double)c.yaw_deg;
+    m[QStringLiteral("pitch")]    = (double)c.pitch_deg;
+    m[QStringLiteral("distance")] = (double)c.distance;
+    m[QStringLiteral("span")]     = (double)c.span;
+    /* Rides along on the prefs read so the viewport's input
+       router can honor middle_drag: pan|orbit without a second
+       API — same contract as the source bridge. */
+    m[QStringLiteral("middle_drag")] =
+        QString::fromStdString(middle);
+    return m;
+}
+
+void WorkspaceController::setCameraState(const QVariantMap& state)
+{
+    const bool changed = session_.SetMeta(
+        [&state](studio::WorkspaceMeta& meta)
+        {
+            studio::CameraPrefs& c = meta.camera;
+            if(state.contains(QStringLiteral("view")))
+            {
+                const QString v =
+                    state[QStringLiteral("view")].toString();
+                if(v == QLatin1String("desk")
+                   || v == QLatin1String("top")
+                   || v == QLatin1String("front")
+                   || v == QLatin1String("case")
+                   || v == QLatin1String("free"))
+                {
+                    c.view = v.toStdString();
+                }
+            }
+            if(state.contains(QStringLiteral("projection")))
+            {
+                const QString v =
+                    state[QStringLiteral("projection")].toString();
+                if(v == QLatin1String("orthographic")
+                   || v == QLatin1String("perspective"))
+                {
+                    c.projection = v.toStdString();
+                }
+            }
+            const auto num = [&state](const char* k, float& dst)
+            {
+                const QString key = QString::fromLatin1(k);
+                if(state.contains(key))
+                {
+                    bool ok = false;
+                    const double v = state[key].toDouble(&ok);
+                    if(ok && std::isfinite(v))
+                    {
+                        dst = (float)v;
+                    }
+                }
+            };
+            num("tx", c.target.x);
+            num("ty", c.target.y);
+            num("tz", c.target.z);
+            num("yaw",      c.yaw_deg);
+            num("pitch",    c.pitch_deg);
+            num("distance", c.distance);
+            num("span",     c.span);
+            if(c.distance <= 0.0f) { c.distance = 1.21f; }
+            if(c.span     <= 0.0f) { c.span     = 0.9f;  }
+            return true;
+        });
+    if(changed)
+    {
+        emit cameraChanged();
+        NoteDraftEdited();
+    }
+}
+
+QString WorkspaceController::renderQuality() const
+{
+    return QString::fromStdString(
+        session_.HasWorking()
+            ? session_.Working().meta.render.quality
+            : std::string("balanced"));
+}
+
+void WorkspaceController::setRenderQuality(const QString& q)
+{
+    if(q != QLatin1String("low") && q != QLatin1String("balanced")
+       && q != QLatin1String("high"))
+    {
+        return;
+    }
+    const std::string want = q.toStdString();
+    const bool changed = session_.SetMeta(
+        [&want](studio::WorkspaceMeta& meta)
+        {
+            meta.render.quality = want;
+            return true;
+        });
+    if(changed)
+    {
+        emit renderPrefsChanged();
+        NoteDraftEdited();
+    }
+}
+
+bool WorkspaceController::renderBloom() const
+{
+    return !session_.HasWorking()
+           || session_.Working().meta.render.bloom;
+}
+
+void WorkspaceController::setRenderBloom(bool on)
+{
+    const bool changed = session_.SetMeta(
+        [on](studio::WorkspaceMeta& meta)
+        {
+            meta.render.bloom = on;
+            return true;
+        });
+    if(changed)
+    {
+        emit renderPrefsChanged();
+        NoteDraftEdited();
+    }
+}
+
+bool WorkspaceController::reducedMotion() const
+{
+    return session_.HasWorking()
+           && session_.Working().meta.ui.reduced_motion;
 }
 
 } /* namespace ui */

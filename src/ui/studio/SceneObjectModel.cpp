@@ -401,6 +401,25 @@ QVariant SceneObjectModel::data(const QModelIndex& index, int role) const
     case RzRole:
         if(r->draft && di != nullptr) return (double)di->rotation_deg.z;
         return o != nullptr ? (double)o->transform.rotation_deg.z : 0.0;
+    case QwRole:
+    case QxRole:
+    case QyRole:
+    case QzRole:
+    {
+        /* One shared rotation convention: the core converts the
+           stored XYZ degrees (Rz*Ry*Rx) into this quaternion —
+           the 3D viewport binds Node.rotation to it directly. */
+        const studio::Vec3 deg =
+            (r->draft && di != nullptr)
+                ? di->rotation_deg
+                : (o != nullptr ? o->transform.rotation_deg
+                                : studio::Vec3{});
+        const studio::Quat q = studio::RotationQuat(deg);
+        if(role == QwRole) return (double)q.w;
+        if(role == QxRole) return (double)q.x;
+        if(role == QyRole) return (double)q.y;
+        return (double)q.z;
+    }
     case WxRole:
     case WyRole:
     case WzRole:
@@ -564,6 +583,10 @@ QHash<int, QByteArray> SceneObjectModel::roleNames() const
         { RxRole,           "rx" },
         { RyRole,           "ry" },
         { RzRole,           "rz" },
+        { QwRole,           "qw" },
+        { QxRole,           "qx" },
+        { QyRole,           "qy" },
+        { QzRole,           "qz" },
         { WxRole,           "wx" },
         { WyRole,           "wy" },
         { WzRole,           "wz" },

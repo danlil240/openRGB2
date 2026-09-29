@@ -196,6 +196,25 @@ bool WorkspaceEditSession::CommitDocEdit(
         });
 }
 
+bool WorkspaceEditSession::SetMeta(
+    const std::function<bool(studio::WorkspaceMeta&)>& mutate)
+{
+    if(!has_working_ || mutate == nullptr)
+    {
+        return false;
+    }
+    /* Snapshot the serialized draft so a mutation that changed
+       nothing leaves no trace — and no UNDO record is ever
+       created: editor prefs are not scene history. Dirty()
+       picks a real change up against the baseline on its own. */
+    const nlohmann::json before = studio::ToJson(working_);
+    if(!mutate(working_.meta))
+    {
+        return false;
+    }
+    return studio::ToJson(working_) != before;
+}
+
 bool WorkspaceEditSession::Undo()
 {
     if(undo_.empty())

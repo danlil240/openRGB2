@@ -126,6 +126,18 @@ public:
     bool CommitDocEdit(const std::string& label,
                        const studio::StudioDocument& new_doc);
 
+    /* Workspace-meta mutation WITHOUT a history record —
+       camera/view/render/control preferences are editor chrome
+       ("editor prefs, never scene-object history": the same rule
+       the source SceneBridge::setCameraState followed). The
+       mutation lands in working_.meta directly; Dirty() picks it
+       up against the baseline and the draft store persists it —
+       undo cannot. Returns false without a working draft or when
+       the mutation changed nothing. `mutate` may only touch the
+       WorkspaceMeta section. */
+    bool SetMeta(
+        const std::function<bool(studio::WorkspaceMeta&)>& mutate);
+
     bool Undo();
     bool Redo();
     /* working = baseline; clears history + any live gesture —

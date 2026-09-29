@@ -390,6 +390,11 @@ void ObjectEditorController::SetStatus(const QString& s)
     emit statusMessage(s);
 }
 
+void ObjectEditorController::setStatusMessage(const QString& text)
+{
+    SetStatus(text);
+}
+
 /*---------------------------------------------------------*\
 || Resolve + model refresh                                  ||
 \*---------------------------------------------------------*/
