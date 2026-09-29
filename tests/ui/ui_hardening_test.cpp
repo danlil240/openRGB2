@@ -58,12 +58,47 @@ static int failures = 0;
 
 static nlohmann::json DocFixture(const char* name)
 {
+    const nlohmann::json pos = nlohmann::json::object(
+        {{"x",0},{"y",0},{"z",0}});
     return nlohmann::json::object({
         { "version",    2    },
         { "name",       name },
         { "brightness", 1.0  },
-        { "bindings",   nlohmann::json::array() },
-        { "objects",    nlohmann::json::array() },
+        { "bindings",   nlohmann::json::array({
+            nlohmann::json::object({
+                { "id",              "slw0" },
+                { "controller_name", "UNI FAN" },
+                { "vendor",          "Lian Li" },
+                { "serial",          "" },
+                { "location",        "" },
+                { "device_type",     -1 },
+                { "zone_name",       "Fan 1" },
+                { "zone_leds",       40 },
+            }),
+        }) },
+        /* A device object — save() refuses a draft with no
+           device objects, so the save-path cases below need a
+           document the guard accepts. */
+        { "objects",    nlohmann::json::array({
+            nlohmann::json::object({
+                { "id",        "fan0" },
+                { "label",     "SLW Fan 0" },
+                { "kind",      "device" },
+                { "position",  pos },
+                { "rotation",  pos },
+                { "scale",     nlohmann::json::object(
+                                   {{"x",1},{"y",1},{"z",1}}) },
+                { "size_m",    pos },
+                { "binding",   "slw0" },
+                { "geometry",  "fan-slw" },
+                { "verified",  true },
+                { "visible",   true },
+                { "emitters",  nlohmann::json::array({
+                    nlohmann::json::object({
+                        { "pos", pos }, { "group", "fan0" },
+                        { "address", 0 } }) }) },
+            }),
+        }) },
         { "object_colors",  nlohmann::json::object() },
         { "emitter_colors", nlohmann::json::object() },
         { "effect", nlohmann::json::object({
