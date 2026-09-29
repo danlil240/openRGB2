@@ -236,10 +236,7 @@ private:
 
     /*---- snapshot/state application -------------------------*/
     void ApplySnapshot(const QVariantMap& snap);
-    void ReconcileAfterReconnect(const QVariantMap& snap);
     void FetchDocument();
-    void AdoptSnapshotDoc(const studio::StudioDocument& doc,
-                          uint64_t ws_rev, uint64_t res_rev);
     void CheckRecoveryOffer();
     void PumpImportQueue();
 
@@ -287,15 +284,10 @@ private:
     /* The in-flight save: the document snapshot + base
        revisions submitted — adoption uses THESE bytes, and
        reconnect reconcile hashes them against content_sha256. */
-    int         pending_save_req_ = 0;
     uint64_t    pending_job_id_   = 0;
-    QString     pending_verb_;     /* "commit" | "save_copy" |
-                                      "reload" | "import_commit" |
-                                      "export" */
     nlohmann::json pending_doc_ = nullptr;
     QString     pending_doc_sha_;
     QString     pending_save_name_;
-    bool        pending_doc_dirty_ = false; /* commit was ours   */
     /* job_id -> purpose for terminal workspace events not part
        of the save flow (import/export/reload). */
     std::map<uint64_t, QString> tracked_jobs_;
@@ -357,9 +349,22 @@ private:
        each, so library imports stage one entry at a time. */
     struct PendingImport { QString name; QByteArray bytes; };
     std::deque<PendingImport> import_queue_;
+    /* Names ride alongside the serial queue so a failed or
+       finished import_commit reports WHICH entry — never an
+       empty name — and the queue keeps moving either way.
+       submit_names is a FIFO drained at each job-accept reply;
+       names_ holds accepted job_id -> name until the terminal
+       event resolves it. */
+    std::deque<QString>           import_submit_names_;
+    std::map<uint64_t, QString>   import_names_;
+    /* Cached baseline hash for the durable record — the
+       baseline only moves at LoadApplied/ApplyRemote/
+       AdoptCommitted; recomputing per edit serializes the
+       whole document every keystroke. */
+    QString     baseline_sha_;
     int SendCommand(const QString& verb, const QVariantMap& args,
                     const QString& tag);
-    QString BaselineSha() const;
+    QString BaselineSha();
     static QString SlugFor(const QString& name);
     void OnJobReply(const QString& verb, const QVariantMap& body,
                     bool ok, const QString& message);

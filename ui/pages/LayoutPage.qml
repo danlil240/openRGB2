@@ -25,9 +25,16 @@ Item {
         typeof layoutCtl !== "undefined"
     readonly property bool engineUp:
         typeof bridge !== "undefined" && bridge.connected
+    /* A recovered local draft has no engine baseline
+       (hasScene) and may exist with NO engine at all —
+       workspace.ready is the honest "a draft is staged" gate
+       for that case; the managed/applied paths keep
+       hasScene + engineUp. */
     readonly property bool editable:
-        root.ctlUp && root.engineUp && layoutCtl.hasScene
-        && !layoutCtl.busy
+        root.ctlUp && !layoutCtl.busy
+        && ((root.engineUp && layoutCtl.hasScene)
+            || (typeof workspace !== "undefined"
+                && workspace.ready))
 
     /* items() / linkPairs() feed the canvas — both recompute
        whenever layoutCtl re-emits itemsChanged (its property

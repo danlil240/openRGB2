@@ -155,6 +155,9 @@ struct WsEngine
     bool          auto_complete_jobs = true;
     bool          fail_next_commit   = false;
     std::string   commit_fail_detail = "invalid_document";
+    /* Count of import_commit jobs to fail before succeeding
+       — exercises the serial import queue's failure path. */
+    int           fail_imports       = 0;
     /* The one held (accepted, not completed) job. */
     uint64_t      held_job   = 0;
     std::string   held_verb;
@@ -516,6 +519,13 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
                     e.fail_next_commit = false;
                     e.SendEvent(e.JobRecord(
                         job, verb, "failed", e.commit_fail_detail));
+                }
+                else if(verb == "import_commit" &&
+                        e.fail_imports > 0)
+                {
+                    --e.fail_imports;
+                    e.SendEvent(e.JobRecord(
+                        job, verb, "failed", "import_failed"));
                 }
                 else
                 {
@@ -1182,6 +1192,17 @@ int main(int argc, char** argv)
         CHECK(ctl.Session().Working().meta.name ==
               "offline-draft");
         CHECK(ctl.dirty());
+        /* A recovered draft is also LAYOUT-editable with no
+           engine — the compact rows come from the working
+           doc (no baseline exists to gate on), and ops
+           commit into the same draft. */
+        LayoutController lay(&bridge);
+        lay.setWorkspace(&ctl);
+        CHECK(ctl.ready());
+        CHECK(!lay.items().isEmpty());
+        CHECK(lay.moveObject(QStringLiteral("fan0"), 0.4, 0.3));
+        CHECK(ctl.Session().Working()
+                  .devices.at("fan0").position.x > 0.39f);
         /* Local edits keep working — and Save reports the
            honest unavailable state, never a fake ok. */
         CHECK(ctl.Session().CommitDocEdit("local",
@@ -1420,6 +1441,228 @@ int main(int argc, char** argv)
             return rig.engine.layout_calls >= 1; }));
         CHECK(rig.engine.commits == 0);
         CHECK(!rig.ctl.Session().HasWorking());
+    }
+
+    std::printf("-- recovery: foreign-workspace record is "
+                "never offered under a managed session\n");
+    {
+        QTemporaryDir dir;
+        const studio::StudioDocument other =
+            ParseCompact(CompactDoc("other-doc"));
+        {
+            /* A crash record for a DIFFERENT workspace —
+               staged under its own id. */
+            WorkspaceDraftStore seed;
+            seed.setRootForTesting(dir.path());
+            seed.Stage(QStringLiteral("ws_foreign"), 1, 1,
+                QString::fromStdString(Sha256(DocBytes(other))),
+                studio::ToJson(other));
+            seed.Flush();
+        }
+        WsRig rig;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.bridge.start();
+        /* Attach completes: managed ws0, doc fetched clean.
+           The foreign record must never be offered — staging
+           it would commit another workspace's document as
+           ws0's content on the next save. */
+        CHECK(rig.PumpUntil([&] { return rig.ctl.ready(); }));
+        for(int i = 0; i < 20; ++i)
+        {
+            ServeWs(rig.engine, 5);
+            QCoreApplication::processEvents();
+        }
+        CHECK(!rig.ctl.recoveryOffered());
+        CHECK(!rig.ctl.dirty());
+        CHECK(rig.ctl.Session().Working().meta.name == "desk");
+
+        /* Its own record still surfaces normally. */
+        const studio::StudioDocument mine =
+            ParseCompact(CompactDoc("mine-doc"));
+        {
+            WorkspaceDraftStore seed;
+            seed.setRootForTesting(dir.path());
+            seed.Stage(QStringLiteral("ws0"), 1, 1,
+                QString::fromStdString(Sha256(DocBytes(mine))),
+                studio::ToJson(mine));
+            seed.Flush();
+        }
+        /* Re-check is driven by another snapshot. */
+        rig.engine.SendEvent(rig.engine.Snapshot());
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.recoveryOffered(); }));
+        rig.ctl.recoverDraft();
+        CHECK(rig.ctl.Session().Working().meta.name ==
+              "mine-doc");
+    }
+
+    std::printf("-- controller: failed import keeps the "
+                "queue moving\n");
+    {
+        QTemporaryDir dir;
+        ProfileLibrary lib;
+        lib.setPathForTesting(dir.filePath("lib.json"));
+        lib.saveProfile("First",
+            JsonToVariant(CompactDoc("first-doc")).toMap());
+        lib.saveProfile("Second",
+            JsonToVariant(CompactDoc("second-doc")).toMap());
+
+        WsRig rig;
+        rig.ctl.setDraftDirForTesting(dir.filePath("drafts"));
+        rig.engine.fail_imports = 1;   /* first commit fails */
+        int finished = 0;
+        int ok_count = 0;
+        QStringList names;
+        QObject::connect(&rig.ctl,
+            &WorkspaceController::importFinished, &rig.ctl,
+            [&](const QString& n, bool ok, const QString& e) {
+                (void)e;
+                ++finished;
+                if(ok)
+                {
+                    ++ok_count;
+                }
+                names.push_back(n);
+            });
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] { return rig.ctl.ready(); }));
+        CHECK(rig.ctl.importProfiles(&lib) == 2);
+        /* Both jobs reach the engine — the failed first never
+           stalls the second. */
+        CHECK(rig.PumpUntil([&] {
+            return rig.engine.import_commits == 2; }));
+        CHECK(rig.PumpUntil([&] { return finished >= 2; }));
+        CHECK(ok_count == 1);
+        /* Both entries reported BY NAME — an empty name is
+           the regression being guarded against. */
+        CHECK(names.size() == 2);
+        CHECK(!names[0].isEmpty());
+        CHECK(!names[1].isEmpty());
+        CHECK(lib.entries().size() == 2);   /* originals kept */
+    }
+
+    std::printf("-- adapters: page switching preserves draft "
+                "+ selection\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        SceneEditController scene(&rig.bridge);
+        LayoutController    layout(&rig.bridge);
+        scene.setWorkspace(&rig.ctl);
+        layout.setWorkspace(&rig.ctl);
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] { return rig.ctl.ready(); }));
+
+        /* Lighting edits, Layout selects — then the user flips
+           pages. Both live in shared controller state: the
+           draft and the selection are never per-view. */
+        scene.setBrightness(0.5);
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        layout.select(QStringLiteral("fan0"));
+        /* Layout "page" binds: rows + selection intact. */
+        CHECK(layout.items().size() == 2);
+        CHECK(layout.selectedId() == QStringLiteral("fan0"));
+        /* Lighting "page" re-binds: the same draft projects
+           back — dirty flag and edited field both live. */
+        CHECK(scene.dirty());
+        CHECK(scene.workingDocument()
+                  .value(QStringLiteral("brightness"))
+                  .toDouble() > 0.49);
+        /* Round-trip back: nothing refetched, nothing lost. */
+        CHECK(layout.selectedId() == QStringLiteral("fan0"));
+        CHECK(rig.ctl.dirty());
+        CHECK(rig.engine.download_begins == 1);
+        CHECK(rig.ctl.Session().UndoCount() == 1);
+    }
+
+    std::printf("-- adapters: emitter rows + render-only "
+                "calibration in ws mode\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        LayoutController layout(&rig.bridge);
+        layout.setWorkspace(&rig.ctl);
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] { return rig.ctl.ready(); }));
+        /* Feed the resolved applied scene — emitter data is
+           engine truth the compact doc doesn't carry. */
+        const nlohmann::json pos = nlohmann::json::object(
+            {{ "x", 0.1 }, { "y", 0.0 }, { "z", 0.2 }});
+        const nlohmann::json scene_doc = nlohmann::json::object({
+            { "version",    2 },
+            { "name",       "test-scene" },
+            { "brightness", 1.0 },
+            { "bindings", nlohmann::json::array({
+                nlohmann::json::object({
+                    { "id", "slw0" },
+                    { "controller_name", "UNI FAN" },
+                    { "zone_name", "Fan 1" },
+                    { "zone_leds", 40 } }) }) },
+            { "objects", nlohmann::json::array({
+                nlohmann::json::object({
+                    { "id", "fan0" }, { "kind", "device" },
+                    { "position", pos },
+                    { "binding",  "slw0" },
+                    { "verified", true },
+                    { "emitters", nlohmann::json::array({
+                        nlohmann::json::object(
+                            {{ "address", 0 }}),
+                        nlohmann::json::object(
+                            {{ "address", 1 }}),
+                        nlohmann::json::object(
+                            {{ "address", -1 }}),
+                    }) } }),
+            }) },
+            { "object_colors", nlohmann::json::object() },
+            { "effect", nlohmann::json::object({
+                { "preset", "aurora" }, { "speed", 1.0 },
+                { "intensity", 1.0 }, { "playing", true },
+                { "layers", nlohmann::json::array() } }) },
+        });
+        rig.engine.srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "scene" },
+                { "data", nlohmann::json::object({
+                    { "loaded",   true },
+                    { "revision", 1 },
+                    { "document", scene_doc } }) } }));
+        /* Pump until the event lands — row counts then come
+           from the resolved doc: 3 emitters, 2 addressed. */
+        auto row_for_fan0 = [&]() -> QVariantMap {
+            for(const QVariant& v : layout.items())
+            {
+                const QVariantMap m = v.toMap();
+                if(m.value("id").toString() ==
+                   QLatin1String("fan0"))
+                {
+                    return m;
+                }
+            }
+            return QVariantMap();
+        };
+        CHECK(rig.PumpUntil([&] {
+            return row_for_fan0().value("emitter_count")
+                       .toInt() == 3; }));
+        const QVariantMap fan0 = row_for_fan0();
+        CHECK(!fan0.isEmpty());
+        CHECK(fan0.value("emitter_count").toInt() == 3);
+        CHECK(fan0.value("addressed_count").toInt() == 2);
+        /* -1 = render-only is a legal calibration input in ws
+           mode — expressed honestly as unbinding the
+           attributed zone row. */
+        CHECK(layout.calibrateEmitter(QStringLiteral("fan0"),
+                                      0, -1));
+        CHECK(rig.ctl.Session().Working()
+                  .device_settings.at("fan0")
+                  .zones.empty());
+        CHECK(rig.ctl.dirty());
+        /* Undo restores the bound row. */
+        layout.undo();
+        CHECK(rig.ctl.Session().Working()
+                  .device_settings.at("fan0")
+                  .zones.count("ring") == 1);
     }
 
     std::printf("ui_workspace_test: %d checks, %d failures\n",

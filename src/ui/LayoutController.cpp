@@ -307,12 +307,27 @@ QVariantList LayoutController::WsItems() const
         m.insert(QStringLiteral("rx"), (double)d.rotation_deg.x);
         m.insert(QStringLiteral("ry"), (double)d.rotation_deg.y);
         m.insert(QStringLiteral("rz"), (double)d.rotation_deg.z);
-        /* Footprint + emitter counts are resolved-scene data —
-           not stored in the compact doc and never invented. */
+        /* Footprint is resolved-scene data — not stored in the
+           compact doc and never invented. Emitter counts come
+           from the APPLIED resolved scene (WsEmitters joins
+           the instance path the same way the calibration list
+           does) — never fabricated: 0 is the honest answer
+           until the engine reports a resolved document. */
         m.insert(QStringLiteral("w"), 0.0);
         m.insert(QStringLiteral("d"), 0.0);
-        m.insert(QStringLiteral("emitter_count"), 0);
-        m.insert(QStringLiteral("addressed_count"), 0);
+        int em_total = 0;
+        int em_addr  = 0;
+        for(const QVariant& ev : WsEmitters(iid))
+        {
+            ++em_total;
+            if(ev.toMap().value(QStringLiteral("address"), -1)
+                   .toInt() >= 0)
+            {
+                ++em_addr;
+            }
+        }
+        m.insert(QStringLiteral("emitter_count"), em_total);
+        m.insert(QStringLiteral("addressed_count"), em_addr);
         m.insert(QStringLiteral("geometry"), QString());
         m.insert(QStringLiteral("mirror_of"),
                  QString::fromStdString(
@@ -1056,14 +1071,15 @@ bool LayoutController::calibrateEmitter(const QString& objectId,
         }
         /* Per-emitter address freedom does not exist in the
            compact model — the authored unit is the zone's
-           addr_base, so calibration shifts the whole zone. */
-        if(address < 0)
+           addr_base, so calibration shifts the whole zone.
+           -1 = render-only stays a legal input (same as the
+           legacy calibrate_led contract): its zone-level
+           form is unbinding the attributed zone row — the
+           emitter's zone renders but drives nothing. */
+        if(address < -1)
         {
-            SetLastError(QStringLiteral("workspace calibration "
-                                        "moves a zone's address "
-                                        "base — per-emitter "
-                                        "render-only is not "
-                                        "expressible"),
+            SetLastError(QStringLiteral("address must be >= -1 "
+                                        "(-1 = render-only)"),
                          QStringLiteral("input"));
             return false;
         }
@@ -1083,6 +1099,55 @@ bool LayoutController::calibrateEmitter(const QString& objectId,
             em.value(QStringLiteral("address"), -1).toInt();
         const QString bind =
             em.value(QStringLiteral("binding")).toString();
+        /* Which zone row? The emitter's object binds ONE
+           binding; exactly one settings zone row may carry it
+           or the write would be ambiguous. Both paths need
+           the attribution. */
+        const auto sit = w->device_settings.find(iid);
+        std::string zone_id;
+        int  rows = 0;
+        int  cur_base = 0;
+        if(sit != w->device_settings.end())
+        {
+            for(const auto& z : sit->second.zones)
+            {
+                if(z.second.binding == bind.toStdString())
+                {
+                    zone_id  = z.first;
+                    cur_base = z.second.addr_base;
+                    ++rows;
+                }
+            }
+        }
+        if(address == -1)
+        {
+            /* Render-only: the emitter's zone loses its
+               binding — rendered, undriven. UnbindZone is one
+               honest undo record (rebinding restores it);
+               the status text names the zone granularity. */
+            if(bind.isEmpty())
+            {
+                SetLastError(QStringLiteral("that emitter is "
+                                            "already render-"
+                                            "only"),
+                             QStringLiteral("input"));
+                return false;
+            }
+            if(rows != 1)
+            {
+                SetLastError(QStringLiteral("cannot attribute "
+                                            "the emitter to one "
+                                            "zone row — "
+                                            "ambiguous "
+                                            "calibration"),
+                             QStringLiteral("input"));
+                return false;
+            }
+            return WsApply(
+                ws_->Session().Editor().UnbindZone(iid,
+                                                  zone_id),
+                QStringLiteral("render-only %1").arg(objectId));
+        }
         if(old_addr < 0 || bind.isEmpty())
         {
             SetLastError(QStringLiteral("that emitter is "
@@ -1103,25 +1168,6 @@ bool LayoutController::calibrateEmitter(const QString& objectId,
                                         "for the bound zone"),
                          QStringLiteral("input"));
             return false;
-        }
-        /* Which zone row? The emitter's object binds ONE
-           binding; exactly one settings zone row may carry it
-           or the write would be ambiguous. */
-        const auto sit = w->device_settings.find(iid);
-        std::string zone_id;
-        int  rows = 0;
-        int  cur_base = 0;
-        if(sit != w->device_settings.end())
-        {
-            for(const auto& z : sit->second.zones)
-            {
-                if(z.second.binding == bind.toStdString())
-                {
-                    zone_id  = z.first;
-                    cur_base = z.second.addr_base;
-                    ++rows;
-                }
-            }
         }
         if(rows != 1)
         {

@@ -129,13 +129,23 @@ int WorkspaceController::SendCommand(const QString& verb,
     return id;
 }
 
-QString WorkspaceController::BaselineSha() const
+QString WorkspaceController::BaselineSha()
 {
     if(!session_.HasBaseline())
     {
+        baseline_sha_.clear();
         return QString();
     }
-    return Sha256Hex(studio::ToJson(session_.Baseline()).dump(2));
+    /* Cached — the baseline only moves at LoadApplied /
+       ApplyRemote / AdoptCommitted (each call site clears the
+       cache); a per-edit recompute serializes the whole
+       document every keystroke. */
+    if(baseline_sha_.isEmpty())
+    {
+        baseline_sha_ = Sha256Hex(
+            studio::ToJson(session_.Baseline()).dump(2));
+    }
+    return baseline_sha_;
 }
 
 QString WorkspaceController::SlugFor(const QString& name)
@@ -303,6 +313,15 @@ void WorkspaceController::OnEngineLost(const QString& reason)
         emit saveFinished(false);
     }
     pending_reqs_.clear();
+    /* Job ids are per-session state — a reconnect starts
+       numbering over, so stale tracked ids could collide with
+       a NEW job and misattribute its terminal event. Queued
+       imports stop with the session; the upload AbortTransfers
+       just cancelled can never resume. */
+    tracked_jobs_.clear();
+    import_queue_.clear();
+    import_submit_names_.clear();
+    import_names_.clear();
 }
 
 void WorkspaceController::OnWorkspaceChanged()
@@ -372,18 +391,24 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
     }
 
     /* An offer may predate the engine attach — restate its
-       staleness against the live revisions. */
+       staleness against the live revisions, and DROP an offer
+       the resolved managed id proves foreign (a pre-attach
+       fallback can't know the managed id until now). */
     if(recovery_offered_)
     {
+        const bool foreign = managed_ &&
+                             offered_ws_id_ != ws_id_;
         const WorkspaceDraftRecord rec =
             drafts_.Read(offered_ws_id_);
-        const bool stale = !rec.exists || !managed_ ||
+        const bool stale = foreign || !rec.exists ||
+            !managed_ ||
             rec.baseline_revision != ws_rev_ ||
             rec.resource_revision != res_rev_;
-        if(!rec.exists)
+        if(foreign || !rec.exists)
         {
             recovery_offered_ = false;
             recovery_stale_   = false;
+            offered_ws_id_.clear();
             emit recoveryChanged();
         }
         else if(stale != recovery_stale_)
@@ -404,6 +429,7 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
         if(studio::FromJson(pending_doc_, d, &errs))
         {
             session_.AdoptCommitted(d, ws, res);
+            baseline_sha_.clear();
         }
         pending_doc_      = nullptr;
         pending_doc_sha_  = QString();
@@ -500,6 +526,7 @@ void WorkspaceController::AdoptFetchedDocument(
        Sha256Hex(bytes) == pending_doc_sha_)
     {
         session_.AdoptCommitted(d, ws_rev_, res_rev_);
+        baseline_sha_.clear();
         pending_doc_       = nullptr;
         pending_doc_sha_   = QString();
         reconcile_pending_ = false;
@@ -511,6 +538,7 @@ void WorkspaceController::AdoptFetchedDocument(
     {
         force_adopt_ = false;
         session_.LoadApplied(d, ws_rev_, res_rev_);
+        baseline_sha_.clear();
         SetConflict(false);
         /* A recovery offer for this workspace stays up until
            the user decides — the engine doc loading clean must
@@ -519,6 +547,7 @@ void WorkspaceController::AdoptFetchedDocument(
     else
     {
         session_.ApplyRemote(d, ws_rev_, res_rev_);
+        baseline_sha_.clear();
         if(session_.Dirty())
         {
             SetConflict(true);
@@ -550,20 +579,35 @@ void WorkspaceController::CheckRecoveryOffer()
            "recovery" — it IS the current work. */
         return;
     }
-    QString id = ws_id_;
+    QString id;
+    if(managed_)
+    {
+        id = ws_id_;
+    }
+    else if(!available_)
+    {
+        /* No workspace surface at all (missing/legacy
+           engine) — the only honest offer is whatever record
+           exists; the draft is workspace-agnostic until the
+           user opens a target. */
+        const QStringList ids = drafts_.recordedIds();
+        if(!ids.isEmpty())
+        {
+            id = ids.first();
+        }
+    }
+    else
+    {
+        /* A capable engine whose managed state isn't resolved
+           yet (or that manages nothing): never offer a
+           workspace's record into the WRONG or empty session —
+           a foreign draft staged here would commit as this
+           workspace's content on the next save. */
+        return;
+    }
     WorkspaceDraftRecord rec;
     if(!id.isEmpty())
     {
-        rec = drafts_.Read(id);
-    }
-    if(!rec.exists)
-    {
-        const QStringList ids = drafts_.recordedIds();
-        if(ids.isEmpty())
-        {
-            return;
-        }
-        id  = ids.first();
         rec = drafts_.Read(id);
     }
     if(!rec.exists)
@@ -594,6 +638,17 @@ void WorkspaceController::recoverDraft()
 {
     if(!recovery_offered_)
     {
+        return;
+    }
+    if(managed_ && offered_ws_id_ != ws_id_)
+    {
+        /* Defense-in-depth: re-check the offer against the
+           live managed id — a foreign record must never stage
+           into this session (its document would commit as
+           this workspace's content). */
+        SetError(QStringLiteral("the recovered draft belongs "
+                                "to a different workspace"),
+                 QStringLiteral("input"));
         return;
     }
     const WorkspaceDraftRecord rec = drafts_.Read(offered_ws_id_);
@@ -658,7 +713,6 @@ void WorkspaceController::save()
        of this snapshot. */
     pending_doc_       = studio::ToJson(session_.Working());
     pending_doc_sha_   = Sha256Hex(pending_doc_.dump(2));
-    pending_doc_dirty_ = true;
     SetSaving(true);
     SetError(QString(), QString());
     const int id = SendCommand(
@@ -724,16 +778,24 @@ void WorkspaceController::saveCopy(const QString& name)
 
 void WorkspaceController::openWorkspace(const QString& id)
 {
-    if(!available_ || id.isEmpty() || id == ws_id_)
+    if(!available_ || !bridge_->connected() || id.isEmpty() ||
+       id == ws_id_)
     {
         return;
     }
     /* The current draft record is staged already (debounced
        shadow) — switching never loses unsaved work. */
     force_adopt_ = true;
-    SendCommand(QStringLiteral("reload"),
-                QVariantMap({{ QStringLiteral("id"), id }}),
-                QStringLiteral("job:reload"));
+    if(SendCommand(QStringLiteral("reload"),
+                   QVariantMap({{ QStringLiteral("id"), id }}),
+                   QStringLiteral("job:reload")) <= 0)
+    {
+        /* No job in flight — a latched force_adopt_ would
+           wholesale-adopt the next fetch over a dirty draft. */
+        force_adopt_ = false;
+        SetError(QStringLiteral("reload request could not be "
+                                "sent"), QStringLiteral("connection"));
+    }
 }
 
 void WorkspaceController::reload()
@@ -748,8 +810,13 @@ void WorkspaceController::reload()
         return;
     }
     force_adopt_ = true;
-    SendCommand(QStringLiteral("reload"), {},
-                QStringLiteral("job:reload"));
+    if(SendCommand(QStringLiteral("reload"), {},
+                   QStringLiteral("job:reload")) <= 0)
+    {
+        force_adopt_ = false;
+        SetError(QStringLiteral("reload request could not be "
+                                "sent"), QStringLiteral("connection"));
+    }
 }
 
 void WorkspaceController::resetEdits()
@@ -959,6 +1026,15 @@ void WorkspaceController::OnJobReply(const QString& verb,
                                      bool ok,
                                      const QString& message)
 {
+    /* An import_commit answer pairs with the oldest queued
+       submit name — the serial queue guarantees order. */
+    QString import_name;
+    if(verb == QLatin1String("import_commit") &&
+       !import_submit_names_.empty())
+    {
+        import_name = import_submit_names_.front();
+        import_submit_names_.pop_front();
+    }
     if(!ok)
     {
         if(verb == QLatin1String("commit") ||
@@ -968,6 +1044,13 @@ void WorkspaceController::OnJobReply(const QString& verb,
             pending_doc_     = nullptr;
             pending_doc_sha_ = QString();
             emit saveFinished(false);
+        }
+        else if(verb == QLatin1String("import_commit"))
+        {
+            /* A refused acceptance still releases the queue —
+               the remaining entries are never abandoned. */
+            emit importFinished(import_name, false, message);
+            PumpImportQueue();
         }
         SetError(message, QStringLiteral("engine"));
         return;
@@ -983,6 +1066,12 @@ void WorkspaceController::OnJobReply(const QString& verb,
             pending_doc_sha_ = QString();
             emit saveFinished(false);
         }
+        else if(verb == QLatin1String("import_commit"))
+        {
+            emit importFinished(import_name, false,
+                QStringLiteral("engine job queue is busy"));
+            PumpImportQueue();
+        }
         SetError(QStringLiteral("engine job queue is busy — "
                                 "try again"),
                  QStringLiteral("engine"));
@@ -993,7 +1082,6 @@ void WorkspaceController::OnJobReply(const QString& verb,
        verb == QLatin1String("save_copy"))
     {
         pending_job_id_ = job;
-        pending_verb_   = verb;
     }
     else if(verb == QLatin1String("reload") ||
             verb == QLatin1String("import_commit") ||
@@ -1002,6 +1090,7 @@ void WorkspaceController::OnJobReply(const QString& verb,
         tracked_jobs_[job] = verb;
         if(verb == QLatin1String("import_commit"))
         {
+            import_names_[job] = import_name;
             SetStatus(QStringLiteral("Importing workspace…"));
         }
     }
@@ -1114,8 +1203,17 @@ void WorkspaceController::ResolveJob(const QVariantMap& st)
         }
         else if(verb == QLatin1String("import_commit"))
         {
-            emit importFinished(QString(), false, err);
+            const quint64 j = JU64(st, "job_id");
+            const QString iname = import_names_.count(j)
+                                      ? import_names_[j]
+                                      : QString();
+            import_names_.erase(j);
+            /* Report WHICH entry failed and keep the queue
+               moving — one bad import never abandons the
+               rest. */
+            emit importFinished(iname, false, err);
             SetError(err, QStringLiteral("engine"));
+            PumpImportQueue();
         }
         else if(verb == QLatin1String("export"))
         {
@@ -1136,6 +1234,7 @@ void WorkspaceController::ResolveJob(const QVariantMap& st)
         if(studio::FromJson(pending_doc_, d, &errs))
         {
             session_.AdoptCommitted(d, ws, res);
+            baseline_sha_.clear();
         }
         pending_doc_     = nullptr;
         pending_doc_sha_ = QString();
@@ -1163,8 +1262,16 @@ void WorkspaceController::ResolveJob(const QVariantMap& st)
     }
     else if(verb == QLatin1String("import_commit"))
     {
-        emit importFinished(QString(), true, QString());
-        emit notice(QStringLiteral("Workspace imported"));
+        const quint64 j = JU64(st, "job_id");
+        const QString iname = import_names_.count(j)
+                                  ? import_names_[j]
+                                  : QString();
+        import_names_.erase(j);
+        emit importFinished(iname, true, QString());
+        emit notice(iname.isEmpty()
+            ? QStringLiteral("Workspace imported")
+            : QStringLiteral("Workspace '%1' imported")
+                  .arg(iname));
         refreshList();
         PumpImportQueue();
     }
@@ -1448,10 +1555,30 @@ void WorkspaceController::OnUploadReply(const QString& stage,
         {
             QVariantMap args = u.args;
             args.insert(QStringLiteral("staged"), token);
+            /* Job-accept replies carry only the request id —
+               the entry's name rides a FIFO keyed to the
+               serial queue so the terminal event reports
+               WHICH import finished or failed. */
+            if(u.verb == QLatin1String("import_commit"))
+            {
+                import_submit_names_.push_back(
+                    u.args.value(QStringLiteral("name"))
+                        .toString());
+            }
             const int id = SendCommand(u.verb, args,
                 QStringLiteral("job:") + u.verb);
             if(id <= 0)
             {
+                if(u.verb == QLatin1String("import_commit"))
+                {
+                    import_submit_names_.pop_back();
+                    emit importFinished(
+                        u.args.value(QStringLiteral("name"))
+                            .toString(),
+                        false,
+                        QStringLiteral("commit could not be "
+                                       "sent"));
+                }
                 SetError(QStringLiteral("staged upload could "
                                         "not be committed"),
                          QStringLiteral("connection"));

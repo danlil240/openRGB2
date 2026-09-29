@@ -350,10 +350,14 @@ ApplicationWindow {
                is an explicit user pick. */
             Rectangle {
                 id: wsStrip
-                visible: root.wsManaged
+                /* Recovery is reachable even when nothing is
+                   managed — the missing-engine draft is the
+                   case this strip exists for. */
+                visible: typeof workspace !== "undefined"
                          && (workspace.recoveryOffered
-                             || workspace.conflict
-                             || workspace.saving
+                             || (root.wsManaged
+                                 && (workspace.conflict
+                                     || workspace.saving))
                              || root.wsNotice !== "")
                 Layout.fillWidth: true
                 implicitHeight: wsRow.implicitHeight
@@ -385,15 +389,15 @@ ApplicationWindow {
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSizeBody
                         text: {
-                            if(!root.wsManaged)
+                            if(typeof workspace === "undefined")
                                 return "";
                             if(workspace.recoveryOffered)
                                 return workspace.recoveryStale
                                     ? qsTr("An unsaved draft was found for this workspace — it was made against an older revision. Recover it as pending edits or discard it.")
                                     : qsTr("An unsaved draft was found for this workspace. Recover it as pending edits or discard it.");
-                            if(workspace.conflict)
+                            if(root.wsManaged && workspace.conflict)
                                 return qsTr("The workspace changed on the engine under your edits. Save commits your draft on top; Reload takes the engine copy.");
-                            if(workspace.saving)
+                            if(root.wsManaged && workspace.saving)
                                 return qsTr("Saving workspace…");
                             return root.wsNotice;
                         }
@@ -402,7 +406,7 @@ ApplicationWindow {
                         id: recBtn
                         objectName: "wsRecover"
                         anchors.verticalCenter: parent.verticalCenter
-                        visible: root.wsManaged
+                        visible: typeof workspace !== "undefined"
                                  && workspace.recoveryOffered
                         text: qsTr("Recover draft")
                         onClicked: workspace.recoverDraft()
@@ -411,7 +415,7 @@ ApplicationWindow {
                         id: dropBtn
                         objectName: "wsDiscardDraft"
                         anchors.verticalCenter: parent.verticalCenter
-                        visible: root.wsManaged
+                        visible: typeof workspace !== "undefined"
                                  && workspace.recoveryOffered
                         text: qsTr("Discard")
                         onClicked: workspace.discardDraft()
@@ -423,7 +427,11 @@ ApplicationWindow {
                         visible: root.wsManaged
                                  && workspace.conflict
                         text: qsTr("Keep my draft (Save)")
-                        onClicked: workspace.save()
+                        /* Same path as Lighting's Save — the
+                           focused text field's uncommitted
+                           text flushes into the draft before
+                           the commit, never silently lost. */
+                        onClicked: lightingPage.commitPendingEdits()
                     }
                     AppButton {
                         id: takeBtn
