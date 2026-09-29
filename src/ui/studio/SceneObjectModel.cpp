@@ -125,8 +125,8 @@ void SceneObjectModel::ResetFrom()
                 }
             }
         }
-        std::function<void(const std::string&)> walk =
-            [&](const std::string& iid)
+        std::function<void(const std::string&, int)> walk =
+            [&](const std::string& iid, int depth)
         {
             /* Instance row — the draft is authoritative; when the
                resolved root exists it shares the same id so
@@ -136,6 +136,7 @@ void SceneObjectModel::ResetFrom()
             Row inst;
             inst.id         = iid;
             inst.instance   = iid;
+            inst.depth      = depth;
             inst.draft      = true;
             if(dit != ws_->devices.end())
             {
@@ -150,16 +151,24 @@ void SceneObjectModel::ResetFrom()
                 r.instance   = iid;
                 r.parent_row = o->parent_id;
                 r.draft      = false;
+                /* Entity depth = instance depth + 1 + the extra
+                   '/' segments past the instance prefix — nested
+                   groups indent their subtree for real. */
+                const std::string rest =
+                    o->id.substr(iid.size() + 1);
+                r.depth = depth + 1
+                          + (int)std::count(rest.begin(), rest.end(),
+                                            '/');
                 rows_.push_back(r);
             }
             for(const std::string& k : kids[iid])
             {
-                walk(k);
+                walk(k, depth + 1);
             }
         };
         for(const std::string& r : roots)
         {
-            walk(r);
+            walk(r, 0);
         }
     }
     RecomputeWorlds();
@@ -436,6 +445,8 @@ QVariant SceneObjectModel::data(const QModelIndex& index, int role) const
     case VisibleRole:
         if(r->draft) return ds == nullptr || ds->visible;
         return o == nullptr || o->visible;
+    case DepthRole:
+        return r->depth;
     case LockedRole:
         /* Lock is instance state — a child row reports its root
            instance's lock (locked descendants are locked roots). */
@@ -575,6 +586,7 @@ QHash<int, QByteArray> SceneObjectModel::roleNames() const
         { ColorRole,        "color" },
         { EmitterColorsRole,"emitterColors" },
         { EmitterPointsRole,"emitterPoints" },
+        { DepthRole,        "depth" },
     };
 }
 

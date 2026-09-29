@@ -85,6 +85,28 @@ Rectangle {
         return b ? b.selectedInstances.length : 0
     }
 
+    /* Depth for the plain-array stub path: walk the row list's
+       parentId chain so group>group>instance chains indent for
+       real. Returns -1 when the model isn't a bare array (the
+       real model answers the "depth" role instead). */
+    function stubDepth(rowId, parentId) {
+        var rows = modelData()
+        if (!rows || rows.length === undefined)
+            return -1
+        var byId = {}
+        for (var i = 0; i < rows.length; i++)
+            byId[rows[i].id] = rows[i]
+        var d = 0, cur = parentId, guard = 0
+        while (cur !== undefined && cur !== "" && byId[cur]
+               && guard++ < 64) {
+            d++
+            cur = byId[cur].parentId || ""
+        }
+        if (d === 0 && rowId.indexOf("/") >= 0)
+            return rowId.split("/").length - 1
+        return d
+    }
+
     /* Deleting a group previews the children it takes with it.
        The controller computes the exact kill set Delete would
        use; only a cascade (kill > selection) earns the prompt —
@@ -265,9 +287,17 @@ Rectangle {
                 property string rowBound: rf("bound", "none")
                 property bool   rowVis:   rf("visible", true)
                 property bool   rowLock:  rf("locked", false)
-                /* Nested instances indent one step past their parent
-                   row depth; entity rows indent by '/' segments. */
+                /* Real tree depth — the model carries it in the
+                   "depth" role (group>group>instance chains indent);
+                   the stub array path walks its own parentId chain. */
                 property int    depth: {
+                    var d = rf("depth", -1)
+                    if (typeof d === "number" && d >= 0)
+                        return d
+                    var s = treeRoot.stubDepth(rowId,
+                                               rf("parentId", ""))
+                    if (s >= 0)
+                        return s
                     var p = rf("parentId", "")
                     if (p === "" || p === undefined)
                         return 0

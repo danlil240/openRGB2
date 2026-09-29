@@ -445,7 +445,24 @@ Item {
                                         enabled: root.editable
                                         property real grabX: 0
                                         property real grabY: 0
+                                        /* Task 5 fix: the inspector's
+                                           Paint tool turns clicks into
+                                           paintObject(paintColor) and
+                                           drags stay inert so a paint
+                                           stroke can't move geometry. */
+                                        readonly property bool paintMode:
+                                            root.studioUp
+                                            && objectCtl.tool === 2
+                                        cursorShape: paintMode
+                                                     ? Qt.CrossCursor
+                                                     : Qt.ArrowCursor
                                         onPressed: function(m) {
+                                            if(paintMode) {
+                                                objectCtl.paintObject(
+                                                    d.o.id,
+                                                    objectCtl.paintColor);
+                                                return;
+                                            }
                                             grabX = m.x;
                                             grabY = m.y;
                                             d.dragging = true;
@@ -483,6 +500,14 @@ Item {
                                                      / view.s
                                                      + view.minZ
                                                      - (d.o.oz || 0);
+                                            /* snapEnabled quantizes the
+                                               commit to the 10mm grid
+                                               (objectCtl.snapMeters is
+                                               the pass-through when off). */
+                                            if(root.studioUp) {
+                                                nx = objectCtl.snapMeters(nx);
+                                                nz = objectCtl.snapMeters(nz);
+                                            }
                                             /* commit the meters —
                                                the engine's scene
                                                event repaints   */
@@ -503,7 +528,11 @@ Item {
                                                     * view.s
                                                     - d.height / 2; });
                                         }
-                                        onClicked: layoutCtl.select(d.o.id)
+                                        /* Paint already landed on
+                                           press — don't select on
+                                           release. */
+                                        onClicked: if(!paintMode)
+                                            layoutCtl.select(d.o.id)
                                     }
                                 }
                             }
@@ -917,6 +946,48 @@ Item {
                                             Layout.preferredWidth: 90
                                             elide: Text.ElideRight
                                         }
+                                        /* Paint tool: per-emitter
+                                           target — the row's `object`
+                                           + `local` index name the
+                                           emitter inside its resolved
+                                           object. */
+                                        Rectangle {
+                                            id: emitPaint
+                                            objectName: "emitPaint_"
+                                                        + modelData.index
+                                            visible: root.studioUp
+                                                     && objectCtl.tool
+                                                        === 2
+                                            Layout.preferredWidth: 16
+                                            Layout.preferredHeight: 16
+                                            Layout.alignment:
+                                                Qt.AlignVCenter
+                                            radius: Theme.radiusS
+                                            color: root.studioUp
+                                                   ? objectCtl.paintColor
+                                                   : "transparent"
+                                            border.width: 1
+                                            border.color:
+                                                Theme.borderStrong
+                                            ToolTip.visible:
+                                                emitPaintMa.containsMouse
+                                            ToolTip.text:
+                                                qsTr("Paint this emitter")
+                                            ToolTip.delay: 400
+                                            MouseArea {
+                                                id: emitPaintMa
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                onClicked:
+                                                    objectCtl.paintEmitter(
+                                                        modelData.object,
+                                                        modelData.local
+                                                        !== undefined
+                                                        ? modelData.local
+                                                        : modelData.index,
+                                                        objectCtl.paintColor)
+                                            }
+                                        }
                                         TextField {
                                             id: addrField
                                             objectName: "ledAddr_" + modelData.index
@@ -1008,31 +1079,52 @@ Item {
                 visible: root.studioUp
                 height: visible ? implicitHeight : 0
 
-                Row {
+                Column {
                     width: parent.width
-                    spacing: Theme.spaceL
+                    spacing: Theme.spaceM
 
-                    DeviceTree {
-                        id: deviceTree
-                        objectName: "deviceTreePanel"
-                        width: 320
-                        height: 430
+                    Row {
+                        width: parent.width
+                        spacing: Theme.spaceL
+
+                        DeviceTree {
+                            id: deviceTree
+                            objectName: "deviceTreePanel"
+                            width: 320
+                            height: 430
+                        }
+                        DeviceLibrary {
+                            id: deviceLibrary
+                            objectName: "deviceLibraryPanel"
+                            width: 340
+                            height: 430
+                            sceneView: root
+                        }
+                        TransformInspector {
+                            id: transformInspector
+                            objectName: "transformInspectorPanel"
+                            /* `ctl` feeds tool/plane/snap reads — the
+                               ObjectEditorController answers; there is
+                               no 3D camera on the 2D page so the view
+                               presets stay hidden until Task 8. */
+                            ctl: root.studioUp ? objectCtl : null
+                        }
                     }
-                    DeviceLibrary {
-                        id: deviceLibrary
-                        objectName: "deviceLibraryPanel"
-                        width: 340
-                        height: 430
-                        sceneView: root
-                    }
-                    TransformInspector {
-                        id: transformInspector
-                        objectName: "transformInspectorPanel"
-                        /* `ctl` feeds tool/plane/snap reads — the
-                           ObjectEditorController answers; there is
-                           no 3D camera on the 2D page so the view
-                           presets stay hidden until Task 8. */
-                        ctl: root.studioUp ? objectCtl : null
+
+                    /* The object editor's status line — refusals
+                       (locked chains, unknown types, gesture rejects)
+                       are visible where they happened instead of
+                       only living on a C++ signal. */
+                    Text {
+                        objectName: "objectStatus"
+                        visible: root.studioUp
+                                 && objectCtl.statusText !== ""
+                        width: parent.width
+                        text: root.studioUp ? objectCtl.statusText : ""
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                        elide: Text.ElideRight
                     }
                 }
             }

@@ -18,6 +18,7 @@
 import QtQuick
 import QtQuick.Controls.Basic
 import OpenRGB2.UI.theme
+import OpenRGB2.UI.components
 
 Rectangle {
     id: inspector
@@ -281,6 +282,56 @@ Rectangle {
                    onClicked: if (inspector.hasBr()
                                   && !inspector.br().gestureActive())
                                   inspector.br().redo() }
+        }
+        /* Paint tool — the color the canvas click applies
+           (LayoutPage calls paintObject/paintEmitter with
+           ctl.paintColor). Current swatch + the module's quick
+           palette, same convention as the Lighting page; the
+           Flow wraps the picks under the swatch line. */
+        Column {
+            spacing: 4
+            width: parent.width
+            visible: inspector.ctl !== null
+                     && inspector.ctl.tool === 2
+            height: visible ? implicitHeight : 0
+            Row {
+                spacing: 4
+                Text {
+                    text: qsTr("Paint")
+                    color: Theme.textSecondary
+                    font.pixelSize: 11
+                    width: 34
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+                ColorWell {
+                    objectName: "paintColorWell"
+                    swatch: inspector.ctl ? inspector.ctl.paintColor
+                                          : "white"
+                    implicitHeight: 22
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+                Text {
+                    text: qsTr("click an object")
+                    color: Theme.textDisabled
+                    font.pixelSize: 10
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+            }
+            Flow {
+                width: parent.width
+                spacing: 4
+                Repeater {
+                    model: Theme.paletteSwatches
+                    PaletteSwatch {
+                        objectName: "paintSwatch" + index
+                        swatch: modelData
+                        onPicked: function(hex) {
+                            if (inspector.ctl)
+                                inspector.ctl.paintColor = hex
+                        }
+                    }
+                }
+            }
         }
         /* View presets need a 3D camera — hidden on the 2D canvas. */
         Row {

@@ -193,6 +193,32 @@ bool LayoutController::WsDocEdit(
 namespace
 {
 
+/* An instance is effectively locked when it OR any ancestor in
+   its draft parent chain is — the core's IsLocked is self-only,
+   so a locked group must still freeze its subtree on the 2D
+   canvas (studio-import Task 5 fix). */
+bool WsChainLocked(const studio::StudioDocument& w,
+                   const std::string& iid)
+{
+    std::set<std::string> seen;
+    std::string cur = iid;
+    while(!cur.empty() && seen.insert(cur).second)
+    {
+        const auto sit = w.device_settings.find(cur);
+        if(sit != w.device_settings.end() && sit->second.locked)
+        {
+            return true;
+        }
+        const auto dit = w.devices.find(cur);
+        if(dit == w.devices.end())
+        {
+            break;
+        }
+        cur = dit->second.parent;
+    }
+    return false;
+}
+
 /* Mirrors studio::NameMatches — the same display-hint
    convention SceneEditController uses for binding joins.
    The engine's resolver is authoritative; this only paints
@@ -537,10 +563,14 @@ QVariantList LayoutController::WsEmitters(
         {
             continue;
         }
+        int local = 0;
         for(const nlohmann::json& e : *ems)
         {
             QVariantMap m;
             m.insert(QStringLiteral("index"), flat++);
+            /* Per-object emitter index — paintEmitter wants the
+               LOCAL index on `object`, not the flattened one. */
+            m.insert(QStringLiteral("local"), local++);
             m.insert(QStringLiteral("address"),
                      e.value("address", -1));
             m.insert(QStringLiteral("group"),
@@ -852,6 +882,15 @@ bool LayoutController::moveObject(const QString& objectId,
                          QStringLiteral("input"));
             return false;
         }
+        /* Locked ancestors freeze the subtree — the canvas
+           honours the same chain the object editor refuses on. */
+        if(WsChainLocked(*w, objectId.toStdString()))
+        {
+            SetLastError(QStringLiteral("move refused: %1 is locked")
+                             .arg(objectId),
+                         QStringLiteral("input"));
+            return false;
+        }
         /* The canvas is world-space (studio-import Task 5:
            items report world x/z): convert through the parent
            frame so a nested instance lands where it was
@@ -905,6 +944,13 @@ bool LayoutController::rotateObject(const QString& objectId,
         if(it == w->devices.end())
         {
             SetLastError(QStringLiteral("unknown scene object"),
+                         QStringLiteral("input"));
+            return false;
+        }
+        if(WsChainLocked(*w, objectId.toStdString()))
+        {
+            SetLastError(QStringLiteral("rotate refused: %1 is locked")
+                             .arg(objectId),
                          QStringLiteral("input"));
             return false;
         }

@@ -196,6 +196,13 @@ public:
     Q_INVOKABLE void paintEmitter(const QString& objectId, int index,
                                   const QColor& color);
 
+    /* 2D-canvas snap seam: quantize a desk-plane meters value to
+       the 10 mm grid when snapEnabled, else pass it through. The
+       Layout canvas drag commits through layoutCtl.moveObject
+       (which has no snap param), so the page rounds the released
+       position here — the same 10 mm step the gestures use. */
+    Q_INVOKABLE double snapMeters(double meters) const;
+
     /*---- undo/redo — the shared session's history --------------*/
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();
@@ -238,7 +245,6 @@ private:
     studio::EditorController*     Editor() const;
     /* The draft document — nullptr when no session/draft. */
     const studio::StudioDocument* WsDoc() const;
-    studio::StudioDocument*       WsDocMut();
 
     /* Commit one edit through the shared session; rebuild the
        resolved snapshot; refresh the models the right granularity
@@ -258,6 +264,16 @@ private:
     /* Effective paint target: linked objects write their OUTPUT
        OWNER's color key (the core's EmitterColor reads through). */
     std::string PaintOwnerOf(const std::string& object_id) const;
+    /* Every color key a paint op on `id` should write: the id's
+       own owner key PLUS every emitter-bearing resolved object
+       under it (an instance/group id paints the whole device —
+       the 2D canvas clicks land on instances). Unresolvable ids
+       fall back to the raw key so the paint still records. */
+    std::set<std::string> PaintTargets(const std::string& id) const;
+    /* True when `iid` or any ancestor in its draft parent chain
+       is locked — the discrete transform ops refuse so a locked
+       group freezes its subtree (core IsLocked is self-only). */
+    bool ChainLocked(const std::string& iid) const;
 
     void SetStatus(const QString& s);
     void RequestCatalog();

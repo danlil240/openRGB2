@@ -19,6 +19,7 @@
 #include <QtGlobal>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
 namespace openrgb2
@@ -320,6 +321,64 @@ std::string ObjectEditorController::PaintOwnerOf(
     return object_id;
 }
 
+std::set<std::string> ObjectEditorController::PaintTargets(
+    const std::string& id) const
+{
+    std::set<std::string> out;
+    out.insert(PaintOwnerOf(id));
+    if(resolved_src_ == ResolvedSrc::None)
+    {
+        return out;
+    }
+    /* An instance/group id paints the device under it: every
+       resolved object carrying emitters below the prefix (and
+       the root itself) gets the color — one undo record writes
+       all keys. */
+    const std::string prefix = id + "/";
+    for(const studio::SceneObject& o : resolved_.objects)
+    {
+        if(o.emitters.empty())
+        {
+            continue;
+        }
+        if(o.id != id
+           && o.id.compare(0, prefix.size(), prefix) != 0)
+        {
+            continue;
+        }
+        const studio::SceneObject* owner =
+            studio::OutputOwner(resolved_, o.id);
+        out.insert(owner != nullptr ? owner->id : o.id);
+    }
+    return out;
+}
+
+bool ObjectEditorController::ChainLocked(const std::string& iid) const
+{
+    const studio::StudioDocument* w = WsDoc();
+    if(w == nullptr)
+    {
+        return false;
+    }
+    std::set<std::string> seen;
+    std::string cur = iid;
+    while(!cur.empty() && seen.insert(cur).second)
+    {
+        const auto sit = w->device_settings.find(cur);
+        if(sit != w->device_settings.end() && sit->second.locked)
+        {
+            return true;
+        }
+        const auto dit = w->devices.find(cur);
+        if(dit == w->devices.end())
+        {
+            break;
+        }
+        cur = dit->second.parent;
+    }
+    return false;
+}
+
 void ObjectEditorController::SetStatus(const QString& s)
 {
     if(status_text_ == s)
@@ -580,6 +639,14 @@ bool ObjectEditorController::setInstancePosition(
     {
         return false;
     }
+    /* Locked ancestor = frozen subtree: the core only checks the
+       instance's own flag, so the adapter refuses the chain. */
+    if(ChainLocked(id.toStdString()))
+    {
+        SetStatus(QStringLiteral("move refused: %1 is locked")
+                      .arg(id));
+        return false;
+    }
     std::optional<studio::EditorEdit> edit =
         e->SetPosition(id.toStdString(),
                        { (float)x, (float)y, (float)z });
@@ -599,6 +666,12 @@ bool ObjectEditorController::setInstancePositionWorld(
     {
         return false;
     }
+    if(ChainLocked(id.toStdString()))
+    {
+        SetStatus(QStringLiteral("move refused: %1 is locked")
+                      .arg(id));
+        return false;
+    }
     std::optional<studio::EditorEdit> edit =
         e->SetPositionWorld(id.toStdString(),
                             { (float)x, (float)y, (float)z });
@@ -616,6 +689,12 @@ bool ObjectEditorController::setInstanceRotation(
     studio::EditorController* e = Editor();
     if(e == nullptr)
     {
+        return false;
+    }
+    if(ChainLocked(id.toStdString()))
+    {
+        SetStatus(QStringLiteral("rotate refused: %1 is locked")
+                      .arg(id));
         return false;
     }
     std::optional<studio::EditorEdit> edit =
@@ -886,7 +965,7 @@ void ObjectEditorController::setTypeFavorite(const QString& typeId,
     {
         return;
     }
-    if(!studio::IsPresetId(tid) || !types_.Contains(tid))
+    if(!studio::IsPresetId(tid) || !preset_model_.Knows(typeId))
     {
         SetStatus(QStringLiteral("favorite refused: unknown type '%1'")
                       .arg(typeId));
@@ -1085,7 +1164,13 @@ void ObjectEditorController::paintObject(const QString& objectId,
     {
         return;
     }
-    const std::string key = PaintOwnerOf(objectId.toStdString());
+    /* The 2D canvas clicks land on INSTANCE ids — expand to the
+       emitter-bearing resolved objects underneath (each mapped
+       through its output owner) so the paint actually reaches
+       the device's emitters, not just the group-node key. One
+       CommitDocEdit writes every key -> one undo record. */
+    const std::set<std::string> keys =
+        PaintTargets(objectId.toStdString());
     const studio::SceneColor nc = studio::MakeSceneColor(
         (unsigned)color.red(), (unsigned)color.green(),
         (unsigned)color.blue());
@@ -1093,22 +1178,35 @@ void ObjectEditorController::paintObject(const QString& objectId,
        coverage but the session owns mutation, so CommitDocEdit's
        snapshot record is the one-record-per-gesture path here. */
     if(!s->CommitDocEdit("paint",
-           [key, nc](studio::StudioDocument& d) -> bool
+           [keys, nc](studio::StudioDocument& d) -> bool
            {
-               const auto it = d.object_colors.find(key);
-               if(it != d.object_colors.end() && it->second == nc)
+               bool changed = false;
+               for(const std::string& key : keys)
                {
-                   return false;   /* no-op — no record */
+                   const auto it = d.object_colors.find(key);
+                   if(it != d.object_colors.end()
+                      && it->second == nc)
+                   {
+                       continue;   /* already that color */
+                   }
+                   d.object_colors[key] = nc;
+                   changed = true;
                }
-               d.object_colors[key] = nc;
-               return true;
+               return changed;   /* all no-op -> no record */
            }))
     {
         return;
     }
     ws_->NoteDraftEdited();
     RebuildResolved();
-    object_model_.UpdateTransforms({ key });
+    /* Refresh the touched entity rows AND their instance rows —
+       the tree's per-row color chips read the instance key. */
+    std::set<std::string> touched = keys;
+    for(const std::string& k : keys)
+    {
+        touched.insert(k.substr(0, k.find('/')));
+    }
+    object_model_.UpdateTransforms(touched);
     emit emittersChanged(objectId);
     emit sceneChanged();
     emit undoChanged();
@@ -1144,6 +1242,11 @@ void ObjectEditorController::paintEmitter(const QString& objectId,
     }
     ws_->NoteDraftEdited();
     RebuildResolved();
+    /* Same refresh paintObject takes — emitter-color displays
+       (tree/canvas chips, the calibration list) re-read on
+       dataChanged, not just the signal. */
+    object_model_.UpdateTransforms(
+        { key, key.substr(0, key.find('/')) });
     emit emittersChanged(objectId);
     emit sceneChanged();
     emit undoChanged();
@@ -1228,6 +1331,12 @@ void ObjectEditorController::setPaintColor(const QColor& c)
     }
     paint_color_ = c;
     emit paintColorChanged();
+}
+
+double ObjectEditorController::snapMeters(double meters) const
+{
+    /* 10 mm grid — the same step the gesture path snaps to. */
+    return snap_ ? std::round(meters * 100.0) / 100.0 : meters;
 }
 
 /*---------------------------------------------------------*\

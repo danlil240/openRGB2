@@ -46,6 +46,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <utility>
 
 using namespace openrgb2;
 using namespace openrgb2::ui;
@@ -484,9 +485,22 @@ int main(int argc, char** argv)
         Rig rig;
         rig.LoadDoc(CompactDoc());
         rig.ctl.LoadPresetDirectory(preset_dir ? preset_dir : "");
+        /* The 2D paint click lands on an INSTANCE id — the paint
+           must reach the emitter-bearing resolved object beneath
+           it (one undo record for the whole write). */
         rig.ctl.paintObject("fan1", QColor(255, 0, 0));
         CHECK(rig.Working().object_colors.at("fan1") ==
               studio::MakeSceneColor(255, 0, 0));
+        CHECK(rig.Working().object_colors.at("fan1/body") ==
+              studio::MakeSceneColor(255, 0, 0));
+        CHECK(rig.UndoCount() == 1);
+        /* ... and the painted emitters read back through the
+           resolved view (base color = the object's key). */
+        const QVariantList c1 =
+            rig.ctl.emitterColorsOf("fan1/body");
+        CHECK(c1.size() == 40);
+        CHECK(c1.at(0).toString().toLower() == "#ff0000");
+        /* Per-emitter paint writes the object's local index. */
         rig.ctl.paintEmitter("fan0/body", 3, QColor(0, 255, 0));
         CHECK(rig.Working().emitter_colors.at("fan0/body").at(3) ==
               studio::MakeSceneColor(0, 255, 0));
@@ -496,10 +510,111 @@ int main(int argc, char** argv)
             rig.ctl.emitterColorsOf("fan0/body");
         CHECK(cols.size() == 40);
         CHECK(cols.at(3).toString().toLower() == "#00ff00");
+        /* setSelectedColor paints the primary selection. */
+        rig.ctl.selectInstance("fan0");
+        rig.ctl.setSelectedColor(QColor(0, 0, 255));
+        CHECK(rig.Working().object_colors.at("fan0/body") ==
+              studio::MakeSceneColor(0, 0, 255));
+        rig.ctl.undo();
         rig.ctl.undo();
         CHECK(rig.Working().emitter_colors.count("fan0/body") == 0
               || rig.Working().emitter_colors.at("fan0/body")
                          .count(3) == 0);
+    }
+
+    std::printf("-- controller: snap quantizes the canvas drop\n");
+    {
+        Rig rig;
+        rig.LoadDoc(CompactDoc());
+        rig.ctl.LoadPresetDirectory(preset_dir ? preset_dir : "");
+        /* snapMeters is the seam the Layout canvas calls before
+           committing a drag — off: pass-through; on: 10mm grid. */
+        rig.ctl.setSnapEnabled(false);
+        CHECK(rig.ctl.snapMeters(0.1234) == 0.1234);
+        rig.ctl.setSnapEnabled(true);
+        CHECK(std::fabs(rig.ctl.snapMeters(0.1234) - 0.12) < 1e-9);
+        CHECK(std::fabs(rig.ctl.snapMeters(0.126) - 0.13) < 1e-9);
+        rig.ctl.setSnapEnabled(false);
+        CHECK(rig.ctl.snapMeters(0.126) == 0.126);
+    }
+
+    std::printf("-- controller: locked ancestor freezes children, "
+                "reparent preserves world transforms\n");
+    {
+        Rig rig;
+        rig.LoadDoc(CompactDoc());
+        rig.ctl.LoadPresetDirectory(preset_dir ? preset_dir : "");
+        auto* model = static_cast<SceneObjectModel*>(
+            rig.ctl.objectModel());
+
+        /* World rows before grouping. */
+        auto wof = [&](const char* id) -> std::pair<double,double>
+        {
+            const QVariantMap r = model->rowAt(model->RowOf(id));
+            return { r.value("wx").toDouble(),
+                     r.value("wz").toDouble() };
+        };
+        const auto f0 = wof("fan0");
+        const auto f1 = wof("fan1");
+        CHECK(std::fabs(f0.first - 0.1) < 1e-4);
+        CHECK(std::fabs(f1.first - 0.3) < 1e-4);
+
+        /* Group the two offset fans — children keep their world
+           placement via parent-local conversion. */
+        rig.ctl.selectInstance("fan0");
+        rig.ctl.selectInstance("fan1", true);
+        rig.ctl.groupSelected();
+        std::string gid;
+        for(const auto& kv : rig.Working().devices)
+        {
+            if(kv.second.type == "group")
+            {
+                gid = kv.first;
+            }
+        }
+        CHECK(!gid.empty());
+        /* World transforms survive the reparent. */
+        {
+            const auto g0 = wof("fan0");
+            const auto g1 = wof("fan1");
+            CHECK(std::fabs(g0.first - f0.first) < 1e-4);
+            CHECK(std::fabs(g0.second - f0.second) < 1e-4);
+            CHECK(std::fabs(g1.first - f1.first) < 1e-4);
+            CHECK(std::fabs(g1.second - f1.second) < 1e-4);
+            /* Nested rows indent past the group (depth role). */
+            CHECK(model->rowAt(model->RowOf("fan0"))
+                      .value("depth").toInt() == 1);
+            CHECK(model->rowAt(model->RowOf("fan0/body"))
+                      .value("depth").toInt() == 2);
+        }
+
+        /* Locking the GROUP freezes the subtree: transform ops on
+           the child refuse honestly (status + no record). */
+        rig.ctl.setInstanceLocked(QString::fromStdString(gid), true);
+        const size_t u = rig.UndoCount();
+        CHECK(!rig.ctl.setInstancePosition("fan0", 9, 9, 9));
+        CHECK(!rig.ctl.setInstanceRotation("fan0", 0, 45, 0));
+        CHECK(!rig.ctl.setInstancePositionWorld("fan0", 9, 9, 9));
+        CHECK(rig.UndoCount() == u);
+        /* Nothing moved — the refused values never landed. */
+        CHECK(rig.Working().devices.at("fan0").position.x != 9.0f);
+        CHECK(!rig.ctl.statusText().isEmpty());
+
+        /* Unlock restores editability — the 0.4/0.4 lands in the
+           GROUP's local frame; capture the resulting world pos. */
+        rig.ctl.setInstanceLocked(QString::fromStdString(gid), false);
+        CHECK(rig.ctl.setInstancePosition("fan0", 0.4, 0.0, 0.4));
+        const auto g2 = wof("fan0");
+
+        /* Ungroup returns children to root — world placement still
+           preserved (local values re-derive, world stays). */
+        rig.ctl.selectInstance(QString::fromStdString(gid));
+        rig.ctl.ungroupSelected();
+        const auto u0 = wof("fan0");
+        CHECK(std::fabs(u0.first - g2.first) < 1e-4);
+        CHECK(std::fabs(u0.second - g2.second) < 1e-4);
+        CHECK(model->rowAt(model->RowOf("fan0"))
+                  .value("depth").toInt() == 0);
     }
 
     std::printf("-- model: preset rows, engine-catalog merge, "

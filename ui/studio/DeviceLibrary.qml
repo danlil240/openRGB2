@@ -328,6 +328,14 @@ Rectangle {
             }
             Item { width: 1; height: 1 }
             IconBtn {
+                text: "Rfr"
+                tip: qsTr("Refresh — re-scan local presets and re-query the engine catalog")
+                visible: lib.hasBr()
+                         && typeof lib.br().refreshLibrary
+                            === "function"
+                onClicked: lib.br().refreshLibrary()
+            }
+            IconBtn {
                 text: "✚"
                 tip: qsTr("New type — open the preset editor on a blank candidate")
                 visible: lib.canAuthorTypes()

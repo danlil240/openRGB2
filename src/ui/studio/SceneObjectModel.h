@@ -81,6 +81,7 @@ public:
         ColorRole,               /* painted base color or ""            */
         EmitterColorsRole,       /* QVariantList of "#RRGGBB"           */
         EmitterPointsRole,       /* QVariantList {x,y,z,c,i}            */
+        DepthRole,               /* real tree depth (nested groups)     */
     };
     Q_ENUM(Role)
 
@@ -131,6 +132,7 @@ private:
         std::string id;           /* instance id or resolved object id */
         std::string instance;     /* owning root instance id           */
         std::string parent_row;   /* row id of the parent ("" = root)  */
+        int         depth = 0;    /* tree depth for indent             */
         bool        draft = false;
     };
 
