@@ -711,6 +711,18 @@ bool SceneEditController::setSceneName(const QString& name)
                          QStringLiteral("input"));
             return false;
         }
+        /* A valid name that already IS the draft's name is a
+           success, not a refusal — SetName parity. Returning
+           false here would abort commitPendingEdits() before
+           save() ever runs, leaving the conflict strip's
+           "Keep my draft" (and Lighting's Save) dead exactly
+           when the draft is dirty but the name is untouched. */
+        if(ws_->Session().HasWorking() &&
+           ws_->Session().Working().meta.name == trimmed)
+        {
+            SetSaveError(QString());
+            return true;
+        }
         if(!WsCommit("rename scene",
                      [&](studio::StudioDocument& w) {
                          if(w.meta.name == trimmed)

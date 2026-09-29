@@ -297,6 +297,15 @@ void WorkspaceController::OnConnectionStateChanged()
 
 void WorkspaceController::OnEngineLost(const QString& reason)
 {
+    /* Capture the in-flight import's name BEFORE the abort
+       clears it — the entry still owes the UI a terminal
+       signal. */
+    QString inflight_import;
+    if(ul_.has_value() &&
+       ul_->purpose.startsWith(QLatin1String("import:")))
+    {
+        inflight_import = ul_->purpose.mid(7);
+    }
     AbortTransfers();
     SetLoading(false);
     if(saving_)
@@ -317,11 +326,32 @@ void WorkspaceController::OnEngineLost(const QString& reason)
        numbering over, so stale tracked ids could collide with
        a NEW job and misattribute its terminal event. Queued
        imports stop with the session; the upload AbortTransfers
-       just cancelled can never resume. */
+       just cancelled can never resume. Every outstanding
+       import entry still owes the UI a terminal signal — a
+       per-entry waiter must never hang on a dropped queue. */
+    const QString lost = QStringLiteral("connection lost: %1")
+                             .arg(reason);
     tracked_jobs_.clear();
-    import_queue_.clear();
-    import_submit_names_.clear();
+    if(!inflight_import.isEmpty())
+    {
+        emit importFinished(inflight_import, false, lost);
+    }
+    while(!import_submit_names_.empty())
+    {
+        emit importFinished(import_submit_names_.front(),
+                            false, lost);
+        import_submit_names_.pop_front();
+    }
+    for(const auto& kv : import_names_)
+    {
+        emit importFinished(kv.second, false, lost);
+    }
     import_names_.clear();
+    for(const PendingImport& imp : import_queue_)
+    {
+        emit importFinished(imp.name, false, lost);
+    }
+    import_queue_.clear();
 }
 
 void WorkspaceController::OnWorkspaceChanged()
@@ -1052,6 +1082,13 @@ void WorkspaceController::OnJobReply(const QString& verb,
             emit importFinished(import_name, false, message);
             PumpImportQueue();
         }
+        else if(verb == QLatin1String("reload"))
+        {
+            /* No job will ever resolve — a latched force_adopt_
+               would wholesale-adopt the NEXT fetch over a dirty
+               draft. */
+            force_adopt_ = false;
+        }
         SetError(message, QStringLiteral("engine"));
         return;
     }
@@ -1071,6 +1108,10 @@ void WorkspaceController::OnJobReply(const QString& verb,
             emit importFinished(import_name, false,
                 QStringLiteral("engine job queue is busy"));
             PumpImportQueue();
+        }
+        else if(verb == QLatin1String("reload"))
+        {
+            force_adopt_ = false;
         }
         SetError(QStringLiteral("engine job queue is busy — "
                                 "try again"),

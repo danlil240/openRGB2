@@ -362,7 +362,8 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 implicitHeight: wsRow.implicitHeight
                                 + 2 * Theme.spaceM
-                color: workspace.conflict
+                color: (typeof workspace !== "undefined"
+                        && workspace.conflict)
                        ? Qt.rgba(0.878, 0.643, 0.345, 0.14)
                        : Theme.surfaceAlt
                 Rectangle {

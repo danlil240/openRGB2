@@ -157,6 +157,30 @@ set_tests_properties(qml_focused_save_test PROPERTIES
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${QT_BIN_DIR}")
 
+# studio-import Task 4 fix round 2: the real shell headless
+# against a scripted studio_workspace_v1 engine — the conflict
+# strip's "Keep my draft (Save)" and Lighting's Save button must
+# reach a commit job even when the name field already matches
+# the draft (a no-op rename is success, not refusal).
+add_executable(qml_workspace_save_test qml_workspace_save_test.cpp)
+target_link_libraries(qml_workspace_save_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    openrgb2_ipc_wire
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+target_include_directories(qml_workspace_save_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(qml_workspace_save_test PRIVATE NDEBUG)
+set_target_properties(qml_workspace_save_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(qml_workspace_save_test)
+add_test(NAME qml_workspace_save_test COMMAND qml_workspace_save_test)
+set_tests_properties(qml_workspace_save_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
+
 # Task 4.7: the real DevicesPage.qml headless — the four rate
 # fields render with honest labels, unmeasured stays
 # unmeasured (never zeros), ownership absence is honest, and
