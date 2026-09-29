@@ -221,6 +221,23 @@ ScenePlaybackCaps ClassifyScenePlayback(const studio::SceneDocument* doc)
         out.caps.animation_playback = true;
         out.preset     = p;
         out.has_preset = true;
+        /* The symmetric capability (BUG-1): an uploaded-preset
+           name resolves to NO live layer stack — the apply
+           path (EngineService::ApplySceneDocument) builds
+           effect.preset only through the live registry, and
+           these ids are not in it. Unless the document ALSO
+           carries inline layers (those win at apply), Live
+           effects would evaluate an empty stack and render
+           every LED black while claiming live delivery — the
+           controller refuses that mode request and this is
+           the reason the UI shows beside the disabled card. */
+        if(doc->effect.layers.empty() && !studio::FindPreset(preset))
+        {
+            out.caps.live_effects = false;
+            out.reason = "preset '" + preset +
+                "' only runs as an uploaded animation — live "
+                "effects need a live preset";
+        }
         return out;
     }
     /* A named preset that is not one of the uploaded

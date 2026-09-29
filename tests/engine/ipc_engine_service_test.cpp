@@ -1264,6 +1264,33 @@ int main()
         CHECK(r.code == ErrCode::Ok);
         CHECK(ctl2.CurrentParams().speed == 170);
         CHECK(ctl2.CurrentParams().color.g == 0xFF);
+
+        /* BUG-1: 'breathing' is an uploaded-only preset —
+           the applied scene resolves to no live layer stack,
+           so a Live switch while its upload is in flight must
+           be REFUSED with a reason, never accepted into a
+           silent all-black evaluation. */
+        r = svc2.Dispatch(MsgType::SetPlaybackMode,
+            nlohmann::json::object({
+                { "mode", "live_effects" }}));
+        CHECK(r.code == ErrCode::Unavailable);
+        CHECK(!r.message.empty());
+        CHECK(r.message.find("breathing") !=
+              std::string::npos);
+        /* The refusal recorded nothing and the wire reports
+           the symmetric capability + reason. */
+        r = svc2.Dispatch(MsgType::GetPlayback,
+                          nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["requested_mode"].get<std::string>()
+              == "animation_playback");
+        CHECK(r.body["capabilities"]["live_effects"]
+                  .get<bool>() == false);
+        CHECK(r.body["capabilities"]["animation_playback"]
+                  .get<bool>() == true);
+        CHECK(r.body["unavailable_reason"].is_string());
+        CHECK(r.body["unavailable_reason"].get<std::string>()
+                  .find("breathing") != std::string::npos);
     }
 
     /*---- add_object: scene objects authored from LIVE

@@ -293,7 +293,12 @@ static void TestLifecycle()
     h.backend.snaps = { ws, wd };
     h.pipeline.RegisterDevice(ws);
     h.pipeline.RegisterDevice(wd);
-    h.scene = MakeScene("rainbow", "rainbow_wave");
+    /* A dual-capable scene — uploaded preset PLUS an inline
+       live layer — so the persisted live return in Phase 2
+       is a legal switch (T11 pins the symmetric refusal for
+       a preset-only scene). */
+    h.scene = MakeScene("rainbow", "rainbow_wave",
+                        /*inline_layer*/ true);
     h.backend.report.valid = true;
     h.backend.report.name  = "Direct";
 
@@ -948,6 +953,91 @@ static void TestSceneStoreBound()
     CHECK(h.ctl->PersistedScenes() <= 32);
 }
 
+/*---------------------------------------------------------*\
+||| T11: BUG-1 — a Live switch on an uploaded-only-preset   ||
+|||     scene is refused with a reason, never accepted into ||
+|||     a silent empty live evaluation (all LEDs black)     ||
+\*---------------------------------------------------------*/
+
+static void TestLiveRefusal()
+{
+    Harness h;
+    const DeviceSnapshot ws = WirelessSnap();
+    h.backend.snaps = { ws };
+    h.pipeline.RegisterDevice(ws);
+    /* spectrum_cycle exists ONLY in the uploaded-preset
+       catalog — studio::FindPreset resolves it to nothing,
+       so a live stack built from this scene would be empty. */
+    h.scene = MakeScene("cycle", "spectrum_cycle");
+    h.backend.report.name  = "Direct";
+    h.backend.report.valid = true;
+
+    /* The classifier reports the symmetric capability pair:
+       the scene CAN animate but CANNOT render live. */
+    const ScenePlaybackCaps caps = h.ctl->SceneCaps();
+    CHECK(caps.caps.animation_playback);
+    CHECK(!caps.caps.live_effects);
+    CHECK(!caps.reason.empty());
+    CHECK(caps.reason.find("spectrum_cycle") !=
+          std::string::npos);
+
+    PlaybackParams params;
+    PlaybackController::Result r =
+        h.ctl->Request(PlaybackMode::AnimationPlayback,
+                       PlaybackControl::Playing, params);
+    CHECK(r.accepted && r.pending);
+
+    /* While the upload is still in flight the live switch is
+       already refused — before it could reach the Direct
+       transition path that would black the group out. */
+    r = h.ctl->Request(PlaybackMode::LiveEffects,
+                       PlaybackControl::Playing, params);
+    CHECK(!r.accepted);
+    CHECK(!r.reason.empty());
+    CHECK(r.reason.find("live") != std::string::npos);
+    CHECK(h.pipeline.IsSuppressed(ws.key));
+    /* The refused request recorded nothing: the recorded
+       selection is still animation. */
+    CHECK(h.ctl->RequestedMode() ==
+          PlaybackMode::AnimationPlayback);
+
+    /* Same refusal once the upload is Active — the running
+       loop keeps owning the group instead of a black frame. */
+    h.ReportPending();
+    h.Poll();
+    CHECK(h.ctl->Status().mode == PlaybackMode::AnimationPlayback);
+    CHECK(h.ctl->Status().upload == UploadState::Active);
+    r = h.ctl->Request(PlaybackMode::LiveEffects,
+                       PlaybackControl::Playing, params);
+    CHECK(!r.accepted);
+    CHECK(!r.reason.empty());
+    CHECK(h.pipeline.IsSuppressed(ws.key));
+    CHECK(h.ctl->PlaybackOwnsWired());
+
+    /* A dual-capable scene — uploaded preset AND an inline
+       layer that resolves live — still returns to live
+       through the normal Direct-restore transition. */
+    h.scene = MakeScene("dual", "rainbow_wave",
+                        /*inline_layer*/ true);
+    r = h.ctl->Request(PlaybackMode::LiveEffects,
+                       PlaybackControl::Playing, params);
+    CHECK(r.accepted && r.pending);
+    CHECK(h.backend.custom_calls == 1);
+    h.Poll();
+    CHECK(h.ctl->Status().mode == PlaybackMode::LiveEffects);
+    CHECK(!h.pipeline.IsSuppressed(ws.key));
+
+    /* And with nothing owned, even a preset-only scene may
+       be requested live — the cheap no-op/persisted-restore
+       path is not gated, only the teardown of a working
+       upload is (T8 pins the failed-upload recovery). */
+    h.scene = MakeScene("cycle2", "breathing");
+    r = h.ctl->Request(PlaybackMode::LiveEffects,
+                       PlaybackControl::Playing, params);
+    CHECK(r.accepted);
+    CHECK(!r.pending);
+}
+
 int main()
 {
     TestLifecycle();
@@ -960,6 +1050,7 @@ int main()
     TestFailedRestore();
     TestSamplerBound();
     TestSceneStoreBound();
+    TestLiveRefusal();
 
     std::printf("playback_test: %d checks, %d failures\n",
                 checks, failures);

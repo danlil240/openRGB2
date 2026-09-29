@@ -366,6 +366,27 @@ PlaybackController::Result PlaybackController::RequestImpl(
                tinyuz/divsufsort compression for large loops
                and must never hold mutex_ (blocks Status/Poll). */
         }
+        else if(mode == PlaybackMode::LiveEffects &&
+                !caps.caps.live_effects          &&
+                (upload_ == UploadState::Uploading ||
+                 upload_ == UploadState::Active))
+        {
+            /* The symmetric refusal (BUG-1): the applied
+               scene's effect names an uploaded-only preset
+               that resolves to NO live layer stack — the
+               switch would evaluate an empty stack and black
+               out every LED while reporting live delivery.
+               Refusing while an upload is in flight or owning
+               the group preserves the running loop and keeps
+               the recorded selection; the reason is already
+               on the wire as unavailable_reason. With nothing
+               owned (None) or a FAILED upload the request
+               still runs — it is the cheap no-op and, after a
+               failure, the explicit lane-restore recovery
+               path (playback_mode_test TestFailedRestore). */
+            r.reason = caps.reason;
+            return r;
+        }
 
         /* Idempotent no-op: identical already-applied state. */
         const bool same_params =

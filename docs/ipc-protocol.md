@@ -204,8 +204,12 @@ acknowledgement — UI shows pending until they agree (plan section 4).
 `pending` is true while a transition or backend acknowledgement is in
 flight; `requested_revision` is the request generation the client can
 poll against `status.parameter_revision`. `unavailable_reason` carries
-the scene-capability reason animation is unavailable for the loaded
-scene; `detail` carries the last transition/ack/control failure.
+the scene-capability reason a mode is unavailable for the loaded
+scene — animation for live-only scenes, live effects for scenes whose
+`effect.preset` names an uploaded-only preset with no live layer stack
+(a live switch there would render nothing, so the request is refused
+while an uploaded loop is in flight or active); `detail` carries the
+last transition/ack/control failure.
 Unsupported modes → `unavailable` with reason; unknown names →
 `bad_request`.
 

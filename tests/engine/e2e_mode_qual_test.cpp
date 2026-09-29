@@ -200,9 +200,13 @@ static json LiveSceneDoc()
     };
 }
 
-/* Playback scene: names the Rainbow Wave preset with no
-   inline layers — the only scene shape eligible for
-   Animation playback. */
+/* Playback scene: names the Rainbow Wave preset AND carries
+   one inline live layer — a dual-capable document. A
+   preset-only scene is animation-only (BUG-1: a Live switch
+   on it would evaluate an empty stack, so the controller
+   refuses the switch while the upload owns the group); the
+   mode legs below exercise the full live<->animation
+   transition and therefore need a live-resolvable stack. */
 static json PlaybackSceneDoc()
 {
     return {
@@ -217,7 +221,16 @@ static json PlaybackSceneDoc()
             { "speed",     1.0 },
             { "intensity", 1.0 },
             { "playing",   true },
-            { "layers",    json::array() },
+            { "layers", json::array({ {
+                { "primitive", "wave" },
+                { "space",     "world" },
+                { "speed",     0.4 },
+                { "scale",     0.5 },
+                { "palette", json::array({
+                    { { "pos", 0.0 }, { "color", "#FF0000" } },
+                    { { "pos", 0.5 }, { "color", "#0000FF" } },
+                }) },
+            } }) },
         } },
     };
 }

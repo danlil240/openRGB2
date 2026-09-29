@@ -128,6 +128,13 @@ bool                            IsPlaybackPresetName(
 |||   presets (audio/key/screen inputs), plain presets —    |
 |||   is Live-only and carries a short human reason         |
 |||   (first-release scoping, plan section 3.4).            |
+|||                                                           |
+|||   live_effects is symmetric (BUG-1): a scene whose        |
+|||   effect.preset names an uploaded preset that has no      |
+|||   live-registry entry AND no inline layers resolves to    |
+|||   no live layer stack — a Live switch would render        |
+|||   black. The reason field carries whichever direction     |
+|||   is unavailable.                                         |
 |\*---------------------------------------------------------*/
 struct ScenePlaybackCaps
 {
@@ -135,7 +142,8 @@ struct ScenePlaybackCaps
     LianLiWireless::PlaybackPreset   preset =
         LianLiWireless::PlaybackPreset::SpectrumCycle;
     bool    has_preset = false;   /* scene names a playback preset */
-    std::string reason;           /* why animation is unavailable  */
+    std::string reason;           /* why the unavailable mode is
+                                     unavailable                  */
 };
 
 ScenePlaybackCaps ClassifyScenePlayback(
