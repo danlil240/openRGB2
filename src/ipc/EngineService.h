@@ -42,6 +42,7 @@
 #include "PlaybackController.h"
 #include "PowerLifecycle.h"
 #include "ReactiveInputs.h"
+#include "StudioScenePreparation.h"
 #include "WorkspaceService.h"
 
 #include "effects/Presets.h"
@@ -187,12 +188,23 @@ public:
     /* The ONE scene-apply path shared by --scene and
        SET_SCENE: resolves the persisted effect stack (inline
        layers, else the named preset through the registry —
-       unknown preset names are rejected), submits to the
-       worker at the next revision, and re-binds the mapper.
-       Emits the "scene" event. */
+       unknown preset names are rejected), prepares the shared
+       runtime scene (hardware-dependent matrix geometry + key
+       positions), submits to the worker at the next revision,
+       and re-binds the mapper. Emits the "scene" event. */
     bool     ApplySceneDocument(
             std::shared_ptr<const studio::SceneDocument> doc,
             std::string& err);
+
+    /* Task 6 workspace apply: the committed candidate drives
+       StudioScenePreparation — runtime layers resolve through
+       the CANDIDATE's own effect-registry snapshot and take the
+       persisted inputs.decay_pct ripple scaling; matrix_map
+       objects expand against the LIVE snapshots. Emits the
+       "scene" event. Unknown preset names stay non-fatal here
+       (candidate parse already warned). */
+    bool     ApplyWorkspaceCandidate(const WorkspaceCandidate& cand,
+                                     std::string& err);
     uint64_t SceneRevision() const;
     std::shared_ptr<const studio::SceneDocument> Scene() const;
 
@@ -289,6 +301,12 @@ private:
                                       const nlohmann::json& body);
     IpcReply       HandleLayoutMutateImpl(const std::string& verb,
                                           const nlohmann::json& body);
+    /* The shared tail of both apply paths: validation, the
+       revision bump, worker submission, mapper re-bind, stored
+       scene, playback restore, and the scene event — all keyed
+       off the PREPARED runtime state. */
+    bool           ApplyPreparedScene(const PreparedStudioScene& prepared,
+                                      std::string& err);
     std::vector<DeviceSnapshot> LayoutSnapshots() const;
     /* studio-import Task 3: true once a managed workspace is
        active — the lossy legacy mutation gate (plan 3.3). */

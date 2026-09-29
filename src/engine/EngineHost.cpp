@@ -840,12 +840,12 @@ bool EngineHost::Start(std::string& err)
            fires only from a workspace job, long after the
            service exists. */
         wdeps.apply_scene =
-            [this](std::shared_ptr<const studio::SceneDocument> doc,
+            [this](std::shared_ptr<const WorkspaceCandidate> cand,
                    std::string& aerr) -> bool
             {
-                return service_ &&
-                       service_->ApplySceneDocument(std::move(doc),
-                                                  aerr);
+                return service_ && cand &&
+                       service_->ApplyWorkspaceCandidate(*cand,
+                                                         aerr);
             };
         workspaces_ = std::make_unique<WorkspaceService>(
             opts_.workspace_root.empty()
@@ -1021,7 +1021,7 @@ bool EngineHost::ApplyStartupScene(std::string& err)
     Log(opts_.scene_path + ": loaded " +
         WorkspaceSourceFormName(cand.source_form) +
         (cand.migrated ? " (migrated)" : ""));
-    if(!service_->ApplySceneDocument(cand.resolved, err))
+    if(!service_->ApplyWorkspaceCandidate(cand, err))
     {
         err = "scene apply failed: " + err;
         return false;

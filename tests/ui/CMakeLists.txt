@@ -263,6 +263,32 @@ set_tests_properties(ui_studio_objects_test PROPERTIES
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${QT_BIN_DIR};DLS_PRESET_DIR=set:${CMAKE_SOURCE_DIR}/src/core/presets/devices")
 
+# studio-import Task 6: the effect-layer editing surface — the
+# real EffectEditorController + EffectLayerModel over the shared
+# WorkspaceEditSession (first-edit materialization + undo back
+# to preset resolution, one record per gesture, stop/path ops,
+# reset/remix/saveLookAs, persisted input settings), plus the
+# five adapted QML panels headless. DLS_EFFECT_DIR feeds the
+# look registry probe, the same convention tests/core uses.
+add_executable(ui_studio_effects_test ui_studio_effects_test.cpp)
+target_link_libraries(ui_studio_effects_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    openrgb2_studio_core
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Test)
+target_include_directories(ui_studio_effects_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(ui_studio_effects_test PRIVATE NDEBUG)
+set_target_properties(ui_studio_effects_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(ui_studio_effects_test)
+add_test(NAME ui_studio_effects_test COMMAND ui_studio_effects_test)
+set_tests_properties(ui_studio_effects_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR};DLS_EFFECT_DIR=set:${CMAKE_SOURCE_DIR}/src/core/presets/effects")
+
 # QA harness (QaServer) — the real shell headless, driven over
 # the loopback QA socket like tools/qa/qa.py drives a live
 # window: selector resolution, synthesized click/type/key,

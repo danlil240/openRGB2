@@ -34,9 +34,18 @@ void SceneWorker::SubmitScene(
     std::vector<studio::EffectLayer> layers,
     uint64_t revision)
 {
+    PreparedStudioScene prepared;
+    prepared.doc    = std::move(doc);
+    prepared.layers = std::move(layers);
+    SubmitPreparedScene(prepared, revision);
+}
+
+void SceneWorker::SubmitPreparedScene(const PreparedStudioScene& scene,
+                                      uint64_t revision)
+{
     std::lock_guard<std::mutex> lock(mutex_);
-    pending_scene_.doc      = std::move(doc);
-    pending_scene_.layers   = std::move(layers);
+    pending_scene_.scene    = scene;      /* doc pointer shared —
+                                           never a doc copy */
     pending_scene_.revision = revision;
     has_pending_scene_      = true;
 }
@@ -75,7 +84,7 @@ uint64_t SceneWorker::Sequence() const
 bool SceneWorker::HasScene() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return active_scene_.doc != nullptr;
+    return active_scene_.scene.doc != nullptr;
 }
 
 void SceneWorker::SetEpoch(TimePoint epoch)
@@ -120,7 +129,7 @@ bool SceneWorker::Step(TimePoint now)
             active_scene_      = std::move(pending_scene_);
             pending_scene_     = SceneState{};
             has_pending_scene_ = false;
-            engine_.SetLayers(active_scene_.layers);
+            engine_.SetLayers(active_scene_.scene.layers);
         }
         if(has_pending_input_)
         {
@@ -136,7 +145,7 @@ bool SceneWorker::Step(TimePoint now)
             active_input_ = std::move(pulled_input);
         }
 
-        evaluate = active_scene_.doc != nullptr;
+        evaluate = active_scene_.scene.doc != nullptr;
         if(!evaluate &&
            (!idle_frame_hook_ || !idle_frame_hook_()))
         {
@@ -164,8 +173,21 @@ bool SceneWorker::Step(TimePoint now)
        pass (identify) is what produces output. */
     if(evaluate)
     {
-        engine_.Evaluate(*active_scene_.doc, frame.scene_time_s,
-                         frame.colors, active_input_.get());
+        /* Task 6: transient key events resolve to emitter world
+           positions through the prepared scene's lookup — the
+           copy stays local to this tick; typed-text history is
+           never retained on the worker. */
+        const studio::InputState* input = active_input_.get();
+        std::shared_ptr<const studio::InputState> positioned;
+        if(input != nullptr && !input->events.empty() &&
+           !active_scene_.scene.key_positions.empty())
+        {
+            positioned = std::make_shared<studio::InputState>(
+                PositionStudioInput(*input, active_scene_.scene));
+            input = positioned.get();
+        }
+        engine_.Evaluate(*active_scene_.scene.doc, frame.scene_time_s,
+                         frame.colors, input);
     }
     if(cb)
     {

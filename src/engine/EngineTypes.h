@@ -111,6 +111,13 @@ struct ZoneSnapshot
        not resizable). */
     uint32_t    leds_min  = 0;
     uint32_t    leds_max  = 0;
+    /* Zone matrix map (keyboards): row-major cells hold the
+       LED index for that grid position or 0xFFFFFFFF for an
+       empty cell. Empty when the zone reports no matrix;
+       consumed by StudioScenePreparation for key geometry. */
+    uint32_t              matrix_rows = 0;
+    uint32_t              matrix_cols = 0;
+    std::vector<uint32_t> matrix_map;
 };
 
 struct DeviceSnapshot
@@ -121,6 +128,10 @@ struct DeviceSnapshot
     std::string               vendor;
     int32_t                   device_type = -1;
     std::vector<ZoneSnapshot> zones;
+    /* Per-LED names in SDK zone order ("Key: Escape", ...) —
+       scene preparation resolves keyboard emitters and key
+       input positions against them. */
+    std::vector<std::string>  led_names;
     std::vector<std::string>  modes;
     int32_t                   active_mode = -1;
     ConnectionState           connection  = ConnectionState::Disconnected;

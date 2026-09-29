@@ -252,7 +252,7 @@ WorkspaceService::Result WorkspaceService::CommitCommon(
     const std::string& original_bytes,
     uint64_t expected_rev,
     bool apply_after,
-    std::shared_ptr<const studio::SceneDocument>* apply_doc)
+    std::shared_ptr<const WorkspaceCandidate>* apply_cand)
 {
     Result res;
     /* Service-level stale-writer fast path for the workspace
@@ -300,20 +300,20 @@ WorkspaceService::Result WorkspaceService::CommitCommon(
        flag), so running it here under the lock is a same-
        thread self-deadlock; a failed apply never rolls the
        generation back, it is reported honestly. */
-    if(apply_after && apply_doc && deps_.apply_scene &&
+    if(apply_after && apply_cand && deps_.apply_scene &&
        cr.candidate && cr.candidate->resolved)
     {
-        *apply_doc = cr.candidate->resolved;
+        *apply_cand = cr.candidate;
     }
     res.ok = true;
     return res;
 }
 
 void WorkspaceService::ApplyAfterCommit(
-    const std::shared_ptr<const studio::SceneDocument>& doc,
+    const std::shared_ptr<const WorkspaceCandidate>& cand,
     uint64_t generation, Result& res)
 {
-    if(!doc || !deps_.apply_scene)
+    if(!cand || !deps_.apply_scene)
     {
         return;
     }
@@ -321,7 +321,7 @@ void WorkspaceService::ApplyAfterCommit(
     bool applied_ok = false;
     try
     {
-        applied_ok = deps_.apply_scene(doc, aerr);
+        applied_ok = deps_.apply_scene(cand, aerr);
     }
     catch(const std::exception& e)
     {
@@ -348,7 +348,7 @@ WorkspaceService::Result WorkspaceService::Save(
     const nlohmann::json& document,
     uint64_t expected_workspace_revision)
 {
-    std::shared_ptr<const studio::SceneDocument> apply_doc;
+    std::shared_ptr<const WorkspaceCandidate> apply_cand;
     Result res;
     {
         std::lock_guard<std::mutex> g(mutex_);
@@ -384,11 +384,11 @@ WorkspaceService::Result WorkspaceService::Save(
         }
         res = CommitCommon(id, cand, document.dump(2),
                            expected_workspace_revision,
-                           /*apply_after=*/true, &apply_doc);
+                           /*apply_after=*/true, &apply_cand);
     }
     /* The apply runs after the lock is released — a scene
        publish emits events that re-enter this service. */
-    ApplyAfterCommit(apply_doc, res.generation, res);
+    ApplyAfterCommit(apply_cand, res.generation, res);
     return res;
 }
 
@@ -634,6 +634,7 @@ bool IsJobVerb(const std::string& v)
     return v == "validate"       || v == "commit"       ||
            v == "save_copy"    || v == "import_inspect" ||
            v == "import_commit" || v == "export"      ||
+           v == "resource_install" ||
            v == "reload";
 }
 
@@ -673,7 +674,7 @@ WorkspaceService::JobResult WorkspaceService::Enqueue(
     }
     const bool needs_revisions =
         verb == "commit" || verb == "save_copy" ||
-        verb == "validate";
+        verb == "validate" || verb == "resource_install";
     if(needs_revisions)
     {
         uint64_t unused = 0;
@@ -685,6 +686,15 @@ WorkspaceService::JobResult WorkspaceService::Enqueue(
             r.detail = "bad_request";
             return r;
         }
+    }
+    /* resource_install carries the effect document inline —
+       bounded by the job-body cap like any other verb. */
+    if(verb == "resource_install" &&
+       (!body.contains("effect") || !body["effect"].is_object()))
+    {
+        r.error  = "'resource_install' requires an effect object";
+        r.detail = "bad_request";
+        return r;
     }
     const bool needs_source = verb == "commit" || verb == "save_copy" ||
                               verb == "validate";
@@ -1096,6 +1106,71 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
         return done(res);
     }
 
+    if(verb == "resource_install")
+    {
+        /* Task 6 personal-look install: ONE validated effect
+           document into the managed library — collision-safe
+           (never overwrites), revision-gated on BOTH the
+           workspace and resource revisions, and returning the
+           landing id + refreshed revisions. */
+        studio::EffectDocument fx;
+        {
+            std::vector<std::string> errs;
+            if(!studio::EffectDocumentFromJson(
+                   body["effect"], fx, &errs))
+            {
+                return fail(
+                    "effect document invalid: " +
+                    (errs.empty() ? std::string("bad shape")
+                                  : errs.front()),
+                    "invalid_document");
+            }
+        }
+        const std::string id = body.value("id", std::string());
+        uint64_t base_rev = 0, res_rev = 0;
+        JsonU64(body, "base_revision",     base_rev);
+        JsonU64(body, "resource_revision", res_rev);
+
+        WorkspaceStore::ResourceInstallResult ir;
+        {
+            std::lock_guard<std::mutex> g(mutex_);
+            ir = store_.InstallEffectResource(id, fx,
+                                              base_rev, res_rev);
+            if(ir.ok && id == current_.id)
+            {
+                /* Keep the published snapshot coherent — a
+                   landed resource is part of the current
+                   workspace's resource set immediately. */
+                current_.resource_revision = ir.resource_revision;
+                PublishLocked();
+            }
+        }
+        if(!ir.ok)
+        {
+            Result res;
+            res.error = ir.error;
+            if(ir.error.find("stale") != std::string::npos ||
+               ir.error.find("revision") != std::string::npos)
+            {
+                res.detail = "revision_conflict";
+            }
+            res.warnings = ir.warnings;
+            return done(res);
+        }
+        Result res;
+        res.ok                = true;
+        /* No generation commits — the marker's resource
+           revision bumped in place; `committed` stays false
+           and the result carries the landing id. */
+        res.workspace_revision = ir.workspace_revision;
+        res.resource_revision  = ir.resource_revision;
+        res.warnings          = ir.warnings;
+        st = done(res);
+        st.result["landed_id"] = ir.landed_id;
+        st.result["reused"]    = ir.reused;
+        return st;
+    }
+
     if(verb == "export")
     {
         /* The managed workspace's portable form — sanitized,
@@ -1196,15 +1271,14 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
         Result res = Open(id);
         if(res.ok && deps_.apply_scene)
         {
-            std::shared_ptr<const studio::SceneDocument> doc;
+            std::shared_ptr<const WorkspaceCandidate> cand;
             {
                 std::lock_guard<std::mutex> g(mutex_);
-                doc = current_.candidate
-                          ? current_.candidate->resolved
-                          : nullptr;
+                cand = current_.candidate;
             }
             std::string aerr;
-            if(doc && deps_.apply_scene(doc, aerr))
+            if(cand && cand->resolved &&
+               deps_.apply_scene(cand, aerr))
             {
                 res.applied = true;
             }
@@ -1223,7 +1297,7 @@ WorkspaceService::Result WorkspaceService::CommitJson(
     bool apply_after, bool adopt)
 {
     Result res;
-    std::shared_ptr<const studio::SceneDocument> apply_doc;
+    std::shared_ptr<const WorkspaceCandidate> apply_cand;
     {
         std::lock_guard<std::mutex> g(mutex_);
         if(!WorkspaceStore::IsWorkspaceId(id))
@@ -1283,7 +1357,7 @@ WorkspaceService::Result WorkspaceService::CommitJson(
         {
             res = CommitCommon(id, cand, original_bytes,
                                expected_workspace_revision,
-                               apply_after, &apply_doc);
+                               apply_after, &apply_cand);
         }
         else
         {
@@ -1316,7 +1390,7 @@ WorkspaceService::Result WorkspaceService::CommitJson(
        the emitted event's payload re-reads this service (the
        managed flag), so applying under the lock is a same-
        thread self-deadlock. */
-    ApplyAfterCommit(apply_doc, res.generation, res);
+    ApplyAfterCommit(apply_cand, res.generation, res);
     return res;
 }
 

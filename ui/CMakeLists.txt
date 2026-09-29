@@ -59,6 +59,11 @@ qt_add_qml_module(openrgb2_ui
         studio/DeviceLibrary.qml
         studio/DeviceTree.qml
         studio/TransformInspector.qml
+        studio/EffectEditor.qml
+        studio/EffectInspector.qml
+        studio/LayerStack.qml
+        studio/LookShelf.qml
+        studio/PaletteEditor.qml
     SOURCES
         ${CMAKE_SOURCE_DIR}/src/ui/EngineBridge.h
         ${CMAKE_SOURCE_DIR}/src/ui/EngineBridge.cpp
@@ -93,6 +98,10 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/studio/PresetListModel.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/studio/ObjectEditorController.h
         ${CMAKE_SOURCE_DIR}/src/ui/studio/ObjectEditorController.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/EffectLayerModel.h
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/EffectLayerModel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/EffectEditorController.h
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/EffectEditorController.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/QaServer.h
         ${CMAKE_SOURCE_DIR}/src/ui/QaServer.cpp)
 

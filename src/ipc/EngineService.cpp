@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <set>
 #include <sstream>
 
 namespace openrgb2
@@ -389,6 +390,65 @@ bool EngineService::ApplySceneDocument(
         }
     }
 
+    /* Graph + LED-address validation run inside
+       ApplyPreparedScene — on the PREPARED document, so
+       matrix-expanded emitter addresses are checked against
+       the persisted zone size as well (Task 6). */
+
+    /* The persisted preset name is validated HERE (the IPC/CLI
+       boundary): a playback-preset name (Spectrum Cycle /
+       Rainbow Wave / Breathing) is also valid — it has no
+       registry layer stack; live fallback renders the
+       document's base colors while Animation playback drives
+       the real preset (Task 3.6). The actual layer build runs
+       inside PrepareStudioScene below. */
+    if(doc->effect.layers.empty() && !doc->effect.preset.empty() &&
+       !studio::FindPreset(doc->effect.preset) &&
+       !IsPlaybackPresetName(doc->effect.preset))
+    {
+        err = "unknown preset '" + doc->effect.preset + "'";
+        return false;
+    }
+
+    /* SET_SCENE / --scene expanded documents carry no workspace
+       inputs — synthesize the minimal candidate preparation
+       needs: the global effect registry resolves named presets
+       (same contract as before) and decay defaults to 100 (a
+       1.0 multiplier). Authored fields stay untouched. */
+    WorkspaceCandidate cand;
+    cand.resolved         = doc;
+    cand.effect_registry  = studio::EffectLooks();
+    cand.document.inputs.decay_pct = 100;
+    return ApplyWorkspaceCandidate(cand, err);
+}
+
+bool EngineService::ApplyWorkspaceCandidate(const WorkspaceCandidate& cand,
+                                            std::string& err)
+{
+    /* Task 6 shared preparation: matrix emitters + key
+       positions expand against the LIVE snapshots; runtime
+       layers resolve through the candidate's own registry
+       snapshot and take the persisted decay scaling on a
+       copy — authored workspace data is never mutated. */
+    PreparedStudioScene prepared;
+    if(!PrepareStudioScene(cand, LayoutSnapshots(), prepared, err))
+    {
+        return false;
+    }
+    return ApplyPreparedScene(prepared, err);
+}
+
+bool EngineService::ApplyPreparedScene(const PreparedStudioScene& prepared,
+                                       std::string& err)
+{
+    const std::shared_ptr<const studio::SceneDocument>& doc =
+        prepared.doc;
+    if(!doc)
+    {
+        err = "null scene document";
+        return false;
+    }
+
     /* Structural rules the SceneJson parser enforces are
        re-checked HERE because the layout mutation verbs edit
        the applied document directly — they never re-enter
@@ -420,7 +480,9 @@ bool EngineService::ApplySceneDocument(
        report, plan section 5): expanded documents bypass
        workspace resolution, so out-of-range LED addresses are
        rejected HERE — the last boundary before the scene is
-       applied and stored. */
+       applied and stored. Task 6: the check runs on the
+       PREPARED document, so matrix-expanded emitter addresses
+       are validated against the persisted zone size too. */
     {
         std::vector<std::string> errs;
         if(!ValidateSceneLedAddresses(*doc, &errs))
@@ -435,42 +497,18 @@ bool EngineService::ApplySceneDocument(
         }
     }
 
-    /* Resolve the effect stack the persisted document intends:
-       the inline layer stack when present, otherwise the named
-       preset through the effect-look registry (same contract
-       as the --scene CLI path). A playback-preset name
-       (Spectrum Cycle / Rainbow Wave / Breathing) is also
-       valid: it has no registry layer stack — live fallback
-       renders the document's base colors while Animation
-       playback drives the real preset (Task 3.6). */
-    std::vector<studio::EffectLayer> layers = doc->effect.layers;
-    if(layers.empty() && !doc->effect.preset.empty())
-    {
-        if(!studio::FindPreset(doc->effect.preset) &&
-           !IsPlaybackPresetName(doc->effect.preset))
-        {
-            err = "unknown preset '" + doc->effect.preset + "'";
-            return false;
-        }
-        if(studio::FindPreset(doc->effect.preset))
-        {
-            layers = studio::BuildPreset(doc->effect.preset,
-                                         doc->effect.seed);
-            studio::ApplyGlobalParams(layers, doc->effect.speed,
-                                      doc->effect.intensity);
-        }
-    }
-
     uint64_t revision;
     {
         /* The whole apply is serialized: revision, worker
            submission, mapper re-bind, and the stored document
            move together — two concurrent SET_SCENEs can't
-           interleave a stale document over a newer revision. */
+           interleave a stale document over a newer revision.
+           The worker receives the PREPARED scene atomically:
+           document, runtime layers, and the key-position
+           lookup never tear across revisions. */
         std::lock_guard<std::mutex> lock(mutex_);
         revision = ++scene_revision_;
-        engine_.Worker().SubmitScene(doc, std::move(layers),
-                                     revision);
+        engine_.Worker().SubmitPreparedScene(prepared, revision);
         if(deps_.mapper)
         {
             deps_.mapper->SetScene(doc);
@@ -1249,14 +1287,41 @@ IpcReply EngineService::Dispatch(MsgType type,
     case MsgType::GetPresets:
     {
         nlohmann::json presets = nlohmann::json::array();
+        std::set<std::string> seen;
         for(const studio::PresetInfo& p : studio::PresetList())
         {
+            seen.insert(p.id);
             presets.push_back(nlohmann::json::object({
                 { "id",          p.id          },
                 { "name",        p.name        },
                 { "description", p.description },
                 { "needs",       p.needs       },
             }));
+        }
+        /* Personal looks landed by resource_install live in the
+           managed workspace library — the global look registry
+           never re-scans it, so merge the effective registry's
+           file-supplied entries (sorted tail, like the catalog).
+           Resolution goes through the same registry, so an id
+           listed here always resolves. */
+        if(deps_.workspace)
+        {
+            const auto looks =
+                deps_.workspace->Store().EffectiveEffectRegistry()
+                    .List({});
+            for(const studio::EffectRegistry::EffectInfo& i : looks)
+            {
+                if(!i.from_file || seen.count(i.id))
+                {
+                    continue;
+                }
+                presets.push_back(nlohmann::json::object({
+                    { "id",          i.id          },
+                    { "name",        i.name        },
+                    { "description", i.description },
+                    { "needs",       i.needs       },
+                }));
+            }
         }
         return IpcReply::Success(MsgType::Presets,
             nlohmann::json::object({{ "presets", presets }}));

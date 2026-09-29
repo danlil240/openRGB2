@@ -125,8 +125,12 @@ public:
            flag — running it under the lock self-deadlocks); a
            failure is reported honestly — the committed
            generation stays durable. */
+        /* Task 6: the committed CANDIDATE is handed over, not
+           just its resolved document — scene preparation needs
+           the authoring document's inputs (decay) and the
+           registry snapshot for runtime layer resolution. */
         std::function<bool(
-            std::shared_ptr<const studio::SceneDocument>,
+            std::shared_ptr<const WorkspaceCandidate>,
             std::string&)> apply_scene;
         /* Pending-job bound across ALL clients (plan 3.3: at
            most eight). */
@@ -275,8 +279,8 @@ private:
         uint64_t generation         = 0;
     };
     /* Serialized-commit core — CALLER HOLDS mutex_. When
-       apply_after is set the resolved document is handed back
-       through apply_doc (never applied inside the lock — the
+       apply_after is set the committed candidate is handed back
+       through apply_cand (never applied inside the lock — the
        apply emits events whose payloads re-enter this
        service). */
     Result CommitCommon(const std::string& id,
@@ -284,13 +288,13 @@ private:
                         const std::string& original_bytes,
                         uint64_t expected_rev,
                         bool apply_after,
-                        std::shared_ptr<const studio::SceneDocument>*
-                            apply_doc);
+                        std::shared_ptr<const WorkspaceCandidate>*
+                            apply_cand);
     /* Runs deps_.apply_scene OFF the service mutex and folds
        the outcome into `res` (committed stays durable; an
        apply failure is reported, never rolled back). */
     void   ApplyAfterCommit(
-             const std::shared_ptr<const studio::SceneDocument>& doc,
+             const std::shared_ptr<const WorkspaceCandidate>& cand,
              uint64_t generation, Result& res);
     /* IPC job paths (worker thread): the workspace AND resource
        revisions are re-checked against the durable marker at

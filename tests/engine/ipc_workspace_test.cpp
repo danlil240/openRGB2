@@ -156,11 +156,11 @@ struct Rig
            path as SET_SCENE — wired lazily because the service
            object is constructed after the workspace service. */
         wdeps.apply_scene =
-            [this](std::shared_ptr<const studio::SceneDocument> doc,
+            [this](std::shared_ptr<const WorkspaceCandidate> cand,
                    std::string& err) -> bool
             {
-                return svc && svc->ApplySceneDocument(std::move(doc),
-                                                      err);
+                return svc && cand &&
+                       svc->ApplyWorkspaceCandidate(*cand, err);
             };
         ws = std::make_unique<WorkspaceService>(root.string(),
                                                 wdeps);

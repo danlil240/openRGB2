@@ -56,11 +56,13 @@ of the shared model.
 | Shared model core (`openrgb2_studio_core`) | Consolidated; includes `PresetBundle`, `DefaultDesk`, `EditorController`, `TransformCommands` |
 | Scene/effect evaluation, schemas, v3 compact workspace model | Imported core; exercised by `core` label suites |
 | Reactive input capture (WASAPI, screen, keyboard, power) | Qt-free Windows implementations in `src/platform/windows` |
-| Compact workspace durability (engine `WorkspaceStore`) | Not started (Task 2) |
-| Workspace IPC (revisions, transfers, jobs, preview) | Not started (Tasks 3, 7) |
-| Shared UI draft/edit session, recovery | Not started (Task 4) |
+| Compact workspace durability (engine `WorkspaceStore`) | Done (Task 2) |
+| Workspace IPC (revisions, transfers, jobs, preview) | Done for workspace + resource jobs incl. `resource_install` (Tasks 3, 6); preview verbs land with Task 7 |
+| Shared UI draft/edit session, recovery | Done (Task 4): `WorkspaceEditSession` owns the draft + bounded undo; every adapter commits through it |
 | Scene/object editing + device library panels | Done (Task 5): `src/ui/studio/` adapters (`SceneObjectModel`, `PresetListModel`, `ObjectEditorController` on the shared `WorkspaceEditSession`) + `ui/studio/` panels (`DeviceTree`, `DeviceLibrary`, `TransformInspector`) mounted on the Layout page; `ui_studio_objects_test` covers the seam headless |
-| Layer/palette/personal-look editing | Not started (Task 6) |
+| Layer/palette/personal-look editing | Done (Task 6): `src/ui/studio/` `EffectLayerModel` (row-granular diff model) + `EffectEditorController` (stack/palette/path/source/targets edits, gesture commit/cancel, named-look materialization, `saveLookAs` via `resource_install`, persisted draft `inputs.*`) + `ui/studio/` panels (`EffectEditor`, `EffectInspector`, `LayerStack`, `PaletteEditor`, `LookShelf`) mounted on the Lighting page; `ui_studio_effects_test` covers the seam headless |
+| Engine prepared scene (`PreparedStudioScene`) | Done (Task 6): `src/engine/StudioScenePreparation` expands matrix emitters + builds `key_positions` against matched hardware and applies `inputs.decay_pct` to runtime ripple density on a copy (authored data untouched); consumed by `SceneWorker` now and preview later; `studio_scene_preparation_test` covers it |
+| SDK topology fidelity | Done (Task 6): bounded zone matrix maps + LED names ride `SdkWire`/`OpenRgbClient`/`DeviceSnapshot` end to end |
 | 3D viewport (`StudioScene.qml` → `StudioViewport`) | Blocked on Quick3D prerequisite (Task 8) |
 | Device-type authoring + portable bundles | Not started (Task 9) |
 | Workspace file actions + external-change recovery | Not started (Task 10) |

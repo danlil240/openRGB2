@@ -19,6 +19,7 @@
 #include "StartupTaskController.h"
 #include "UiSettings.h"
 #include "WorkspaceController.h"
+#include "studio/EffectEditorController.h"
 #include "studio/ObjectEditorController.h"
 
 #include <QApplication>
@@ -239,6 +240,13 @@ int main(int argc, char** argv)
        or undo stack). */
     openrgb2::ui::ObjectEditorController object_ctl(
         &bridge, &workspace_ctl);
+    /* studio-import Task 6: the effect-layer editor — stack,
+       palette, personal-look shelf and persisted input
+       settings all edit the same shared draft through the
+       session's EditorController (never a private document
+       or undo stack). */
+    openrgb2::ui::EffectEditorController effect_ctl(
+        &bridge, &workspace_ctl);
     /* Normal close flushes the debounced draft record so a
        crash-free exit still preserves unsaved work. */
     QObject::connect(&app, &QCoreApplication::aboutToQuit,
@@ -270,6 +278,8 @@ int main(int argc, char** argv)
                                              &workspace_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("objectCtl"),
                                              &object_ctl);
+    engine.rootContext()->setContextProperty(QStringLiteral("effectEdit"),
+                                             &effect_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("diagCtl"),
                                              &diag_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("uiPrefs"),

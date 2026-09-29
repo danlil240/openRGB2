@@ -673,11 +673,11 @@ static void TestServiceSurface()
     deps.devices = RegistryWith(types.string());
     std::shared_ptr<const studio::SceneDocument> applied;
     deps.apply_scene =
-        [&applied](std::shared_ptr<const studio::SceneDocument> doc,
+        [&applied](std::shared_ptr<const WorkspaceCandidate> cand,
                    std::string&) -> bool
         {
-            applied = std::move(doc);
-            return true;
+            applied = cand ? cand->resolved : nullptr;
+            return applied != nullptr;
         };
 
     const fs::path root = g_tmp / "ws9";

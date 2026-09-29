@@ -22,6 +22,7 @@
 #pragma once
 
 #include "EngineTypes.h"
+#include "StudioScenePreparation.h"
 
 #include "effects/EffectEngine.h"
 #include "scene/SceneTypes.h"
@@ -91,6 +92,16 @@ public:
                          std::vector<studio::EffectLayer> layers,
                          uint64_t revision = 0);
 
+    /* Task 6 shared prepared scene (StudioScenePreparation): the
+       workspace-apply path submits the expanded document, the
+       runtime layer stack (global params + ripple decay applied to
+       the COPY), and the keyboard-position lookup as one atomic
+       state — the same state the Task 7 preview evaluates. The
+       worker enriches transient key events through
+       PositionStudioInput so ripples spawn at real key positions. */
+    void     SubmitPreparedScene(const PreparedStudioScene& scene,
+                                 uint64_t revision = 0);
+
     /* Latest-wins reactive-input submission; nullptr clears. */
     void     SubmitInput(std::shared_ptr<const studio::InputState> input);
 
@@ -150,9 +161,11 @@ public:
 private:
     struct SceneState
     {
-        uint64_t                                     revision = 0;
-        std::shared_ptr<const studio::SceneDocument> doc;
-        std::vector<studio::EffectLayer>             layers;
+        uint64_t            revision = 0;
+        /* doc/layers/key_positions move as ONE prepared unit —
+           a stale document can never pair with a newer key
+           lookup. */
+        PreparedStudioScene scene;
     };
 
     void Run();

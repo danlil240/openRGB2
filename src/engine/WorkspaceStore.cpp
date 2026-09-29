@@ -1590,4 +1590,227 @@ WorkspaceStore::CommitResult WorkspaceStore::Commit(
     return res;
 }
 
+/*---------------------------------------------------------*\
+||| InstallEffectResource — Task 6 personal-look install.   ||
+||| Same collision discipline as InstallEffectLooks but for ||
+||| ONE validated document, revision-gated and WITHOUT a    ||
+||| generation: the marker's resource_revision bumps in     ||
+||| place only when a file was written.                     ||
+\*---------------------------------------------------------*/
+WorkspaceStore::ResourceInstallResult WorkspaceStore::InstallEffectResource(
+    const std::string& id,
+    const studio::EffectDocument& effect,
+    uint64_t expected_workspace_revision,
+    uint64_t expected_resource_revision)
+{
+    ResourceInstallResult res;
+    auto fail = [&](std::string e) -> ResourceInstallResult
+    {
+        res.error = std::move(e);
+        return res;
+    };
+    if(!IsWorkspaceId(id))
+    {
+        return fail("invalid workspace id '" + id + "'");
+    }
+    if(!studio::IsPresetId(effect.id))
+    {
+        return fail("effect id '" + effect.id +
+                    "' is not a valid identifier");
+    }
+    /* Re-validate the serialized form — the file that lands
+       must re-parse to the same document (bounded, canonical). */
+    const nlohmann::ordered_json ej =
+        studio::EffectDocumentToJson(effect);
+    {
+        studio::EffectDocument check;
+        std::vector<std::string> verrs;
+        if(!studio::EffectDocumentFromJson(ej, check, &verrs))
+        {
+            return fail("effect '" + effect.id +
+                        "' failed validation: " +
+                        (verrs.empty() ? std::string("invalid")
+                                       : verrs.front()));
+        }
+    }
+    const std::string bytes = ej.dump(2);
+    if(bytes.size() > 1024 * 1024)
+    {
+        return fail("effect '" + effect.id +
+                    "' exceeds the 1 MiB resource bound");
+    }
+
+    std::error_code ec;
+    const fs::path wsdir = WorkspaceDir(id);
+    if(fs::exists(wsdir, ec) && !InsideRoot(root_, wsdir))
+    {
+        return fail("workspace dir '" + wsdir.string() +
+                    "' escapes the managed root — refused");
+    }
+
+    /*---- Revision gate — same primary/backup discipline as
+    ||   Commit: an unreadable marker is never guessed at.
+    \*---------------------------------------------------------*/
+    const Marker primary = ReadMarker(wsdir / "active");
+    const Marker backup  = ReadMarker(wsdir / "active.lkg");
+    Marker       current;
+    if(primary.valid)
+    {
+        current = primary;
+    }
+    else if(primary.exists && backup.valid)
+    {
+        current = backup;
+    }
+    else if(primary.exists)
+    {
+        return fail("active marker is unreadable (" +
+                    primary.error +
+                    ") — recover the workspace before "
+                    "installing resources");
+    }
+    else if(backup.valid)
+    {
+        current = backup;
+    }
+    else
+    {
+        return fail("workspace '" + id +
+                    "' has no readable marker — nothing to "
+                    "install against");
+    }
+    if(expected_workspace_revision != current.workspace_revision)
+    {
+        return fail("stale workspace revision: expected " +
+                    std::to_string(expected_workspace_revision) +
+                    " but '" + id + "' is at " +
+                    std::to_string(current.workspace_revision));
+    }
+    if(expected_resource_revision != current.resource_revision)
+    {
+        return fail("stale resource revision: expected " +
+                    std::to_string(expected_resource_revision) +
+                    " but '" + id + "' is at " +
+                    std::to_string(current.resource_revision));
+    }
+
+    /*---- Collision-safe install — identical content reuses,  ||
+    ||   differing content lands under a suffixed id, never   ||
+    ||   an overwrite (InstallEffectLooks discipline).        ||
+    \*-------------------------------------------------------*/
+    const fs::path dir = fs::path(LibraryEffectsDir());
+    fs::create_directories(dir, ec);
+    if(ec)
+    {
+        return fail("cannot create " + dir.string() + ": " +
+                    ec.message());
+    }
+    std::string landed = effect.id;
+    const fs::path target = dir / (landed + ".effect.json");
+    bool have_local = false;
+    bool identical  = false;
+    if(fs::exists(target, ec))
+    {
+        have_local = true;
+        std::string existing;
+        if(ReadFileBytes(target, existing))
+        {
+            const nlohmann::json parsed =
+                nlohmann::json::parse(existing, nullptr, false);
+            studio::EffectDocument ed;
+            if(!parsed.is_discarded() &&
+               studio::EffectDocumentFromJson(parsed, ed, nullptr))
+            {
+                identical =
+                    studio::EffectDocumentToJson(ed) == ej;
+            }
+        }
+    }
+    else if(const studio::EffectDocument* p =
+                deps_.effects.Find(landed))
+    {
+        /* A packaged/default look with the same id counts as
+           existing content — identical reuses, differing gets
+           the file-layer override name. */
+        have_local = true;
+        identical  = studio::EffectDocumentToJson(*p) == ej;
+    }
+    bool wrote = false;
+    if(have_local && identical)
+    {
+        res.reused = true;      /* nothing written */
+    }
+    else
+    {
+        if(have_local)
+        {
+            landed = FreeEffectId(dir, deps_.effects, {},
+                                  effect.id);
+            res.warnings.push_back(
+                "effect look '" + effect.id +
+                "' collides with existing content — "
+                "installed as '" + landed + "'");
+        }
+        studio::EffectDocument to_write = effect;
+        to_write.id = landed;
+        const std::string wbytes =
+            studio::EffectDocumentToJson(to_write).dump(2);
+        const fs::path wtarget = dir / (landed + ".effect.json");
+        if(fs::exists(wtarget, ec))
+        {
+            /* Another writer landed the id mid-install —
+               still never overwritten. */
+            return fail("effect file '" + landed +
+                        ".effect.json' appeared during install");
+        }
+        if(!WriteAtomicFile(wtarget.string() + ".tmp", wtarget,
+                            wbytes, res.error))
+        {
+            return res;
+        }
+        /* Read-back verification — the landed file must parse
+           to the document written. */
+        studio::EffectDocument landed_doc;
+        if(!studio::EffectDocumentFromJsonFile(wtarget.string(),
+                                               landed_doc, nullptr) ||
+           studio::EffectDocumentToJson(landed_doc) !=
+               studio::EffectDocumentToJson(to_write))
+        {
+            return fail("installed effect '" + landed +
+                        "' failed read-back verification");
+        }
+        wrote = true;
+    }
+
+    /*---- Marker bump: resource_revision advances only when  ||
+    ||   the library actually changed. Generation + workspace||
+    ||   revision pass through untouched; the marker replace  ||
+    ||   is the same atomic write the commit path uses.       ||
+    \*-------------------------------------------------------*/
+    uint64_t next_res_rev = current.resource_revision;
+    if(wrote)
+    {
+        ++next_res_rev;
+        const nlohmann::json marker = nlohmann::json::object({
+            { "kind",               kMarkerKind    },
+            { "schema_version",     kRecordSchema  },
+            { "generation",         current.generation },
+            { "workspace_revision", current.workspace_revision },
+            { "resource_revision",  next_res_rev   },
+        });
+        if(!WriteAtomicFile(wsdir / "active.tmp",
+                            wsdir / "active",
+                            marker.dump(2), res.error))
+        {
+            return res;
+        }
+    }
+
+    res.ok                 = true;
+    res.landed_id          = landed;
+    res.workspace_revision = current.workspace_revision;
+    res.resource_revision  = next_res_rev;
+    return res;
+}
+
 } /* namespace openrgb2 */

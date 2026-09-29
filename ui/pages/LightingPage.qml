@@ -14,6 +14,7 @@ import QtQuick.Layouts
 import QtQuick.Controls
 import OpenRGB2.UI.theme
 import OpenRGB2.UI.components
+import OpenRGB2.UI.studio
 
 Item {
     id: root
@@ -1261,6 +1262,29 @@ Item {
                     }
                 }
 
+                /*---- Effect layers (studio-import Task 6) ------
+                   The advanced section: ordered layer stack,
+                   inspector, palette/gradient editing and the
+                   personal-look shelf — all edits land in the
+                   shared workspace draft as one undo record
+                   each. Workspace-mode only (a legacy engine
+                   has no draft); the card hides rather than
+                   fabricating controls. Live-effects only —
+                   an uploaded loop keeps its own controls. */
+                Card {
+                    id: effectCard
+                    title: qsTr("EFFECT LAYERS")
+                    objectName: "effectCard"
+                    width: parent.width - 2 * col.padding
+                    visible: typeof effectEdit !== "undefined"
+                             && effectEdit.ready
+
+                    EffectEditor {
+                        width: parent.width
+                        animationSelected: root.animationRequested
+                    }
+                }
+
                 /*---- Reactive inputs (Task 4.6) -----------------
                    Enable/disable + honest status for each engine
                    reactive input. Every toggle is real wire
@@ -1375,11 +1399,22 @@ Item {
                                         objectName: inputId + "Check"
                                         text: modelData.label
                                         enabled: inputRow.usable
-                                        onClicked:
+                                        onClicked: {
                                             bridge.reactiveCommand(
                                                 "set_enabled",
                                                 { "input": inputId,
                                                   "enabled": inputCheck.checked })
+                                            /* Persist the authored
+                                               source choice into the
+                                               draft (Task 6 parity —
+                                               the workspace restores
+                                               it on commit). */
+                                            if(typeof effectEdit !== "undefined"
+                                               && effectEdit.ready)
+                                                effectEdit.setInputEnabled(
+                                                    inputId,
+                                                    inputCheck.checked)
+                                        }
                                         Binding {
                                             target: inputCheck
                                             property: "checked"
@@ -1462,12 +1497,17 @@ Item {
                                     Timer {
                                         id: sensTimer
                                         interval: 150
-                                        onTriggered:
+                                        onTriggered: {
                                             bridge.reactiveCommand(
                                                 "set_params",
                                                 { "input": "audio",
                                                   "sensitivity":
                                                       sensSlider.value / 100.0 })
+                                            if(typeof effectEdit !== "undefined"
+                                               && effectEdit.ready)
+                                                effectEdit.setInputSensitivity(
+                                                    Math.round(sensSlider.value))
+                                        }
                                     }
                                 }
 
@@ -1492,11 +1532,15 @@ Item {
                                         enabled: inputRow.usable && count > 0
                                         model: reactiveCard.reactiveDisplays
                                         textRole: "name"
-                                        onActivated: index =>
+                                        onActivated: index => {
                                             bridge.reactiveCommand(
                                                 "set_params",
                                                 { "input": "screen",
                                                   "screen_index": index })
+                                            if(typeof effectEdit !== "undefined"
+                                               && effectEdit.ready)
+                                                effectEdit.setInputScreenIndex(index)
+                                        }
                                         Binding {
                                             target: dispCombo
                                             property: "currentIndex"
@@ -1512,6 +1556,50 @@ Item {
                                         font.pixelSize: Theme.fontSizeSmall
                                     }
                                 }
+                            }
+                        }
+
+                        /* Ripple decay (Task 6): the AUTHORED
+                           inputs.decay_pct — 50..300, default
+                           100, applied engine-side to runtime
+                           ripple-layer density copies only. A
+                           workspace-draft field, so the control
+                           exists only when the shared draft is
+                           editable; the drag commits one record
+                           on release. */
+                        RowLayout {
+                            visible: typeof effectEdit !== "undefined"
+                                     && effectEdit.ready
+                            width: parent.width
+                            spacing: Theme.spaceL
+                            Text {
+                                text: qsTr("Ripple decay")
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeBody
+                                Layout.preferredWidth: 110
+                            }
+                            AppSlider {
+                                id: decaySlider
+                                objectName: "rippleDecay"
+                                Accessible.name: qsTr("ripple decay")
+                                Layout.fillWidth: true
+                                from: 50; to: 300; stepSize: 5
+                                onPressedChanged: {
+                                    if(!pressed)
+                                        effectEdit.setDecayPct(
+                                            Math.round(value))
+                                }
+                                Binding {
+                                    target: decaySlider
+                                    property: "value"
+                                    value: effectEdit.ready
+                                           ? effectEdit.decayPct : 100
+                                }
+                            }
+                            Text {
+                                text: Math.round(decaySlider.value) + "%"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeBody
                             }
                         }
 

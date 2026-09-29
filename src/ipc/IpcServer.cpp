@@ -47,6 +47,7 @@ bool IsRequestType(MsgType t)
     case MsgType::GetPresets:
     case MsgType::Quit:
     case MsgType::WorkspaceCommand:
+    case MsgType::ReactiveCommand:
     case MsgType::DiagGet:
         return true;
     default:

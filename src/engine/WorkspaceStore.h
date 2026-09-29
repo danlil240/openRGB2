@@ -197,6 +197,36 @@ public:
                         const std::string& original_bytes,
                         uint64_t expected_workspace_revision);
 
+    /*---- Personal effect looks (studio-import Task 6) ------*\
+    |  InstallEffectResource: collision-safe install of ONE   |
+    |  validated effect document into the managed effect      |
+    |  library — identical existing content is reused,        |
+    |  differing content is NEVER overwritten (a suffixed id  |
+    |  lands instead). The marker's resource_revision bumps   |
+    |  only when a file was actually written; workspace       |
+    |  revision and the active generation are untouched.      |
+    |  Both expected revisions are checked against the        |
+    |  durable marker BEFORE any write — a stale client is    |
+    |  rejected ("revision_conflict" discipline), and the     |
+    |  resource install is refused entirely when the          |
+    |  workspace has no readable marker.                      |
+    \*-------------------------------------------------------*/
+    struct ResourceInstallResult
+    {
+        bool        ok                 = false;
+        bool        reused             = false; /* identical existed */
+        std::string landed_id;                  /* final effect id   */
+        uint64_t    workspace_revision = 0;
+        uint64_t    resource_revision  = 0;
+        std::string error;
+        std::vector<std::string> warnings;
+    };
+    ResourceInstallResult InstallEffectResource(
+        const std::string& id,
+        const studio::EffectDocument& effect,
+        uint64_t expected_workspace_revision,
+        uint64_t expected_resource_revision);
+
 private:
     std::string root_;
     Deps        deps_;

@@ -45,6 +45,12 @@ engine_suite(ownership_scan_test)
 # and the honest live-only playback reason for reactive scenes.
 engine_suite(reactive_inputs_test)
 
+# Studio-import Task 6 — shared prepared scene: matrix emitter
+# expansion against matched bindings, the runtime layer copy
+# (global params + ripple decay, authored data untouched), and
+# the VK->world key-position lookup the worker/preview share.
+engine_suite(studio_scene_preparation_test)
+
 # Task 4.9-parallel IPC surface for the same task: REACTIVE_COMMAND
 # verb bounds, honest Unavailable paths, STATE/DIAGNOSTICS surface,
 # the reactive event, and the reactive-scene playback reason.

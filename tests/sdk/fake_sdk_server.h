@@ -63,6 +63,14 @@ struct FakeZone
     uint32_t    leds_min   = 0;
     uint32_t    leds_max   = 0;
     uint32_t    leds_count = 0;
+    /* Zone matrix map (keyboards) — protocol-4 serialization:
+       u16 byte size, then u32 rows (height), u32 cols (width),
+       rows*cols u32 cells (0xFFFFFFFF = empty). rows == 0
+       serializes an empty map (size field 0), matching
+       RGBController::GetMatrixMapDescriptionData. */
+    uint32_t              matrix_rows = 0;
+    uint32_t              matrix_cols = 0;
+    std::vector<uint32_t> matrix_map;
 };
 
 struct FakeController
@@ -429,7 +437,20 @@ inline std::vector<uint8_t> FakeSdkServer::BuildControllerBody(
         PutU32(b, z.leds_min);
         PutU32(b, z.leds_max);
         PutU32(b, z.leds_count);
-        PutU16(b, 0);                              /* matrix map size */
+        if(z.matrix_rows > 0 && z.matrix_cols > 0)
+        {
+            PutU16(b, (uint16_t)(8 + z.matrix_map.size() * 4));
+            PutU32(b, z.matrix_rows);              /* height */
+            PutU32(b, z.matrix_cols);              /* width  */
+            for(uint32_t cell : z.matrix_map)
+            {
+                PutU32(b, cell);
+            }
+        }
+        else
+        {
+            PutU16(b, 0);                          /* matrix map size */
+        }
         PutU16(b, 0);                              /* num segments    */
     }
     PutU16(b, (uint16_t)c.led_names.size());

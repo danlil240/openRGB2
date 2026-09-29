@@ -823,6 +823,7 @@ IpcReply WorkspaceCommands::Handle(uint64_t session_id,
     if(verb == "validate"       || verb == "commit"      ||
        verb == "save_copy"      || verb == "import_inspect" ||
        verb == "import_commit"  || verb == "export"      ||
+       verb == "resource_install" ||
        verb == "reload")
     {
         return HandleJobVerb(session_id, verb, body);
