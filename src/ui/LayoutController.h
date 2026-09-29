@@ -43,12 +43,24 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include <functional>
+#include <optional>
+#include <string>
+
+namespace studio
+{
+struct StudioDocument;
+struct EditorEdit;
+struct DeviceBinding;
+}
+
 namespace openrgb2
 {
 namespace ui
 {
 
 class EngineBridge;
+class WorkspaceController;
 
 class LayoutController : public QObject
 {
@@ -118,6 +130,16 @@ class LayoutController : public QObject
 public:
     explicit LayoutController(EngineBridge* bridge,
                               QObject* parent = nullptr);
+
+    /* studio-import Task 4: attach the shared workspace
+       controller. With a managed workspace (or a staged local
+       draft), arrangement/binding/mirror/calibration edits
+       become local draft mutations on the shared
+       StudioDocument — one undo timeline, one dirty flag,
+       Save through the workspace commit path. On a legacy
+       engine (no studio_workspace_v1) the immediate
+       LAYOUT_COMMAND path below is kept verbatim. */
+    void setWorkspace(WorkspaceController* ws);
 
     /*---- selection -----------------------------------------*/
     Q_INVOKABLE void select(const QString& objectId);
@@ -225,8 +247,37 @@ private:
     static QString IdentifyTag(const QVariantMap& key);
     void           PruneIdentifies();
 
+    /*---- shared-workspace adaptation (Task 4) ---------------
+       WsMode(): attached controller AND (capable+managed
+       engine OR a local draft already loaded). In workspace
+       mode rows come from the compact draft at INSTANCE
+       granularity; the applied scene (model_) still feeds
+       emitter-level views — emitter positions are resolved
+       engine truth the UI must not fabricate. */
+    bool        WsMode() const;
+    const studio::StudioDocument* WsDoc() const;
+    /* Commit a discrete editor op; false = refused (the
+       editor's LastError explains why). */
+    bool        WsApply(std::optional<studio::EditorEdit> e,
+                        const QString& label);
+    /* Whole-document record for fields outside EditorEdit. */
+    bool        WsDocEdit(const std::string& label,
+                          const std::function<bool(
+                              studio::StudioDocument&)>& mut);
+    /* Compact-doc rows + binding join (display hints only —
+       the engine resolves authoritatively). */
+    QVariantList  WsItems() const;
+    QString       WsBindingState(const studio::DeviceBinding& b,
+                                 bool& connected) const;
+    /* Emitters of the APPLIED resolved scene under instance
+       `iid` — engine truth for the calibration list; the
+       draft's device_settings own the address bases. */
+    QVariantList  WsEmitters(const std::string& iid) const;
+    QString       WsUniqueBindingId(const QString& base) const;
+
     EngineBridge*   bridge_;
     LayoutEditModel model_;
+    WorkspaceController* ws_ = nullptr;
     QString         selected_id_;
     QString         last_error_;
     QString         last_error_source_;

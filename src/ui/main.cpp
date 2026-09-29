@@ -18,6 +18,7 @@
 #include "SceneEditController.h"
 #include "StartupTaskController.h"
 #include "UiSettings.h"
+#include "WorkspaceController.h"
 
 #include <QApplication>
 #include <QCryptographicHash>
@@ -214,12 +215,29 @@ int main(int argc, char** argv)
     {
         bridge.setPipeName(pipe);
     }
+    /* The shared workspace draft (studio-import Task 4): when
+       the engine advertises studio_workspace_v1 and manages a
+       workspace, both editing pages adapt to this ONE draft —
+       Lighting and Layout share dirty/conflict/undo state and
+       the durable crash-recovery record. On a legacy engine
+       the controller reports unavailable and both pages keep
+       their SET_SCENE / LAYOUT_COMMAND paths. */
+    openrgb2::ui::WorkspaceController workspace_ctl(&bridge);
     /* The Lighting view's scene-edit session — owns the working
        document, the save flow, and the named-scene library. */
     openrgb2::ui::SceneEditController scene_edit(&bridge);
     /* The Layout view's edit session — arrangement ops ride
        LAYOUT_COMMAND, undo/redo reverts via SET_SCENE. */
     openrgb2::ui::LayoutController layout_ctl(&bridge);
+    scene_edit.setWorkspace(&workspace_ctl);
+    layout_ctl.setWorkspace(&workspace_ctl);
+    /* Normal close flushes the debounced draft record so a
+       crash-free exit still preserves unsaved work. */
+    QObject::connect(&app, &QCoreApplication::aboutToQuit,
+                     &workspace_ctl,
+                     [&workspace_ctl] {
+                         workspace_ctl.FlushDrafts();
+                     });
     /* The Devices & Diagnostics view's read-only surface —
        derived rate/ownership/conflict views over the bridge
        stores plus the redacted export bundle (Task 4.7). */
@@ -240,6 +258,8 @@ int main(int argc, char** argv)
                                              &scene_edit);
     engine.rootContext()->setContextProperty(QStringLiteral("layoutCtl"),
                                              &layout_ctl);
+    engine.rootContext()->setContextProperty(QStringLiteral("workspace"),
+                                             &workspace_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("diagCtl"),
                                              &diag_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("uiPrefs"),

@@ -85,6 +85,34 @@ ui_suite(ui_diagnostics_test)
 # ProfileLibrary failed-write rollback; stale phase_detail.
 ui_suite(ui_hardening_test)
 
+# studio-import Task 4: the shared workspace draft — the
+# Qt-free WorkspaceEditSession (one draft for every editing
+# page, one undo record per committed gesture, bounded
+# history), the debounced WorkspaceDraftStore, and a real
+# EngineBridge + WorkspaceController over the in-process pipe
+# (capability gate, transfer-based document fetch, commit-job
+# correlation, save rejection keeping the draft, edits during
+# save, stale echoes + reconnect reconcile by content hash,
+# explicit crash recovery, legacy-engine fallback). The suite
+# compiles the compact-document fixtures itself, so it links
+# the Qt-free studio core directly.
+add_executable(ui_workspace_test ui_workspace_test.cpp)
+target_link_libraries(ui_workspace_test PRIVATE
+    openrgb2_ui
+    openrgb2_ipc_wire
+    openrgb2_studio_core)
+target_include_directories(ui_workspace_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(ui_workspace_test PRIVATE NDEBUG)
+set_target_properties(ui_workspace_test PROPERTIES AUTOMOC ON)
+add_test(NAME ui_workspace_test COMMAND ui_workspace_test)
+set_tests_properties(ui_workspace_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
+
 # The QML smoke test additionally needs the module's compiled
 # plugin + Qt Quick runtime on its link line.
 add_executable(qml_smoke_test qml_smoke_test.cpp)

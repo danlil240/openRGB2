@@ -1700,6 +1700,24 @@ Item {
                             width: parent.width
                         }
 
+                        /* studio-import Task 4: with a managed
+                           workspace, the stored entries migrate
+                           ONLY on this explicit click — each
+                           becomes its own workspace through the
+                           engine's bounded import path.
+                           Originals and names are retained;
+                           nothing is auto-applied. */
+                        AppButton {
+                            objectName: "importProfiles"
+                            width: parent.width
+                            visible: root.editorUp
+                                     && typeof workspace !== "undefined"
+                                     && workspace.managed
+                                     && sceneEdit.profiles.length > 0
+                            text: qsTr("Import all profiles into workspaces")
+                            onClicked: sceneEdit.importProfilesToWorkspaces()
+                        }
+
                         Text {
                             visible: root.editorUp && sceneEdit.libraryError !== ""
                             text: root.editorUp ? sceneEdit.libraryError : ""

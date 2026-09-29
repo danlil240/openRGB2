@@ -78,6 +78,12 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/UiSettings.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/StartupTaskController.h
         ${CMAKE_SOURCE_DIR}/src/ui/StartupTaskController.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceEditSession.h
+        ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceEditSession.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceDraftStore.h
+        ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceDraftStore.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceController.h
+        ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceController.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/QaServer.h
         ${CMAKE_SOURCE_DIR}/src/ui/QaServer.cpp)
 
@@ -99,6 +105,12 @@ target_link_libraries(openrgb2_ui PUBLIC
     Qt6::Gui
     Qt6::Qml
     Qt6::Quick
+    # studio-import Task 4: the shared workspace draft edits
+    # the Qt-free compact model (StudioDocument +
+    # EditorController). PUBLIC so the entry-point target sees
+    # WorkspaceEditSession.h's includes. Still no engine/SDK/
+    # controller boundary — the core target carries neither.
+    openrgb2_studio_core
 PRIVATE
     Qt6::Network
     openrgb2_ipc_wire)

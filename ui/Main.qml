@@ -106,33 +106,75 @@ ApplicationWindow {
                  && !sceneEdit.saving
         onActivated: lightingPage.commitPendingEdits()
     }
-    /* Ctrl+Z / Ctrl+Shift+Z (+Ctrl+Y) drive the Layout undo
-       timeline — only while the Layout view is up and no
-       text field owns the keys. */
+    /* The shared workspace draft (studio-import Task 4):
+       when the engine manages a workspace, ONE undo timeline
+       covers both editing views — Lighting field edits and
+       Layout ops interleave on the same stack. Legacy engines
+       keep the layoutCtl-only path. */
+    readonly property bool wsManaged:
+        typeof workspace !== "undefined"
+        && workspace.managed
+
+    /* Ctrl+Z / Ctrl+Shift+Z (+Ctrl+Y) drive the undo
+       timeline — the shared workspace one while managed,
+       else the legacy Layout-only one; never while a text
+       field owns the keys. */
     Shortcut {
         sequence: "Ctrl+Z"
-        enabled: root.currentView === 2
-                 && typeof layoutCtl !== "undefined"
-                 && layoutCtl.canUndo
-                 && !root.textEditingActive()
-        onActivated: layoutCtl.undo()
+        enabled: !root.textEditingActive()
+                 && ((root.wsManaged
+                      && (root.currentView === 1
+                          || root.currentView === 2)
+                      && workspace.canUndo)
+                     || (!root.wsManaged
+                         && root.currentView === 2
+                         && typeof layoutCtl !== "undefined"
+                         && layoutCtl.canUndo))
+        onActivated: root.wsManaged ? workspace.undo()
+                                    : layoutCtl.undo()
     }
     Shortcut {
         sequence: "Ctrl+Shift+Z"
-        enabled: root.currentView === 2
-                 && typeof layoutCtl !== "undefined"
-                 && layoutCtl.canRedo
-                 && !root.textEditingActive()
-        onActivated: layoutCtl.redo()
+        enabled: !root.textEditingActive()
+                 && ((root.wsManaged
+                      && (root.currentView === 1
+                          || root.currentView === 2)
+                      && workspace.canRedo)
+                     || (!root.wsManaged
+                         && root.currentView === 2
+                         && typeof layoutCtl !== "undefined"
+                         && layoutCtl.canRedo))
+        onActivated: root.wsManaged ? workspace.redo()
+                                    : layoutCtl.redo()
     }
     Shortcut {
         sequence: "Ctrl+Y"
-        enabled: root.currentView === 2
-                 && typeof layoutCtl !== "undefined"
-                 && layoutCtl.canRedo
-                 && !root.textEditingActive()
-        onActivated: layoutCtl.redo()
+        enabled: !root.textEditingActive()
+                 && ((root.wsManaged
+                      && (root.currentView === 1
+                          || root.currentView === 2)
+                      && workspace.canRedo)
+                     || (!root.wsManaged
+                         && root.currentView === 2
+                         && typeof layoutCtl !== "undefined"
+                         && layoutCtl.canRedo))
+        onActivated: root.wsManaged ? workspace.redo()
+                                    : layoutCtl.redo()
     }
+
+    /* Workspace notices (foreign commits, import/export
+       results) surface as a transient line in the strip. */
+    property string wsNotice: ""
+    Connections {
+        target: typeof workspace !== "undefined" ? workspace : null
+        function onNotice(text) { root.wsNotice = text }
+    }
+    Timer {
+        id: wsNoticeTimer
+        interval: 8000
+        onTriggered: root.wsNotice = ""
+    }
+    onWsNoticeChanged: if(wsNotice !== "") wsNoticeTimer.restart()
 
     RowLayout {
         anchors.fill: parent
@@ -296,6 +338,101 @@ ApplicationWindow {
                         visible: typeof bridge !== "undefined"
                                  && root.connState !== "connected"
                         onClicked: bridge.reconnectNow()
+                    }
+                }
+            }
+
+            /* Shared-workspace strip (Task 4): one banner for
+               the states the shared draft can surface —
+               a recovered unsaved draft (offered, NEVER
+               auto-applied), an engine-side conflict, a save
+               in flight, or a controller notice. Every action
+               is an explicit user pick. */
+            Rectangle {
+                id: wsStrip
+                visible: root.wsManaged
+                         && (workspace.recoveryOffered
+                             || workspace.conflict
+                             || workspace.saving
+                             || root.wsNotice !== "")
+                Layout.fillWidth: true
+                implicitHeight: wsRow.implicitHeight
+                                + 2 * Theme.spaceM
+                color: workspace.conflict
+                       ? Qt.rgba(0.878, 0.643, 0.345, 0.14)
+                       : Theme.surfaceAlt
+                Rectangle {
+                    anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                    height: 1; color: Theme.border
+                }
+
+                Row {
+                    id: wsRow
+                    anchors {
+                        left: parent.left; right: parent.right
+                        verticalCenter: parent.verticalCenter
+                        leftMargin: Theme.spaceL
+                        rightMargin: Theme.spaceL
+                    }
+                    spacing: Theme.spaceL
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - recBtn.width
+                               - dropBtn.width - keepBtn.width
+                               - takeBtn.width - Theme.spaceL * 4
+                        wrapMode: Text.WordWrap
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSizeBody
+                        text: {
+                            if(!root.wsManaged)
+                                return "";
+                            if(workspace.recoveryOffered)
+                                return workspace.recoveryStale
+                                    ? qsTr("An unsaved draft was found for this workspace — it was made against an older revision. Recover it as pending edits or discard it.")
+                                    : qsTr("An unsaved draft was found for this workspace. Recover it as pending edits or discard it.");
+                            if(workspace.conflict)
+                                return qsTr("The workspace changed on the engine under your edits. Save commits your draft on top; Reload takes the engine copy.");
+                            if(workspace.saving)
+                                return qsTr("Saving workspace…");
+                            return root.wsNotice;
+                        }
+                    }
+                    AppButton {
+                        id: recBtn
+                        objectName: "wsRecover"
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: root.wsManaged
+                                 && workspace.recoveryOffered
+                        text: qsTr("Recover draft")
+                        onClicked: workspace.recoverDraft()
+                    }
+                    AppButton {
+                        id: dropBtn
+                        objectName: "wsDiscardDraft"
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: root.wsManaged
+                                 && workspace.recoveryOffered
+                        text: qsTr("Discard")
+                        onClicked: workspace.discardDraft()
+                    }
+                    AppButton {
+                        id: keepBtn
+                        objectName: "wsKeepDraft"
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: root.wsManaged
+                                 && workspace.conflict
+                        text: qsTr("Keep my draft (Save)")
+                        onClicked: workspace.save()
+                    }
+                    AppButton {
+                        id: takeBtn
+                        objectName: "wsTakeEngine"
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: root.wsManaged
+                                 && workspace.conflict
+                        text: qsTr("Take engine copy")
+                        onClicked: workspace.reload()
                     }
                 }
             }
