@@ -29,6 +29,8 @@ enable_testing()
 
 # CTest labels defined by the implementation plan (Milestone 0): core, sdk,
 # engine, ui, backend. Targets are added as their milestones land.
+# Shared Qt-free Studio model core — must precede every consumer.
+add_subdirectory(src/core)
 add_subdirectory(src/engine)
 if(Qt6_FOUND)
     # Milestone 4 — the UI process (OpenRGB2.UI QML module + the

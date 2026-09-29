@@ -7,42 +7,16 @@
 # device_preset_test.cpp (../../src/core/presets/devices from here).
 
 set(CORE_DIR ${CMAKE_SOURCE_DIR}/src/core)
-set(JSON_DIR ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies/json)
 
-# Scene core + effects + shared input core.
-set(SCENE_SRC
-    ${CORE_DIR}/scene/SceneTypes.cpp
-    ${CORE_DIR}/scene/SceneGraph.cpp
-    ${CORE_DIR}/scene/EmitterLayout.cpp
-    ${CORE_DIR}/scene/SceneJson.cpp
-    ${CORE_DIR}/scene/BindingResolver.cpp
-    ${CORE_DIR}/scene/DefaultDesk.cpp
-    ${CORE_DIR}/effects/EffectTypes.cpp
-    ${CORE_DIR}/effects/EffectEngine.cpp
-    ${CORE_DIR}/effects/EffectJson.cpp
-    ${CORE_DIR}/effects/Presets.cpp
-    ${CORE_DIR}/inputs/InputBus.cpp
-    ${CORE_DIR}/inputs/OnsetDetect.cpp
-    ${CORE_DIR}/inputs/KeyMap.cpp)
-
-# v3 type stack: presets, resolver, config migration.
-set(V3_SRC
-    ${CORE_DIR}/presets/DevicePreset.cpp
-    ${CORE_DIR}/presets/PresetRegistry.cpp
-    ${CORE_DIR}/presets/EffectRegistry.cpp
-    ${CORE_DIR}/presets/PresetBundle.cpp
-    ${CORE_DIR}/scene/SceneResolver.cpp
-    ${CORE_DIR}/config/StudioConfig.cpp
-    ${CORE_DIR}/config/ConfigMigration.cpp)
-
-# Qt-free editor core.
-set(EDITOR_SRC
-    ${CORE_DIR}/editor/EditorController.cpp
-    ${CORE_DIR}/editor/TransformCommands.cpp)
+# Scene core + effects + v3 type stack + Qt-free editor core now
+# live in the shared openrgb2_studio_core library (src/core); the
+# suites link it instead of recompiling the source list so the same
+# studio::* objects are exercised everywhere. Its PUBLIC interface
+# supplies the src/core + nlohmann-json include dirs.
 
 function(dls_suite NAME)
     add_executable(${NAME} ${NAME}.cpp ${ARGN})
-    target_include_directories(${NAME} PRIVATE ${CORE_DIR} ${JSON_DIR})
+    target_link_libraries(${NAME} PRIVATE openrgb2_studio_core)
     target_compile_definitions(${NAME} PRIVATE NDEBUG)
     add_test(NAME ${NAME} COMMAND ${NAME})
     set_tests_properties(${NAME} PROPERTIES
@@ -52,11 +26,11 @@ function(dls_suite NAME)
             "DLS_EFFECT_DIR=${CORE_DIR}/presets/effects;DLS_PRESET_DIR=${CORE_DIR}/presets/devices")
 endfunction()
 
-dls_suite(studio_scene_test  ${SCENE_SRC} ${V3_SRC})
-dls_suite(studio_config_test ${SCENE_SRC} ${V3_SRC})
-dls_suite(device_preset_test ${SCENE_SRC} ${V3_SRC})
-dls_suite(studio_editor_test ${SCENE_SRC} ${V3_SRC} ${EDITOR_SRC})
-dls_suite(effect_json_test  ${SCENE_SRC} ${V3_SRC})
+dls_suite(studio_scene_test)
+dls_suite(studio_config_test)
+dls_suite(device_preset_test)
+dls_suite(studio_editor_test)
+dls_suite(effect_json_test)
 
 add_executable(playback_test
     playback_test.cpp

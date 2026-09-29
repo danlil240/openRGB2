@@ -1,0 +1,159 @@
+# Desktop Lighting Studio import — SHA-256 provenance ledger
+#
+# Source of record (read-only): plugins/DesktopLightingStudio under
+# C:\Users\daniel\tools\openrgb-unified (working-tree state, which
+# carries uncommitted files; a git revision is not the snapshot).
+# Destination: this repository (openRGB2, branch devin/studio-import).
+# Hashes computed 2026-09-29 against the source working tree.
+#
+# Format (one record per line, ' | ' separated):
+#   <sha256 of source file> | <source path, relative to the plugin root> | <destination path in this repo> | <adaptation note>
+#
+# Excluded by construction (not source): build/, out/, generated
+# MOC/RCC output (moc_*, qrc_*), Makefiles, .qmake.stash, binaries,
+# runtime settings.
+#
+# === Imported byte-identical into src/core/ (verified identical 2026-09-29) ===
+f70bb215091714d61f91b01899a2c8f4dfa09e59277f9c17ecb4fe60ba780127 | config/ConfigMigration.cpp | src/core/config/ConfigMigration.cpp | byte-identical import; no adaptation
+0f335d75f68f6bacc1edc1d644ad0186f2b44db821a4b0f6453d89027dc5e905 | config/ConfigMigration.h | src/core/config/ConfigMigration.h | byte-identical import; no adaptation
+4edcf47d5761a2a0fefa22aee9983c47ff61f93d253a9e9289a757baeb46c2ec | config/StudioConfig.cpp | src/core/config/StudioConfig.cpp | byte-identical import; no adaptation
+f00a77082d65417a6bf02daee4e26cf8ee73d66a3e657aeef72b0ec6febcc24d | config/StudioConfig.h | src/core/config/StudioConfig.h | byte-identical import; no adaptation
+5f03292502241b25d05095a93dc6a09736d658430f152341ecdf550844f4cd11 | editor/EditorController.cpp | src/core/editor/EditorController.cpp | byte-identical import; no adaptation
+c72ab49803795733c8f8c47b09aa862a3e447729ea499adc7ac67f1844eb929b | editor/EditorController.h | src/core/editor/EditorController.h | byte-identical import; no adaptation
+2ba4e1ad6c199e1dff3b43d913763f69bd4a78ed80c85549b4fdf733bfe8359a | editor/TransformCommands.cpp | src/core/editor/TransformCommands.cpp | byte-identical import; no adaptation
+aebc5b6f89d5d3b231bc265ccf5ebc0a66752b8b7f984e755687602c7d7a833a | editor/TransformCommands.h | src/core/editor/TransformCommands.h | byte-identical import; no adaptation
+fe32fd6a6382dbca859108a78603072a9068e36215cbabd3673957add58cad17 | effects/EffectEngine.cpp | src/core/effects/EffectEngine.cpp | byte-identical import; no adaptation
+0ad49a8322c71a598bb055328a9e79d3bda0bc036f42254f66ef1f170019471f | effects/EffectEngine.h | src/core/effects/EffectEngine.h | byte-identical import; no adaptation
+449505e930ed96717403908febea13b2b6210036eff83905aae1c7f5a11c815c | effects/EffectJson.cpp | src/core/effects/EffectJson.cpp | byte-identical import; no adaptation
+3ee14569df85ccb4c4816019bf1afe0ab29310f2b9e95d40adc8e54e7a594125 | effects/EffectJson.h | src/core/effects/EffectJson.h | byte-identical import; no adaptation
+82e9c32e1fef4b4ff8428f4a6657d430a8e8102c594352e317d1249c2456aca1 | effects/EffectTypes.cpp | src/core/effects/EffectTypes.cpp | byte-identical import; no adaptation
+cda17896462069e239e0845cfb3fcded479eb0db0aaf0251005b4fc7e3d1a8e4 | effects/EffectTypes.h | src/core/effects/EffectTypes.h | byte-identical import; no adaptation
+fd071297cc9568a2b3b7a7b052fd837eb605a867c4f5632fefed090f9d9240a0 | effects/Presets.cpp | src/core/effects/Presets.cpp | byte-identical import; no adaptation
+467181339ecc1c7c355de3d2000d60834ef49b7bc8389cb252b1f1bf776bde6a | effects/Presets.h | src/core/effects/Presets.h | byte-identical import; no adaptation
+a6addbc7d4e800e05ebd77cd05f9206408996205de17b6027adce4fb7dc3dfbd | inputs/InputBus.cpp | src/core/inputs/InputBus.cpp | byte-identical import; no adaptation
+f48799ed881fc5c096dcbd4de27eb194f9d4a27f7bb355064a99d1c12ebac1b5 | inputs/InputBus.h | src/core/inputs/InputBus.h | byte-identical import; no adaptation
+3941a6ad8d38542a541ec99f0d194de4808bf3209aacf823a30ee3900ce7c8fb | inputs/KeyMap.cpp | src/core/inputs/KeyMap.cpp | byte-identical import; no adaptation
+935e3779da836db79c73c0c6e5678c6539449b374bc41b432fd5aabdadbeeb79 | inputs/KeyMap.h | src/core/inputs/KeyMap.h | byte-identical import; no adaptation
+a14251cc475f283221564c81683167703a9567847aefd7e7d38730b864b00aee | inputs/KeyTranslate.cpp | src/core/inputs/KeyTranslate.cpp | byte-identical import; no adaptation
+e89767215aad935ded01b091bf44697f596ab3aca72ac0edbee246d59e3de0c9 | inputs/KeyTranslate.h | src/core/inputs/KeyTranslate.h | byte-identical import; no adaptation
+bd7addc0cfb62373fa01955e1d403128c9bf56308b3ac777f850630e40b613bc | inputs/OnsetDetect.cpp | src/core/inputs/OnsetDetect.cpp | byte-identical import; no adaptation
+2bc0d7fe3d53168cde5e41cd91879df527e1f186f5540b19e63ef8c6c0879602 | inputs/OnsetDetect.h | src/core/inputs/OnsetDetect.h | byte-identical import; no adaptation
+ffdc5d916bbc644fadfa975fc8998110e3d50134c6182fcb33efd3fbac14953a | inputs/VkDefs.h | src/core/inputs/VkDefs.h | byte-identical import; no adaptation
+d57895d20c5561d59f372d840e50bde64a3d5563e768b6730014ef1abbe11495 | presets/DevicePreset.cpp | src/core/presets/DevicePreset.cpp | byte-identical import; no adaptation
+8598eb9219ef67d0ea6b581eb4af4801b68dbd8ce7c14c7c135c1ec3bbae69c3 | presets/DevicePreset.h | src/core/presets/DevicePreset.h | byte-identical import; no adaptation
+c76bfcb8d179640d83694fbd48ac77941382ccb55dae40503f5bfd605928c098 | presets/EffectRegistry.cpp | src/core/presets/EffectRegistry.cpp | byte-identical import; no adaptation
+e7008634e882a2176e590b64e41897fd4486a07020264298aa28e31fbf2ccf0e | presets/EffectRegistry.h | src/core/presets/EffectRegistry.h | byte-identical import; no adaptation
+02fdcb0c7569f9bdca83bc439279236cb208a3b89664d600a24e0012a0e5514d | presets/PresetBundle.cpp | src/core/presets/PresetBundle.cpp | byte-identical import; no adaptation
+15851084b3f2ee4bee72528ed8d1658809534eaa6306dc1aa9522e6cb8da0e33 | presets/PresetBundle.h | src/core/presets/PresetBundle.h | byte-identical import; no adaptation
+939cba2b5ee525a516f16c6e75e38ccc0529a3761a6b80d6002721c5a9c9bccd | presets/PresetRegistry.cpp | src/core/presets/PresetRegistry.cpp | byte-identical import; no adaptation
+f01952b776dba0ad18015a35bd7a56248fe17b20948f184caceb9a50141cd540 | presets/PresetRegistry.h | src/core/presets/PresetRegistry.h | byte-identical import; no adaptation
+81885f0cfc8b421be4fae3adfdb61c1ac2acdafc20b3947d364e320c6f83e699 | presets/devices/desk.device.json | src/core/presets/devices/desk.device.json | byte-identical import; no adaptation
+7667269bf6424ceede85e16281eb7a6921b3d45da0767c0ca8d91f389b5fb6ee | presets/devices/fan-120.device.json | src/core/presets/devices/fan-120.device.json | byte-identical import; no adaptation
+18736a4f92abe50151a3aa39243c20658e47305ef499c05fa7284df95100abf9 | presets/devices/fan-slw.device.json | src/core/presets/devices/fan-slw.device.json | byte-identical import; no adaptation
+ef565cd7254858666fe19adccf96175b7df44e5a9a6a1eb97f715e189b9e3bb5 | presets/devices/gpu-card.device.json | src/core/presets/devices/gpu-card.device.json | byte-identical import; no adaptation
+a43d38e877b35ab0e184bd90558d2773e4fd69d5163851617a69c206a4e7379e | presets/devices/gpu-fan.device.json | src/core/presets/devices/gpu-fan.device.json | byte-identical import; no adaptation
+13f163abbb0f38460eb6b5d10b3ebd322b46b930cd8e9b412c8ff4a05662a023 | presets/devices/gpu-logo.device.json | src/core/presets/devices/gpu-logo.device.json | byte-identical import; no adaptation
+fe03aba641217a4b1eef47385d9af2875ce615e19daa57de36272d5c60d58fd2 | presets/devices/group.device.json | src/core/presets/devices/group.device.json | byte-identical import; no adaptation
+59a25d25cedf15607078d49e0da36a95999256e86ba22f4c5072beb9b5a5e790 | presets/devices/keyboard-104.device.json | src/core/presets/devices/keyboard-104.device.json | byte-identical import; no adaptation
+31986d3c7826bb6c5093124a78c5cc066eaef833531c627176293d28f4544aa8 | presets/devices/monitor.device.json | src/core/presets/devices/monitor.device.json | byte-identical import; no adaptation
+eb7f4e55163787122e20508a452098a5b7471480ed4c944df09dcd6be0bfa2d7 | presets/devices/mouse-3zone.device.json | src/core/presets/devices/mouse-3zone.device.json | byte-identical import; no adaptation
+16de5a6aefbf9c23a5ad48036498f26b4f082079e68d98b508d8eec4377aaa72 | presets/devices/pc-case.device.json | src/core/presets/devices/pc-case.device.json | byte-identical import; no adaptation
+69a350e95ee61db39a40e3c8e989b2dc52abe66d6ea2c939a774a0c510293e48 | presets/devices/pump-360.device.json | src/core/presets/devices/pump-360.device.json | byte-identical import; no adaptation
+76fc00fcd1796752d0a459154f7aaeb3ebf5646ee7d385e5692a7a99b0a5db10 | presets/devices/ram-stick.device.json | src/core/presets/devices/ram-stick.device.json | byte-identical import; no adaptation
+ec0d6d682c2b5bc80a3e8d0fc3e95a6f7942647ae5f2b4a4a4125b1d35552443 | presets/effects/ambient.effect.json | src/core/presets/effects/ambient.effect.json | byte-identical import; no adaptation
+16a3e19cde2d69ba1651d98a72c13f4cda1c0c0d84dc9c94cd51d6416860464a | presets/effects/aurora.effect.json | src/core/presets/effects/aurora.effect.json | byte-identical import; no adaptation
+c56379a564911773091b2995c72078bbfd739937aa4baeb4be6dc9e581633aee | presets/effects/chrome.effect.json | src/core/presets/effects/chrome.effect.json | byte-identical import; no adaptation
+e928087bfa86bd83fba002afbbd95d8905ecf609fd2b80b8eb85cfa852e8e059 | presets/effects/comet.effect.json | src/core/presets/effects/comet.effect.json | byte-identical import; no adaptation
+a22d574c8b3f0488137517a5435250a5415bf235d9415ef91d91b99a9db26c91 | presets/effects/embers.effect.json | src/core/presets/effects/embers.effect.json | byte-identical import; no adaptation
+f9bb0f9ea0282a8a7473887093f7a80a693613b00c796940a0aa1efe4724caf3 | presets/effects/keyripple.effect.json | src/core/presets/effects/keyripple.effect.json | byte-identical import; no adaptation
+3c518d1add71389d87bac80997b9a8081bc0e7764fedd2a5b3d336e2d458f2d4 | presets/effects/portal.effect.json | src/core/presets/effects/portal.effect.json | byte-identical import; no adaptation
+034c52a46a9cb1a0603b021e59c8f12679d7228257bb1a8c3a112bba0c327956 | presets/effects/reactor.effect.json | src/core/presets/effects/reactor.effect.json | byte-identical import; no adaptation
+a8ba20b693457884a3fd228ad730b5414d6b452ad819fa0d87af38adaf308e33 | presets/effects/shockwave.effect.json | src/core/presets/effects/shockwave.effect.json | byte-identical import; no adaptation
+f01e207c989cc3ffb25013b2b6c24ed8cda865adcdea3ec246c6fa33637bf3b1 | scene/BindingResolver.cpp | src/core/scene/BindingResolver.cpp | byte-identical import; no adaptation
+ce80a6a5cf2c87a3bc1aeb1bc45ec728af90bea36b5fe9ff523686b48e1d43c1 | scene/BindingResolver.h | src/core/scene/BindingResolver.h | byte-identical import; no adaptation
+48979925321cde61f7f230095cc60401f54c6855ffd4e1cb223687156f662238 | scene/DefaultDesk.cpp | src/core/scene/DefaultDesk.cpp | byte-identical import; no adaptation
+09016fc3e9ab757b3e6b7b1b78e1dbbd5462f9dff9422404d6864cbc128954de | scene/DefaultDesk.h | src/core/scene/DefaultDesk.h | byte-identical import; no adaptation
+952887e76c4fe4bc7b28e4f3e8d26668708b48971f6ebbccbbb7bd34e3c7e72f | scene/EmitterLayout.cpp | src/core/scene/EmitterLayout.cpp | byte-identical import; no adaptation
+7f315d3e36b3abef7033d40f45dc9cf52431b6499a29ec72cfb38c6c17baf84c | scene/EmitterLayout.h | src/core/scene/EmitterLayout.h | byte-identical import; no adaptation
+1e1fc5fc7974b2af8cdf2cd167cb6088f07e2bc88dcf7ecd9c1bdf64aedd3003 | scene/JsonFields.h | src/core/scene/JsonFields.h | byte-identical import; no adaptation
+007908c3efd28a4638343afde0c4f310c105e24fe2b84b9aeae16dbab1b97f22 | scene/SceneGraph.cpp | src/core/scene/SceneGraph.cpp | byte-identical import; no adaptation
+661a34def20fd5543a46f124e11231736f8eb3301220fc45a043be67d8de1631 | scene/SceneGraph.h | src/core/scene/SceneGraph.h | byte-identical import; no adaptation
+64b33dceb401b37f07929f6e7cc1aa53f96cea74a5a513df0499b0deb7de0e1e | scene/SceneJson.cpp | src/core/scene/SceneJson.cpp | byte-identical import; no adaptation
+102846e8e0060682c456de44f8f9ee4afad980d3f3a79161932365df3dbafea4 | scene/SceneJson.h | src/core/scene/SceneJson.h | byte-identical import; no adaptation
+d2d3dc91779ce1320faee99cea9aa85ea8829f1a4dc13e5683db4a056759a97c | scene/SceneResolver.cpp | src/core/scene/SceneResolver.cpp | byte-identical import; no adaptation
+b618602317c69acb4305b5465f5a6ffaea02ad23fadbc8fbbc56eb903b28f0b2 | scene/SceneResolver.h | src/core/scene/SceneResolver.h | byte-identical import; no adaptation
+e71ed3b546cf97a4761ead990dae6a8afae1ce55a285e5341f95f6daa057f5d7 | scene/SceneTypes.cpp | src/core/scene/SceneTypes.cpp | byte-identical import; no adaptation
+f934987477193c840cd487d40130115aaddb21b2a14365f14188947b277d1b9a | scene/SceneTypes.h | src/core/scene/SceneTypes.h | byte-identical import; no adaptation
+eefac303f0849395a4f3bd8e92784c5b34d2cc9057d9870e88b4d0d973cd5518 | schemas/device.schema.json | src/core/schemas/device.schema.json | byte-identical import; no adaptation
+9566a1b5f7bce16b05c3719a7e1e561ed64c3a4cd70a6eb934a2046327618b6e | schemas/effect.schema.json | src/core/schemas/effect.schema.json | byte-identical import; no adaptation
+e8a58b0a6ad03c5ea88797b15551c0f98f6d94f66e8c47ead02c33dadf819c12 | schemas/studio.schema.json | src/core/schemas/studio.schema.json | byte-identical import; no adaptation
+#
+# === Pending copy/adaptation (later tasks; destination planned per plan section 5) ===
+c2685f87ceccccc3e9992a69cf5965c832d7e6071139291dd814186681c9ef03 | config/ConfigStore.cpp | src/engine/WorkspaceStore.cpp | Task 2 — behavior reused; Qt-free rewrite (no QObject/QSaveFile/file watcher)
+222a2bfccbb9d4f4a79066846a74955e37c97d5520e5732b3d86fe0a2aa1e5e6 | config/ConfigStore.h | src/engine/WorkspaceStore.h | Task 2 — behavior reused; Qt-free rewrite (no QObject/QSaveFile/file watcher)
+5998d59e260c2d9ba13c19260c90b485f771926026f8215dec9cdf13a0de80e8 | editor/EffectLayerModel.cpp | src/ui/studio/EffectLayerModel.cpp | Task 6 — adapt QObject row model for ordered layer editing
+4755536ec410b98c54ccd9103925f3d7ba04da338443195d60fecf929226a908 | editor/EffectLayerModel.h | src/ui/studio/EffectLayerModel.h | Task 6 — adapt QObject row model for ordered layer editing
+261dd8ed48960dcbc98fc148857a09e701f68c7b3bdf1bfb58e536ad40393b80 | editor/PresetListModel.cpp | src/ui/studio/PresetListModel.cpp | Task 5 — adapt QObject row model for the device/type library
+0539e373e23f05089a42de74934c3deea69a39bfefb8f4c3618385c1cd0f9077 | editor/PresetListModel.h | src/ui/studio/PresetListModel.h | Task 5 — adapt QObject row model for the device/type library
+0e2da5d29a98b105303c0f15e832485e3aaab0268daf9cc615d114a99eb4a2c6 | editor/SceneObjectModel.cpp | src/ui/studio/SceneObjectModel.cpp | Task 5 — adapt QObject row model onto the shared draft (WorkspaceEditSession)
+5b1aeb9b226256eb6aec91fd589025e4426f71fb71c927b7fd4a64af0e19aa92 | editor/SceneObjectModel.h | src/ui/studio/SceneObjectModel.h | Task 5 — adapt QObject row model onto the shared draft (WorkspaceEditSession)
+9acc4fbd9984860734d37315ed8fc84cccf40d4b20feb5ee12c498a70e33c731 | inputs/AudioLoopback.cpp | src/platform/windows/WinAudioLoopback.cpp | already ported — Qt-free WASAPI loopback source (IReactiveSource); header contract in WinReactiveInputs.h
+30eecfb40d7d1c7464fc4cc0bacdb552235cd975c95b4409ce409cb03d6351f9 | inputs/AudioLoopback.h | src/platform/windows/WinAudioLoopback.cpp | already ported — Qt-free WASAPI loopback source (IReactiveSource); header contract in WinReactiveInputs.h
+8da02ed4351c1d6de2d4c1e83b52031cc1cf78ce1ac9f3057468eb92e1872efc | inputs/AudioLoopback_mac.mm | — | not imported — macOS port out of scope
+a81874d5c7fb621264c87bafdfe015ebc5ae22a2526785bb1dc495ce8c1304d8 | inputs/KeyHook.cpp | src/platform/windows/WinKeyHook.cpp | already ported — Qt-free WH_KEYBOARD_LL source (IReactiveSource); header contract in WinReactiveInputs.h
+c6d05ebad631df34d2a6cad6c3490a6645f41fca71067e02753554db56d496f4 | inputs/KeyHook.h | src/platform/windows/WinKeyHook.cpp | already ported — Qt-free WH_KEYBOARD_LL source (IReactiveSource); header contract in WinReactiveInputs.h
+1c99cfa2c9e5e2922970a66532c03cd59e7e262afb9ad3e3e4d56590260c8319 | inputs/ScreenSampler.cpp | src/platform/windows/WinScreenSampler.cpp | already ported — Qt-free GDI sampler (IReactiveSource); header contract in WinReactiveInputs.h
+1c0824cfc012864ee2cf78ffb10802c26634764bb8e5f1f8a985165ff132ec91 | inputs/ScreenSampler.h | src/platform/windows/WinScreenSampler.cpp | already ported — Qt-free GDI sampler (IReactiveSource); header contract in WinReactiveInputs.h
+df6b2a9069a4ded6a6849213c0de4c28ffcf44cdac53fd7789812511507c2253 | ui/StudioScene.qml | ui/studio/viewport/StudioViewport.qml | Task 8 — adapt to OpenRGB2 theme/controllers; requires Qt Quick3D (see docs/studio-import.md)
+9ced9f3965f254ede6b553e7e7ddc632ec6952b18a3e7ae1d94fb92e3065bbb5 | ui/StudioWorkspace.qml | ui/studio/ | Task 10 — adapt workspace file-action panels into existing pages
+a90d4a06a3da9de3c7e315bf57e0e10b942c8bca792d45f9aecd8678ea84a045 | ui/components/DeviceLibrary.qml | ui/studio/DeviceLibrary.qml | Task 5 — adapt to shared draft + Theme tokens
+ff4403203a6cddd39a3909425a1d121f212aa49ce99315bffddcf7d56eb8dd41 | ui/components/DevicePresetEditor.qml | ui/studio/DevicePresetEditor.qml | Task 9 — adapt to shared draft + Theme tokens
+4926453be11a988c89a5aeeaa1c4c9712855ef89dfd5fd5059e8fd64975a1898 | ui/components/DeviceTree.qml | ui/studio/DeviceTree.qml | Task 5 — adapt to shared draft + Theme tokens
+50512c30544043c68af05c1c814963b337df1b81e340098340b26467b5946873 | ui/components/EffectEditor.qml | ui/studio/EffectEditor.qml | Task 6 — adapt to shared draft + Theme tokens
+dc5e6a56bfaf7e4c514e172c72c45de266732ac5def6e565c7296483961216d4 | ui/components/EffectInspector.qml | ui/studio/EffectInspector.qml | Task 6 — adapt to shared draft + Theme tokens
+3b252ab893ddf9013b8526bf068009727cfa30071067ba8df5a4a452b40d4727 | ui/components/Inspector.qml | ui/studio/Inspector.qml | Task 5/6 — adapt to shared draft + Theme tokens
+44acfb5c1efed09ae12bafc689b06004b931713a5af50539e177a6f7283865da | ui/components/LayerStack.qml | ui/studio/LayerStack.qml | Task 6 — adapt to shared draft + Theme tokens
+c61a9e4b0021859ec0819f0d03cd27dbbfe5e83d40fa0dc4416f16f7935db12f | ui/components/LedCalibrator.qml | ui/studio/LedCalibrator.qml | Task 11 — adapt to CalibrationController + Theme tokens
+2441849bfad2b62f2b6df8852811b2093ef6cfc2e53cf9b60633ce1cfbc0f89a | ui/components/LookShelf.qml | ui/studio/LookShelf.qml | Task 6 — adapt to shared draft + Theme tokens
+d3a1971be9355b0cc8e25dc268a3b21162f331e4c9357f6bea0ce2c8f682a10f | ui/components/PaletteEditor.qml | ui/studio/PaletteEditor.qml | Task 6 — adapt to shared draft + Theme tokens
+271466f2c94d5e5589d1799230c0ca4b3627732f3c9c9b2c43fb7b6c1c5b6f7e | ui/components/Theme.qml | — | superseded by existing ui/theme/Theme.qml tokens (mapped, not copied)
+c8b6f61460a6367bd690dcd6ca8a33621826fb8b6e28e7308a139fe4b9090672 | ui/devices/Case.qml | ui/studio/viewport/devices/Case.qml | Task 8 — adapt for StudioViewport
+c5913da3eab2413e0a19fd22bd0725dfd1bc1c2dbca860aa28f458e66b69d0f3 | ui/devices/Fan.qml | ui/studio/viewport/devices/Fan.qml | Task 8 — adapt for StudioViewport
+23cc67f6d84134819801363714d633e65ad7afba0217c2402cf20d96a8ba24e4 | ui/devices/Gpu.qml | ui/studio/viewport/devices/Gpu.qml | Task 8 — adapt for StudioViewport
+04908c1b95143cbc8d8dee2b6e350798b4f9d98add8f0dbf4f1d515fcc7c545a | ui/devices/Keyboard.qml | ui/studio/viewport/devices/Keyboard.qml | Task 8 — adapt for StudioViewport
+09ae2807f1eabcc467dbd2a50dcca5439bec2804808b93409bb80591840bd315 | ui/devices/Monitor.qml | ui/studio/viewport/devices/Monitor.qml | Task 8 — adapt for StudioViewport
+7b92a32d758d3656baf161477ffc19cad72a314d4f53c49b748c8edea6bf6228 | ui/devices/Mouse.qml | ui/studio/viewport/devices/Mouse.qml | Task 8 — adapt for StudioViewport
+872dd74a4382a9ce8bcf9c224f1f3382b637aa497755d9f7cb2acffca405c37e | ui/devices/Ram.qml | ui/studio/viewport/devices/Ram.qml | Task 8 — adapt for StudioViewport
+d38f1e44109ff0c167d814ff812005fca641fc2c757a1ba2cfb307e762a3018d | ui/devices/SelectionFrame.qml | ui/studio/viewport/devices/SelectionFrame.qml | Task 8 — adapt for StudioViewport
+f87e368fc118ca8bce41dd339e5c3f6a4620ef5daafa252d1688c29e218e4fea | ui/devices/Strip.qml | ui/studio/viewport/devices/Strip.qml | Task 8 — adapt for StudioViewport
+f63412066e6be5e5da1517b72bffa20fcbd0c792d9e71c749c46824a3a81e8ee | ui/editor/CameraController.qml | ui/studio/viewport/editor/CameraController.qml | Task 8 — adapt for StudioViewport
+99afb42e630f3c65fd340f81f009f1de2fac3d1509d19acd8ba38db350921088 | ui/editor/SelectionController.qml | ui/studio/viewport/editor/SelectionController.qml | Task 8 — adapt for StudioViewport
+5daaf5a6b66fff09263aa6036aae39c49479cd10cf2f4880f6a6f9a9dd736ba0 | ui/editor/TransformGizmo.qml | ui/studio/viewport/editor/TransformGizmo.qml | Task 8 — adapt for StudioViewport
+2be36ea715ce4414ac4308aa991147005e1cccd42b46fb381cb057b6156a5d1c | ui/editor/TransformInspector.qml | ui/studio/TransformInspector.qml | Task 5 — adapt to shared draft + Theme tokens
+0946857a2511475d9145d3fe639991dd8349ded1ac17870e6f2d9aad6815e610 | ui/materials/StudioEnvironment.qml | ui/studio/viewport/materials/StudioEnvironment.qml | Task 8 — adapt for StudioViewport
+a70e666566f805c8ddca48c3cac626479d27be51d57e27ee0aee1ffcc834dcc8 | ui/studio.qrc | — | superseded — files land in the OpenRGB2.UI qt_add_qml_module target, not a .qrc
+#
+# === Reference only — never copied into this repo ===
+6f4ea8b62a8ba5a08586305a34c84b083fe1da426e5ce9f5c96cefb2b89eb82f | .clangd | — | reference only — build/deploy packaging machinery not carried over
+158dbc7db3a247acfd989e2cdd7d863aafdd2f21a690fddbb1d048e2ec57aecc | DesktopLightingStudio.pro | — | reference only — build/deploy packaging machinery not carried over
+b85fc196e9bce7a77c5e1d2b6bacb6ab99d1ade8fdfec8a12d58fed97b26ecaf | PACKAGING.md | — | reference only — build/deploy packaging machinery not carried over
+150c6f7156f88582f363098ae7cb1f9288f68270fd1a6903f0d71faf713b16e6 | build-only.bat | — | reference only — build/deploy packaging machinery not carried over
+781266d4096187123822e3c2de69bf41b9f1f62b2bf4bdec43a24dfaae2694f8 | build-plugin.bat | — | reference only — build/deploy packaging machinery not carried over
+acb5c0b5f96b0f6bb8066cdb417b9f3c88a20f7ef9c9d227c23b2e5ffc4fdd43 | build-plugin.sh | — | reference only — build/deploy packaging machinery not carried over
+768a663906c23dea44e01f33d6b4dbe6c3fd6f8d57e4acc55336bd8eb6eb0e54 | deploy-only.bat | — | reference only — build/deploy packaging machinery not carried over
+644eb2c8344fd0ba142a00ea39c472e99f3cc8882648e569a93ce5e05a6e0ec8 | deploy-openrgb.sh | — | reference only — build/deploy packaging machinery not carried over
+d76927c364f47b4cd466b81a05a8cf4e7e5598db45ba487093a7e369c619b7e6 | output/ControllerAdapter.cpp | — | reference only — replaced by engine delivery pipeline + OpenRGB SDK client
+6e92a0dc443ebcc2cc88c49b40c70e5756cf1b92e5f0f47017e8046ffad0d968 | output/ControllerAdapter.h | — | reference only — replaced by engine delivery pipeline + OpenRGB SDK client
+7bdda7146eadec095a4273369887d285b6dbe652a18c8aa535d66fa3b8449ce0 | output/DisplayPowerMonitor.cpp | — | reference only — replaced by engine delivery pipeline + OpenRGB SDK client
+315450d6a1f7a99311cb37252c8a075529b43d9c955e71d0fda910e43c198459 | output/DisplayPowerMonitor.h | — | reference only — replaced by engine delivery pipeline + OpenRGB SDK client
+74e7adf46f98a441fdc87d41b63eff597958c15dc77801dff5e6f6e00fba9c6a | output/OutputRouter.cpp | — | reference only — replaced by engine delivery pipeline + OpenRGB SDK client
+f1aa3e226dd12a5221c4f984094d737271eac8d1bfbfe389a000814e23f099da | output/OutputRouter.h | — | reference only — replaced by engine delivery pipeline + OpenRGB SDK client
+cb9a5158564682f01fe4fe844214baeecdc1258b954878d382ba9ce8fc5d6eb2 | plugin/DesktopLightingStudio.cpp | — | reference only — plugin host/bridge/tab replaced by openrgb2-ui + engine IPC
+f67fb712b928ad0328d3bbc36d1a46a67f9532aeb410e9472b1ad5d8485ec3b8 | plugin/DesktopLightingStudio.h | — | reference only — plugin host/bridge/tab replaced by openrgb2-ui + engine IPC
+77689ec13f2419f76b07c7ad078b7fe0c5882a87dc7116d39a5c99aabeacf092 | plugin/SceneBridge.cpp | — | reference only — plugin host/bridge/tab replaced by openrgb2-ui + engine IPC
+6a48c31cfe04f34025b4d2f26d4027143a6bcff57c1c96a37e97b24b7d165d41 | plugin/SceneBridge.h | — | reference only — plugin host/bridge/tab replaced by openrgb2-ui + engine IPC
+197a79a903cfbfe3a0525b9d175151dfac4345b0eda3cb862624c36f38d42935 | plugin/StudioTab.cpp | — | reference only — plugin host/bridge/tab replaced by openrgb2-ui + engine IPC
+2956b9d0f33ca826a94befdd77f288263ca168d950dd62662ab16cbd304b2688 | plugin/StudioTab.h | — | reference only — plugin host/bridge/tab replaced by openrgb2-ui + engine IPC
+70235e1a15719a8ac7ce5c3226d2db2807f32a66b38884796ed169441f165e30 | plugin/metadata.json | — | reference only — plugin host/bridge/tab replaced by openrgb2-ui + engine IPC
+a7529403537ff5bda67671311eb363146116217918a1a29fd214e7fd86f056cd | verify-package.bat | — | reference only — build/deploy packaging machinery not carried over
+4ebf45d65744546c2d8f17d27909cce7078f0132077588924b7bc756f56a7e08 | verify-package.sh | — | reference only — build/deploy packaging machinery not carried over

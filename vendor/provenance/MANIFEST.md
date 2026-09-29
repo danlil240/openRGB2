@@ -65,14 +65,24 @@ path-based verdict bypass, exclusion, or security-setting change is used.
 
 ## Deferred to later milestones (still only in the origin tree)
 
-The origin tree remains the source of record for these until their milestones:
+The origin tree remains the source of record for these until their milestones.
+Per-file hashes and planned destinations for the Desktop Lighting Studio
+import are in [`dls-ui-import-hashes.txt`](dls-ui-import-hashes.txt).
 
 - `plugins/DesktopLightingStudio/output/` (ControllerAdapter, OutputRouter,
-  DisplayPowerMonitor — engine milestone 3)
+  DisplayPowerMonitor — engine milestone 3; behavioral reference only, the
+  delivery pipeline + SDK client replace them)
 - `plugins/DesktopLightingStudio/{plugin,ui}/` and Qt-dependent editor models
-  (SceneObjectModel, EffectLayerModel, PresetListModel) and `config/ConfigStore`
-  (UI milestone 4)
-- Platform reactive inputs (AudioLoopback, KeyHook, ScreenSampler) (milestone 4)
+  (SceneObjectModel, EffectLayerModel, PresetListModel — slated for
+  `src/ui/studio/`) and `config/ConfigStore` (behavior reused by the engine
+  `WorkspaceStore`; the QObject/QSaveFile/file-watcher implementation is not
+  carried over)
+- ~~Platform reactive inputs (AudioLoopback, KeyHook, ScreenSampler)
+  (milestone 4)~~ — **done**: Windows WASAPI loopback, WH_KEYBOARD_LL key
+  hook, and GDI screen sampling now exist as Qt-free implementations in
+  `src/platform/windows/` (`WinAudioLoopback`, `WinKeyHook`,
+  `WinScreenSampler`, `WinReactiveInputs`). The remaining macOS source
+  (`AudioLoopback_mac.mm`) is out of scope.
 - Qt-dependent test suites (`editor_qml`, `studio_lifecycle_test`,
   `studio_transform_test`, `studio_config_store_test`, `quickwidget_probe`)
 - `LED_CALIBRATION_E2E_REPORT_2026-09-18.md` (referenced by the plan's L11)

@@ -12,16 +12,18 @@ find_package(Threads REQUIRED)
 # Engine library: the section-4 boundary types, the submitLatest sink
 # plumbing, the delivery pipeline, device mapping, the scene-
 # evaluation worker, and the playback-mode state machine (Task 3.6).
-# The core scene/effects sources it drives are compiled in directly
-# (same pattern as the offline test suites) — src/core stays
-# unchanged. The scene JSON + preset-registry stack is part of the
-# library so both the --scene CLI path and the IPC service
+# The shared scene/effects/config/editor/input-model core it drives
+# is linked from openrgb2_studio_core (src/core) — no source is
+# compiled twice. The scene JSON + preset-registry stack is part of
+# the link so both the --scene CLI path and the IPC service
 # (src/ipc/EngineService.cpp) share ONE scene-apply path.
 #
 # Playback geometry reuses the SHARED src/core/playback/PlaybackLoop
 # builder plus the pure vendor renderers — identical inputs give the
-# same frames the backend uploads. The codec drags in the tinyuz /
-# divsufsort compression sources (same set as tests/backend).
+# same frames the backend uploads. PlaybackLoop is wireless-specific
+# (it includes LianLiWirelessProtocol.h) so it stays compiled here,
+# outside the vendor-neutral studio core, together with the codec's
+# tinyuz / divsufsort compression sources (same set as tests/backend).
 add_library(openrgb2_engine STATIC
     EngineTypes.cpp
     FrameSink.cpp
@@ -39,24 +41,7 @@ add_library(openrgb2_engine STATIC
     SingleInstance.cpp
     OwnershipScan.cpp
     Engine.cpp
-    ${CORE_DIR}/scene/SceneTypes.cpp
-    ${CORE_DIR}/scene/SceneGraph.cpp
-    ${CORE_DIR}/scene/BindingResolver.cpp
-    ${CORE_DIR}/scene/SceneJson.cpp
-    ${CORE_DIR}/scene/SceneResolver.cpp
-    ${CORE_DIR}/scene/EmitterLayout.cpp
-    ${CORE_DIR}/config/StudioConfig.cpp
-    ${CORE_DIR}/config/ConfigMigration.cpp
-    ${CORE_DIR}/effects/EffectTypes.cpp
-    ${CORE_DIR}/effects/EffectEngine.cpp
-    ${CORE_DIR}/effects/EffectJson.cpp
-    ${CORE_DIR}/effects/Presets.cpp
-    ${CORE_DIR}/presets/EffectRegistry.cpp
-    ${CORE_DIR}/presets/PresetRegistry.cpp
-    ${CORE_DIR}/presets/DevicePreset.cpp
     ${CORE_DIR}/playback/PlaybackLoop.cpp
-    ${CORE_DIR}/inputs/InputBus.cpp
-    ${CORE_DIR}/inputs/OnsetDetect.cpp
     ${LLW_CTRL}/LianLiWirelessEffects.cpp
     ${LLW_CTRL}/LianLiWirelessCodec.cpp
     ${LLW_DEPS}/tinyuz/compress/tuz_enc.cpp
@@ -77,7 +62,11 @@ target_include_directories(openrgb2_engine PRIVATE
     ${LLW_DEPS}/HDiffPatch)
 target_compile_definitions(openrgb2_engine PRIVATE
     _IS_USED_MULTITHREAD=0)
-target_link_libraries(openrgb2_engine PUBLIC Threads::Threads)
+# PUBLIC: consumers (ipc service, host, engine/sdk test suites) see
+# the studio::* model headers through this link.
+target_link_libraries(openrgb2_engine PUBLIC
+    openrgb2_studio_core
+    Threads::Threads)
 if(WIN32)
     # OwnershipScan: GetExtendedTcpTable for the backend-listener
     # PID lookup (competing-owner detection, Task 3.9).
