@@ -112,7 +112,11 @@ class DiagnosticsController : public QObject
        kEventLogBound): [{time,kind,detail}] — push kinds,
        ERROR replies, connection transitions, protocol
        errors. This is the UI's own journal, not the
-       engine's log. */
+       engine's log. Per-frame frame_status pushes are NOT
+       journaled — telemetry that would evict every real
+       event within seconds at live-effects rates; the
+       bridge's frameStatus store and the preview-cadence
+       window carry it. */
     Q_PROPERTY(QVariantList eventLog READ eventLog
                    NOTIFY eventLogChanged)
 

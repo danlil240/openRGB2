@@ -7,6 +7,7 @@
 #include "DiagnosticsController.h"
 
 #include "EngineBridge.h"
+#include "IpcProtocol.h"
 #include "JsonVariant.h"
 
 #include <QDateTime>
@@ -640,6 +641,17 @@ void DiagnosticsController::OnFrameStatus()
 void DiagnosticsController::OnEventReceived(const QString& kind,
                                             const QVariantMap&)
 {
+    /* frame_status is per-frame telemetry (up to ~30 Hz), not
+       a journal entry: it already lands in the bridge's
+       frameStatus store and this controller's preview-cadence
+       window. Journaling it flooded the bounded ring — a few
+       seconds of identical blank-detail rows at live-effects
+       rates evicted real error events before they could be
+       read (BUG-3). */
+    if(kind == QLatin1String(ipc::event_kind::kFrameStatus))
+    {
+        return;
+    }
     AppendEvent(kind, QString());
 }
 

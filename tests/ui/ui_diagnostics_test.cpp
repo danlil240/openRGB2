@@ -521,17 +521,84 @@ int main(int argc, char** argv)
     std::printf("-- event log\n");
     {
         CHECK(!diag.eventLog().isEmpty());
-        bool saw_frame_status = false;
+        /* frame_status is per-frame telemetry — the bridge's
+           frameStatus store + the preview-cadence window carry
+           it. It is NOT journaled: at live-effects rates a few
+           seconds of identical blank-detail rows evicted real
+           error events (BUG-3). */
+        int fs_rows = 0;
         for(const QVariant& e : diag.eventLog())
         {
             if(e.toMap().value(QStringLiteral("kind"))
                    .toString() ==
                QStringLiteral("frame_status"))
             {
-                saw_frame_status = true;
+                ++fs_rows;
             }
         }
-        CHECK(saw_frame_status);
+        CHECK(fs_rows == 0);
+    }
+
+    /*---- journal: errors survive frame_status spam ------------*/
+    std::printf("-- event log: errors survive flood\n");
+    {
+        int frames = 0;
+        QObject::connect(&bridge,
+                         &ui::EngineBridge::frameStatusChanged,
+                         [&] { ++frames; });
+
+        /* Ping is unhandled by the scripted engine -> an ERROR
+           reply; the journal entry carries its message. */
+        const int pid = bridge.ping();
+        CHECK(pid > 0);
+        CHECK(PumpBoth(s, [&] {
+            for(const QVariant& e : diag.eventLog())
+            {
+                const QVariantMap ev = e.toMap();
+                if(ev.value(QStringLiteral("kind")).toString() ==
+                       QStringLiteral("error") &&
+                   ev.value(QStringLiteral("detail")).toString()
+                       .contains(QStringLiteral(
+                           "unexpected request")))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }));
+
+        /* Flood well past the ring bound — journaled spam would
+           evict the error within seconds; excluded, it cannot. */
+        const int flood =
+            2 * ui::DiagnosticsController::kEventLogBound;
+        for(int i = 0; i < flood; ++i)
+        {
+            s.srv.SendMsg(MsgType::Event, 0,
+                nlohmann::json::object({
+                    { "kind", "frame_status" },
+                    { "data", nlohmann::json::object(
+                        {{ "frame", i }}) },
+                }));
+        }
+        CHECK(PumpBoth(s, [&] { return frames >= flood; }));
+
+        int fs_rows = 0;
+        bool error_still = false;
+        for(const QVariant& e : diag.eventLog())
+        {
+            const QString k = e.toMap()
+                .value(QStringLiteral("kind")).toString();
+            if(k == QStringLiteral("frame_status"))
+            {
+                ++fs_rows;
+            }
+            if(k == QStringLiteral("error"))
+            {
+                error_still = true;
+            }
+        }
+        CHECK(fs_rows == 0);
+        CHECK(error_still);
     }
 
     /*---- export: redacted bundle -------------------------------*/
