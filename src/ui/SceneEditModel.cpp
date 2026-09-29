@@ -22,9 +22,15 @@ namespace
    params each accepts. */
 const std::vector<PlaybackPresetInfo> kPlaybackPresets =
 {
-    { "spectrum_cycle", "Spectrum Cycle", true,  false, false },
-    { "rainbow_wave",    "Rainbow Wave",   true,  true,  false },
-    { "breathing",      "Breathing",      true,  false, true  },
+    { "spectrum_cycle",     "Spectrum Cycle",     true,  false, false },
+    { "rainbow_wave",        "Rainbow Wave",       true,  true,  false },
+    { "breathing",          "Breathing",          true,  false, true  },
+    { "perimeter_wave",      "Perimeter Wave",     true,  true,  false },
+    { "perimeter_comet",    "Perimeter Comet",    true,  true,  true  },
+    { "perimeter_chase",    "Perimeter Chase",    true,  true,  false },
+    { "perimeter_ping_pong","Perimeter Ping Pong",true,  false, true  },
+    { "stack_wave",         "Stack Wave",         true,  false, false },
+    { "stack_rainbow",      "Stack Rainbow",      true,  true,  false },
 };
 
 constexpr int kSpeedMin = 10;

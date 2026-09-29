@@ -399,7 +399,7 @@ bool SceneEditController::setPreset(const QString& id)
     /* The scene-creation default (plan section 3.4 first-
        release rules; the Task 3.6 ruling assigns the
        user-facing default to the UI): picking one of the
-       three uploaded presets for a NEW instance arms the
+       the uploaded presets for a NEW instance arms the
        Animation-playback default — it fires in
        OnSceneChanged once the engine has APPLIED a scene
        naming the preset. Existing/migrated scenes stay

@@ -38,6 +38,12 @@ enum
     LLW_MODE_SPECTRUM  = 2,
     LLW_MODE_RAINBOW   = 3,
     LLW_MODE_BREATHING = 4,
+    LLW_MODE_PERIMETER_WAVE      = 5,
+    LLW_MODE_PERIMETER_COMET     = 6,
+    LLW_MODE_PERIMETER_CHASE     = 7,
+    LLW_MODE_PERIMETER_PINGPONG  = 8,
+    LLW_MODE_STACK_WAVE          = 9,
+    LLW_MODE_STACK_RAINBOW       = 10,
 };
 
 /*---------------------------------------------------------*\
@@ -116,6 +122,87 @@ RGBController_LianLiWireless::RGBController_LianLiWireless(LianLiWirelessControl
     Breathing.colors.resize(1);
     Breathing.colors[0]         = ToRGBColor(0xFF, 0x00, 0x00);
     modes.push_back(Breathing);
+
+    /*-------------------------------------------------*\
+    | Stack-aware loops: one continuous path runs up    |
+    | the left edge through fans 1..N and back down the |
+    | right edge, so color flows fan -> fan instead of  |
+    | restarting per fan. Stack effects use vertical    |
+    | position instead of perimeter position.           |
+    \*-------------------------------------------------*/
+    mode PerimeterWave;
+    PerimeterWave.name          = "Perimeter Wave";
+    PerimeterWave.value         = LLW_MODE_PERIMETER_WAVE;
+    PerimeterWave.flags         = MODE_FLAG_HAS_SPEED
+                                | MODE_FLAG_HAS_DIRECTION_LR;
+    PerimeterWave.speed_min     = LLW_SPEED_MIN;
+    PerimeterWave.speed_max     = LLW_SPEED_MAX;
+    PerimeterWave.speed         = LLW_SPEED_DEF;
+    PerimeterWave.color_mode    = MODE_COLORS_NONE;
+    modes.push_back(PerimeterWave);
+
+    mode PerimeterComet;
+    PerimeterComet.name         = "Perimeter Comet";
+    PerimeterComet.value        = LLW_MODE_PERIMETER_COMET;
+    PerimeterComet.flags        = MODE_FLAG_HAS_SPEED
+                                | MODE_FLAG_HAS_DIRECTION_LR
+                                | MODE_FLAG_HAS_MODE_SPECIFIC_COLOR;
+    PerimeterComet.speed_min    = LLW_SPEED_MIN;
+    PerimeterComet.speed_max    = LLW_SPEED_MAX;
+    PerimeterComet.speed        = LLW_SPEED_DEF;
+    PerimeterComet.colors_min   = 1;
+    PerimeterComet.colors_max   = 1;
+    PerimeterComet.color_mode   = MODE_COLORS_MODE_SPECIFIC;
+    PerimeterComet.colors.resize(1);
+    PerimeterComet.colors[0]    = ToRGBColor(0xFF, 0xFF, 0xFF);
+    modes.push_back(PerimeterComet);
+
+    mode PerimeterChase;
+    PerimeterChase.name         = "Perimeter Chase";
+    PerimeterChase.value        = LLW_MODE_PERIMETER_CHASE;
+    PerimeterChase.flags        = MODE_FLAG_HAS_SPEED
+                                | MODE_FLAG_HAS_DIRECTION_LR;
+    PerimeterChase.speed_min    = LLW_SPEED_MIN;
+    PerimeterChase.speed_max    = LLW_SPEED_MAX;
+    PerimeterChase.speed        = LLW_SPEED_DEF;
+    PerimeterChase.color_mode   = MODE_COLORS_NONE;
+    modes.push_back(PerimeterChase);
+
+    mode PerimeterPingPong;
+    PerimeterPingPong.name      = "Perimeter Ping Pong";
+    PerimeterPingPong.value     = LLW_MODE_PERIMETER_PINGPONG;
+    PerimeterPingPong.flags     = MODE_FLAG_HAS_SPEED
+                                | MODE_FLAG_HAS_MODE_SPECIFIC_COLOR;
+    PerimeterPingPong.speed_min = LLW_SPEED_MIN;
+    PerimeterPingPong.speed_max = LLW_SPEED_MAX;
+    PerimeterPingPong.speed     = LLW_SPEED_DEF;
+    PerimeterPingPong.colors_min = 1;
+    PerimeterPingPong.colors_max = 1;
+    PerimeterPingPong.color_mode = MODE_COLORS_MODE_SPECIFIC;
+    PerimeterPingPong.colors.resize(1);
+    PerimeterPingPong.colors[0] = ToRGBColor(0xFF, 0xFF, 0xFF);
+    modes.push_back(PerimeterPingPong);
+
+    mode StackWave;
+    StackWave.name              = "Stack Wave";
+    StackWave.value             = LLW_MODE_STACK_WAVE;
+    StackWave.flags             = MODE_FLAG_HAS_SPEED;
+    StackWave.speed_min         = LLW_SPEED_MIN;
+    StackWave.speed_max         = LLW_SPEED_MAX;
+    StackWave.speed             = LLW_SPEED_DEF;
+    StackWave.color_mode        = MODE_COLORS_NONE;
+    modes.push_back(StackWave);
+
+    mode StackRainbow;
+    StackRainbow.name           = "Stack Rainbow";
+    StackRainbow.value          = LLW_MODE_STACK_RAINBOW;
+    StackRainbow.flags          = MODE_FLAG_HAS_SPEED
+                                | MODE_FLAG_HAS_DIRECTION_LR;
+    StackRainbow.speed_min      = LLW_SPEED_MIN;
+    StackRainbow.speed_max      = LLW_SPEED_MAX;
+    StackRainbow.speed          = LLW_SPEED_DEF;
+    StackRainbow.color_mode     = MODE_COLORS_NONE;
+    modes.push_back(StackRainbow);
 
     SetupZones();
 }
@@ -198,7 +285,13 @@ void RGBController_LianLiWireless::DeviceUpdateMode()
     const mode& active = modes[active_mode];
     const bool playback = active.value == LLW_MODE_SPECTRUM
                        || active.value == LLW_MODE_RAINBOW
-                       || active.value == LLW_MODE_BREATHING;
+                       || active.value == LLW_MODE_BREATHING
+                       || active.value == LLW_MODE_PERIMETER_WAVE
+                       || active.value == LLW_MODE_PERIMETER_COMET
+                       || active.value == LLW_MODE_PERIMETER_CHASE
+                       || active.value == LLW_MODE_PERIMETER_PINGPONG
+                       || active.value == LLW_MODE_STACK_WAVE
+                       || active.value == LLW_MODE_STACK_RAINBOW;
     const uint64_t revision = controller->BeginMode(playback);
     mode_revision = revision;
 
@@ -214,6 +307,12 @@ void RGBController_LianLiWireless::DeviceUpdateMode()
         case LLW_MODE_SPECTRUM:
         case LLW_MODE_RAINBOW:
         case LLW_MODE_BREATHING:
+        case LLW_MODE_PERIMETER_WAVE:
+        case LLW_MODE_PERIMETER_COMET:
+        case LLW_MODE_PERIMETER_CHASE:
+        case LLW_MODE_PERIMETER_PINGPONG:
+        case LLW_MODE_STACK_WAVE:
+        case LLW_MODE_STACK_RAINBOW:
         {
             /*-----------------------------------------*\
             | Render one full cycle; the firmware loops |
@@ -222,21 +321,59 @@ void RGBController_LianLiWireless::DeviceUpdateMode()
             LianLiWireless::PlaybackRequest request;
             request.led_count = leds.size();
             request.speed = active.speed;
+            request.reverse = active.direction == MODE_DIRECTION_RIGHT;
+            request.leds_per_fan = controller->GetLEDsPerFan();
             if(active.value == LLW_MODE_SPECTRUM)
+            {
                 request.preset = LianLiWireless::PlaybackPreset::SpectrumCycle;
+            }
             else if(active.value == LLW_MODE_RAINBOW)
             {
                 request.preset = LianLiWireless::PlaybackPreset::RainbowWave;
-                request.reverse = active.direction == MODE_DIRECTION_RIGHT;
-                request.leds_per_fan = controller->GetLEDsPerFan();
                 request.led_order = LianLiWireless::FanLedOrder(controller->GetFanType());
             }
-            else
+            else if(active.value == LLW_MODE_BREATHING)
             {
                 request.preset = LianLiWireless::PlaybackPreset::Breathing;
                 request.red = (uint8_t)RGBGetRValue(active.colors[0]);
                 request.green = (uint8_t)RGBGetGValue(active.colors[0]);
                 request.blue = (uint8_t)RGBGetBValue(active.colors[0]);
+            }
+            else
+            {
+                switch(active.value)
+                {
+                    case LLW_MODE_PERIMETER_WAVE:
+                        request.preset = LianLiWireless::PlaybackPreset::PerimeterWave;
+                        break;
+                    case LLW_MODE_PERIMETER_COMET:
+                        request.preset = LianLiWireless::PlaybackPreset::PerimeterComet;
+                        break;
+                    case LLW_MODE_PERIMETER_CHASE:
+                        request.preset = LianLiWireless::PlaybackPreset::PerimeterChase;
+                        break;
+                    case LLW_MODE_PERIMETER_PINGPONG:
+                        request.preset = LianLiWireless::PlaybackPreset::PerimeterPingPong;
+                        break;
+                    case LLW_MODE_STACK_WAVE:
+                        request.preset = LianLiWireless::PlaybackPreset::StackWave;
+                        break;
+                    default:
+                        request.preset = LianLiWireless::PlaybackPreset::StackRainbow;
+                        break;
+                }
+                request.stack_pos  = LianLiWireless::FanStackPos(controller->GetFanType());
+                request.led_height = LianLiWireless::FanLedHeight(controller->GetFanType());
+                if(!active.colors.empty())
+                {
+                    request.red   = (uint8_t)RGBGetRValue(active.colors[0]);
+                    request.green = (uint8_t)RGBGetGValue(active.colors[0]);
+                    request.blue  = (uint8_t)RGBGetBValue(active.colors[0]);
+                }
+                else
+                {
+                    request.red = request.green = request.blue = 0xFF;
+                }
             }
             try
             {

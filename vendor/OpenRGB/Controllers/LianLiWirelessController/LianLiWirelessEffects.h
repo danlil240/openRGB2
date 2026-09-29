@@ -44,4 +44,35 @@ namespace LianLiWireless
                                            const uint8_t* led_order = nullptr);
     std::vector<uint8_t> RenderBreathing(size_t led_count, size_t frame_count,
                                          uint8_t r, uint8_t g, uint8_t b);
+
+    /*---------------------------------------------------------*\
+    | Stack-aware effects: the whole group is one continuous    |
+    | path — up the left edge through fans 0..N-1, down the     |
+    | right edge through fans N-1..0 (or a vertical coordinate  |
+    | for the height effects). stack_pos maps each per-fan LED  |
+    | index to its slot on that loop (inner and outer strips    |
+    | share a slot at the same height); led_height maps it to   |
+    | a 0-255 vertical position. Both come from                 |
+    | LianLiWirelessFanType.h; nullptr falls back to linear.    |
+    \*---------------------------------------------------------*/
+    std::vector<uint8_t> RenderPerimeterWave(size_t led_count, size_t frame_count,
+                                             bool reverse, size_t leds_per_fan,
+                                             const uint8_t* stack_pos);
+    std::vector<uint8_t> RenderPerimeterComet(size_t led_count, size_t frame_count,
+                                              bool reverse, size_t leds_per_fan,
+                                              const uint8_t* stack_pos,
+                                              uint8_t r, uint8_t g, uint8_t b);
+    std::vector<uint8_t> RenderPerimeterChase(size_t led_count, size_t frame_count,
+                                              bool reverse, size_t leds_per_fan,
+                                              const uint8_t* stack_pos);
+    std::vector<uint8_t> RenderPerimeterPingPong(size_t led_count, size_t frame_count,
+                                                 size_t leds_per_fan,
+                                                 const uint8_t* stack_pos,
+                                                 uint8_t r, uint8_t g, uint8_t b);
+    std::vector<uint8_t> RenderStackWave(size_t led_count, size_t frame_count,
+                                         size_t leds_per_fan,
+                                         const uint8_t* led_height);
+    std::vector<uint8_t> RenderStackRainbow(size_t led_count, size_t frame_count,
+                                            bool reverse, size_t leds_per_fan,
+                                            const uint8_t* led_height);
 }

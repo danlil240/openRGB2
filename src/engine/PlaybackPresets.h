@@ -1,15 +1,16 @@
 /*---------------------------------------------------------*\
 ||| PlaybackPresets.h                                         |
 |||                                                           |
-|||   The first-release Animation-playback preset table     |
-|||   (plan section 3.4): exactly the three uploaded modes  |
-|||   the vendored backend can render device-side —         |
-|||   Spectrum Cycle, Rainbow Wave, Breathing — mapped to   |
+|||   The Animation-playback preset table (plan section    |
+|||   3.4): the uploaded modes the vendored backend can    |
+|||   render device-side — Spectrum Cycle, Rainbow Wave,   |
+|||   Breathing, and the stack-aware Perimeter/Stack       |
+|||   effects — mapped to                                  |
 |||   their SDK mode names and to the scene-preset names a  |
 |||   scene document may carry.                             |
 |||                                                           |
 |||   Also the capability classification contract: only a   |
-|||   scene whose effect names one of the three playback    |
+|||   scene whose effect names one of the playback    |
 |||   presets may select AnimationPlayback. Arbitrary       |
 |||   layered scenes, audio reactions, screen mirroring,    |
 |||   and key reactions stay Live-only — the classification |
@@ -122,7 +123,7 @@ bool                            IsPlaybackPresetName(
 ||| ScenePlaybackCaps — per-scene capability classification.|
 |||                                                           |
 |||   animation_playback is true ONLY when the scene's      |
-|||   effect names one of the three playback presets. Any   |
+|||   effect names one of the playback presets. Any   |
 |||   other scene — arbitrary inline layers, reactive       |
 |||   presets (audio/key/screen inputs), plain presets —    |
 |||   is Live-only and carries a short human reason         |

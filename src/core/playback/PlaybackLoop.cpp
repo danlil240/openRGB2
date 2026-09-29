@@ -51,6 +51,36 @@ namespace LianLiWireless
                     loop.rgb = RenderBreathing(request.led_count, count,
                         request.red, request.green, request.blue);
                     break;
+                case PlaybackPreset::PerimeterWave:
+                    loop.rgb = RenderPerimeterWave(request.led_count, count,
+                        request.reverse, request.leds_per_fan,
+                        request.stack_pos);
+                    break;
+                case PlaybackPreset::PerimeterComet:
+                    loop.rgb = RenderPerimeterComet(request.led_count, count,
+                        request.reverse, request.leds_per_fan,
+                        request.stack_pos, request.red, request.green,
+                        request.blue);
+                    break;
+                case PlaybackPreset::PerimeterChase:
+                    loop.rgb = RenderPerimeterChase(request.led_count, count,
+                        request.reverse, request.leds_per_fan,
+                        request.stack_pos);
+                    break;
+                case PlaybackPreset::PerimeterPingPong:
+                    loop.rgb = RenderPerimeterPingPong(request.led_count, count,
+                        request.leds_per_fan, request.stack_pos,
+                        request.red, request.green, request.blue);
+                    break;
+                case PlaybackPreset::StackWave:
+                    loop.rgb = RenderStackWave(request.led_count, count,
+                        request.leds_per_fan, request.led_height);
+                    break;
+                case PlaybackPreset::StackRainbow:
+                    loop.rgb = RenderStackRainbow(request.led_count, count,
+                        request.reverse, request.leds_per_fan,
+                        request.led_height);
+                    break;
                 default:
                     throw std::invalid_argument("unsupported playback preset");
             }

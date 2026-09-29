@@ -98,18 +98,58 @@ namespace LianLiWireless
     }
 
     /*---------------------------------------------------------*\
-    | Physical perimeter order of an SL V3's 40 frame LEDs:     |
-    | 12-LED top strip forward, 8-LED side strip reversed,      |
-    | 12-LED bottom strip reversed, 8-LED side strip forward.   |
-    | Iterating slots in this order follows the ring instead    |
-    | of zig-zagging across it. nullptr means linear order.     |
+    | Physical perimeter order of an SL V3's 40 frame LEDs,     |
+    | verified on hardware (LED walk on the top fan):           |
+    | inner-left strip up (0-11), inner-right strip down        |
+    | (31-20), outer-right edge up (32-39), outer-left edge     |
+    | down (19-12). Iterating slots in this order follows the   |
+    | ring instead of zig-zagging across it. nullptr means      |
+    | linear order.                                             |
     \*---------------------------------------------------------*/
     inline constexpr uint8_t SLV3_LED_ORDER[40] =
     {
         0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11,
-       19, 18, 17, 16, 15, 14, 13, 12,
        31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20,
-       32, 33, 34, 35, 36, 37, 38, 39
+       32, 33, 34, 35, 36, 37, 38, 39,
+       19, 18, 17, 16, 15, 14, 13, 12
+    };
+
+    /*---------------------------------------------------------*\
+    | Per-fan position on the whole-stack perimeter loop,       |
+    | verified on hardware: slots 0-11 walk the left edge       |
+    | bottom->top, slots 12-23 walk the right edge top->bottom. |
+    | Inner and outer strips share positions by height, so a    |
+    | path step lights both at once. The group path runs fans   |
+    | 0..N-1 up the left side then fans N-1..0 down the right.  |
+    | nullptr means no stack mapping.                           |
+    \*---------------------------------------------------------*/
+    inline constexpr uint8_t SLV3_STACK_POS[40] =
+    {
+        /* inner-left  0-11: left edge bottom->top          */
+        0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11,
+        /* outer-left 12-19: left edge bottom->top, sharing
+           the inner slots at the same height              */
+        0,  2,  3,  5,  6,  8,  9, 11,
+        /* inner-right 20-31: index 20 is the bottom        */
+       23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12,
+        /* outer-right 32-39: index 32 is the bottom        */
+       23, 21, 20, 18, 17, 15, 14, 12
+    };
+
+    /*---------------------------------------------------------*\
+    | Vertical position of each LED within its fan, 0 = bottom, |
+    | 255 = top. Same layout assumptions as SLV3_STACK_POS.     |
+    \*---------------------------------------------------------*/
+    inline constexpr uint8_t SLV3_LED_HEIGHT[40] =
+    {
+        /* inner-left  0-11                                   */
+          0,  23,  46,  70,  93, 116, 139, 162, 185, 209, 232, 255,
+        /* outer-left 12-19                                   */
+          0,  36,  73, 109, 146, 182, 219, 255,
+        /* inner-right 20-31                                  */
+          0,  23,  46,  70,  93, 116, 139, 162, 185, 209, 232, 255,
+        /* outer-right 32-39                                  */
+          0,  36,  73, 109, 146, 182, 219, 255
     };
 
     inline const uint8_t* FanLedOrder(WirelessFanType t)
@@ -119,6 +159,30 @@ namespace LianLiWireless
             case WirelessFanType::Slv3Led:
             case WirelessFanType::Slv3Lcd:
                 return SLV3_LED_ORDER;
+            default:
+                return nullptr;
+        }
+    }
+
+    inline const uint8_t* FanStackPos(WirelessFanType t)
+    {
+        switch(t)
+        {
+            case WirelessFanType::Slv3Led:
+            case WirelessFanType::Slv3Lcd:
+                return SLV3_STACK_POS;
+            default:
+                return nullptr;
+        }
+    }
+
+    inline const uint8_t* FanLedHeight(WirelessFanType t)
+    {
+        switch(t)
+        {
+            case WirelessFanType::Slv3Led:
+            case WirelessFanType::Slv3Lcd:
+                return SLV3_LED_HEIGHT;
             default:
                 return nullptr;
         }

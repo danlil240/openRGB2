@@ -8,7 +8,18 @@
 
 namespace LianLiWireless
 {
-    enum class PlaybackPreset { SpectrumCycle, RainbowWave, Breathing };
+    enum class PlaybackPreset
+    {
+        SpectrumCycle,
+        RainbowWave,
+        Breathing,
+        PerimeterWave,
+        PerimeterComet,
+        PerimeterChase,
+        PerimeterPingPong,
+        StackWave,
+        StackRainbow,
+    };
 
     struct PlaybackRequest
     {
@@ -18,6 +29,8 @@ namespace LianLiWireless
         bool reverse = false;
         size_t leds_per_fan = 0;
         const uint8_t* led_order = nullptr;
+        const uint8_t* stack_pos = nullptr;
+        const uint8_t* led_height = nullptr;
         uint8_t red = 255, green = 0, blue = 0;
     };
 
