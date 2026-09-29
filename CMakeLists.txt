@@ -5,6 +5,10 @@ project(OpenRGB2
     DESCRIPTION "Polished Windows RGB application with uploaded animation and live-effects modes"
     LANGUAGES C CXX)
 
+if(WIN32)
+    enable_language(RC)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -18,7 +22,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 #
 find_package(Qt6 6.8 QUIET COMPONENTS
     Core Gui Qml QmlMeta QmlModels QmlWorkerScript
-    Quick QuickControls2 Network OpenGL)
+    Quick QuickControls2 Network OpenGL Widgets)
 if(NOT Qt6_FOUND)
     message(STATUS
         "Qt6 not found (pass -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64). "

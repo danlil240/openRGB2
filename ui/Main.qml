@@ -6,8 +6,8 @@
 // UI-only preference persistence (window geometry + last
 // view via uiPrefs — engine-owned state is NEVER stored
 // here; it returns through WELCOME + subscription replay).
-// Closing this window only closes the UI — the engine keeps
-// running; engine shutdown lives on Settings → Quit All
+// Closing this window hides the UI when a tray is available;
+// engine shutdown lives on Settings → Quit All
 // (a confirmed IPC QUIT, plan section 4 UI independence).
 import QtQuick
 import QtQuick.Layouts
@@ -20,11 +20,12 @@ ApplicationWindow {
     id: root
     objectName: "mainWindow"
 
-    visible: true
+    visible: !(typeof startHidden !== "undefined" && startHidden)
     width: 1180; height: 760
     minimumWidth: 960; minimumHeight: 620
     title: qsTr("OpenRGB2")
     color: Theme.bg
+    property bool exitRequested: false
 
     readonly property bool engineUp:
         typeof bridge !== "undefined" && bridge.connected
@@ -66,6 +67,14 @@ ApplicationWindow {
         if(root.prefsUp)
             uiPrefs.saveGeometry(root.x, root.y,
                                  root.width, root.height);
+        if(!root.exitRequested
+           && typeof trayAvailable !== "undefined"
+           && trayAvailable) {
+            close.accepted = false;
+            root.hide();
+        } else if(root.exitRequested) {
+            Qt.quit();
+        }
     }
 
     /* A text editor owns Ctrl+Z/Ctrl+Y for its own undo —

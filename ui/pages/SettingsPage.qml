@@ -26,6 +26,9 @@ Item {
         typeof bridge !== "undefined" && bridge.connected
     readonly property bool prefsUp:
         typeof uiPrefs !== "undefined" && uiPrefs !== null
+    readonly property bool startupUp:
+        typeof startupTask !== "undefined" && startupTask !== null
+        && startupTask.available
     /* The engine-side connection state (wire truth). */
     readonly property string connState:
         typeof bridge !== "undefined" ? bridge.connectionState
@@ -244,6 +247,54 @@ Item {
                 }
             }
 
+            /*---- Windows sign-in ------------------------------*/
+            Card {
+                Layout.fillWidth: true
+                title: qsTr("Windows startup")
+
+                ColumnLayout {
+                    width: parent.width
+                    spacing: Theme.spaceS
+
+                    AppCheckBox {
+                        objectName: "startAtLoginCheck"
+                        text: qsTr("Open OpenRGB2 when I sign in")
+                        Accessible.name: text
+                        enabled: root.startupUp && !startupTask.busy
+                        checked: root.startupUp
+                                 ? startupTask.enabled : false
+                        onToggled:
+                            if(root.startupUp)
+                                startupTask.setEnabled(checked)
+                    }
+                    Text {
+                        text: qsTr("Starts in the tray with administrator privileges. Windows may ask for approval when you launch OpenRGB2 manually.")
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                        Accessible.name: text
+                    }
+                    Text {
+                        visible: root.startupUp && startupTask.busy
+                        text: qsTr("Checking Windows startup…")
+                        color: Theme.textDisabled
+                        font.pixelSize: Theme.fontSizeSmall
+                        Layout.fillWidth: true
+                    }
+                    Text {
+                        visible: root.startupUp && startupTask.error !== ""
+                        text: root.startupUp
+                              ? startupTask.error : ""
+                        color: Theme.bad
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                        Accessible.name: text
+                    }
+                }
+            }
+
             /*---- Session --------------------------------------*/
             Card {
                 Layout.fillWidth: true
@@ -262,8 +313,10 @@ Item {
                             Accessible.name:
                                 qsTr("Close the UI (engine keeps running)")
                             onClicked:
-                                if(root.appWindow)
+                                if(root.appWindow) {
+                                    root.appWindow.exitRequested = true;
                                     root.appWindow.close();
+                                }
                         }
                         Text {
                             text: qsTr("Exits this window only — lighting keeps running.")
