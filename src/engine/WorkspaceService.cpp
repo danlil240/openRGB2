@@ -40,6 +40,26 @@ bool ReadBytes(const std::string& path, std::string& out,
     return out.size() <= cap;
 }
 
+/* Job-result report arrays ride the 1 MiB reply envelope — a
+   pathological bundle (thousands of bundled presets or parse
+   errors) must never push a result over it. Reports keep the
+   first entries and carry the dropped count honestly. */
+constexpr size_t kMaxReportItems = 256;
+
+void CapReportArray(nlohmann::json& report, const char* key)
+{
+    const auto it = report.find(key);
+    if(it == report.end() || !it->is_array() ||
+       it->size() <= kMaxReportItems)
+    {
+        return;
+    }
+    const size_t dropped = it->size() - kMaxReportItems;
+    it->erase(it->begin() + (ptrdiff_t)kMaxReportItems,
+              it->end());
+    report[std::string(key) + "_truncated"] = dropped;
+}
+
 /* Layer the types/looks a folder-of-files import carries under
    <dir>/presets/{devices,effects} — a scratch overlay only; the
    caller's registries are never mutated (matching the
@@ -218,6 +238,7 @@ WorkspaceService::Result WorkspaceService::Open(const std::string& id)
     current_.workspace_revision = lr.workspace_revision;
     current_.resource_revision  = lr.resource_revision;
     current_.generation         = lr.generation;
+    PublishLocked();
     res.ok                 = true;
     res.generation         = lr.generation;
     res.workspace_revision = lr.workspace_revision;
@@ -271,6 +292,7 @@ WorkspaceService::Result WorkspaceService::CommitCommon(
     current_.workspace_revision = cr.workspace_revision;
     current_.resource_revision  = cr.resource_revision;
     current_.generation         = cr.generation;
+    PublishLocked();
 
     /* Publish AFTER the durable commit — and AFTER the caller
        releases the service mutex. The apply emits the scene
@@ -515,34 +537,56 @@ WorkspaceService::CurrentCandidate() const
     return current_.candidate;
 }
 
+void WorkspaceService::PublishLocked()
+{
+    /* current_ -> snap_ copy; snap_mutex_ is held for the
+       copy only — readers never queue behind commit I/O. */
+    PublishedState s;
+    s.managed            = !current_.id.empty();
+    s.id                 = current_.id;
+    s.workspace_revision = current_.workspace_revision;
+    s.resource_revision  = current_.resource_revision;
+    s.generation         = current_.generation;
+    if(current_.candidate)
+    {
+        s.name        = current_.candidate->document.meta.name;
+        s.source_form =
+            WorkspaceSourceFormName(current_.candidate->source_form);
+    }
+    std::lock_guard<std::mutex> g(snap_mutex_);
+    snap_ = std::move(s);
+}
+
+WorkspaceService::PublishedState
+WorkspaceService::Snapshot() const
+{
+    std::lock_guard<std::mutex> g(snap_mutex_);
+    return snap_;
+}
+
 std::string WorkspaceService::CurrentId() const
 {
-    std::lock_guard<std::mutex> g(mutex_);
-    return current_.id;
+    return Snapshot().id;
 }
 
 uint64_t WorkspaceService::WorkspaceRevision() const
 {
-    std::lock_guard<std::mutex> g(mutex_);
-    return current_.workspace_revision;
+    return Snapshot().workspace_revision;
 }
 
 uint64_t WorkspaceService::ResourceRevision() const
 {
-    std::lock_guard<std::mutex> g(mutex_);
-    return current_.resource_revision;
+    return Snapshot().resource_revision;
 }
 
 uint64_t WorkspaceService::CurrentGeneration() const
 {
-    std::lock_guard<std::mutex> g(mutex_);
-    return current_.generation;
+    return Snapshot().generation;
 }
 
 bool WorkspaceService::ManagedActive() const
 {
-    std::lock_guard<std::mutex> g(mutex_);
-    return !current_.id.empty();
+    return Snapshot().managed;
 }
 
 /*---------------------------------------------------------*\
@@ -608,9 +652,12 @@ WorkspaceService::JobResult WorkspaceService::Enqueue(
     }
 
     /* Cheap synchronous validation — the worker re-checks the
-       durable revisions; enqueue never does file I/O. */
+       durable revisions; enqueue never does file I/O. `reload`
+       may omit id: the worker falls back to the current
+       workspace. */
     const bool needs_id = verb != "export" &&
-                          verb != "import_inspect";
+                          verb != "import_inspect" &&
+                          verb != "reload";
     const std::string id = body.value("id", std::string());
     if(needs_id && id.empty())
     {
@@ -842,6 +889,11 @@ void WorkspaceService::WorkerMain()
             if(it != jobs_.end())
             {
                 it->second.st = done;
+                /* Terminal records stay queryable for
+                   reconcile — the request body (a full staged
+                   or inline document, up to ~1 MiB) does not:
+                   retention keeps status, never payload. */
+                it->second.body = nlohmann::json();
             }
             /* bounded retention — oldest terminal records evict */
             while(jobs_.size() > kMaxJobRecords)
@@ -908,6 +960,7 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
         if(!res.warnings.empty())
         {
             st.result["warnings"] = res.warnings;
+            CapReportArray(st.result, "warnings");
         }
         return st;
     };
@@ -987,6 +1040,9 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
             st.result["valid"]    = errors.empty();
             st.result["errors"]   = errors;
             st.result["warnings"] = warnings;
+            /* Same 1 MiB reply bound as the import report. */
+            CapReportArray(st.result, "errors");
+            CapReportArray(st.result, "warnings");
             return st;
         }
         /* commit applies + adopts; save_copy only commits — the
@@ -1120,6 +1176,7 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
             { "sha256",      sha                    },
             { "warnings",    uerrs                  },
         });
+        CapReportArray(st.result, "warnings");
         return st;
     }
 
@@ -1540,6 +1597,14 @@ nlohmann::json WorkspaceService::InspectCandidateJson(
     }
     out["errors"]   = errors;
     out["warnings"] = warnings;
+    /* Every array field is capped — the report rides the 1 MiB
+       job-result envelope; a pathological bundle truncates with
+       an honest dropped count, never an oversized reply. */
+    for(const char* key :
+            { "conflicts", "missing", "warnings", "errors" })
+    {
+        CapReportArray(out, key);
+    }
     return out;
 }
 
@@ -1547,21 +1612,12 @@ bool WorkspaceService::DocumentBytes(const std::string& id,
                                      std::string& bytes,
                                      std::string& err) const
 {
-    const WorkspaceStore::LoadResult lr = store_.Load(id);
-    if(lr.status != WorkspaceStore::LoadStatus::Loaded &&
-       lr.status != WorkspaceStore::LoadStatus::Recovered)
-    {
-        err = lr.error.empty() ? "no managed workspace '" + id + "'"
-                               : lr.error;
-        return false;
-    }
-    if(!lr.candidate)
-    {
-        err = "workspace '" + id + "' has no candidate";
-        return false;
-    }
-    bytes = studio::ToJson(lr.candidate->document).dump(2);
-    return true;
+    /* Raw document.json — byte-identical to re-serializing a
+       loaded candidate, but a marker + single file read rather
+       than a full manifest-verify + registry-overlay + parse.
+       Reader-thread metadata stays bounded and cheap; the IPC
+       layer caches per revision on top of this. */
+    return store_.ReadActiveDocumentBytes(id, bytes, err);
 }
 
 /*---------------------------------------------------------*\

@@ -182,7 +182,8 @@ public:
     void CancelSession(uint64_t session_id);
     /* Drop transfers idle past options.idle_expiry_ms — called
        by the IPC surface on every workspace command and on the
-       owner loop's PollEvents tick. */
+       owner loop's PollEvents tick. Mutex-serialized like every
+       other public op. */
     void SweepExpired();
 
     uint64_t       StagedBytes() const;
@@ -211,6 +212,10 @@ private:
     void        Drop(Transfer& t);      /* erase record + file      */
     std::string PathFor(const std::string& id) const;
     static uint64_t NowMs();
+    /* Under-lock variants — public ops call these while already
+       holding mutex_; NEVER call the locking forms there. */
+    void        SweepExpiredLocked();
+    size_t      LiveCountLocked(uint64_t session_id) const;
 
     std::string          root_;
     Options              options_;

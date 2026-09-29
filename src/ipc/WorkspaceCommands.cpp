@@ -25,10 +25,13 @@
 #include "presets/PresetRegistry.h"
 #include "presets/EffectRegistry.h"
 
+#include <chrono>
 #include <filesystem>
 #include <string>
 
 namespace openrgb2 { namespace ipc {
+
+namespace fs = std::filesystem;
 
 namespace
 {
@@ -108,6 +111,45 @@ nlohmann::json Paged(const std::vector<T>& items, const Page& p,
     return out;
 }
 
+/* Cheap invalidation key for the reader caches — a bounded
+   entry walk (names + sizes + write times), never a parse.
+   Mixing entry mtimes catches content rewrites the dir's own
+   timestamp does not report. 0 = unreadable/absent (caches
+   still build once and re-check each call). */
+uint64_t DirStamp(const std::string& dir)
+{
+    std::error_code ec;
+    if(!fs::is_directory(dir, ec))
+    {
+        return 0;
+    }
+    uint64_t h = 1469598103934665603ull;    /* FNV-1a 64 offset */
+    auto mix = [&](uint64_t v)
+    {
+        h ^= v;
+        h *= 1099511628211ull;
+    };
+    for(const fs::directory_entry& e :
+            fs::directory_iterator(dir, ec))
+    {
+        const std::string name = e.path().filename().string();
+        for(unsigned char c : name)
+        {
+            mix(c);
+        }
+        mix((uint64_t)e.file_size(ec));
+        const fs::file_time_type t = e.last_write_time(ec);
+        mix((uint64_t)std::chrono::duration_cast<
+            std::chrono::nanoseconds>(
+                t.time_since_epoch()).count());
+    }
+    const fs::file_time_type dt = fs::last_write_time(dir, ec);
+    mix((uint64_t)std::chrono::duration_cast<
+        std::chrono::nanoseconds>(
+            dt.time_since_epoch()).count());
+    return ec ? 0 : h;
+}
+
 } /* anonymous namespace */
 
 WorkspaceCommands::WorkspaceCommands(
@@ -158,6 +200,101 @@ WorkspaceCommands::WorkspaceCommands(
 }
 
 /*---------------------------------------------------------*\
+||| Reader caches — file work is never re-run per request    ||
+||| (library/list key on dir write times; document bytes on  ||
+||| durable marker revisions).                               ||
+\*---------------------------------------------------------*/
+
+std::shared_ptr<const studio::PresetRegistry>
+WorkspaceCommands::CachedDevices() const
+{
+    const uint64_t stamp =
+        DirStamp(service_->Store().LibraryDevicesDir());
+    std::lock_guard<std::mutex> g(cache_mutex_);
+    if(!lib_dev_ || lib_dev_mtime_ != stamp)
+    {
+        lib_dev_ = std::make_shared<const studio::PresetRegistry>(
+            service_->Store().EffectiveDeviceRegistry());
+        lib_dev_mtime_ = stamp;
+    }
+    return lib_dev_;
+}
+
+std::shared_ptr<const studio::EffectRegistry>
+WorkspaceCommands::CachedEffects() const
+{
+    const uint64_t stamp =
+        DirStamp(service_->Store().LibraryEffectsDir());
+    std::lock_guard<std::mutex> g(cache_mutex_);
+    if(!lib_eff_ || lib_eff_mtime_ != stamp)
+    {
+        lib_eff_ = std::make_shared<const studio::EffectRegistry>(
+            service_->Store().EffectiveEffectRegistry());
+        lib_eff_mtime_ = stamp;
+    }
+    return lib_eff_;
+}
+
+std::vector<std::string> WorkspaceCommands::CachedList() const
+{
+    /* The id set changes only when a workspace dir appears or
+       vanishes under the root — the root's own write time is
+       the invalidation key (a generation write inside an id
+       dir does not change the LIST). */
+    const uint64_t stamp = DirStamp(service_->Store().Root());
+    std::lock_guard<std::mutex> g(cache_mutex_);
+    if(list_mtime_ != stamp)
+    {
+        list_ids_   = service_->Store().List();
+        list_mtime_ = stamp;
+    }
+    return list_ids_;
+}
+
+std::shared_ptr<const std::string>
+WorkspaceCommands::CachedDocumentBytes(const std::string& id,
+                                       uint64_t workspace_revision,
+                                       uint64_t resource_revision,
+                                       std::string& err) const
+{
+    std::lock_guard<std::mutex> g(cache_mutex_);
+    const auto it = doc_cache_.find(id);
+    if(it != doc_cache_.end() &&
+       it->second.workspace_revision == workspace_revision &&
+       it->second.resource_revision == resource_revision)
+    {
+        return it->second.bytes;
+    }
+    std::string bytes;
+    /* One bounded load per (id,revisions) — repeat download
+       begins and content_sha256 reads hit the cache. */
+    if(!service_->DocumentBytes(id, bytes, err))
+    {
+        return nullptr;
+    }
+    DocCacheEntry e;
+    e.workspace_revision = workspace_revision;
+    e.resource_revision  = resource_revision;
+    e.seq    = doc_cache_seq_++;
+    e.bytes  = std::make_shared<const std::string>(
+                   std::move(bytes));
+    doc_cache_[id] = std::move(e);
+    while(doc_cache_.size() > kMaxDocCacheEntries)
+    {
+        auto oldest = doc_cache_.begin();
+        for(auto i = doc_cache_.begin(); i != doc_cache_.end(); ++i)
+        {
+            if(i->second.seq < oldest->second.seq)
+            {
+                oldest = i;
+            }
+        }
+        doc_cache_.erase(oldest);
+    }
+    return doc_cache_[id].bytes;
+}
+
+/*---------------------------------------------------------*\
 ||| Metadata                                                  ||
 \*---------------------------------------------------------*/
 
@@ -169,29 +306,37 @@ nlohmann::json WorkspaceCommands::SnapshotJson() const
     {
         return out;
     }
-    const std::string id = service_->CurrentId();
-    if(id.empty())
+    /* One coherent published snapshot — never torn across a
+       commit and never queued behind worker file I/O. */
+    const WorkspaceService::PublishedState snap = service_->Snapshot();
+    if(!snap.managed)
     {
         return out;
     }
-    const std::shared_ptr<const WorkspaceCandidate> cand =
-        service_->CurrentCandidate();
     out["managed"]            = true;
-    out["id"]                 = id;
-    out["workspace_revision"] = service_->WorkspaceRevision();
-    out["resource_revision"]  = service_->ResourceRevision();
-    out["generation"]         = service_->CurrentGeneration();
-    if(cand)
+    out["id"]                 = snap.id;
+    out["workspace_revision"] = snap.workspace_revision;
+    out["resource_revision"]  = snap.resource_revision;
+    out["generation"]         = snap.generation;
+    if(!snap.name.empty())
     {
-        out["name"] = cand->document.meta.name;
-        /* The deterministic serialization is what a document
-           download streams — the hash is the reconnect-reconcile
-           token (plan 3.3). In-memory only: bounded CPU, never
-           file I/O on a reader thread. */
-        out["content_sha256"] =
-            Sha256Hex(studio::ToJson(cand->document).dump(2));
-        out["source_form"] =
-            WorkspaceSourceFormName(cand->source_form);
+        out["name"] = snap.name;
+    }
+    if(!snap.source_form.empty())
+    {
+        out["source_form"] = snap.source_form;
+    }
+    /* The deterministic serialization is what a document
+       download streams — same bytes the doc cache serves, so
+       the hash is the reconnect-reconcile token (plan 3.3).
+       Cached per revision: at most one bounded store read per
+       commit, amortized across every get/download. */
+    std::string err;
+    if(const std::shared_ptr<const std::string> bytes =
+           CachedDocumentBytes(snap.id, snap.workspace_revision,
+                               snap.resource_revision, err))
+    {
+        out["content_sha256"] = Sha256Hex(*bytes);
     }
     return out;
 }
@@ -210,6 +355,21 @@ IpcReply WorkspaceCommands::HandleGet(uint64_t session_id,
             return FailDetail(ErrCode::BadRequest,
                               "invalid workspace id",
                               "bad_request");
+        }
+        /* The current id answers from the published snapshot —
+           no marker read at all. */
+        const WorkspaceService::PublishedState snap = service_->Snapshot();
+        if(snap.managed && snap.id == id)
+        {
+            return IpcReply::Success(MsgType::Ok,
+                nlohmann::json::object({
+                    { "managed",            true                  },
+                    { "id",                 id                    },
+                    { "workspace_revision",
+                      snap.workspace_revision                     },
+                    { "resource_revision",
+                      snap.resource_revision                      },
+                }));
         }
         const WorkspaceStore::Revisions rev =
             service_->Store().LoadRevisions(id);
@@ -236,7 +396,9 @@ IpcReply WorkspaceCommands::HandleList(const nlohmann::json& body)
     {
         return err;
     }
-    const std::vector<std::string> all = service_->Store().List();
+    /* Cached on the root dir's write time — the id set, not
+       the file system, is what this answer is about. */
+    const std::vector<std::string> all = CachedList();
     nlohmann::json ids = nlohmann::json::array();
     for(uint64_t i = p.offset;
         i < all.size() && ids.size() < p.limit; ++i)
@@ -265,8 +427,9 @@ IpcReply WorkspaceCommands::HandleCatalog(const nlohmann::json& body)
     uint64_t total = 0;
     if(kind == "devices")
     {
-        const auto items =
-            service_->Store().EffectiveDeviceRegistry().List();
+        /* Cached effective library — an unchanged library is
+           never re-parsed per request. */
+        const auto items = CachedDevices()->List();
         total = items.size();
         entries = Paged(items, p,
             [](const studio::PresetRegistry::PresetInfo& i)
@@ -283,8 +446,7 @@ IpcReply WorkspaceCommands::HandleCatalog(const nlohmann::json& body)
     }
     else if(kind == "effects")
     {
-        const auto items =
-            service_->Store().EffectiveEffectRegistry().List();
+        const auto items = CachedEffects()->List();
         total = items.size();
         entries = Paged(items, p,
             [](const studio::EffectRegistry::EffectInfo& i)
@@ -300,8 +462,7 @@ IpcReply WorkspaceCommands::HandleCatalog(const nlohmann::json& body)
     }
     else if(kind == "workspaces")
     {
-        const std::vector<std::string> all =
-            service_->Store().List();
+        const std::vector<std::string> all = CachedList();
         total = all.size();
         nlohmann::json ids = nlohmann::json::array();
         for(uint64_t i = p.offset;
@@ -463,7 +624,9 @@ IpcReply WorkspaceCommands::HandleTransferBegin(
     {
         /* Bounded document read materialized for staged
            download — document/type/look content rides the
-           transfer mechanism, not an inline body. */
+           transfer mechanism, not an inline body. Revisions
+           are the cheap staleness key: repeat begins serve
+           the cached bytes; a commit invalidates honestly. */
         const std::string id = body.value("id", std::string());
         if(id.empty() || !WorkspaceStore::IsWorkspaceId(id))
         {
@@ -471,14 +634,27 @@ IpcReply WorkspaceCommands::HandleTransferBegin(
                 "download requires {id} naming a managed "
                 "workspace", "bad_request");
         }
-        std::string bytes, err;
-        if(!service_->DocumentBytes(id, bytes, err))
+        const WorkspaceStore::Revisions rev =
+            service_->Store().LoadRevisions(id);
+        if(!rev.exists || !rev.error.empty())
+        {
+            return FailDetail(ErrCode::BadRequest,
+                rev.error.empty()
+                    ? "no managed workspace '" + id + "'"
+                    : rev.error,
+                "bad_request");
+        }
+        std::string err;
+        const std::shared_ptr<const std::string> bytes =
+            CachedDocumentBytes(id, rev.workspace_revision,
+                                rev.resource_revision, err);
+        if(!bytes)
         {
             return FailDetail(ErrCode::BadRequest, err,
                               "bad_request");
         }
         const WorkspaceTransfer::BeginResult r =
-            transfers_.StageDownload(session_id, kind, bytes);
+            transfers_.StageDownload(session_id, kind, *bytes);
         if(!r.ok)
         {
             return FailDetail(ErrCode::BadRequest, r.error, r.detail);

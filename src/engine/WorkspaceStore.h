@@ -150,6 +150,19 @@ public:
     };
     Revisions LoadRevisions(const std::string& id) const;
 
+    /* The ACTIVE generation's document.json bytes verbatim —
+       the same bytes Load's candidate re-serializes to
+       (ToJson(document).dump(2)), read straight off disk
+       WITHOUT the manifest verify / registry overlay /
+       candidate parse a full Load performs. The IPC document
+       download + content hash use this so a metadata read
+       never re-resolves a workspace on a reader thread; the
+       marker (primary, backup on a torn primary) selects the
+       generation honestly. */
+    bool ReadActiveDocumentBytes(const std::string& id,
+                                 std::string& bytes,
+                                 std::string& err) const;
+
     /* Managed workspace ids (dirs with a marker or generations —
        the shared "library" dir is never listed). */
     std::vector<std::string> List() const;

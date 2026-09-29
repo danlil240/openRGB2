@@ -921,6 +921,53 @@ WorkspaceStore::Revisions WorkspaceStore::LoadRevisions(
     return r;
 }
 
+bool WorkspaceStore::ReadActiveDocumentBytes(
+    const std::string& id, std::string& bytes,
+    std::string& err) const
+{
+    if(!IsWorkspaceId(id))
+    {
+        err = "invalid workspace id '" + id + "'";
+        return false;
+    }
+    const fs::path wsdir = WorkspaceDir(id);
+    std::error_code ec;
+    if(!fs::is_directory(wsdir, ec))
+    {
+        err = "no managed workspace '" + id + "'";
+        return false;
+    }
+    /* The marker selects honestly — a torn primary falls back
+       to the last-known-good backup, never a guessed gen. */
+    const Marker primary = ReadMarker(wsdir / "active");
+    const Marker backup  = ReadMarker(wsdir / "active.lkg");
+    const Marker* sel = primary.valid  ? &primary
+                      : backup.valid   ? &backup
+                      : nullptr;
+    if(sel == nullptr)
+    {
+        err = "workspace '" + id + "' has no readable marker";
+        return false;
+    }
+    const fs::path doc = wsdir / "generations" / sel->generation /
+                         "document.json";
+    if(!ReadFileBytes(doc, bytes))
+    {
+        err = "workspace '" + id + "' document.json is "
+              "unreadable under generation '" + sel->generation +
+              "'";
+        return false;
+    }
+    if(bytes.size() > kMaxDocumentBytes)
+    {
+        err = "workspace '" + id + "' document exceeds the "
+              "byte bound";
+        bytes.clear();
+        return false;
+    }
+    return true;
+}
+
 namespace
 {
 

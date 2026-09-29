@@ -197,6 +197,25 @@ public:
     /* Current-workspace introspection (empty until an
        Open/Save/Import adopts one). */
     const WorkspaceStore& Store() const { return store_; }
+    /* Coherent, commit-free read of the current workspace —
+       refreshed at each commit boundary inside snap_mutex_
+       (held for the field copy only, NEVER across store I/O),
+       so metadata reads and the legacy-mutation gate never
+       stall behind a multi-MiB worker commit (plan 3.3:
+       handlers read snapshots). */
+    struct PublishedState
+    {
+        bool        managed            = false;
+        std::string id;
+        std::string name;
+        std::string source_form;
+        uint64_t    workspace_revision = 0;
+        uint64_t    resource_revision  = 0;
+        uint64_t    generation         = 0;
+    };
+    PublishedState Snapshot() const;
+    /* Worker/owner paths only — takes the commit mutex. IPC
+       metadata reads use Snapshot() instead. */
     std::shared_ptr<const WorkspaceCandidate> CurrentCandidate() const;
     std::string  CurrentId()          const;
     uint64_t     WorkspaceRevision()  const;
@@ -334,6 +353,13 @@ private:
     Deps            deps_;
     mutable std::mutex mutex_;
     Current            current_;
+    /* Copy current_ -> snap_ for lock-light readers —
+       CALLER HOLDS mutex_. snap_mutex_ is only ever held for
+       the field copy: the worker never stores I/O under it,
+       so readers contend on microseconds, not commits. */
+    void                PublishLocked();
+    mutable std::mutex  snap_mutex_;
+    PublishedState      snap_;
 };
 
 const char*        JobStateName(WorkspaceService::JobState s);

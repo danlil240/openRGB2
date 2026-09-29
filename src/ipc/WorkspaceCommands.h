@@ -36,11 +36,17 @@
 #include "WorkspaceTransfer.h"
 
 #include "WorkspaceService.h"
+#include "presets/PresetRegistry.h"
+#include "presets/EffectRegistry.h"
 
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <vector>
 
 namespace openrgb2
 {
@@ -109,8 +115,51 @@ private:
     IpcReply HandleJobCancel(uint64_t session_id,
                              const nlohmann::json& body);
 
+    /* Reader-side caches — handlers must not re-run file work
+       per request (plan 3.3). The library cache keys on the
+       managed library dirs' write times (a catalog never
+       re-parses a unchanged library), the workspace list on
+       the root dir's write time (the id set only changes when
+       an id dir appears/vanishes), and document bytes on the
+       durable marker revisions. Each rebuilds once per
+       observed change; all are shared_ptr snapshots so a
+       concurrent rebuild never mutates an in-flight reply. */
+    std::shared_ptr<const studio::PresetRegistry>
+                         CachedDevices() const;
+    std::shared_ptr<const studio::EffectRegistry>
+                         CachedEffects() const;
+    std::vector<std::string>
+                         CachedList() const;
+    std::shared_ptr<const std::string>
+                         CachedDocumentBytes(
+                             const std::string& id,
+                             uint64_t workspace_revision,
+                             uint64_t resource_revision,
+                             std::string& err) const;
+
     WorkspaceService*        service_;
     WorkspaceTransfer        transfers_;
+
+    mutable std::mutex       cache_mutex_;
+    mutable uint64_t         lib_dev_mtime_ = 0;
+    mutable uint64_t         lib_eff_mtime_ = 0;
+    mutable std::shared_ptr<const studio::PresetRegistry>
+                             lib_dev_;
+    mutable std::shared_ptr<const studio::EffectRegistry>
+                             lib_eff_;
+    mutable uint64_t         list_mtime_ = 0;
+    mutable std::vector<std::string> list_ids_;
+    struct DocCacheEntry
+    {
+        uint64_t    workspace_revision = 0;
+        uint64_t    resource_revision  = 0;
+        uint64_t    seq                = 0;
+        std::shared_ptr<const std::string> bytes;
+    };
+    mutable std::map<std::string, DocCacheEntry> doc_cache_;
+    mutable uint64_t         doc_cache_seq_ = 1;
+    /* Document cache bound: 4 entries x the 4 MiB document cap. */
+    static constexpr size_t kMaxDocCacheEntries = 4;
 };
 
 } /* namespace ipc */

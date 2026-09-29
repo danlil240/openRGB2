@@ -88,7 +88,6 @@ Defined values:
 | capability | surface |
 | --- | --- |
 | `studio_workspace_v1` | `WORKSPACE_COMMAND` (managed workspace jobs, revisions, transfers — §5) |
-```
 
 After the handshake every message's header `version` MUST equal
 `negotiated_version`. A mismatched message gets `ERROR(version_mismatch)`;
@@ -480,9 +479,10 @@ commit, `resource_revision` on resource-set change. Candidate verbs
 (`commit`, `save_copy`, `import_commit`) carry `base_revision` and
 `resource_revision`; a stale value fails the job with
 `detail:"revision_conflict"` — never silently wins. While a managed
-workspace is active the legacy mutation verbs (`SET_SCENE`,
-`SET_PLAYBACK_MODE`, `LAYOUT_COMMAND` set_*) are refused — read-only
-state verbs and the workspace surface stay live.
+workspace is active the lossy legacy DOCUMENT mutations (`SET_SCENE`,
+`LAYOUT_COMMAND` set_*) are refused (`ERROR bad_request`,
+`detail:"workspace_required"`); playback-mode changes, reads, and
+telemetry stay live — the plan only gates document mutation.
 
 | verb | body | reply |
 | --- | --- | --- |

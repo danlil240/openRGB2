@@ -389,7 +389,7 @@ WorkspaceTransfer::BeginResult WorkspaceTransfer::BeginUpload(
     uint64_t declared_length, const std::string& sha256_hex)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    SweepExpired();
+    SweepExpiredLocked();
 
     BeginResult r;
     if(!IsKnownKind(kind))
@@ -408,7 +408,7 @@ WorkspaceTransfer::BeginResult WorkspaceTransfer::BeginUpload(
         r.detail = "too_large";
         return r;
     }
-    if(LiveCount(session_id) >= options_.max_per_session)
+    if(LiveCountLocked(session_id) >= options_.max_per_session)
     {
         r.error = "too many open transfers on this session";
         r.detail = "transfer_limit";
@@ -456,7 +456,7 @@ WorkspaceTransfer::BeginResult WorkspaceTransfer::StageDownload(
     const std::string& bytes)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    SweepExpired();
+    SweepExpiredLocked();
 
     BeginResult r;
     if(!IsKnownKind(kind))
@@ -470,7 +470,7 @@ WorkspaceTransfer::BeginResult WorkspaceTransfer::StageDownload(
         r.detail = "too_large";
         return r;
     }
-    if(LiveCount(session_id) >= options_.max_per_session)
+    if(LiveCountLocked(session_id) >= options_.max_per_session)
     {
         r.error = "too many open transfers on this session";
         r.detail = "transfer_limit";
@@ -520,7 +520,7 @@ WorkspaceTransfer::ChunkResult WorkspaceTransfer::WriteChunk(
     uint64_t offset, const std::vector<uint8_t>& decoded)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    SweepExpired();
+    SweepExpiredLocked();
     ChunkResult r;
     auto it = transfers_.find(transfer_id);
     if(it == transfers_.end() || it->second.session_id != session_id)
@@ -578,7 +578,7 @@ WorkspaceTransfer::ChunkResult WorkspaceTransfer::ReadChunk(
     uint64_t offset, uint64_t max_bytes)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    SweepExpired();
+    SweepExpiredLocked();
     ChunkResult r;
     auto it = transfers_.find(transfer_id);
     if(it == transfers_.end() || it->second.session_id != session_id)
@@ -635,7 +635,7 @@ WorkspaceTransfer::FinishResult WorkspaceTransfer::Finish(
     uint64_t session_id, const std::string& transfer_id)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    SweepExpired();
+    SweepExpiredLocked();
     FinishResult r;
     auto it = transfers_.find(transfer_id);
     if(it == transfers_.end() || it->second.session_id != session_id)
@@ -755,6 +755,12 @@ void WorkspaceTransfer::CancelSession(uint64_t session_id)
 
 void WorkspaceTransfer::SweepExpired()
 {
+    std::lock_guard<std::mutex> lock(mutex_);
+    SweepExpiredLocked();
+}
+
+void WorkspaceTransfer::SweepExpiredLocked()
+{
     const uint64_t now = NowMs();
     for(auto it = transfers_.begin(); it != transfers_.end();)
     {
@@ -778,6 +784,12 @@ uint64_t WorkspaceTransfer::StagedBytes() const
 }
 
 size_t WorkspaceTransfer::LiveCount(uint64_t session_id) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return LiveCountLocked(session_id);
+}
+
+size_t WorkspaceTransfer::LiveCountLocked(uint64_t session_id) const
 {
     size_t n = 0;
     for(const auto& kv : transfers_)
