@@ -24,15 +24,20 @@ usage:
     qa.py key "Ctrl+2" | "Tab" | "a"
     qa.py scroll SEL DY [DX]      (DY in wheel steps, -3 = down 3)
     qa.py reveal SEL              scroll until SEL's rect is inside the window
+    qa.py pick X Y | pick SEL     hit-test: show the item chain under a point
     qa.py shot [PATH.png]
     qa.py wait SEL [PROP VALUE] [--timeout MS]
     qa.py eval "this.currentView = 2"
     qa.py raw '{"op":"tree","all":true}'
 
 Extra flags: `click SEL --reveal` scrolls the target into view
-first (flickables clip; a bare click on a scrolled-out item hits
-off-window coordinates and silently does nothing). `shot` creates
-the parent directory before asking the app to write.
+first (flickables clip). `click SEL` verifies by default: an
+off-window center auto-reveals, and if the resolved point is
+covered by another item the click refuses instead of silently
+landing on the wrong thing (--no-verify restores the raw send).
+Pinned items (footers) that can't be scrolled are detected by an
+unmoving rect. `shot` creates the parent directory before asking
+the app to write.
 """
 
 import json
@@ -89,22 +94,42 @@ def send(req, port):
         die(f"unparseable reply: {buf!r}", 1)
 
 
+def geom_rect(sel, port):
+    """Resolved scene rect [x,y,w,h] for SEL, or None."""
+    g = send({"op": "geom", "sel": sel}, port)
+    if not g.get("ok"):
+        return None
+    return g["result"].get("rect")
+
+
+def window_size(port):
+    st = send({"op": "state"}, port)
+    if not st.get("ok"):
+        return 0, 0
+    return (st["result"].get("width", 0),
+            st["result"].get("height", 0))
+
+
 def reveal(sel, port, margin=40, max_steps=20):
     """Scroll the page until SEL's rect is inside the window.
 
     Flickables clip: an item can report visible:true while its
     scene rect is off-window (clicks then land nowhere). Pumps a
-    few wheel steps toward the item, settling each time.
+    few wheel steps toward the item, settling each time. Items
+    outside the scroll area (pinned footers like saveBar) never
+    move — an unchanged rect across a scroll ends the loop
+    honestly instead of timing out.
     """
+    still = 0
     for _ in range(max_steps):
-        st = send({"op": "state"}, port)
-        if not st.get("ok"):
-            return st
-        win_h = st["result"].get("height", 0)
-        g = send({"op": "geom", "sel": sel}, port)
-        if not g.get("ok"):
-            return g
-        r = g["result"].get("rect") or [0, 0, 0, 0]
+        win_w, win_h = window_size(port)
+        if not win_h:
+            return {"ok": False, "error": "no_window",
+                    "message": "could not read window size"}
+        r = geom_rect(sel, port)
+        if r is None:
+            return {"ok": False, "error": "not_found",
+                    "message": f"no rect for {sel}"}
         cy = r[1] + r[3] / 2
         if margin <= cy <= win_h - margin:
             # In-bounds isn't enough — a Flickable keeps moving
@@ -112,10 +137,7 @@ def reveal(sel, port, margin=40, max_steps=20):
             # coords once. Require two identical rects ~150ms apart
             # before calling it settled.
             time.sleep(0.15)
-            g2 = send({"op": "geom", "sel": sel}, port)
-            if not g2.get("ok"):
-                return g2
-            r2 = g2["result"].get("rect") or [0, 0, 0, 0]
+            r2 = geom_rect(sel, port)
             if r2 == r:
                 return {"ok": True,
                         "result": {"rect": r, "height": win_h}}
@@ -125,8 +147,75 @@ def reveal(sel, port, margin=40, max_steps=20):
         send({"op": "scroll", "x": 960, "y": win_h / 2, "dy": dy},
              port)
         time.sleep(0.35)
+        r2 = geom_rect(sel, port)
+        if r2 == r:
+            # One unmoved scroll is inconclusive — the page may
+            # still be settling after a nav switch. Items outside
+            # the scroll area (pinned footers like saveBar) never
+            # move; require three consecutive stills to say so.
+            still += 1
+            if still < 3:
+                continue
+            if margin <= cy <= win_h - margin:
+                return {"ok": True,
+                        "result": {"rect": r, "height": win_h}}
+            return {"ok": False, "error": "fixed_offscreen",
+                    "message": f"{sel} does not move with scroll "
+                               f"(rect {r}); it is outside the "
+                               f"scrollable area"}
+        still = 0
     return {"ok": False, "error": "reveal_timeout",
             "message": f"could not scroll {sel} into view"}
+
+
+_PICK_JS = ("(function(root){var p=root.contentItem,x=%r,y=%r,out=[];"
+            "for(var i=0;i<40;i++){var c=p.childAt(x,y);if(!c)break;"
+            "var tl=c.mapToItem(null,0,0),br=c.mapToItem(null,"
+            "c.width,c.height);"
+            "out.push({n:c.objectName||'',t:String(c).split('(')[0],"
+            "r:[tl.x,tl.y,br.x-tl.x,br.y-tl.y]});"
+            "var pt=c.mapFromItem(p,x,y);x=pt.x;y=pt.y;p=c}"
+            "return JSON.stringify(out)})(this)")
+
+
+def pick_chain(port, x, y):
+    """Deepest-first ancestor chain of items under window point.
+
+    Uses the eval escape hatch — no server change needed. Each
+    entry: {n: objectName, t: type name, r: scene rect}.
+    """
+    r = send({"op": "eval", "code": _PICK_JS % (x, y)}, port)
+    if not r.get("ok") or not r.get("result"):
+        return []
+    try:
+        return json.loads(r["result"])
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _rect_close(a, b, eps=2.0):
+    return a and b and len(a) == 4 and len(b) == 4 and \
+        all(abs(x - y) <= eps for x, y in zip(a, b))
+
+
+def verify_hit(port, rect, name):
+    """Check that a click at rect's center lands inside the
+    target's subtree. The chain from childAt already guarantees
+    containment at the point; the target proves it is in that
+    chain by matching objectName AND its own rect (rect alone
+    when the item is unnamed).
+    Returns (ok, chain)."""
+    if not rect or rect[2] <= 0 or rect[3] <= 0:
+        return False, []
+    cx, cy = rect[0] + rect[2] / 2, rect[1] + rect[3] / 2
+    chain = pick_chain(port, cx, cy)
+    for el in chain:
+        if name:
+            if el["n"] == name and _rect_close(el["r"], rect):
+                return True, chain
+        elif _rect_close(el["r"], rect):
+            return True, chain
+    return False, chain
 
 
 def build(op, args):
@@ -249,16 +338,73 @@ def main():
         sys.exit(2)
     if args[0] == "reveal":
         reply = reveal(parse_sel(args[1]), port)
+    elif args[0] == "pick":
+        # Hit-test: chain of items under a point (diagnostic for
+        # covered/clipped clicks). `pick SEL` uses the item's
+        # center; `pick X Y` takes window coords.
+        if len(args) > 2 and args[1].lstrip("-").replace(
+                ".", "", 1).isdigit():
+            x, y = float(args[1]), float(args[2])
+        else:
+            r = geom_rect(parse_sel(args[1]), port)
+            if r is None:
+                reply = {"ok": False, "error": "not_found",
+                         "message": f"no rect for {args[1]}"}
+                print(json.dumps(reply, indent=2, ensure_ascii=False))
+                sys.exit(1)
+            x, y = r[0] + r[2] / 2, r[1] + r[3] / 2
+        reply = {"ok": True,
+                 "result": {"x": x, "y": y,
+                            "chain": pick_chain(port, x, y)}}
     else:
-        if args[0] == "click" and "--reveal" in args:
-            args.remove("--reveal")
+        if args[0] == "click":
+            no_verify = "--no-verify" in args
+            if no_verify:
+                args.remove("--no-verify")
             is_xy = args[1].lstrip("-").replace(".", "", 1).isdigit()
-            if not is_xy:
-                r = reveal(parse_sel(args[1]), port)
-                if not r.get("ok"):
-                    print(json.dumps(r, indent=2))
-                    sys.exit(1)
-                time.sleep(0.15)
+            if "--reveal" in args:
+                args.remove("--reveal")
+                if not is_xy:
+                    r = reveal(parse_sel(args[1]), port)
+                    if not r.get("ok"):
+                        print(json.dumps(r, indent=2))
+                        sys.exit(1)
+                    time.sleep(0.15)
+            elif not is_xy and not no_verify:
+                # A click is only honest if it lands on the
+                # target: off-window centers get a reveal; a
+                # point covered by another item refuses loudly.
+                sel = parse_sel(args[1])
+                win_w, win_h = window_size(port)
+                r = geom_rect(sel, port)
+                if r is not None:
+                    cy = r[1] + r[3] / 2
+                    if not (0 <= cy <= win_h):
+                        rr = reveal(sel, port)
+                        if not rr.get("ok"):
+                            print(json.dumps(rr, indent=2))
+                            sys.exit(1)
+                        r = geom_rect(sel, port)
+                        time.sleep(0.15)
+                if r is not None:
+                    name = ""
+                    if isinstance(sel, str):
+                        name = sel if ":" not in sel else \
+                            (sel.split(":", 1)[1]
+                             if sel.startswith("name:") else "")
+                    elif isinstance(sel, dict):
+                        name = sel.get("name", "")
+                    hit, chain = verify_hit(port, r, name)
+                    if not hit:
+                        leaf = chain[-1] if chain else {}
+                        reply = {"ok": False, "error": "covered",
+                                 "message": f"click point is "
+                                           f"covered by "
+                                           f"{leaf.get('n') or leaf.get('t') or 'nothing'}",
+                                 "rect": r, "leaf": leaf}
+                        print(json.dumps(reply, indent=2,
+                                         ensure_ascii=False))
+                        sys.exit(1)
         req = build(args[0], args[1:])
         reply = send(req, port)
     # Windows consoles default to cp1252 — QML text carries

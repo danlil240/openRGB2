@@ -184,6 +184,98 @@ commit (or track a separate "field dirty" flag), and clear
 
 ---
 
+---
+
+## Second pass — 2026-09-29 (post-fix verification + continued hunting)
+
+Drove the same flows again against `build/src/ui/Release/openrgb2-ui.exe
+--qa` (rebuilt after `81fabe2`..`b4f0137`), live engine, same 7×321
+topology. All four fixes verified end-to-end in the live UI (table
+above). Two **new** confirmed defects below; neither is a regression of
+the earlier fixes.
+
+### BUG-5 — `topology` events churn continuously while effects animate (medium)
+
+`EngineService::PollEvents` (`src/ipc/EngineService.cpp:2268`) diffs
+`SnapshotsJson()` to decide whether a `topology` event is pending — but
+`SnapshotsJson()` builds each entry with
+`SnapshotToJson(snap, /*colors*/ true)` (`:588`), so the diffed payload
+**includes per-frame LED colors**. Any animated frame flips the
+signature → a full `topology` EVENT (all controllers + all colors)
+pushes at every poll tick while effects run.
+
+Wire proof (`openrgb2-ctl subscribe 6` while `aurora` animates):
+4 `topology` events in ~5.5 s; diffing consecutive payloads shows the
+only changed fields are `colors` (`shots/r2-events2.log`).
+
+Consequences:
+
+- The diagnostics journal fills with `topology` rows at ~0.7 Hz —
+  BUG-3's `frame_status` fix removed one spam source but the same
+  evict-the-real-events class persists: the 128-entry ring cycles in
+  ~3 min of animation.
+- Continuous multi-KB pushes on the wire, plus `snapshotsChanged` →
+  `RecomputeControllers()` churn in the UI, for what is structurally a
+  no-op (topology = devices/zones, not pixels).
+
+**Suggested fix area**: diff topology on a structure-only signature
+(`SnapshotToJson(snap, colors=false)`) — colors already stream in
+`frame_status` at frame rate; nothing needs them in the topology event.
+
+### BUG-6 — Event journal drops every event payload (low)
+
+`DiagnosticsController::OnEventReceived(const QString& kind,
+const QVariantMap&)` (`src/ui/DiagnosticsController.cpp`) ignores the
+payload and calls `AppendEvent(kind, QString())` — so **every** journal
+entry has an empty `detail`. Scene/playback/topology rows are
+indistinguishable and carry no context (no preset name, revision, or
+controller count); only `error`/`connection` rows ever show detail.
+
+Deterministic from source; observed live: all journal rows had blank
+detail while events flowed.
+
+**Suggested fix area**: render a compact per-kind detail (e.g. scene
+name + revision, mode, snapshot count) — the payload is already on hand.
+
+### Second-pass verified working (in addition to the first-pass list)
+
+- Engine bounce: `quit` → UI degrades honestly (banner, retry,
+  controls inert, edits kept) → relaunch → reconnects and restores the
+  last applied scene; conflict flag still correct afterwards.
+- Transport **Stop** on an upload, then picking a live preset + Save →
+  `live_effects`/`playing`, all 321 LEDs lit (no blackout carry-over;
+  `shots/r2-sdk-live-after-stop.json`).
+- Layout editing via `layoutCtl.moveObject` → undo/redo both apply.
+- Keyboard: Tab focus moves sensibly; Space activates the focused
+  control; `type`/`key` reach `nameField`.
+- Rapid preset→save race: intermediate picks serialize, last wins
+  (`chrome`/`comet` sequence ended with the final pick applied).
+- Unicode scene name (`灯光 fx ✨ español`) persists correctly — the
+  mangled console glyphs were a terminal-decoding artifact (raw JSON
+  bytes are valid UTF-8).
+- Dashboard preview carries real per-LED colors (comet gradient, not
+  placeholders).
+- Diagnostics export writes a sane bundle; no `frame_status` in the
+  journal post-fix.
+- Reactive inputs round-trip: audio off→on (`audio: listening`),
+  screen (`sampling \\.\DISPLAY11`), key (`keys: listening`); reactive
+  scenes remain honestly live-only.
+
+### Second-pass harness changes (`tools/qa/qa.py`, uncommitted)
+
+- `pick X Y` op — deepest-first ancestor chain under a window point via
+  `childAt` (implemented through `eval`; no server change needed).
+- `click` now auto-reveals clipped targets and **verifies the click
+  landed on the intended item** by comparing the `pick` chain before
+  and after — catches silent misses into occluding layers.
+- `reveal` hardened: a single unmoved scroll no longer aborts (page may
+  still be settling post-nav); requires three consecutive stills before
+  `fixed_offscreen`.
+- Worked around (not fixed) one gap: wheel `scroll` needs a
+  plain-number `dy` arg in position 3 (`scroll X Y DY`), and
+  `set <flickable> contentY N` is a reliable fallback when wheel
+  delivery is unreliable mid-transition.
+
 ## Low-confidence observations (not confirmed)
 
 - **Conflict banner vs. `conflict:false`** — one screenshot
@@ -253,5 +345,6 @@ objects); AppSliders only commit on pointer interaction
 ## Artifacts
 
 `tools/qa/shots/` — screenshots (`bug1-*`, `bug4-saveblocked`,
-`transport-stopped`, `devices`), SDK readbacks (`sdk-*.json`),
-engine event captures (`events-*.log`), scene docs (`scene-*.json`).
+`transport-stopped`, `devices`, second pass `r2-*`), SDK readbacks
+(`sdk-*.json`, `r2-sdk-*.json`), engine event captures (`events-*.log`,
+`r2-events*.log`), scene docs (`scene-*.json`).
