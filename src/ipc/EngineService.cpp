@@ -185,6 +185,8 @@ nlohmann::json SnapshotToJson(const DeviceSnapshot& snap,
         zones.push_back(nlohmann::json::object({
             { "name",      z.name      },
             { "led_count", z.led_count },
+            { "leds_min",  z.leds_min  },
+            { "leds_max",  z.leds_max  },
         }));
     }
     nlohmann::json out = nlohmann::json::object({
@@ -1194,20 +1196,33 @@ IpcReply EngineService::Dispatch(MsgType type,
         /* The "Quit All" hook (plan section 4): the UI's quit
            command lands here; the engine then runs its ordered,
            bounded shutdown (OrderlyShutdown in main.cpp — owned
-           components stop in order). The reply is prepared
-           BEFORE the hook fires so the requester sees OK. */
+           components stop in order). The reply body is assembled
+           BEFORE the hook fires; the hook's own fields are merged
+           in so the backend-handoff decision rides the same OK. */
         if(!deps_.request_shutdown)
         {
             return IpcReply::Fail(ErrCode::Unavailable,
                 "engine shutdown is not wired on this process");
         }
-        const IpcReply reply = IpcReply::Success(MsgType::Ok,
-            nlohmann::json::object({
-                { "shutting_down", true },
-                { "ordered",       true },
-            }));
-        deps_.request_shutdown();
-        return reply;
+        const bool stop_backend =
+            body.is_object() &&
+            body.value("stop_backend", nlohmann::json()).is_boolean() &&
+            body["stop_backend"].get<bool>();
+        nlohmann::json reply_body = nlohmann::json::object({
+            { "shutting_down", true          },
+            { "ordered",       true          },
+            { "stop_backend",  stop_backend  },
+        });
+        const nlohmann::json extra =
+            deps_.request_shutdown(stop_backend);
+        if(extra.is_object())
+        {
+            for(auto it = extra.begin(); it != extra.end(); ++it)
+            {
+                reply_body[it.key()] = it.value();
+            }
+        }
+        return IpcReply::Success(MsgType::Ok, std::move(reply_body));
     }
 
     case MsgType::DiagGet:

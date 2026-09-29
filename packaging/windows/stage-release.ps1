@@ -19,7 +19,7 @@
         scripts/*.ps1          managed lifecycle (Task 6.2): start /
                                stop / update / rollback
         OpenRGB2.cmd           double-click launcher -> scripts\start
-        OpenRGB2.vbs + .ico    hidden desktop launcher and icon
+        OpenRGB2.vbs + .ico    compatibility launcher and application icon
         INSTALL.md             install/startup/recovery guide
         manifest.json          source/build manifest (per-file SHA-256)
 
@@ -220,6 +220,7 @@ if(-not $VerifyOnly) {
     Require (Join-Path $PkgDir "NOTICES.txt") "notices manifest source" | Out-Null
     Require (Join-Path $PkgDir "licenses")    "license texts" | Out-Null
     foreach($s in @("start-openrgb2.ps1","start-openrgb2-gui.ps1",
+                    "startup-task.ps1",
                     "stop-openrgb2.ps1","update-openrgb2.ps1",
                     "rollback-openrgb2.ps1","create-desktop-shortcut.ps1",
                     "OpenRGB2.cmd","OpenRGB2.vbs","OpenRGB2.ico",
@@ -364,6 +365,7 @@ if(-not $VerifyOnly) {
     #--------------------------------------------------------------#
     New-Item -ItemType Directory -Force -Path (Join-Path $OutDir "scripts") | Out-Null
     foreach($s in @("start-openrgb2.ps1","start-openrgb2-gui.ps1",
+                    "startup-task.ps1",
                     "stop-openrgb2.ps1","update-openrgb2.ps1",
                     "rollback-openrgb2.ps1","create-desktop-shortcut.ps1")) {
         Copy-Item (Join-Path $PkgDir $s) (Join-Path $OutDir "scripts")
@@ -479,7 +481,7 @@ if(-not $VerifyOnly) {
                 elseif($rel -like "profiles/*")     { "profiles" }
                 elseif($rel -like "licenses/*")     { "packaging/windows/licenses" }
                 elseif($rel -like "scripts/*")      { "packaging/windows" }
-                elseif($rel -eq "OpenRGB2.ico")  { "vendor/OpenRGB/qt/OpenRGB.ico" }
+                elseif($rel -eq "OpenRGB2.ico")  { "packaging/windows/OpenRGB2.ico" }
                 elseif($rel -eq "NOTICES.txt" -or $rel -eq "OpenRGB2.cmd" -or
                        $rel -eq "OpenRGB2.vbs" -or
                        $rel -eq "INSTALL.md" -or $rel -eq "RELEASE.md") {
@@ -555,6 +557,7 @@ $required = @(
     "licenses",
     "scripts\start-openrgb2.ps1",
     "scripts\start-openrgb2-gui.ps1",
+    "scripts\startup-task.ps1",
     "scripts\stop-openrgb2.ps1",
     "scripts\update-openrgb2.ps1",
     "scripts\rollback-openrgb2.ps1",

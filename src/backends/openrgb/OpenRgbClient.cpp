@@ -287,6 +287,8 @@ bool OpenRgbClient::EnumerateLocked(std::string& err)
             ZoneSnapshot zs;
             zs.name      = z.name;
             zs.led_count = z.leds_count;
+            zs.leds_min  = z.leds_min;
+            zs.leds_max  = z.leds_max;
             rec.snap.zones.push_back(std::move(zs));
         }
         /* Last-enumerated device colors — the device mapper seeds

@@ -484,7 +484,10 @@ int main()
         EngineService::Deps deps;
         bool shutdown_requested = false;
         deps.request_shutdown =
-            [&] { shutdown_requested = true; };
+            [&](bool) -> nlohmann::json {
+                shutdown_requested = true;
+                return nlohmann::json::object();
+            };
         EngineService svc(engine, deps);
         IpcServer server(svc);
         TestClient c;

@@ -5,6 +5,14 @@
 # scripts and process fixtures are Win32/PowerShell.
 
 if(WIN32)
+    add_test(NAME package_startup_task_test
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/startup_task_tests.ps1
+            -Script ${CMAKE_SOURCE_DIR}/packaging/windows/startup-task.ps1)
+    set_tests_properties(package_startup_task_test PROPERTIES
+        LABELS packaging
+        TIMEOUT 30)
+
     add_test(NAME package_launcher_test
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
             -File ${CMAKE_CURRENT_SOURCE_DIR}/launcher_tests.ps1

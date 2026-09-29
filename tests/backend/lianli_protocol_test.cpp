@@ -1060,27 +1060,87 @@ static void TestEffectRendering()
           "rainbow wave advances phase per frame");
     CHECK(wave != wave_r, "direction flag mirrors the wave");
 
-    /* per-fan wheel: each fan spans the full hue circle and is
-       offset by 360/fans so the wave cascades down the group */
+    /* continuous wheel: one hue circle spans the whole group so
+       the wave continues from each fan into the next — fan 1
+       starts where fan 0's third of the wheel ends */
     auto wave_p = RenderRainbowWave(leds, frames, false, 40, nullptr);
     CHECK(wave_p[0] == 255 && wave_p[1] == 0 && wave_p[2] == 0,
-          "fan 0 slot 0 starts red");
+          "chain slot 0 starts red");
     CHECK(wave_p[40 * 3] == 0 && wave_p[40 * 3 + 1] == 255
           && wave_p[40 * 3 + 2] == 0,
-          "fan 1 slot 0 offset by a third of the wheel");
+          "fan 1 slot 0 continues at a third of the wheel");
     CHECK(wave_p[80 * 3] == 0 && wave_p[80 * 3 + 1] == 0
           && wave_p[80 * 3 + 2] == 255,
-          "fan 2 slot 0 offset by two thirds");
+          "fan 2 slot 0 continues at two thirds");
+    /* the hue gradient is smooth across the fan boundary */
+    CHECK(memcmp(&wave_p[39 * 3], &wave_p[40 * 3], 3) != 0,
+          "hue keeps walking across the fan 0 -> fan 1 seam");
 
     /* perimeter order: virtual slot lands on physical LED order[slot]
-       — e.g. slot 12 (start of the reversed side strip) -> LED 19 */
+       — e.g. slot 12 (start of the reversed inner-right strip)
+       -> LED 31 */
     auto wave_o = RenderRainbowWave(leds, frames, false, 40, SLV3_LED_ORDER);
-    CHECK(memcmp(&wave_o[19 * 3], &wave_p[12 * 3], 3) == 0,
-          "rainbow order maps slot 12 to physical LED 19");
+    CHECK(memcmp(&wave_o[31 * 3], &wave_p[12 * 3], 3) == 0,
+          "rainbow order maps slot 12 to physical LED 31");
     const size_t f2 = frames / 3;
-    /* fan 1 slot 19 -> physical LED 40 + order[19] = 52 */
-    CHECK(memcmp(&wave_o[(f2 * leds + 52) * 3], &wave_p[(f2 * leds + 59) * 3], 3)
+    /* fan 1 slot 19 -> physical LED 40 + order[19] = 64 */
+    CHECK(memcmp(&wave_o[(f2 * leds + 64) * 3], &wave_p[(f2 * leds + 59) * 3], 3)
           == 0, "order remap holds on later frames and later fans");
+
+    /* stack effects: the perimeter path walks up the left edge
+       through fans 0..2 then down the right edge 2..0 — 24 slots
+       per fan, 72 for the group */
+    auto pwave = RenderPerimeterWave(leds, frames, false, 40,
+                                     SLV3_STACK_POS);
+    CHECK(pwave.size() == leds * frames * 3,
+          "perimeter wave covers every frame");
+    /* inner and outer strips share a position at the same height:
+       fan 0 left-edge top — inner LED 11 and outer LED 19 both sit
+       at stack slot 11, so they carry the same color */
+    CHECK(memcmp(&pwave[11 * 3], &pwave[19 * 3], 3) == 0,
+          "inner/outer strips share the perimeter position");
+    /* the path is continuous across fans: fan 0 slot 11 (LED 11)
+       neighbors fan 1 slot 12 (LED 51 = 40 + inner-left top) */
+    CHECK(memcmp(&pwave[11 * 3], &pwave[51 * 3], 3) != 0,
+          "perimeter wave walks across the fan 0 -> fan 1 seam");
+    CHECK(memcmp(&pwave[0], &pwave[leds * 3], 3) != 0,
+          "perimeter wave advances phase per frame");
+
+    auto comet = RenderPerimeterComet(leds, frames, false, 40,
+                                      SLV3_STACK_POS, 255, 255, 255);
+    bool any_lit = false, any_dark = false;
+    for(size_t b = 0; b < leds * 3; b++)
+    {
+        if(comet[b] > 200) any_lit = true;
+        if(comet[b] == 0)  any_dark = true;
+    }
+    CHECK(any_lit && any_dark,
+          "perimeter comet leaves a lit head and dark gap");
+
+    auto pong = RenderPerimeterPingPong(leds, frames, 40,
+                                        SLV3_STACK_POS, 0, 255, 0);
+    /* the head travels: slot-0 LEDs are lit at frame 0 and dark at
+       mid-frame when the head has reached the far end */
+    const uint8_t* pong0 = &pong[0];
+    const uint8_t* pong_mid = &pong[(frames / 2) * leds * 3];
+    CHECK(pong0[1] > 200 && pong_mid[1] == 0,
+          "ping pong head leaves the start position");
+    /* ...and reaches the path end: LED 32 (fan 0 outer-right bottom)
+       is the last slot on the loop */
+    CHECK(pong_mid[32 * 3 + 1] > 200,
+          "ping pong head reaches the far end mid-cycle");
+
+    auto srain = RenderStackRainbow(leds, frames, false, 40,
+                                    SLV3_LED_HEIGHT);
+    /* same height on different fans matches: bottom of fan 0
+       (LED 0) vs bottom of fan 1 (LED 40) differ — the stack
+       coordinate lifts each fan by a third */
+    CHECK(memcmp(&srain[0], &srain[40 * 3], 3) != 0,
+          "stack rainbow separates fans by height");
+    /* left/right strips at the same height share a color:
+       inner-left 0 and inner-right 20 are both fan-bottom */
+    CHECK(memcmp(&srain[0], &srain[20 * 3], 3) == 0,
+          "same height lights both sides equally");
 
     /* breathing: dark at the loop seam, full brightness mid-cycle */
     auto br = RenderBreathing(leds, frames, 200, 40, 10);

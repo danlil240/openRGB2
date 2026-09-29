@@ -388,10 +388,23 @@ Check ((Sha (Join-Path $instC "profiles\local\engine-state.json")) -eq $profBefo
 Check (-not (Test-Path (Join-Path $instC "state\openrgb2.run.json"))) `
       "run file cleared"
 
-# nothing-running stop is a clean no-op
+# nothing-running stop is a clean no-op -- unless the HOST itself
+# has same-named processes we cannot verify (e.g. a real elevated
+# managed stack running on the dev box): those are honestly reported
+# and the exit is 1, never a silent 0. Expected rc mirrors the
+# script's own rule: unreadable image path -> unverifiable.
 $rc = Invoke-ManagedStop -InstallDir $instC -TimeoutSeconds 1 `
     -Force $false -CtlExe $ctlStub
-Check ($rc -eq 0) "stop with nothing running exits 0"
+$hostUnverifiable = @(Get-Process -Name "openrgb2-engine","OpenRGB" `
+    -ErrorAction SilentlyContinue | Where-Object {
+        $img = $null; try { $img = $_.Path } catch { $img = $null }
+        -not $img })
+if($hostUnverifiable.Count -eq 0) {
+    Check ($rc -eq 0) "stop with nothing running exits 0"
+} else {
+    Check ($rc -eq 1) `
+        "stop exits 1 when host has unverifiable same-named procs (elevated stack present)"
+}
 
 #====================================================================#
 Section "T8 update refuses while install is running"

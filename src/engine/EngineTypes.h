@@ -105,6 +105,12 @@ struct ZoneSnapshot
 {
     std::string name;
     uint32_t    led_count = 0;
+    /* Resize bounds reported by the backend ([min,max] — a
+       zone with min == max is fixed-size; 0/0 on old or
+       unusual backends means "bounds unknown", treated as
+       not resizable). */
+    uint32_t    leds_min  = 0;
+    uint32_t    leds_max  = 0;
 };
 
 struct DeviceSnapshot

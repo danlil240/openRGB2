@@ -21,6 +21,7 @@
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickItem>
+#include <QQuickWindow>
 #include <QQuickStyle>
 
 #include <cmath>
@@ -43,6 +44,8 @@ int main(int argc, char** argv)
     QQuickStyle::setStyle(QStringLiteral("Basic"));
 
     QQmlEngine engine;
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("trayAvailable"), true);
     ui::EngineBridge bridge;   /* never start()ed — offline */
     engine.rootContext()->setContextProperty(
         QStringLiteral("bridge"), &bridge);
@@ -94,6 +97,20 @@ int main(int argc, char** argv)
             continue;
         }
         std::printf("  loaded %s\n", f);
+
+        if(std::strcmp(f, "Main.qml") == 0)
+        {
+            auto* window = qobject_cast<QQuickWindow*>(obj);
+            CHECK(window != nullptr);
+            if(window)
+            {
+                CHECK(window->isVisible());
+                CHECK(!window->close());
+                CHECK(!window->isVisible());
+                window->setProperty("exitRequested", true);
+                CHECK(window->close());
+            }
+        }
 
         /* Card geometry — ui-first-look-2026-09-28 regression:
            a Card's content root must fill the card body. A

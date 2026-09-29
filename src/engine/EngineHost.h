@@ -130,6 +130,14 @@ struct EngineHostOptions
                                             private config dir;
                                             empty = skip the
                                             sole-writer check  */
+    /* The managed backend's declared image path (--backend-exe;
+       the launcher passes <install>\backend\OpenRGB.exe). The
+       QUIT "stop_backend" handoff only ever signals a process
+       whose image path equals this EXACTLY — the same
+       verified-own standard stop-openrgb2.ps1 enforces. Empty ->
+       no backend can ever be verified, so the handoff never
+       signals anything. */
+    std::string backend_exe;
     bool        power_monitor   = true;
 
     /* Task 2 (studio-import): the managed workspace root —
@@ -230,6 +238,10 @@ private:
     bool StartIpc();
     bool ApplyStartupScene(std::string& err);
     void ScanOwners();
+    /* QUIT stop_backend teardown: re-verifies the pending
+       pid's image against opts_.backend_exe, posts WM_CLOSE
+       to its top-level windows, and waits out the bound. */
+    void SignalPendingBackend();
     /* ReactiveInputs changed hook: emit the IPC event +
        persist the selection through the profile store. */
     void OnReactiveChanged();
@@ -237,6 +249,17 @@ private:
     /* Task 5.3: re-arms the SDK reconnect schedule after the
        client's bounded backoff latches to Disconnected. */
     void ReprobeSdk(TimePoint now);
+
+    /* Zone-size reconciliation: a scene binding's declared
+       zone_leds is the intended size — a backend that drops
+       persisted zone sizes (e.g. a headless --localconfig
+       server that never saves its controllers section)
+       enumerates resizable zones smaller/empty and the
+       binding writes nothing. RESIZEZONE each resolved
+       mismatch within the zone's [leds_min, leds_max] bounds,
+       bounded retries per observed count, then Enumerate so
+       the new topology lands in `snaps` this same poll. */
+    void ReconcileZoneSizes(std::vector<DeviceSnapshot>& snaps);
 
     EngineHostOptions        opts_;
     /* Built in Start() with opts_.instance_name — the option is
@@ -266,9 +289,25 @@ private:
 
     std::atomic<uint64_t>                    frames_{ 0 };
     std::atomic<bool>                        capture_paused_{ false };
+    /* The managed-backend pid a QUIT stop_backend request
+       resolved at ask time (0 = none pending). Stop() re-
+       verifies before signaling — the pid is a handle to
+       close, never proof on its own. */
+    std::atomic<uint32_t>                    pending_backend_pid_{ 0 };
     TimePoint                                last_reprobe_{};
     TimePoint                                last_topology_poll_{};
     std::map<DeviceKey, uint64_t>            custom_mode_done_;
+    /* Per-binding resize bookkeeping for ReconcileZoneSizes:
+       binding id -> {observed led_count, attempts}. Attempts
+       are bounded per OBSERVED count — a backend that keeps
+       clamping to a different size stops being poked, while
+       a count change (replug, external owner) re-arms. */
+    struct ZoneResizeAttempts
+    {
+        uint32_t observed = 0;
+        uint32_t tries    = 0;
+    };
+    std::map<std::string, ZoneResizeAttempts>  zone_resize_tries_;
     bool                                     started_ = false;
     OrderlyShutdown::Result                  shutdown_result_;
     bool                                     stopped_ = false;

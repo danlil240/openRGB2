@@ -849,7 +849,10 @@ bool EngineHost::Start(std::string& err)
            owner loop's stop flag; the ordered, bounded teardown
            runs in Stop() (OrderlyShutdown). */
         ipc_deps.request_shutdown =
-            [this] { stop_.store(true); };
+            [this](bool /*stop_backend*/) -> nlohmann::json {
+                stop_.store(true);
+                return nlohmann::json::object();
+            };
         /* Task 4.7: the startup ownership scan surfaced
            read-only in STATE/DIAGNOSTICS. ownership_ is
            written during Start() before the IPC surface
@@ -1103,8 +1106,13 @@ void EngineHost::PollOnce()
 
     if(sdk_)
     {
-        const std::vector<DeviceSnapshot> snaps = sdk_->Snapshots();
+        std::vector<DeviceSnapshot> snaps = sdk_->Snapshots();
         mapper_.SyncDevices(snaps);
+        /* Zone-size reconciliation BEFORE the persist/upkeep
+           below so both see the post-resize topology — a
+           resize Enumerate()s and re-syncs the mapper in
+           place. */
+        ReconcileZoneSizes(snaps);
         /* Task 3.8: persist the identities bindings resolved
            to — the offline binding table survives restarts
            and only writes on change. */
@@ -1160,6 +1168,100 @@ void EngineHost::PollOnce()
                 }
             }
         }
+    }
+}
+
+/* Zone-size reconciliation. The scene document's declared
+   zone_leds is the INTENT — backends that lose persisted
+   zone sizes (the managed headless --localconfig server
+   never writes its controllers section) enumerate resizable
+   zones at 0 and the binding silently writes nothing.
+   RESIZEZONE is bounded: at most kZoneResizeMaxTries per
+   observed count per binding, so a backend that clamps to a
+   different size is not poked forever; a count change
+   (replug, another owner) re-arms the allowance. */
+void EngineHost::ReconcileZoneSizes(
+    std::vector<DeviceSnapshot>& snaps)
+{
+    static constexpr uint32_t kZoneResizeMaxTries = 3;
+    const std::shared_ptr<const studio::SceneDocument> doc =
+        mapper_.Scene();
+    if(!doc)
+    {
+        return;
+    }
+    bool resized = false;
+    for(const studio::DeviceBinding& b : doc->bindings)
+    {
+        /* zone_leds 0 = unchecked — the binding doesn't pin a
+           size. Zoneless bindings carry no target either. */
+        if(b.zone_name.empty() || b.zone_leds == 0)
+        {
+            continue;
+        }
+        ZonePlacement zp;
+        if(!mapper_.BoundZone(b.id, zp) ||
+           zp.led_count == b.zone_leds)
+        {
+            continue;
+        }
+        const auto snap_it =
+            std::find_if(snaps.begin(), snaps.end(),
+                [&zp](const DeviceSnapshot& s)
+                { return s.key == zp.controller; });
+        if(snap_it == snaps.end() ||
+           snap_it->connection != ConnectionState::Connected ||
+           zp.zone_index >= snap_it->zones.size())
+        {
+            continue;
+        }
+        const ZoneSnapshot& zs = snap_it->zones[zp.zone_index];
+        /* 0/0 bounds = unknown -> not resizable; fixed-size
+           zones (min == max) can never reach the declared
+           count anyway. */
+        if(zs.leds_max == 0 ||
+           b.zone_leds < zs.leds_min || b.zone_leds > zs.leds_max)
+        {
+            continue;
+        }
+        /* Same gate as the custom-mode upkeep below: RESIZEZONE
+           is a hardware write and must not cross a suspend /
+           display-off boundary. */
+        if(lifecycle_ && lifecycle_->OutputPaused())
+        {
+            continue;
+        }
+        ZoneResizeAttempts& att = zone_resize_tries_[b.id];
+        if(att.observed != zp.led_count)
+        {
+            att.observed = zp.led_count;
+            att.tries    = 0;
+        }
+        if(att.tries >= kZoneResizeMaxTries)
+        {
+            continue;
+        }
+        ++att.tries;
+        if(sdk_->ResizeZone(zp.controller, b.zone_name,
+                            (int32_t)b.zone_leds))
+        {
+            resized = true;
+            Log("zone '" + b.zone_name + "' on " +
+                snap_it->name + " was " +
+                std::to_string(zp.led_count) + " LEDs — resized to " +
+                std::to_string(b.zone_leds) +
+                " (scene binding " + b.id + ")");
+        }
+    }
+    if(resized)
+    {
+        /* RESIZEZONE changed the topology and bumped the
+           generation; Enumerate refreshes zones + colors now
+           so the mapper, lanes, and the upkeep below all see
+           the new sizes this same poll. */
+        sdk_->Enumerate();
+        snaps = sdk_->Snapshots();
+        mapper_.SyncDevices(snaps);
     }
 }
 

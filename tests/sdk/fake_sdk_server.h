@@ -564,6 +564,43 @@ inline void FakeSdkServer::HandleSend(FakeStream& stream,
             }
             break;
         }
+        case openrgb2::sdk::kPktResizeZone:
+        {
+            /* RESIZEZONE body = i32 zone_index + i32 new_size.
+               Apply like the real backend: clamp into the
+               zone's [leds_min, leds_max] window, and keep the
+               colors vector sized to the new total so the next
+               enumeration is self-consistent. */
+            events.push_back(ServerEvent{ req.header.dev_id,
+                                          req.header.pkt_id,
+                                          req.body });
+            if(req.header.dev_id < controllers.size() &&
+               req.body.size() >= 8)
+            {
+                int32_t zone_index = 0, new_size = 0;
+                memcpy(&zone_index, req.body.data(), 4);
+                memcpy(&new_size,   req.body.data() + 4, 4);
+                FakeController& c = controllers[req.header.dev_id];
+                if(zone_index >= 0 &&
+                   (size_t)zone_index < c.zones.size() &&
+                   new_size >= 0)
+                {
+                    FakeZone& z = c.zones[(size_t)zone_index];
+                    uint32_t sz = (uint32_t)new_size;
+                    if(sz < z.leds_min) { sz = z.leds_min; }
+                    if(sz > z.leds_max) { sz = z.leds_max; }
+                    z.leds_count = sz;
+                    uint32_t total = 0;
+                    for(const FakeZone& zz : c.zones)
+                    {
+                        total += zz.leds_count;
+                    }
+                    c.colors.resize(total, 0x00010101u);
+                    c.led_names.resize(total);
+                }
+            }
+            break;
+        }
         default:
             events.push_back(ServerEvent{ req.header.dev_id,
                                           req.header.pkt_id,

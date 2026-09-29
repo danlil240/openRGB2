@@ -13,8 +13,12 @@
          within the bound.
       2. backend handoff -- the backend stays the sole hardware owner;
          it is closed AFTER the engine fully exits with a graceful
-         CloseMainWindow (WM_CLOSE), never a hard kill -- so it can
-         persist its own config (state\backend\OpenRGB.json).
+         WM_CLOSE, never a hard kill -- so it can persist its own
+         config (state\backend\OpenRGB.json). CloseMainWindow reaches
+         only a MAIN window; a tray/headless backend has none, so the
+         fallback posts WM_CLOSE to every top-level window the pid
+         owns (taskkill without /F -- still graceful, still
+         verified-own only).
 
     Only processes VERIFIED as ours are ever touched: a PID is only
     signaled when its image path matches this install's executables
@@ -31,8 +35,18 @@
     expires it permits Stop-Process on VERIFIED OWN processes only --
     still never a foreign process.
 
-    Exit codes: 0 clean (or nothing running), 1 partial (a process
-    outlived its bound and -Force was not given).
+    Elevation: a managed stack started elevated is UNVERIFIABLE from a
+    non-elevated shell -- its children's image paths cannot be read,
+    so ownership proof always fails. Such processes are reported as
+    "running but unverifiable" (never "not running"), the run file is
+    kept for the retry, and the script exits 1. -Elevated re-launches
+    this script under UAC, same user-visible step as
+    start-openrgb2.ps1.
+
+    Exit codes: 0 clean (or nothing verifiably ours running),
+    1 partial (a process outlived its bound without -Force, or
+    same-named processes exist that cannot be verified -- hence
+    cannot be touched).
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\stop-openrgb2.ps1
@@ -48,6 +62,13 @@ param(
     # Permit Stop-Process on verified own processes after the
     # graceful bound expires. Never applies to foreign processes.
     [switch]$Force,
+
+    # Re-launch this script elevated (UAC prompt = the user-visible
+    # step, parity with start-openrgb2.ps1). Needed to stop a stack
+    # that was started elevated: only a same-integrity-or-higher
+    # shell can read the children's image paths, so verification --
+    # and therefore any signal -- requires elevation.
+    [switch]$Elevated,
 
     # ctl override -- offline-test seam (the packaging suite injects a
     # stub that simulates the engine's ordered-exit response to QUIT).
@@ -85,16 +106,94 @@ function Find-ByImagePath {
         } catch { $false } } | Select-Object -First 1
 }
 
+# Resolve the PID we may signal for one component: the run-file PID
+# verified by image path, else image-path discovery. When resolution
+# fails the result still explains WHY -- same-named processes may be
+# running but unverifiable (image path unreadable from this
+# shell's integrity level: elevated children or another user's
+# processes) or foreign (image resolves to a different install).
+# Both are listed so the report is honest; neither is ever touched.
+function Resolve-OwnPid {
+    param(
+        [int]$RunFilePid,
+        [string]$ImageName,
+        [string]$ExpectedPath
+    )
+    if($RunFilePid -gt 0 -and
+       (Test-OwnProcess $RunFilePid $ExpectedPath)) {
+        return [pscustomobject]@{ Pid=$RunFilePid; Unverifiable=@(); Foreign=@() }
+    }
+    if($p = Find-ByImagePath $ImageName $ExpectedPath) {
+        return [pscustomobject]@{ Pid=$p.Id; Unverifiable=@(); Foreign=@() }
+    }
+    $unverifiable = @()
+    $foreign      = @()
+    foreach($p in @(Get-Process -Name $ImageName -ErrorAction SilentlyContinue)) {
+        $img = $null
+        try { $img = $p.Path } catch { $img = $null }
+        if($img) { $foreign      += [pscustomobject]@{ Id=$p.Id; Path=$img } }
+        else     { $unverifiable += $p.Id }
+    }
+    return [pscustomobject]@{ Pid=0; Unverifiable=$unverifiable; Foreign=$foreign }
+}
+
 function Invoke-ManagedStop {
     param(
         [string]$InstallDir,
         [int]$TimeoutSeconds,
         [bool]$Force,
+        [bool]$Elevated,
         [string]$CtlExe
     )
 
-    if(-not $InstallDir) { $InstallDir = Split-Path -Parent $PSScriptRoot }
+    if(-not $InstallDir) {
+        $InstallDir = Split-Path -Parent $PSScriptRoot
+        # Source-tree convenience (mirrors OpenRGB2.cmd): invoked from
+        # packaging\windows the derived default lands on
+        # ...\packaging, which is NOT an install root -- no exes, no
+        # state\ -- so fall back to the newest staged package under
+        # build\package\ and manage that install instead.
+        if(-not (Test-Path (Join-Path $InstallDir "openrgb2-engine.exe"))) {
+            $staged = Get-ChildItem (Join-Path $PSScriptRoot `
+                        "..\..\build\package\OpenRGB2-*-win64") `
+                        -Directory -ErrorAction SilentlyContinue |
+                Where-Object {
+                    Test-Path (Join-Path $_.FullName "openrgb2-engine.exe") } |
+                Sort-Object LastWriteTime -Descending |
+                Select-Object -First 1
+            if($staged) { $InstallDir = $staged.FullName }
+        }
+    }
     $InstallDir = (Resolve-Path $InstallDir).Path
+
+    # Self-elevation (parity with start-openrgb2.ps1): an elevated
+    # stack is invisible to ownership verification from a
+    # non-elevated shell. -Elevated re-launches this script under UAC
+    # with the resolved install dir; the child omits -Elevated. The
+    # elevated child's own window shows its output; we wait and
+    # propagate its exit code.
+    if($Elevated) {
+        $elevArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File",
+                      "`"$PSCommandPath`"",
+                      "-InstallDir","`"$InstallDir`"",
+                      "-TimeoutSeconds","$TimeoutSeconds")
+        if($Force)  { $elevArgs += "-Force" }
+        if($CtlExe) { $elevArgs += @("-CtlExe","`"$CtlExe`"") }
+        Write-Host "re-launching elevated (UAC prompt)..."
+        try {
+            $ep = Start-Process powershell.exe -Verb RunAs -Wait `
+                -PassThru -ArgumentList ($elevArgs -join " ")
+        } catch {
+            Fail "elevation declined or unavailable: $($_.Exception.Message)"
+            return 1
+        }
+        if($ep.ExitCode -ne 0) {
+            Fail ("elevated stop returned $($ep.ExitCode) -- for the " +
+                "full log re-run in an elevated PowerShell: " +
+                "scripts\stop-openrgb2.ps1")
+        }
+        return $ep.ExitCode
+    }
 
     $EngineExe  = Join-Path $InstallDir "openrgb2-engine.exe"
     $BackendExe = Join-Path $InstallDir "backend\OpenRGB.exe"
@@ -118,16 +217,32 @@ function Invoke-ManagedStop {
     $backendGone= $false
 
     #---- 1. engine: IPC QUIT (ordered, bounded shutdown) -------------
-    $enginePid = 0
-    if($run -and (Test-OwnProcess ([int]$run.engine_pid) $EngineExe)) {
-        $enginePid = [int]$run.engine_pid
-    } elseif($p = Find-ByImagePath "openrgb2-engine" $EngineExe) {
-        $enginePid = $p.Id
-    }
+    $runEnginePid = 0
+    if($run) { try { $runEnginePid = [int]$run.engine_pid } catch { } }
+    $eng = Resolve-OwnPid -RunFilePid $runEnginePid `
+        -ImageName "openrgb2-engine" -ExpectedPath $EngineExe
+    $enginePid = [int]$eng.Pid
 
     if($enginePid -eq 0) {
-        Info "engine: not running"
-        $engineGone = $true
+        if($eng.Unverifiable.Count -gt 0) {
+            Fail ("engine: same-named process running " +
+                "(pid $($eng.Unverifiable -join ', ')) but its image " +
+                "path is UNREADABLE from this shell -- the stack is " +
+                "elevated (or owned by another user). Verification " +
+                "never touches what it cannot prove is ours: re-run " +
+                "from an elevated PowerShell, or re-run with -Elevated.")
+            $exitCode = 1
+        } elseif($eng.Foreign.Count -gt 0) {
+            foreach($fp in $eng.Foreign) {
+                Info ("engine: pid $($fp.Id) runs a DIFFERENT image " +
+                    "($($fp.Path)) -- foreign, not touched")
+            }
+            Info "engine: nothing of ours running"
+            $engineGone = $true
+        } else {
+            Info "engine: not running"
+            $engineGone = $true
+        }
     } else {
         Step "engine (pid $enginePid): QUIT via IPC -- ordered bounded shutdown"
         if(Test-Path $CtlExe) {
@@ -151,23 +266,46 @@ function Invoke-ManagedStop {
     }
 
     #---- 2. backend handoff: graceful close, never a kill ------------
-    $backendPid = 0
-    if($run -and (Test-OwnProcess ([int]$run.backend_pid) $BackendExe)) {
-        $backendPid = [int]$run.backend_pid
-    } elseif($p = Find-ByImagePath "OpenRGB" $BackendExe) {
-        $backendPid = $p.Id
-    }
+    $runBackendPid = 0
+    if($run) { try { $runBackendPid = [int]$run.backend_pid } catch { } }
+    $bk = Resolve-OwnPid -RunFilePid $runBackendPid `
+        -ImageName "OpenRGB" -ExpectedPath $BackendExe
+    $backendPid = [int]$bk.Pid
 
     if($backendPid -eq 0) {
-        Info "backend: not running (or not ours -- foreign processes are never touched)"
-        $backendGone = $true
+        if($bk.Unverifiable.Count -gt 0) {
+            Fail ("backend: same-named process running " +
+                "(pid $($bk.Unverifiable -join ', ')) but its image " +
+                "path is UNREADABLE from this shell -- the stack is " +
+                "elevated (or owned by another user). Verification " +
+                "never touches what it cannot prove is ours: re-run " +
+                "from an elevated PowerShell, or re-run with -Elevated.")
+            $exitCode = 1
+        } elseif($bk.Foreign.Count -gt 0) {
+            foreach($fp in $bk.Foreign) {
+                Info ("backend: pid $($fp.Id) runs a DIFFERENT image " +
+                    "($($fp.Path)) -- foreign, not touched")
+            }
+            Info "backend: nothing of ours running"
+            $backendGone = $true
+        } else {
+            Info "backend: not running"
+            $backendGone = $true
+        }
     } else {
-        Step "backend (pid $backendPid): CloseMainWindow -- graceful handoff"
+        Step "backend (pid $backendPid): WM_CLOSE -- graceful handoff"
         $bkProc = Get-Process -Id $backendPid -ErrorAction SilentlyContinue
         $closed = $false
         try { $closed = $bkProc.CloseMainWindow() } catch { $closed = $false }
         if(-not $closed) {
-            Info "no main window to close (minimized/headless) -- waiting for it to exit anyway"
+            # Tray/headless backends have no MAIN window (handle 0) so
+            # CloseMainWindow can't reach them. taskkill WITHOUT /F
+            # posts the same WM_CLOSE to every top-level window the
+            # pid owns -- graceful, and this pid is already verified
+            # ours. It errors harmlessly when the process owns no
+            # windows at all; the bounded wait below still applies.
+            Info "no main window (tray/headless) -- posting WM_CLOSE to all its top-level windows"
+            $null = & taskkill.exe /PID $backendPid 2>&1
         }
         if($bkProc -and -not $bkProc.WaitForExit($TimeoutSeconds * 1000)) {
             if($Force -and (Test-OwnProcess $backendPid $BackendExe)) {
@@ -195,7 +333,11 @@ function Invoke-ManagedStop {
         if(Test-Path $sidecar) { Info "profile sidecar kept: $(Split-Path -Leaf $sidecar)" }
     }
 
-    if(Test-Path $RunFile) { Remove-Item -Force $RunFile }
+    # Keep the run file on a non-clean exit: its recorded PIDs are
+    # exactly what a retry (elevated, or with -Force) needs.
+    if($exitCode -eq 0 -and (Test-Path $RunFile)) {
+        Remove-Item -Force $RunFile
+    }
 
     if($engineGone -and $backendGone -and $exitCode -eq 0) {
         Write-Host "OpenRGB2 stopped cleanly." -ForegroundColor Green
@@ -206,5 +348,6 @@ function Invoke-ManagedStop {
 # Dot-source guard (packaging suite imports the functions).
 if($MyInvocation.InvocationName -ne '.') {
     exit (Invoke-ManagedStop -InstallDir $InstallDir `
-        -TimeoutSeconds $TimeoutSeconds -Force $Force -CtlExe $CtlExe)
+        -TimeoutSeconds $TimeoutSeconds -Force $Force `
+        -Elevated ([bool]$Elevated) -CtlExe $CtlExe)
 }

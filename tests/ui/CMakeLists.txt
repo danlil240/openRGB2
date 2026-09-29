@@ -39,6 +39,7 @@ endfunction()
 
 ui_suite(ui_wire_client_test)
 ui_suite(ui_bridge_test)
+ui_suite(ui_startup_task_test)
 # Task 4.2: the scene-edit model builds the SET_SCENE body and
 # owns the named-scene library file; the bridge suite drives a
 # real EngineBridge + SceneEditController over an in-process

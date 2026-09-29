@@ -76,6 +76,8 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/ProfileLibrary.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/UiSettings.h
         ${CMAKE_SOURCE_DIR}/src/ui/UiSettings.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/StartupTaskController.h
+        ${CMAKE_SOURCE_DIR}/src/ui/StartupTaskController.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/QaServer.h
         ${CMAKE_SOURCE_DIR}/src/ui/QaServer.cpp)
 

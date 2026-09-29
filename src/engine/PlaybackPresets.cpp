@@ -43,6 +43,24 @@ const PresetRow kPresets[] =
     { LianLiWireless::PlaybackPreset::Breathing,
       "Breathing", "breathing",
       PlaybackPresetSupport{ true, false, true } },
+    { LianLiWireless::PlaybackPreset::PerimeterWave,
+      "Perimeter Wave", "perimeter_wave",
+      PlaybackPresetSupport{ true, true, false } },
+    { LianLiWireless::PlaybackPreset::PerimeterComet,
+      "Perimeter Comet", "perimeter_comet",
+      PlaybackPresetSupport{ true, true, true } },
+    { LianLiWireless::PlaybackPreset::PerimeterChase,
+      "Perimeter Chase", "perimeter_chase",
+      PlaybackPresetSupport{ true, true, false } },
+    { LianLiWireless::PlaybackPreset::PerimeterPingPong,
+      "Perimeter Ping Pong", "perimeter_ping_pong",
+      PlaybackPresetSupport{ true, false, true } },
+    { LianLiWireless::PlaybackPreset::StackWave,
+      "Stack Wave", "stack_wave",
+      PlaybackPresetSupport{ true, false, false } },
+    { LianLiWireless::PlaybackPreset::StackRainbow,
+      "Stack Rainbow", "stack_rainbow",
+      PlaybackPresetSupport{ true, true, false } },
 };
 
 /* Case-insensitive name match that ignores spaces,
@@ -101,6 +119,12 @@ const std::vector<LianLiWireless::PlaybackPreset>& PlaybackPresetList()
         LianLiWireless::PlaybackPreset::SpectrumCycle,
         LianLiWireless::PlaybackPreset::RainbowWave,
         LianLiWireless::PlaybackPreset::Breathing,
+        LianLiWireless::PlaybackPreset::PerimeterWave,
+        LianLiWireless::PlaybackPreset::PerimeterComet,
+        LianLiWireless::PlaybackPreset::PerimeterChase,
+        LianLiWireless::PlaybackPreset::PerimeterPingPong,
+        LianLiWireless::PlaybackPreset::StackWave,
+        LianLiWireless::PlaybackPreset::StackRainbow,
     };
     return list;
 }
@@ -199,7 +223,7 @@ ScenePlaybackCaps ClassifyScenePlayback(const studio::SceneDocument* doc)
         out.has_preset = true;
         return out;
     }
-    /* A named preset that is not one of the three uploaded
+    /* A named preset that is not one of the uploaded
        presets: reactive looks get the honest reason first. */
     const studio::PresetInfo* info = studio::FindPreset(preset);
     if(info && !info->needs.empty())
@@ -210,9 +234,7 @@ ScenePlaybackCaps ClassifyScenePlayback(const studio::SceneDocument* doc)
     else
     {
         out.reason = "preset '" + preset +
-                     "' is not one of the three uploaded playback "
-                     "presets (Spectrum Cycle, Rainbow Wave, "
-                     "Breathing)";
+                     "' is not an uploaded playback preset";
     }
     return out;
 }
@@ -307,6 +329,36 @@ std::vector<RgbColor> PlaybackFrameSampler::Sample(
                 rgb = LianLiWireless::RenderBreathing(
                     led_count, frame_count, params.color.r,
                     params.color.g, params.color.b);
+                break;
+            case LianLiWireless::PlaybackPreset::PerimeterWave:
+                rgb = LianLiWireless::RenderPerimeterWave(
+                    led_count, frame_count, params.reverse,
+                    0, nullptr);
+                break;
+            case LianLiWireless::PlaybackPreset::PerimeterComet:
+                rgb = LianLiWireless::RenderPerimeterComet(
+                    led_count, frame_count, params.reverse,
+                    0, nullptr, params.color.r, params.color.g,
+                    params.color.b);
+                break;
+            case LianLiWireless::PlaybackPreset::PerimeterChase:
+                rgb = LianLiWireless::RenderPerimeterChase(
+                    led_count, frame_count, params.reverse,
+                    0, nullptr);
+                break;
+            case LianLiWireless::PlaybackPreset::PerimeterPingPong:
+                rgb = LianLiWireless::RenderPerimeterPingPong(
+                    led_count, frame_count, 0, nullptr,
+                    params.color.r, params.color.g, params.color.b);
+                break;
+            case LianLiWireless::PlaybackPreset::StackWave:
+                rgb = LianLiWireless::RenderStackWave(
+                    led_count, frame_count, 0, nullptr);
+                break;
+            case LianLiWireless::PlaybackPreset::StackRainbow:
+                rgb = LianLiWireless::RenderStackRainbow(
+                    led_count, frame_count, params.reverse,
+                    0, nullptr);
                 break;
             }
             it = loops_.emplace(key,

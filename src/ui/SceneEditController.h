@@ -92,7 +92,7 @@ class SceneEditController : public QObject
                    NOTIFY workingChanged)
 
     /*---- presets -------------------------------------------*/
-    /* The three uploaded presets from the wire contract:
+    /* The the uploaded presets from the wire contract:
        [{id,name,speed,direction,color}]. */
     Q_PROPERTY(QVariantList playbackPresets READ playbackPresets
                    CONSTANT)
@@ -287,7 +287,7 @@ private:
     /* The scene-creation default latch (plan section 3.4
        first-release rules; the Task 3.6 ruling assigns the
        user-facing default to the UI): an explicit pick of
-       one of the three uploaded presets arms it, and it
+       one of the uploaded presets arms it, and it
        fires ONE animation_playback request once the engine
        has APPLIED a scene actually naming that preset —
        capability validation runs against the applied

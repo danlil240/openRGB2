@@ -34,7 +34,7 @@ namespace ui
 
 /*---------------------------------------------------------*\
 ||| Playback-preset capability table — the wire contract   ||
-||| itself (docs/ipc-protocol.md §5): the three uploaded   ||
+||| itself (docs/ipc-protocol.md §5): the uploaded   ||
 ||| presets, the params each accepts through               ||
 ||| SET_PLAYBACK_MODE {params:{speed,reverse,color}}, and  ||
 ||| the names a scene may put in effect.preset. The        ||
@@ -51,7 +51,7 @@ struct PlaybackPresetInfo
     bool        color     = false;   /* "#RRGGBB" param           */
 };
 
-/* The three uploaded presets in contract order. */
+/* The the uploaded presets in contract order. */
 const std::vector<PlaybackPresetInfo>& PlaybackPresetCatalog();
 
 /* Case/space/underscore/dash-insensitive normalization —

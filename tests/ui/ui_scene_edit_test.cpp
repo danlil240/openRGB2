@@ -323,7 +323,7 @@ int main(int argc, char** argv)
     /*---- playback preset contract table ---------------------*/
     std::printf("-- playback preset support\n");
     {
-        CHECK(PlaybackPresetCatalog().size() == 3);
+        CHECK(PlaybackPresetCatalog().size() == 9);
         PlaybackPresetInfo p;
         CHECK(PlaybackPresetFromName("spectrum_cycle", p));
         CHECK(p.speed && !p.direction && !p.color);
@@ -332,6 +332,12 @@ int main(int argc, char** argv)
         CHECK(p.speed && p.direction && !p.color);
         CHECK(PlaybackPresetFromName("BREATHING", p));
         CHECK(p.speed && !p.direction && p.color);
+        CHECK(PlaybackPresetFromName("perimeter_wave", p));
+        CHECK(p.speed && p.direction && !p.color);
+        CHECK(PlaybackPresetFromName("Perimeter Comet", p));
+        CHECK(p.speed && p.direction && p.color);
+        CHECK(PlaybackPresetFromName("stack_rainbow", p));
+        CHECK(p.id == "stack_rainbow");
         CHECK(!PlaybackPresetFromName("aurora", p));
         CHECK(!PlaybackPresetFromName("", p));
         CHECK(NormalizePresetId("Rainbow-Wave") == "rainbowwave");
