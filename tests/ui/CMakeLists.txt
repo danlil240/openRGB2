@@ -235,6 +235,34 @@ foreach(scale 1.00 1.25 1.50 2.00)
             "PATH=path_list_prepend:${QT_BIN_DIR};QT_SCALE_FACTOR=set:${scale}")
 endforeach()
 
+# studio-import Task 5: the scene/object editing surface —
+# the real ObjectEditorController + SceneObjectModel +
+# PresetListModel over the shared WorkspaceEditSession (one
+# undo record per op/gesture, preview never records, rename
+# re-keying, mirrored copies never mint bindings, library
+# floor lift, favorites as non-undo prefs), plus the three
+# adapted QML panels headless against stub bridges.
+# DLS_PRESET_DIR feeds the controller's registry probe, the
+# same convention tests/core uses.
+add_executable(ui_studio_objects_test ui_studio_objects_test.cpp)
+target_link_libraries(ui_studio_objects_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    openrgb2_studio_core
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Test)
+target_include_directories(ui_studio_objects_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(ui_studio_objects_test PRIVATE NDEBUG)
+set_target_properties(ui_studio_objects_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(ui_studio_objects_test)
+add_test(NAME ui_studio_objects_test COMMAND ui_studio_objects_test)
+set_tests_properties(ui_studio_objects_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR};DLS_PRESET_DIR=set:${CMAKE_SOURCE_DIR}/src/core/presets/devices")
+
 # QA harness (QaServer) — the real shell headless, driven over
 # the loopback QA socket like tools/qa/qa.py drives a live
 # window: selector resolution, synthesized click/type/key,

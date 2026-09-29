@@ -59,7 +59,7 @@ of the shared model.
 | Compact workspace durability (engine `WorkspaceStore`) | Not started (Task 2) |
 | Workspace IPC (revisions, transfers, jobs, preview) | Not started (Tasks 3, 7) |
 | Shared UI draft/edit session, recovery | Not started (Task 4) |
-| Scene/object editing + device library panels | Not started (Task 5) |
+| Scene/object editing + device library panels | Done (Task 5): `src/ui/studio/` adapters (`SceneObjectModel`, `PresetListModel`, `ObjectEditorController` on the shared `WorkspaceEditSession`) + `ui/studio/` panels (`DeviceTree`, `DeviceLibrary`, `TransformInspector`) mounted on the Layout page; `ui_studio_objects_test` covers the seam headless |
 | Layer/palette/personal-look editing | Not started (Task 6) |
 | 3D viewport (`StudioScene.qml` → `StudioViewport`) | Blocked on Quick3D prerequisite (Task 8) |
 | Device-type authoring + portable bundles | Not started (Task 9) |

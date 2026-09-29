@@ -12,8 +12,16 @@
 
 #include "config/StudioConfig.h"
 #include "editor/EditorController.h"
+#include "editor/TransformCommands.h"  /* EulerDegFromMat4 */
+#include "scene/SceneGraph.h"          /* Mat4, compose    */
+#include "scene/SceneJson.h"           /* applied-doc parse */
 
 #include <QDateTime>
+
+#include <algorithm>
+#include <functional>
+#include <set>
+#include <vector>
 
 namespace openrgb2
 {
@@ -269,6 +277,43 @@ QString LayoutController::WsBindingState(
     return QStringLiteral("resolved");
 }
 
+studio::Mat4 LayoutController::WsInstanceWorld(
+    const std::string& iid) const
+{
+    const studio::StudioDocument* w = WsDoc();
+    studio::Mat4 m = studio::Mat4Identity();
+    std::set<std::string> stack;
+    std::string cur = iid;
+    /* Compose parent-first: collect the chain, then multiply
+       root->leaf (world = parentWorld * local). A dangling or
+       cyclic parent degrades to "no parent". */
+    std::vector<const studio::DeviceInstance*> chain;
+    while(w != nullptr && stack.insert(cur).second)
+    {
+        const auto it = w->devices.find(cur);
+        if(it == w->devices.end())
+        {
+            break;
+        }
+        chain.push_back(&it->second);
+        if(it->second.parent.empty()
+           || w->devices.count(it->second.parent) == 0)
+        {
+            break;
+        }
+        cur = it->second.parent;
+    }
+    for(auto it = chain.rbegin(); it != chain.rend(); ++it)
+    {
+        studio::Transform t;
+        t.position     = (*it)->position;
+        t.rotation_deg = (*it)->rotation_deg;
+        t.scale        = { 1.0f, 1.0f, 1.0f };
+        m = studio::Mat4Mul(m, studio::LocalMatrix(t));
+    }
+    return m;
+}
+
 QVariantList LayoutController::WsItems() const
 {
     QVariantList out;
@@ -277,6 +322,24 @@ QVariantList LayoutController::WsItems() const
     {
         return out;
     }
+
+    /* Footprints are resolved-scene data — not stored in the
+       compact doc and never invented. When the engine's APPLIED
+       resolved scene is available, each item reports its union
+       body footprint (ox/oz = center offset from the instance
+       origin, which x/z still name so drags stay origin-true);
+       a draft that hasn't resolved — or no applied scene yet —
+       keeps the honest 0 footprint. */
+    studio::SceneDocument resolved;
+    std::map<std::string, studio::Mat4> rw;
+    const nlohmann::json& applied = model_.Applied();
+    const bool have_res = applied.is_object()
+        && studio::FromJson(applied, resolved, nullptr);
+    if(have_res)
+    {
+        rw = studio::ResolveWorldMatrices(resolved);
+    }
+
     for(const auto& kv : w->devices)
     {
         const std::string&            iid = kv.first;
@@ -301,20 +364,77 @@ QVariantList LayoutController::WsItems() const
             kind = QStringLiteral("linked");
         }
         m.insert(QStringLiteral("kind"), kind);
-        m.insert(QStringLiteral("x"), (double)d.position.x);
-        m.insert(QStringLiteral("y"), (double)d.position.y);
-        m.insert(QStringLiteral("z"), (double)d.position.z);
+
+        /* World-space placement — the canvas is desk-world, so
+           a nested instance draws where it actually lands. */
+        const studio::Mat4  wm = WsInstanceWorld(iid);
+        const studio::Vec3  wt = studio::Mat4Translation(wm);
+        m.insert(QStringLiteral("x"), (double)wt.x);
+        m.insert(QStringLiteral("y"), (double)wt.y);
+        m.insert(QStringLiteral("z"), (double)wt.z);
         m.insert(QStringLiteral("rx"), (double)d.rotation_deg.x);
-        m.insert(QStringLiteral("ry"), (double)d.rotation_deg.y);
+        m.insert(QStringLiteral("ry"),
+                 (double)studio::EulerDegFromMat4(wm).y);
         m.insert(QStringLiteral("rz"), (double)d.rotation_deg.z);
-        /* Footprint is resolved-scene data — not stored in the
-           compact doc and never invented. Emitter counts come
-           from the APPLIED resolved scene (WsEmitters joins
-           the instance path the same way the calibration list
-           does) — never fabricated: 0 is the honest answer
-           until the engine reports a resolved document. */
-        m.insert(QStringLiteral("w"), 0.0);
-        m.insert(QStringLiteral("d"), 0.0);
+
+        /* Union of the subtree's resolved bodies: each object
+           contributes its ResolvedBodySize box corners through
+           its world matrix. */
+        double minx = 0, maxx = 0, minz = 0, maxz = 0;
+        bool   any  = false;
+        if(have_res)
+        {
+            const std::string prefix = iid + "/";
+            for(const studio::SceneObject& o : resolved.objects)
+            {
+                if(o.id != iid
+                   && o.id.compare(0, prefix.size(), prefix) != 0)
+                {
+                    continue;
+                }
+                const auto wit = rw.find(o.id);
+                if(wit == rw.end())
+                {
+                    continue;
+                }
+                const studio::Vec3 body =
+                    studio::ResolvedBodySize(o);
+                if(body.x <= 0.0f && body.z <= 0.0f)
+                {
+                    continue;
+                }
+                for(int i = 0; i < 8; ++i)
+                {
+                    const studio::Vec3 c{
+                        (i & 1) ? body.x * 0.5f : -body.x * 0.5f,
+                        (i & 2) ? body.y * 0.5f : -body.y * 0.5f,
+                        (i & 4) ? body.z * 0.5f : -body.z * 0.5f };
+                    const studio::Vec3 p =
+                        studio::TransformPoint(wit->second, c);
+                    if(!any)
+                    {
+                        minx = maxx = p.x;
+                        minz = maxz = p.z;
+                        any = true;
+                    }
+                    else
+                    {
+                        minx = std::min(minx, (double)p.x);
+                        maxx = std::max(maxx, (double)p.x);
+                        minz = std::min(minz, (double)p.z);
+                        maxz = std::max(maxz, (double)p.z);
+                    }
+                }
+            }
+        }
+        m.insert(QStringLiteral("w"), any ? maxx - minx : 0.0);
+        m.insert(QStringLiteral("d"), any ? maxz - minz : 0.0);
+        /* Footprint center vs. instance origin — the delegate
+           draws the box at (x + ox, z + oz). */
+        m.insert(QStringLiteral("ox"),
+                 any ? (minx + maxx) * 0.5 - wt.x : 0.0);
+        m.insert(QStringLiteral("oz"),
+                 any ? (minz + maxz) * 0.5 - wt.z : 0.0);
         int em_total = 0;
         int em_addr  = 0;
         for(const QVariant& ev : WsEmitters(iid))
@@ -732,11 +852,15 @@ bool LayoutController::moveObject(const QString& objectId,
                          QStringLiteral("input"));
             return false;
         }
-        /* Desk-plane move: y stays where the draft put it. */
-        const studio::Vec3 pos{ (float)x, it->second.position.y,
-                                (float)z };
+        /* The canvas is world-space (studio-import Task 5:
+           items report world x/z): convert through the parent
+           frame so a nested instance lands where it was
+           dragged. Desk-plane move — world y stays. */
+        const studio::Vec3 wt = studio::Mat4Translation(
+            WsInstanceWorld(objectId.toStdString()));
+        const studio::Vec3 pos{ (float)x, wt.y, (float)z };
         return WsApply(
-            ws_->Session().Editor().SetPosition(
+            ws_->Session().Editor().SetPositionWorld(
                 objectId.toStdString(), pos),
             QStringLiteral("move %1").arg(objectId));
     }
@@ -784,8 +908,17 @@ bool LayoutController::rotateObject(const QString& objectId,
                          QStringLiteral("input"));
             return false;
         }
+        /* The canvas yaw is world-space — a nested instance's
+           local ry is the world yaw minus its parent's. */
+        float parent_yaw = 0.0f;
+        const std::string& pid = it->second.parent;
+        if(!pid.empty() && w->devices.count(pid))
+        {
+            parent_yaw = studio::EulerDegFromMat4(
+                WsInstanceWorld(pid)).y;
+        }
         const studio::Vec3 rot{ it->second.rotation_deg.x,
-                                (float)yawDeg,
+                                (float)(yawDeg - parent_yaw),
                                 it->second.rotation_deg.z };
         return WsApply(
             ws_->Session().Editor().SetRotation(

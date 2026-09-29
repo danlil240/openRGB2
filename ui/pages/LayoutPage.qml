@@ -16,6 +16,7 @@ import QtQuick.Layouts
 import QtQuick.Controls
 import OpenRGB2.UI.theme
 import OpenRGB2.UI.components
+import OpenRGB2.UI.studio
 
 Item {
     id: root
@@ -23,6 +24,13 @@ Item {
 
     readonly property bool ctlUp:
         typeof layoutCtl !== "undefined"
+    /* studio-import Task 5: the scene/object editor surfaces
+       (hierarchy tree, device library, transform inspector) mount
+       below the canvas whenever the shared-draft session is up —
+       objectCtl is absent in legacy/no-workspace contexts, and
+       `ready` is false while no workspace draft is loaded. */
+    readonly property bool studioUp:
+        typeof objectCtl !== "undefined" && objectCtl.ready
     readonly property bool engineUp:
         typeof bridge !== "undefined" && bridge.connected
     /* A recovered local draft has no engine baseline
@@ -57,10 +65,13 @@ Item {
         for(var i = 0; i < its.length; ++i) {
             var o = its[i];
             byId[o.id] = o;
-            minX = Math.min(minX, o.x - o.w / 2);
-            maxX = Math.max(maxX, o.x + o.w / 2);
-            minZ = Math.min(minZ, o.z - o.d / 2);
-            maxZ = Math.max(maxZ, o.z + o.d / 2);
+            /* Footprints center at (x+ox, z+oz) — Task 5 world-
+               space items carry ox/oz (0 on legacy rows). */
+            var fx = o.x + (o.ox || 0), fz = o.z + (o.oz || 0);
+            minX = Math.min(minX, fx - o.w / 2);
+            maxX = Math.max(maxX, fx + o.w / 2);
+            minZ = Math.min(minZ, fz - o.d / 2);
+            maxZ = Math.max(maxZ, fz + o.d / 2);
         }
         if(its.length === 0 || minX > maxX) {
             view = ({ "s": 200, "ox": 20, "oz": 20,
@@ -93,6 +104,17 @@ Item {
             });
         }
         linkPairs = pairs;
+    }
+
+    /* Desk meters under the canvas' center — the device
+       library's button-add targets this point; the drop handler
+       maps exact pixels the same way. */
+    function canvasCenter() {
+        var px = canvasRect.width / 2;
+        var pz = canvasRect.height / 2;
+        return ({ "x": view.minX + (px - view.ox) / view.s,
+                  "y": 0,
+                  "z": view.minZ + (pz - view.oz) / view.s });
     }
 
     function stateTone(o) {
@@ -345,13 +367,24 @@ Item {
                                              && o.kind !== "group"
                                     width: Math.max(10, o.w * view.s)
                                     height: Math.max(10, o.d * view.s)
+                                    /* Task 5: workspace rows carry
+                                       a world-space footprint —
+                                       (ox,oz) is its center offset
+                                       from the instance origin and
+                                       the box is already world-
+                                       aligned, so it must not take
+                                       the authored ry again. */
                                     x: view.ox
-                                       + (o.x - view.minX) * view.s
+                                       + (o.x + (o.ox || 0)
+                                          - view.minX) * view.s
                                        - width / 2
                                     y: view.oz
-                                       + (o.z - view.minZ) * view.s
+                                       + (o.z + (o.oz || 0)
+                                          - view.minZ) * view.s
                                        - height / 2
-                                    rotation: o.ry
+                                    rotation: (o.ox !== undefined
+                                               && o.w > 0)
+                                              ? 0 : o.ry
 
                                     Rectangle {
                                         anchors.fill: parent
@@ -435,14 +468,21 @@ Item {
                                         onReleased: {
                                             if(!d.dragging) return;
                                             d.dragging = false;
+                                            /* The rect centers on the
+                                               footprint (origin + ox/oz)
+                                               — the move target is the
+                                               ORIGIN, so subtract the
+                                               offset back out. */
                                             var nx = (d.x + d.width / 2
                                                       - view.ox)
                                                      / view.s
-                                                     + view.minX;
+                                                     + view.minX
+                                                     - (d.o.ox || 0);
                                             var nz = (d.y + d.height / 2
                                                       - view.oz)
                                                      / view.s
-                                                     + view.minZ;
+                                                     + view.minZ
+                                                     - (d.o.oz || 0);
                                             /* commit the meters —
                                                the engine's scene
                                                event repaints   */
@@ -452,17 +492,58 @@ Item {
                                                refused, snap back */
                                             d.x = Qt.binding(function() {
                                                 return view.ox
-                                                    + (d.o.x - view.minX)
+                                                    + (d.o.x + (d.o.ox || 0)
+                                                       - view.minX)
                                                     * view.s
                                                     - d.width / 2; });
                                             d.y = Qt.binding(function() {
                                                 return view.oz
-                                                    + (d.o.z - view.minZ)
+                                                    + (d.o.z + (d.o.oz || 0)
+                                                       - view.minZ)
                                                     * view.s
                                                     - d.height / 2; });
                                         }
                                         onClicked: layoutCtl.select(d.o.id)
                                     }
+                                }
+                            }
+
+                            /* Device-library drag target — rows
+                               drag "studio-device-type" with the
+                               type id on drag.source.dropTypeId
+                               (mimeData string is the fallback);
+                               the pixel maps to desk meters and
+                               the add commits through the shared
+                               session — one undo record. */
+                            DropArea {
+                                anchors.fill: parent
+                                keys: ["studio-device-type"]
+                                onDropped: function(drop) {
+                                    if(!root.studioUp) {
+                                        drop.accepted = false;
+                                        return;
+                                    }
+                                    var tid = "";
+                                    if(drop.source
+                                       && drop.source.dropTypeId
+                                              !== undefined)
+                                        tid = drop.source.dropTypeId;
+                                    else
+                                        tid = drop.getDataAsString(
+                                                  "studio-device-type");
+                                    if(tid === "") {
+                                        drop.accepted = false;
+                                        return;
+                                    }
+                                    var x = view.minX
+                                        + (drop.x - view.ox)
+                                          / view.s;
+                                    var z = view.minZ
+                                        + (drop.y - view.oz)
+                                          / view.s;
+                                    objectCtl.addDeviceInstance(
+                                        tid, x, 0, z);
+                                    drop.accept(Qt.CopyAction);
                                 }
                             }
 
@@ -906,6 +987,52 @@ Item {
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            /*---- Scene objects (studio-import Task 5) ---------*/
+            /* One card carrying the adapted Desktop Lighting
+               Studio surfaces against the shared workspace
+               draft: the hierarchy tree owns selection and
+               structural ops, the transform inspector owns
+               numeric edits, the library adds instances —
+               everything commits through objectCtl → the one
+               WorkspaceEditSession, so undo groups these edits
+               with the canvas drags above. Hidden (not
+               disabled) until a draft is staged — the legacy
+               canvas + binding cards keep working offline. */
+            Card {
+                title: qsTr("SCENE OBJECTS")
+                width: parent.width - 2 * col.padding
+                visible: root.studioUp
+                height: visible ? implicitHeight : 0
+
+                Row {
+                    width: parent.width
+                    spacing: Theme.spaceL
+
+                    DeviceTree {
+                        id: deviceTree
+                        objectName: "deviceTreePanel"
+                        width: 320
+                        height: 430
+                    }
+                    DeviceLibrary {
+                        id: deviceLibrary
+                        objectName: "deviceLibraryPanel"
+                        width: 340
+                        height: 430
+                        sceneView: root
+                    }
+                    TransformInspector {
+                        id: transformInspector
+                        objectName: "transformInspectorPanel"
+                        /* `ctl` feeds tool/plane/snap reads — the
+                           ObjectEditorController answers; there is
+                           no 3D camera on the 2D page so the view
+                           presets stay hidden until Task 8. */
+                        ctl: root.studioUp ? objectCtl : null
                     }
                 }
             }

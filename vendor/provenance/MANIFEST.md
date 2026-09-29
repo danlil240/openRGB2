@@ -73,10 +73,14 @@ import are in [`dls-ui-import-hashes.txt`](dls-ui-import-hashes.txt).
   DisplayPowerMonitor — engine milestone 3; behavioral reference only, the
   delivery pipeline + SDK client replace them)
 - `plugins/DesktopLightingStudio/{plugin,ui}/` and Qt-dependent editor models
-  (SceneObjectModel, EffectLayerModel, PresetListModel — slated for
-  `src/ui/studio/`) and `config/ConfigStore` (behavior reused by the engine
-  `WorkspaceStore`; the QObject/QSaveFile/file-watcher implementation is not
-  carried over)
+  (slated for `src/ui/studio/`; `config/ConfigStore` behavior reused by the
+  engine `WorkspaceStore` — the QObject/QSaveFile/file-watcher implementation
+  is not carried over). **Task 5 landed**: `SceneObjectModel`,
+  `PresetListModel`, `ObjectEditorController` (the SceneBridge editor half on
+  the shared `WorkspaceEditSession`), and the `DeviceTree` / `DeviceLibrary` /
+  `TransformInspector` QML surfaces now live in `src/ui/studio/` +
+  `ui/studio/`, covered by `tests/ui/ui_studio_objects_test.cpp`.
+  `EffectLayerModel` and the Task-6/8/9 panels remain deferred.
 - ~~Platform reactive inputs (AudioLoopback, KeyHook, ScreenSampler)
   (milestone 4)~~ — **done**: Windows WASAPI loopback, WH_KEYBOARD_LL key
   hook, and GDI screen sampling now exist as Qt-free implementations in

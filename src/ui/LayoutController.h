@@ -52,6 +52,7 @@ namespace studio
 struct StudioDocument;
 struct EditorEdit;
 struct DeviceBinding;
+struct Mat4;
 }
 
 namespace openrgb2
@@ -267,6 +268,12 @@ private:
     /* Compact-doc rows + binding join (display hints only —
        the engine resolves authoritatively). */
     QVariantList  WsItems() const;
+    /* Compact instance id -> world matrix, parent-chain compose
+       (studio-import Task 5: the canvas is world-space, so
+       nested instances need their parent's frame). A dangling
+       or cyclic parent degrades to "no parent" — the document
+       validator rejects bad chains, display stays honest. */
+    studio::Mat4  WsInstanceWorld(const std::string& iid) const;
     QString       WsBindingState(const studio::DeviceBinding& b,
                                  bool& connected) const;
     /* Emitters of the APPLIED resolved scene under instance

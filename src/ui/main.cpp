@@ -19,6 +19,7 @@
 #include "StartupTaskController.h"
 #include "UiSettings.h"
 #include "WorkspaceController.h"
+#include "studio/ObjectEditorController.h"
 
 #include <QApplication>
 #include <QCryptographicHash>
@@ -231,6 +232,13 @@ int main(int argc, char** argv)
     openrgb2::ui::LayoutController layout_ctl(&bridge);
     scene_edit.setWorkspace(&workspace_ctl);
     layout_ctl.setWorkspace(&workspace_ctl);
+    /* studio-import Task 5: the scene/object editor — selection,
+       transform gestures, hierarchy ops, painting and the device
+       library ALL edit the same shared draft through the
+       session's own EditorController (never a private document
+       or undo stack). */
+    openrgb2::ui::ObjectEditorController object_ctl(
+        &bridge, &workspace_ctl);
     /* Normal close flushes the debounced draft record so a
        crash-free exit still preserves unsaved work. */
     QObject::connect(&app, &QCoreApplication::aboutToQuit,
@@ -260,6 +268,8 @@ int main(int argc, char** argv)
                                              &layout_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("workspace"),
                                              &workspace_ctl);
+    engine.rootContext()->setContextProperty(QStringLiteral("objectCtl"),
+                                             &object_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("diagCtl"),
                                              &diag_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("uiPrefs"),
