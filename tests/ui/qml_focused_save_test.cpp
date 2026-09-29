@@ -319,6 +319,98 @@ int main(int argc, char** argv)
        not the stale baseline */
     CHECK(s.doc["name"].get<std::string>() == "renamed-scene");
 
+    /*---- BUG-4 regression: a refused name commit must
+           revert the field and never poison Save --------
+       Clear the field (uncommitted — the working copy still
+       holds "renamed-scene") and click Save with a REAL
+       pending edit in the copy. The name commit refuses
+       before send; the field must resync to the model's
+       name and the pending edit must survive — the
+       pre-fix field kept "" and every later save refused
+       on the same stale text. */
+    scene_edit.setBrightness(0.5);
+    QCoreApplication::processEvents();
+    CHECK(scene_edit.dirty());
+    nameField->setProperty("focus", true);
+    nameField->setProperty("text", QStringLiteral(""));
+    QCoreApplication::processEvents();
+    CHECK(PumpBoth(s, [&] {
+        return saveBtn->property("enabled").toBool();
+    }));
+    QMetaObject::invokeMethod(saveBtn, "clicked",
+                              Qt::DirectConnection);
+    /* refused before send — nothing on the wire, the error
+       is attributed to input, and the pending edit is kept */
+    CHECK(scene_edit.saveError() ==
+          QStringLiteral("scene name is empty"));
+    CHECK(scene_edit.saveErrorSource() ==
+          QStringLiteral("input"));
+    CHECK(s.scene_saves == 1);
+    CHECK(scene_edit.dirty());
+    /* the field snapped back to the model's name — the
+       invalid text no longer sits there invisible-but-
+       blocking */
+    CHECK(nameField->property("text").toString() ==
+          QStringLiteral("renamed-scene"));
+
+    /* Discard repairs a field holding uncommitted text the
+       sentinel can't see as stale (the model name never
+       moves off it) — and clears the saved error. */
+    nameField->setProperty("text",
+                           QStringLiteral("never-committed"));
+    QCoreApplication::processEvents();
+    QObject* discardBtn =
+        win->findChild<QObject*>(QStringLiteral("discardEdits"));
+    CHECK(discardBtn != nullptr);
+    if(discardBtn)
+    {
+        QMetaObject::invokeMethod(discardBtn, "clicked",
+                                  Qt::DirectConnection);
+    }
+    CHECK(PumpBoth(s, [&] { return !scene_edit.dirty(); }));
+    CHECK(nameField->property("text").toString() ==
+          QStringLiteral("renamed-scene"));
+    CHECK(scene_edit.saveError().isEmpty());
+
+    /* Reload applied resyncs the same way — the latch
+       covers the async GET_SCENE pull, not just the
+       synchronous Discard. */
+    nameField->setProperty("text",
+                           QStringLiteral("stale-again"));
+    QCoreApplication::processEvents();
+    QObject* reloadBtn =
+        win->findChild<QObject*>(QStringLiteral("reloadApplied"));
+    CHECK(reloadBtn != nullptr);
+    if(reloadBtn)
+    {
+        QMetaObject::invokeMethod(reloadBtn, "clicked",
+                                  Qt::DirectConnection);
+    }
+    CHECK(PumpBoth(s, [&] {
+        return nameField->property("text").toString()
+               == QStringLiteral("renamed-scene");
+    }));
+    CHECK(scene_edit.saveError().isEmpty());
+
+    /* the poison check: a fresh edit + Save goes out — one
+       refused name can no longer block every later save */
+    scene_edit.setBrightness(0.75);
+    QCoreApplication::processEvents();
+    CHECK(PumpBoth(s, [&] {
+        return saveBtn->property("enabled").toBool();
+    }));
+    QMetaObject::invokeMethod(saveBtn, "clicked",
+                              Qt::DirectConnection);
+    CHECK(PumpBoth(s, [&] { return s.scene_saves >= 2; }));
+    CHECK(s.last_scene_body["document"]["name"]
+              .get<std::string>() == "renamed-scene");
+    CHECK(s.last_scene_body["document"]["brightness"]
+              .get<double>() == 0.75);
+    CHECK(PumpBoth(s, [&] {
+        return !scene_edit.saving() && !scene_edit.dirty();
+    }));
+    CHECK(scene_edit.saveError().isEmpty());
+
     bridge.stop();
     std::printf("qml_focused_save_test: %d checks, %d failures\n",
                 checks, failures);

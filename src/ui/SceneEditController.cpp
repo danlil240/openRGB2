@@ -439,6 +439,11 @@ bool SceneEditController::setSceneName(const QString& name)
                      QStringLiteral("input"));
         return false;
     }
+    /* Same rule as setPreset/setGroupColor: a commit that
+       LANDS clears the refusal an earlier commit raised —
+       a stale "scene name is empty" must not keep
+       reporting after the field carries a valid name. */
+    SetSaveError(QString());
     TouchWorking();
     return true;
 }
@@ -585,11 +590,20 @@ void SceneEditController::discardEdits()
        that armed the new-instance default is gone with it. */
     pending_default_preset_.clear();
     model_.DiscardEdits();
+    /* The failure being surfaced described edits that no
+       longer exist — keeping it would claim "your edits are
+       still here" about a working copy the user just threw
+       away (BUG-4). */
+    SetSaveError(QString());
     TouchWorking();
 }
 
 void SceneEditController::reloadFromEngine()
 {
+    /* A fresh applied-state pull supersedes the last save's
+       failure state — the working copy is about to be
+       replaced by whatever the engine reports (BUG-4). */
+    SetSaveError(QString());
     bridge_->getScene();
 }
 

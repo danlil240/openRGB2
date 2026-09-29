@@ -59,6 +59,28 @@ Item {
     /* nameField sync sentinel — the last model name the
        field was shown (see the field's comment). */
     property string syncedSceneName: ""
+    /* Resync latch for the paths that must push the model's
+       name into the field even when that name never moved
+       OFF the sentinel: Discard/Reload revert the working
+       name to the value the sentinel already holds, so the
+       sentinel alone can't tell stale field text from
+       deliberate typing (BUG-4). Armed by the Discard and
+       Reload-applied buttons, consumed by the NEXT
+       workingChanged (synchronous for Discard, on the
+       GET_SCENE reply for Reload). */
+    property bool nameResyncPending: false
+
+    /* A refused name commit reverts the field to the
+       model's name — the invalid text must never linger:
+       the model name never moved, so the sentinel would
+       suppress every resync and each later Save would
+       refuse on the same stale text (BUG-4). The sentinel
+       stays in step with what the field now shows. */
+    function resyncNameField() {
+        const want = root.editorUp ? sceneEdit.sceneName : "";
+        root.syncedSceneName = want;
+        nameField.text = want;
+    }
 
     /* uiPrefs presence guard — tests may omit the store. */
     readonly property bool prefsUp:
@@ -93,8 +115,14 @@ Item {
     function commitPendingEdits() {
         if(!root.editorUp)
             return;
-        if(!sceneEdit.setSceneName(nameField.text))
+        /* A refused name commit aborts THIS save — the
+           error pill says why and the field reverts to the
+           model's name so the invalid text can't refuse
+           every later save (BUG-4). */
+        if(!sceneEdit.setSceneName(nameField.text)) {
+            resyncNameField();
             return;
+        }
         sceneEdit.save();
     }
 
@@ -1646,14 +1674,27 @@ Item {
                                    model name this field was shown.
                                    When the model's name moves OFF
                                    that value (discard, reload,
-                                   remote apply, a refused edit's
-                                   revert) the field follows it —
-                                   focused or not — while edits the
-                                   model never saw (uncommitted
+                                   remote apply) the field follows
+                                   it — focused or not — while edits
+                                   the model never saw (uncommitted
                                    typing) survive unrelated
-                                   workingChanged churn. */
-                                onEditingFinished: if(root.editorUp)
-                                    sceneEdit.setSceneName(text)
+                                   workingChanged churn. The paths
+                                   that revert to the SAME name the
+                                   sentinel already holds — a
+                                   refused commit, Discard, Reload —
+                                   resync explicitly instead
+                                   (BUG-4). */
+                                onEditingFinished: {
+                                    /* A refused commit reverts —
+                                       the model never took the
+                                       text, so the field must not
+                                       keep showing it (BUG-4). */
+                                    if(root.editorUp
+                                       && !sceneEdit
+                                              .setSceneName(text)) {
+                                        root.resyncNameField();
+                                    }
+                                }
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSizeBody
                                 background: Rectangle {
@@ -1668,7 +1709,9 @@ Item {
                                     function onWorkingChanged() {
                                         const want = root.editorUp
                                             ? sceneEdit.sceneName : "";
-                                        if(want !== root.syncedSceneName) {
+                                        if(want !== root.syncedSceneName
+                                           || root.nameResyncPending) {
+                                            root.nameResyncPending = false;
                                             root.syncedSceneName = want;
                                             if(nameField.text !== want)
                                                 nameField.text = want;
@@ -1847,14 +1890,27 @@ Item {
                     text: qsTr("Reload applied")
                     visible: root.editorUp
                     enabled: root.engineUp
-                    onClicked: sceneEdit.reloadFromEngine()
+                    onClicked: {
+                        /* The pull can land on the SAME name
+                           the sentinel already holds — arm the
+                           resync so stale field text can't
+                           survive it (BUG-4). */
+                        root.nameResyncPending = true;
+                        sceneEdit.reloadFromEngine();
+                    }
                 }
                 AppButton {
                     objectName: "discardEdits"
                     text: qsTr("Discard")
                     visible: root.editorUp && sceneEdit.dirty
                     enabled: root.editorUp && !sceneEdit.saving
-                    onClicked: sceneEdit.discardEdits()
+                    onClicked: {
+                        /* Same resync-latch reason as Reload —
+                           the reverted name usually EQUALS the
+                           sentinel (BUG-4). */
+                        root.nameResyncPending = true;
+                        sceneEdit.discardEdits();
+                    }
                 }
                 AppButton {
                     objectName: "saveButton"
