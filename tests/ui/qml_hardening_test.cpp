@@ -278,7 +278,6 @@ static double Contrast(const QColor& a, const QColor& b)
 
 int main(int argc, char** argv)
 {
-    setvbuf(stdout, nullptr, _IONBF, 0);   /* TEMP debug */
     qputenv("QT_QPA_PLATFORM", "offscreen");
     /* QT_SCALE_FACTOR comes from the CTest entry's env —
        reported here so the log shows which pass ran. */

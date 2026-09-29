@@ -380,6 +380,9 @@ int main(int argc, char** argv)
                     if(m.type == MsgType::Quit)
                     {
                         ++e.quits;
+                        e.stop_backend_seen =
+                            m.Body().value("stop_backend", false)
+                                ? 1 : 0;
                         e.srv.SendMsg(MsgType::Error,
                             m.request_id,
                             nlohmann::json::object({
@@ -404,6 +407,9 @@ int main(int argc, char** argv)
             }
             CHECK(got);
         }
+        /* quitEngine(true) put the stop_backend flag on the
+           wire even though this request was refused. */
+        CHECK(e.stop_backend_seen == 1);
         CHECK(PumpUntil(e, [&] { return reply_type == "ERROR"; }));
         CHECK(reply_body.value("message").toString()
                   .contains("shutdown"));
