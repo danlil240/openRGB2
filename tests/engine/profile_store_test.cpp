@@ -744,6 +744,92 @@ static void TestSceneLoader()
     CHECK(!err.empty());
 }
 
+/*---------------------------------------------------------*\
+|||| T7: last-scene snapshot — the applied scene doc      ||
+||||     persisted beside engine-state.json for restart    ||
+||||     restore. Same atomic-write + corrupt-file-aside   ||
+||||     guarantees; a missing file is "absent", never an  ||
+||||     error.                                            ||
+|\*---------------------------------------------------------*/
+
+static void TestSceneSnapshot()
+{
+    const std::string state = Path("snap/engine-state.json");
+    ProfileStore      store(state);
+    std::string       err;
+
+    /* the snapshot lives beside the state file */
+    CHECK(store.SceneSnapshotPath() ==
+          (g_tmp / "snap" / "last-scene.json").string());
+
+    /* absent -> honest "nothing there", not an error */
+    {
+        const ProfileStore::SceneSnapshot r =
+            store.LoadSceneSnapshot();
+        CHECK(!r.present);
+        CHECK(r.error.empty());
+    }
+
+    /* round-trip: bytes land verbatim */
+    const std::string doc_bytes =
+        std::string("{\n  \"version\": 2,\n") +
+        "  \"name\": \"ice-aurora\",\n" +
+        "  \"objects\": [{\"id\":\"o1\",\"kind\":\"device\"}]\n}\n";
+    CHECK(store.SaveSceneSnapshot(doc_bytes, err));
+    CHECK(err.empty());
+    {
+        const ProfileStore::SceneSnapshot r =
+            store.LoadSceneSnapshot();
+        CHECK(r.present);
+        CHECK(r.error.empty());
+        CHECK(r.bytes == doc_bytes);
+    }
+
+    /* overwrite replaces whole */
+    const std::string doc2 =
+        "{\"version\":2,\"name\":\"v2\",\"objects\":[]}";
+    CHECK(store.SaveSceneSnapshot(doc2, err));
+    {
+        const ProfileStore::SceneSnapshot r =
+            store.LoadSceneSnapshot();
+        CHECK(r.present);
+        CHECK(r.bytes == doc2);
+    }
+
+    /* a malformed candidate never lands */
+    CHECK(!store.SaveSceneSnapshot("{ not json", err));
+    CHECK(!err.empty());
+    {
+        const ProfileStore::SceneSnapshot r =
+            store.LoadSceneSnapshot();
+        CHECK(r.present);
+        CHECK(r.bytes == doc2);      /* previous file intact */
+    }
+
+    /* corruption on disk: load reports the failure honestly,
+       and a later save preserves the bad bytes as .rejected
+       rather than destroying them */
+    WriteText(store.SceneSnapshotPath(), "{ torn");
+    {
+        const ProfileStore::SceneSnapshot r =
+            store.LoadSceneSnapshot();
+        CHECK(!r.present);
+        CHECK(!r.error.empty());
+    }
+    CHECK(store.SaveSceneSnapshot(doc_bytes, err));
+    CHECK(fs::exists(store.SceneSnapshotRejectedPath()));
+    {
+        std::ifstream rej(store.SceneSnapshotRejectedPath(),
+                          std::ios::binary);
+        std::stringstream ss;
+        ss << rej.rdbuf();
+        CHECK(ss.str() == "{ torn");
+        const ProfileStore::SceneSnapshot r =
+            store.LoadSceneSnapshot();
+        CHECK(r.present && r.bytes == doc_bytes);
+    }
+}
+
 int main()
 {
     g_tmp = fs::temp_directory_path() /
@@ -758,6 +844,7 @@ int main()
     TestRecovery();
     TestBoundaryValidation();
     TestDurablePlaybackMode();
+    TestSceneSnapshot();
     TestSceneLoader();
 
     /* Opt-in manual check: point OPENRGB2_SCENE_FILE at a real

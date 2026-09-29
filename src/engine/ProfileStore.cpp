@@ -1058,4 +1058,104 @@ bool ProfileStore::Save(const EngineState& state, std::string& err) const
     return true;
 }
 
+/*---------------------------------------------------------*\
+|||| Last-scene snapshot                                   ||
+\*---------------------------------------------------------*/
+
+std::string ProfileStore::SceneSnapshotPath() const
+{
+    return (std::filesystem::path(path_).parent_path() /
+            "last-scene.json").string();
+}
+
+std::string ProfileStore::SceneSnapshotRejectedPath() const
+{
+    return SceneSnapshotPath() + ".rejected";
+}
+
+ProfileStore::SceneSnapshot ProfileStore::LoadSceneSnapshot() const
+{
+    SceneSnapshot r;
+    std::error_code ec;
+    const std::string p = SceneSnapshotPath();
+    if(!std::filesystem::exists(p, ec))
+    {
+        return r;   /* absent — a fresh profile, not an error */
+    }
+    if(!ReadFile(p, r.bytes))
+    {
+        r.error = "cannot read " + p;
+        return r;
+    }
+    const nlohmann::json j =
+        nlohmann::json::parse(r.bytes, nullptr, false);
+    if(j.is_discarded() || !j.is_object())
+    {
+        /* Honest failure: the bytes stay on disk (a read never
+           destroys user state); the NEXT successful save sets
+           the corrupt file aside as .rejected. */
+        r.bytes.clear();
+        r.error = p + ": not a scene document (invalid JSON)";
+        return r;
+    }
+    r.present = true;
+    return r;
+}
+
+bool ProfileStore::SaveSceneSnapshot(const std::string& bytes,
+                                     std::string& err) const
+{
+    /* The store never lands a document it can't itself parse —
+       same discipline as Save()'s serialize + re-validate. */
+    const nlohmann::json j =
+        nlohmann::json::parse(bytes, nullptr, false);
+    if(j.is_discarded() || !j.is_object())
+    {
+        err = "scene snapshot candidate is not a JSON object";
+        return false;
+    }
+
+    const std::filesystem::path p(SceneSnapshotPath());
+    std::error_code ec;
+    if(p.has_parent_path() &&
+       !std::filesystem::exists(p.parent_path(), ec))
+    {
+        if(!std::filesystem::create_directories(p.parent_path(),
+                                               ec))
+        {
+            err = "cannot create " + p.parent_path().string() +
+                  ": " + ec.message();
+            return false;
+        }
+    }
+
+    /* A corrupt outgoing file is preserved as .rejected —
+       reported, never silently destroyed. Only a file we
+       actually READ is set aside; an unreadable one keeps its
+       bytes and the write below reports any real error. */
+    if(std::filesystem::exists(p, ec))
+    {
+        std::string cur;
+        if(ReadFile(p.string(), cur))
+        {
+            const nlohmann::json cj =
+                nlohmann::json::parse(cur, nullptr, false);
+            if(cj.is_discarded() || !cj.is_object())
+            {
+                if(!WriteAtomic(
+                       SceneSnapshotRejectedPath() + ".tmp",
+                       SceneSnapshotRejectedPath(), cur, err))
+                {
+                    err = "could not set the corrupt scene "
+                          "snapshot aside: " + err;
+                    return false;
+                }
+            }
+        }
+    }
+
+    return WriteAtomic(p.string() + ".tmp", p.string(), bytes,
+                       err);
+}
+
 } /* namespace openrgb2 */

@@ -83,6 +83,12 @@ struct EngineHostOptions
 {
     /* Inputs. */
     std::string scene_path;
+    /* Last-scene restore: when no --scene is given, the engine
+       loads the snapshot written on the last applied scene
+       (state file sibling "last-scene.json"). An explicit
+       --scene always wins; --no-scene-restore opts out for
+       deterministic/headless runs. */
+    bool        scene_restore = true;
     std::string effects_dir;
     std::string devices_dir;
     std::string state_path = "profiles/local/engine-state.json";

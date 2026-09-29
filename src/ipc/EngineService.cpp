@@ -457,6 +457,17 @@ bool EngineService::ApplySceneDocument(
        contract is that event data matches the corresponding
        pull body (docs/ipc-protocol.md §7). */
     Emit(event_kind::kScene, SceneJsonLocked());
+    /* The last-scene snapshot: every successful apply that
+       carries objects persists the document — SET_SCENE,
+       layout mutations, and the startup --scene/restore path
+       all funnel through here. An object-less document is a
+       deliberate "new scene" staging step, not the scene to
+       restore on next launch — it never overwrites the
+       snapshot. */
+    if(deps_.persist_scene && !doc->objects.empty())
+    {
+        deps_.persist_scene(*doc);
+    }
     return true;
 }
 

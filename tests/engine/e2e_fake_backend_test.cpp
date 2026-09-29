@@ -401,6 +401,67 @@ int main()
        now acquires cleanly (collision coverage lives in
        ownership_scan_test). */
 
+    /*---- last-scene persistence + restore --------------------
+       Host A's --scene apply ran through the shared apply
+       path, which fired persist_scene — the document sits
+       beside engine-state.json as last-scene.json. A fresh
+       host with NO --scene over the same state dir restores
+       it; --no-scene-restore suppresses the restore. */
+    {
+        const std::string snap_file =
+            (std::filesystem::path(state_file).parent_path() /
+             "last-scene.json").string();
+        std::error_code ec2;
+        CHECK(std::filesystem::exists(snap_file, ec2));
+
+        auto make_opts = [&](const char* inst,
+                             bool restore)
+        {
+            EngineHostOptions o;
+            o.sdk_enabled       = true;
+            o.transport_factory =
+                [&server]() -> std::unique_ptr<sdk::IStreamTransport>
+                { return std::make_unique<sdk_test::FakeStream>(
+                      server); };
+            o.ipc_enabled     = false;
+            o.power_monitor   = false;
+            o.scan_owners     = false;
+            o.single_instance = true;
+            o.instance_name   = inst;
+            o.state_path      = state_file;
+            o.scene_restore   = restore;
+            o.log             = [](const std::string&) {};
+            return o;
+        };
+
+        /* Host B: no --scene -> the persisted scene applies. */
+        EngineHost host2(make_opts(
+            "Local\\openrgb2-engine-e2e-test-2", true));
+        CHECK(host2.Start(err));
+        CHECK(host2.GetService() != nullptr);
+        std::shared_ptr<const studio::SceneDocument> doc =
+            host2.GetService()->Scene();
+        CHECK(doc != nullptr);
+        if(doc)
+        {
+            CHECK(doc->name == "e2e-scene");
+            CHECK(doc->objects.size() == 4);
+            CHECK(doc->bindings.size() == 4);
+        }
+        host2.RequestStop();
+        host2.Stop();
+
+        /* Host C: --no-scene-restore -> same state dir starts
+           idle, snapshot untouched. */
+        EngineHost host3(make_opts(
+            "Local\\openrgb2-engine-e2e-test-3", false));
+        CHECK(host3.Start(err));
+        CHECK(host3.GetService() != nullptr);
+        CHECK(host3.GetService()->Scene() == nullptr);
+        host3.RequestStop();
+        host3.Stop();
+    }
+
     std::printf("%d checks, %d failures\n", checks, failures);
     {
         std::lock_guard<std::mutex> g(log_mutex);

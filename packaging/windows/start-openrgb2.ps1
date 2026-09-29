@@ -50,7 +50,11 @@
     engine's ProfileStore treats a missing profile as a fresh start
     (no error), writes state\ and profiles\local\ on first save, and
     migrates older schema versions forward. With no --scene the engine
-    idles at the 60 Hz scene clock until the UI applies a scene.
+    restores profiles\local\last-scene.json -- the most recent
+    NON-EMPTY applied scene, snapshotted after every successful
+    apply (an empty scene never overwrites it). Only a first-ever
+    run or -NoSceneRestore leaves the engine idling at the 60 Hz
+    scene clock until the UI applies a scene.
 
     Run state is recorded in state\openrgb2.run.json (PIDs + image
     paths) so stop-openrgb2.ps1 can order the shutdown and verify it
@@ -79,6 +83,12 @@ param(
 
     # Optional scene file passed to the engine's --scene.
     [string]$Scene,
+
+    # Skip the last-scene restore: without -Scene the engine
+    # otherwise re-applies profiles\local\last-scene.json (the
+    # most recent non-empty applied scene). Pass this to start
+    # with NO scene at all.
+    [switch]$NoSceneRestore,
 
     # Start backend + engine but not the UI.
     [switch]$NoUI,
@@ -266,6 +276,7 @@ function Invoke-ManagedStart {
     param(
         [string]$InstallDir,
         [string]$Scene,
+        [bool]$NoSceneRestore,
         [bool]$NoUI,
         [bool]$TakeOver,
         [bool]$ScanOnly,
@@ -299,6 +310,7 @@ function Invoke-ManagedStart {
                       "`"$PSCommandPath`"",
                       "-InstallDir","`"$InstallDir`"")
         if($Scene)  { $elevArgs += @("-Scene","`"$Scene`"") }
+        if($NoSceneRestore) { $elevArgs += "-NoSceneRestore" }
         if($NoUI)   { $elevArgs += "-NoUI" }
         if($TakeOver){ $elevArgs += "-TakeOver" }
         if($HideWindows) { $elevArgs += "-HideWindows" }
@@ -478,6 +490,7 @@ function Invoke-ManagedStart {
                     "--effects-dir", (Join-Path $InstallDir "presets\effects"),
                     "--state", (Join-Path $InstallDir "profiles\local\engine-state.json"))
     if($Scene) { $engineArgs += @("--scene", $Scene) }
+    if($NoSceneRestore) { $engineArgs += "--no-scene-restore" }
     # -ArgumentList joins with spaces -- quote elements that need it
     # (install paths under e.g. "C:\Program Files" must survive).
     $engineArgLine = ($engineArgs | ForEach-Object {
@@ -538,7 +551,8 @@ function Invoke-ManagedStart {
 # Dot-source guard: sourcing this file defines the functions only.
 if($MyInvocation.InvocationName -ne '.') {
     exit (Invoke-ManagedStart `
-        -InstallDir $InstallDir -Scene $Scene -NoUI $NoUI `
+        -InstallDir $InstallDir -Scene $Scene `
+        -NoSceneRestore $NoSceneRestore -NoUI $NoUI `
         -TakeOver $TakeOver -ScanOnly $ScanOnly -Elevated $Elevated `
         -HideWindows $HideWindows `
         -BackendWaitSeconds $BackendWaitSeconds -ProcessList $ProcessList `

@@ -45,11 +45,14 @@ void Usage(const char* argv0)
         "          [--sdk [host:port]] [--ipc | --no-ipc]\n"
         "          [--backend-config <dir>] [--backend-exe <path>]\n"
         "          [--no-scan]\n"
-        "          [--no-instance-guard]\n"
+        "          [--no-instance-guard] [--no-scene-restore]\n"
         "\n"
         "  Runs the lighting engine until SIGINT/SIGTERM. No UI is\n"
-        "  required or expected. Without --scene the engine idles at\n"
-        "  the 60 Hz scene clock (no frames are produced).\n"
+        "  required or expected. Every applied scene persists to\n"
+        "  last-scene.json beside the state file; without --scene\n"
+        "  the engine restores that snapshot (a missing or\n"
+        "  unloadable snapshot degrades to idle, never a\n"
+        "  fabricated scene — --no-scene-restore opts out).\n"
         "  --scene accepts any persisted form the profile layer\n"
         "  resolves: an expanded SceneDocument JSON ('version'),\n"
         "  a compact workspace studio.json ('schema_version'), or a\n"
@@ -155,6 +158,10 @@ int main(int argc, char** argv)
         else if(arg == "--no-instance-guard")
         {
             opts.single_instance = false;
+        }
+        else if(arg == "--no-scene-restore")
+        {
+            opts.scene_restore = false;
         }
         else if(arg == "--help" || arg == "-h")
         {

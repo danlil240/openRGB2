@@ -122,6 +122,19 @@ public:
         std::function<void(std::shared_ptr<const studio::SceneDocument>&)>
             prepare_scene;
 
+        /* Last-scene persistence: invoked AFTER every
+           successful apply of a document that carries objects
+           — SET_SCENE, layout mutations (incl. add_object), and
+           the --scene/restore startup path all funnel through
+           ApplySceneDocument, so this is the one place a
+           durable "last applied scene" can be captured. A
+           document with NO objects never reaches the hook:
+           applying an empty scene is a deliberate "new scene"
+           staging step, not the thing to restore on the next
+           launch. Empty -> no persistence. */
+        std::function<void(const studio::SceneDocument&)>
+            persist_scene;
+
         /* The "Quit All" hook (plan section 4): QUIT invokes this
            AFTER the reply is prepared; production wires it to the
            owner loop's stop flag so owned components shut down in

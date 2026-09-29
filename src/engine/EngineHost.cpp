@@ -1020,6 +1020,27 @@ bool EngineHost::Start(std::string& err)
                     }
                 }
             };
+        /* Last-scene persistence: every successful apply that
+           carries objects lands the document beside the state
+           file, so a restart with no --scene restores what was
+           last applied. A write failure is logged, never
+           fatal — persistence must not break the apply that
+           produced it. */
+        ipc_deps.persist_scene =
+            [this](const studio::SceneDocument& doc)
+            {
+                if(!profile_)
+                {
+                    return;
+                }
+                std::string serr;
+                if(!profile_->SaveSceneSnapshot(
+                       studio::ToJson(doc).dump(2) + "\n", serr))
+                {
+                    Log("last-scene snapshot save failed: " +
+                        serr);
+                }
+            };
         service_ = std::make_unique<ipc::EngineService>(
             engine_, std::move(ipc_deps));
     }
@@ -1095,33 +1116,83 @@ bool EngineHost::StartIpc()
 
 bool EngineHost::ApplyStartupScene(std::string& err)
 {
-    if(opts_.scene_path.empty())
+    if(!opts_.scene_path.empty())
+    {
+        /* Task 3.8: --scene resolves through the profile/
+           workspace layer — expanded scene JSON, a compact
+           studio.json workspace, or a legacy host-settings
+           blob all land on the same SceneDocument. */
+        const studio::PresetRegistry device_registry =
+            BuildDeviceRegistry(opts_.devices_dir,
+                [this](const std::string& l) { Log(l); });
+        std::shared_ptr<studio::SceneDocument> doc;
+        std::vector<std::string> warnings;
+        if(!LoadSceneDocument(opts_.scene_path, device_registry,
+                              doc, err, &warnings))
+        {
+            return false;
+        }
+        for(const std::string& w : warnings)
+        {
+            Log(opts_.scene_path + ": " + w);
+        }
+        if(!service_->ApplySceneDocument(doc, err))
+        {
+            err = "scene apply failed: " + err;
+            return false;
+        }
+        return true;
+    }
+
+    /* No explicit --scene: restore the last applied scene —
+       the snapshot persist_scene wrote on the previous run's
+       final non-empty apply. Parse + apply go through the
+       SAME path SET_SCENE uses (FromJson + ApplySceneDocument,
+       so graph/LED-address validation and binding
+       augmentation all run normally). A corrupt or
+       unloadable snapshot degrades to the idle state with a
+       logged reason — restore failure is never a startup
+       failure, and no scene is ever fabricated. */
+    if(!opts_.scene_restore || !profile_ || !service_)
     {
         return true;
     }
-    /* Task 3.8: --scene resolves through the profile/
-       workspace layer — expanded scene JSON, a compact
-       studio.json workspace, or a legacy host-settings
-       blob all land on the same SceneDocument. */
-    const studio::PresetRegistry device_registry =
-        BuildDeviceRegistry(opts_.devices_dir,
-                            [this](const std::string& l) { Log(l); });
-    std::shared_ptr<studio::SceneDocument> doc;
-    std::vector<std::string> warnings;
-    if(!LoadSceneDocument(opts_.scene_path, device_registry,
-                          doc, err, &warnings))
+    const ProfileStore::SceneSnapshot snap =
+        profile_->LoadSceneSnapshot();
+    if(!snap.error.empty())
     {
-        return false;
+        Log("last-scene restore skipped: " + snap.error);
+        return true;
     }
-    for(const std::string& w : warnings)
+    if(!snap.present)
     {
-        Log(opts_.scene_path + ": " + w);
+        return true;   /* nothing persisted — idle, as before */
+    }
+    const nlohmann::json j =
+        nlohmann::json::parse(snap.bytes, nullptr, false);
+    auto doc = std::make_shared<studio::SceneDocument>();
+    std::vector<std::string> errors;
+    if(j.is_discarded() ||
+       !studio::FromJson(j, *doc, &errors))
+    {
+        std::string why = "not valid scene JSON";
+        if(!errors.empty())
+        {
+            why = errors.front();
+        }
+        Log("last-scene restore skipped: " +
+            profile_->SceneSnapshotPath() + ": " + why);
+        return true;
     }
     if(!service_->ApplySceneDocument(doc, err))
     {
-        err = "scene apply failed: " + err;
-        return false;
+        Log("last-scene restore: apply failed (" + err +
+            ") — continuing without a scene");
+        err.clear();
+        return true;
     }
+    Log("restored last applied scene '" + doc->name + "' from " +
+        profile_->SceneSnapshotPath());
     return true;
 }
 

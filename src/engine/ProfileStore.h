@@ -215,6 +215,31 @@ public:
        file is left untouched. */
     bool Save(const EngineState& state, std::string& err) const;
 
+    /*---- last-scene snapshot --------------------------------
+       The document the engine most recently applied (only
+       non-empty applies reach the hook — see EngineService::
+       Deps::persist_scene), stored beside the state file so a
+       restart with no --scene restores it. Same discipline as
+       Save(): the candidate is validated (a JSON object —
+       scene semantics are the scene layer's job on restore),
+       writes are atomic temp+rename, and a corrupt outgoing
+       file is set aside as <path>.rejected, never destroyed. */
+    std::string SceneSnapshotPath() const;
+    std::string SceneSnapshotRejectedPath() const;
+    struct SceneSnapshot
+    {
+        bool        present = false; /* a usable doc was on disk */
+        std::string bytes;           /* raw scene JSON           */
+        std::string error;           /* read/parse failure       */
+    };
+    /* A missing snapshot is present=false with an EMPTY error
+       — a fresh profile is not an error. A corrupt file is
+       present=false + error; the bytes stay on disk (reads
+       never destroy user state). */
+    SceneSnapshot LoadSceneSnapshot() const;
+    bool          SaveSceneSnapshot(const std::string& bytes,
+                                    std::string& err) const;
+
 private:
     std::string path_;
 };
