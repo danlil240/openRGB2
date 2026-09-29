@@ -554,6 +554,56 @@ int main()
         CHECK(IsError(m, ErrCode::Unavailable));
     }
 
+    /*---- REACTIVE_COMMAND reaches dispatch (wire level) ------*\
+    | Regression: IsRequestType lacked ReactiveCommand — every    |
+    | audio/screen/key toggle was rejected as UnknownCommand      |
+    | before EngineService ever saw it (dispatch-level tests      |
+    | bypass the gate, so only a real session catches it).        |
+    \*------------------------------------------------------------*/
+    {
+        openrgb2::Engine engine;
+        EngineService::Deps deps;   /* no reactive manager */
+        EngineService svc(engine, deps);
+        IpcServer server(svc);
+        TestClient c;
+        CHECK(server.Serve(c.MakeChannel(), ChannelKind::Command));
+        c.Hello();
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Welcome);
+
+        /* Well-formed command, unwired deps -> the handler's own
+           honest Unavailable, NOT UnknownCommand. */
+        c.SendMsg(MsgType::ReactiveCommand, 95, nlohmann::json::object(
+            { { "verb",    "set_enabled" },
+              { "input",   "audio"       },
+              { "enabled", true          } }));
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(IsError(m, ErrCode::Unavailable));
+        CHECK(!IsError(m, ErrCode::UnknownCommand));
+
+        /* Malformed verb space -> BadRequest from dispatch,
+           again proving the message crossed the gate. */
+        c.SendMsg(MsgType::ReactiveCommand, 96, nlohmann::json::object(
+            { { "verb", "nonsense" } }));
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(IsError(m, ErrCode::BadRequest));
+
+        /* ...and on the read-only diagnostics pipe the verb is
+           refused before dispatch like every command verb. */
+        TestClient d;
+        CHECK(server.Serve(d.MakeChannel(),
+                           ChannelKind::Diagnostics));
+        d.Hello();
+        CHECK(d.RecvMsg(m, 5000));
+        d.SendMsg(MsgType::ReactiveCommand, 97, nlohmann::json::object(
+            { { "verb",    "set_enabled" },
+              { "input",   "audio"       },
+              { "enabled", true          } }));
+        CHECK(d.RecvMsg(m, 5000));
+        CHECK(IsError(m, ErrCode::ReadOnly));
+    }
+
     /*---- connection cap ------------------------------------*/
     {
         IpcServerOptions opts;
