@@ -85,6 +85,9 @@ per-file `signed` flag and a `signing` block when a package was signed.
 ## Files here
 
 - `stage-release.ps1` — staging + verification script.
+- `build-and-deploy.ps1` — one-command wrapper: CMake build → pinned
+  backend check → `stage-release.ps1` → optional `update-openrgb2.ps1`
+  into `-InstallDir` (stops the running install first).
 - `start-openrgb2.ps1` / `stop-openrgb2.ps1` — managed startup
   (ownership scan -> explicit `-TakeOver` gate -> backend -> engine ->
   UI) and ordered clean shutdown (engine IPC QUIT -> graceful backend
@@ -95,12 +98,14 @@ per-file `signed` flag and a `signing` block when a package was signed.
 - `OpenRGB2.cmd` — double-click launcher shipped at the package root.
   The copy in this source directory launches the staged release under
   `build/package/` when one is present.
-- `OpenRGB2.vbs` — terminal-free launcher for a desktop shortcut. It
-  starts the managed stack with `-TakeOver`, keeps competing applications
-  running, and logs startup to `state/startup.log`. The GUI wrapper shows
-  an error dialog when startup fails.
-- `create-desktop-shortcut.ps1` — creates `OpenRGB2.lnk` on the current
-  user's desktop, using the packaged OpenRGB icon.
+- `openrgb2-ui.exe` — terminal-free desktop entry. It starts the managed
+  stack as administrator, keeps a tray icon after the window closes,
+  and logs startup to `state/startup.log`.
+- `startup-task.ps1` — manages the optional current-user, highest-privilege
+  sign-in task controlled by Settings → Windows startup.
+- `OpenRGB2.vbs` — retained compatibility launcher for older shortcuts.
+- `create-desktop-shortcut.ps1` — creates `OpenRGB2.lnk` pointing directly
+  at the UI executable, using the packaged OpenRGB2 icon.
 - `install-recovery.md` — install/startup/ownership/update/rollback
   guide (staged as `INSTALL.md`).
 - `NOTICES.txt` — shipped license/provenance manifest.

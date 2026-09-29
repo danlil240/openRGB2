@@ -13,7 +13,7 @@ it anywhere and run it.
 
 | Entry | What it is |
 | --- | --- |
-| `openrgb2-ui.exe` | Qt Quick UI (effects, devices, diagnostics) |
+| `openrgb2-ui.exe` | Qt Quick desktop app (effects, devices, diagnostics, tray icon); starts the managed stack when run from this package |
 | `openrgb2-engine.exe` | Qt-free lighting engine; owns scene clock, delivery lanes, SDK client, IPC pipes |
 | `openrgb2-ctl.exe` | CLI for the engine's command/diagnostics pipes |
 | `backend\OpenRGB.exe` | pinned `lianli-wireless` OpenRGB backend — the sole RGB hardware owner, SDK server on `127.0.0.1:6744` only |
@@ -31,14 +31,19 @@ documented in `INSTALL.md` ("State written OUTSIDE the install dir"):
 a ~370-byte backend startup log stub per launch in
 `%APPDATA%\OpenRGB\logs\` (vendored `LogManager` runs before
 `--localconfig`), the UI's Qt cache under `%LOCALAPPDATA%\OpenRGB2\`,
-and UI preferences in `HKCU\Software\OpenRGB2\OpenRGB2`. Removal =
-delete this folder, optionally those three locations; nothing else
-touches the system.
+and UI preferences in `HKCU\Software\OpenRGB2\OpenRGB2`. The optional
+sign-in task is registered only when enabled in Settings. Removal =
+disable that setting, delete this folder, and optionally clear those
+three locations.
 
 ## How to run
 
-Double-click **`OpenRGB2.cmd`** (or
-`powershell -File scripts\start-openrgb2.ps1`). The launcher then:
+Double-click **`openrgb2-ui.exe`** or its desktop shortcut for a launch
+without terminal windows. Windows requests administrator approval for a
+manual launch. Settings has an optional sign-in toggle that starts the
+app elevated in the tray. `OpenRGB2.cmd` and
+`powershell -File scripts\start-openrgb2.ps1` remain command-line entries.
+The managed launcher then:
 
 1. **Ownership scan** — reports competing RGB owners (L-Connect, G Hub,
    Synapse, iCUE, SignalRGB, GCC, other OpenRGB instances). FanControl
@@ -57,9 +62,8 @@ Double-click **`OpenRGB2.cmd`** (or
    closed gracefully. `-Force` exists as the last resort on verified
    own processes only.
 
-Elevation is opt-in (`-Elevated` → UAC prompt) and only needed for
-PawnIO-gated paths (SMBus DIMMs, SuperIO) — USB/HID devices work
-unelevated.
+The desktop app requests elevation by default. The command-line launcher
+still has the opt-in `-Elevated` switch.
 
 ## Measured support matrix
 

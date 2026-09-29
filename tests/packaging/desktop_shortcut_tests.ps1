@@ -6,7 +6,7 @@ $desktop = Join-Path $root 'Desktop'
 New-Item -ItemType Directory -Force $desktop | Out-Null
 
 try {
-    New-Item -ItemType File (Join-Path $root 'OpenRGB2.vbs') | Out-Null
+    New-Item -ItemType File (Join-Path $root 'openrgb2-ui.exe') | Out-Null
     New-Item -ItemType File (Join-Path $root 'OpenRGB2.ico') | Out-Null
     & powershell -NoProfile -ExecutionPolicy Bypass -File $Installer -InstallDir $root -DesktopDir $desktop
     if($LASTEXITCODE -ne 0) { throw "shortcut installer exited $LASTEXITCODE" }
@@ -14,10 +14,10 @@ try {
     $linkPath = Join-Path $desktop 'OpenRGB2.lnk'
     if(-not (Test-Path $linkPath)) { throw 'desktop shortcut was not created' }
     $link = (New-Object -ComObject WScript.Shell).CreateShortcut($linkPath)
-    if($link.TargetPath -ne (Join-Path $env:SystemRoot 'System32\wscript.exe')) {
+    if($link.TargetPath -ne (Join-Path $root 'openrgb2-ui.exe')) {
         throw "wrong shortcut target: $($link.TargetPath)"
     }
-    if($link.Arguments -ne ('"' + (Join-Path $root 'OpenRGB2.vbs') + '"')) {
+    if($link.Arguments -ne '--managed') {
         throw "wrong shortcut arguments: $($link.Arguments)"
     }
     if($link.IconLocation -notlike ((Join-Path $root 'OpenRGB2.ico') + '*')) {

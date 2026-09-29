@@ -16,8 +16,9 @@ app-locally. No installer and no PATH changes.
 | `state\` | **user state** (created at runtime) — backend private config (`state\backend\`), run file, update journal |
 | `scripts\*.ps1` | managed startup / shutdown / update / rollback |
 | `OpenRGB2.cmd` | double-click entry point (runs `scripts\start-openrgb2.ps1`) |
-| `OpenRGB2.vbs` | desktop entry point; starts silently with `-TakeOver` and writes `state\startup.log` |
-| `OpenRGB2.ico` | desktop shortcut icon (from the pinned OpenRGB fork) |
+| `openrgb2-ui.exe` | desktop entry point; starts the managed stack without a terminal and keeps a tray icon |
+| `OpenRGB2.vbs` | legacy terminal-free desktop entry point |
+| `OpenRGB2.ico` | OpenRGB2 application and desktop shortcut icon |
 | `manifest.json` | per-file SHA-256 + provenance for the whole package |
 
 ### State written OUTSIDE the install dir
@@ -31,9 +32,9 @@ hidden:
 | `%LOCALAPPDATA%\OpenRGB2\OpenRGB2\cache\` | Qt runtime (UI) | `QStandardPaths` pipeline/shader cache for `openrgb2-ui.exe` — Qt writes this for any Qt Quick app; safe to delete. |
 | `HKCU\Software\OpenRGB2\OpenRGB2` | UI (`UiSettings`) | `QSettings` for window geometry / last view / playback-param seeds. UI-only preferences — engine state is never in the registry. |
 
-To remove OpenRGB2 completely: delete the install folder, then the
-three locations above. Nothing else is written — no system dirs, no
-services, no PATH/registry changes beyond the single QSettings key.
+To remove OpenRGB2 completely: disable Windows startup in Settings if
+enabled, then delete the install folder and the three locations above.
+The optional sign-in task is the only other system registration.
 
 ## Process model and startup
 
@@ -59,25 +60,36 @@ powershell -ExecutionPolicy Bypass -File scripts\start-openrgb2.ps1
 # or double-click OpenRGB2.cmd
 ```
 
-For a desktop icon with no terminal window, run this once from the
-package directory:
+Double-click `openrgb2-ui.exe` to start the managed stack without a
+terminal. Windows requests administrator approval for a manual launch.
+Closing its window hides it in the system tray; click the icon
+to reopen it, use **Exit UI** to leave lighting running, or choose
+**Quit OpenRGB2** to stop the managed engine and backend before exiting.
+The Settings page has the confirmed engine shutdown action. Startup
+output goes to `state\startup.log`, and a dialog reports startup errors.
+
+Settings → Windows startup has **Open OpenRGB2 when I sign in** (off by
+default). Enabling it registers a task for the current Windows user with
+highest privileges; at sign-in the app starts in the tray without a UAC
+prompt. Disable the setting before deleting or moving this install. The
+same action is available from `scripts\startup-task.ps1 -Mode disable`.
+
+To create a desktop shortcut, run this once from the package directory:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\create-desktop-shortcut.ps1
 ```
 
-The shortcut starts `OpenRGB2.vbs`, which acknowledges process-name
-ownership warnings with `-TakeOver` while leaving Logitech G Hub and
-FanControl running. Startup output goes to `state\startup.log`; a
-Windows dialog points to that file if startup fails. The shortcut does
-not change Windows Application Control policy, so an unsigned binary
-blocked by that policy still cannot launch.
+The shortcut points straight to `openrgb2-ui.exe --managed`. It uses
+`-TakeOver` while leaving Logitech G Hub and FanControl running. The
+shortcut does not change Windows Application Control policy, so an
+unsigned binary blocked by that policy still cannot launch.
 
 Options: `-NoUI` headless · `-Scene <file>` startup scene ·
 `-ScanOnly` ownership report only · `-TakeOver` explicit takeover ·
 `-Elevated` re-launch via UAC (needed when the backend's hardware
-access requires admin — e.g. the optional PawnIO driver path; the
-UAC prompt is the user-visible consent step).
+access requires admin from a command-line launch; the desktop app
+requests elevation automatically).
 
 **First run:** `profiles\local\` and `state\` do not exist yet — the
 engine treats a missing profile as a fresh start (never an error),

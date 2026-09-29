@@ -435,11 +435,16 @@ function Invoke-ManagedStart {
         } else {
             New-Item -ItemType Directory -Force -Path $BackendCfg | Out-Null
             Write-Host "==> starting pinned backend (config: state\backend)" -ForegroundColor Cyan
-            $bp = Start-Process -FilePath $BackendExe -PassThru `
-                  -WorkingDirectory $BackendCfg `
-                  -ArgumentList "--server","--server-host","127.0.0.1",
-                                "--server-port","$ManagedPort",
-                                "--noautoconnect","--localconfig"
+            $backendStart = @{
+                FilePath = $BackendExe
+                PassThru = $true
+                WorkingDirectory = $BackendCfg
+                ArgumentList = @("--server","--server-host","127.0.0.1",
+                                 "--server-port","$ManagedPort",
+                                 "--noautoconnect","--localconfig")
+            }
+            if($HideWindows) { $backendStart.WindowStyle = 'Hidden' }
+            $bp = Start-Process @backendStart
             $backendProcId  = $bp.Id
             $startedBackend = $true
             $deadline = (Get-Date).AddSeconds($BackendWaitSeconds)
@@ -468,6 +473,7 @@ function Invoke-ManagedStart {
     #---- 4. engine ----------------------------------------------------
     $engineArgs = @("--sdk",
                     "--backend-config", $BackendCfg,
+                    "--backend-exe", $BackendExe,
                     "--devices-dir", (Join-Path $InstallDir "presets\devices"),
                     "--effects-dir", (Join-Path $InstallDir "presets\effects"),
                     "--state", (Join-Path $InstallDir "profiles\local\engine-state.json"))
@@ -521,7 +527,8 @@ function Invoke-ManagedStart {
     #---- 5. UI ---------------------------------------------------------
     if(-not $NoUI -and (Test-Path $UiExe)) {
         Write-Host "==> starting UI (engine keeps running if the UI closes)" -ForegroundColor Cyan
-        Start-Process -FilePath $UiExe -WorkingDirectory $InstallDir | Out-Null
+        Start-Process -FilePath $UiExe -WorkingDirectory $InstallDir `
+            -ArgumentList '--unmanaged' | Out-Null
     }
 
     Write-Host "OpenRGB2 started. Stop with: scripts\stop-openrgb2.ps1" -ForegroundColor Green
