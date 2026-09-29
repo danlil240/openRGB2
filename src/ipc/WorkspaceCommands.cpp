@@ -446,18 +446,35 @@ IpcReply WorkspaceCommands::HandleCatalog(const nlohmann::json& body)
     }
     else if(kind == "effects")
     {
-        const auto items = CachedEffects()->List();
+        const std::shared_ptr<const studio::EffectRegistry> reg =
+            CachedEffects();
+        const auto items = reg->List();
         total = items.size();
         entries = Paged(items, p,
-            [](const studio::EffectRegistry::EffectInfo& i)
+            [reg](const studio::EffectRegistry::EffectInfo& i)
             {
-                return nlohmann::json::object({
+                nlohmann::json e = nlohmann::json::object({
                     { "id",          i.id          },
                     { "name",        i.name        },
                     { "description", i.description },
                     { "needs",       i.needs       },
                     { "from_file",   i.from_file   },
                 });
+                /* File-supplied looks carry their document so the
+                   UI session can resolve them without a second
+                   round-trip — a saved look stays usable across
+                   restarts. Packaged looks resolve from the
+                   client's compiled-in registry already. */
+                if(i.from_file)
+                {
+                    if(const studio::EffectDocument* d =
+                           reg->Find(i.id))
+                    {
+                        e["document"] =
+                            studio::EffectDocumentToJson(*d);
+                    }
+                }
+                return e;
             });
     }
     else if(kind == "workspaces")

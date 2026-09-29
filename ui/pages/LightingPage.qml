@@ -1479,6 +1479,18 @@ Item {
                                         from: 25; to: 200; stepSize: 1
                                         enabled: inputRow.usable
                                         onMoved: sensTimer.restart()
+                                        /* Persist the authored
+                                           value into the draft on
+                                           RELEASE only — one undo
+                                           record per drag, not one
+                                           per 150 ms timer tick. */
+                                        onPressedChanged: {
+                                            if(!pressed
+                                               && typeof effectEdit !== "undefined"
+                                               && effectEdit.ready)
+                                                effectEdit.setInputSensitivity(
+                                                    Math.round(value))
+                                        }
                                         Binding {
                                             target: sensSlider
                                             property: "value"
@@ -1497,17 +1509,15 @@ Item {
                                     Timer {
                                         id: sensTimer
                                         interval: 150
-                                        onTriggered: {
+                                        /* Live wire updates only —
+                                           the draft persist lands
+                                           once on slider release. */
+                                        onTriggered:
                                             bridge.reactiveCommand(
                                                 "set_params",
                                                 { "input": "audio",
                                                   "sensitivity":
                                                       sensSlider.value / 100.0 })
-                                            if(typeof effectEdit !== "undefined"
-                                               && effectEdit.ready)
-                                                effectEdit.setInputSensitivity(
-                                                    Math.round(sensSlider.value))
-                                        }
                                     }
                                 }
 
@@ -1585,14 +1595,17 @@ Item {
                                 Layout.fillWidth: true
                                 from: 50; to: 300; stepSize: 5
                                 onPressedChanged: {
-                                    if(!pressed)
+                                    if(!pressed
+                                       && typeof effectEdit !== "undefined"
+                                       && effectEdit.ready)
                                         effectEdit.setDecayPct(
                                             Math.round(value))
                                 }
                                 Binding {
                                     target: decaySlider
                                     property: "value"
-                                    value: effectEdit.ready
+                                    value: typeof effectEdit !== "undefined"
+                                           && effectEdit.ready
                                            ? effectEdit.decayPct : 100
                                 }
                             }

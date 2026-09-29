@@ -848,6 +848,160 @@ static void TestFutureGenerationNotRewritten()
               != std::string::npos);
 }
 
+/*---------------------------------------------------------*\
+||| T11: InstallEffectResource (Task 6 resource_install) — ||
+|||      revision-gated, collision-safe single-look        ||
+|||      install: identical reuses, differing content      ||
+|||      suffixes without overwriting, stale revisions and ||
+|||      an unreadable marker refuse, and a failed install ||
+|||      leaves the active workspace + library intact      ||
+\*---------------------------------------------------------*/
+static studio::EffectDocument EffectDoc(const std::string& id,
+                                        const std::string& name,
+                                        double speed)
+{
+    const nlohmann::ordered_json ej = nlohmann::ordered_json::object({
+        { "schema_version", studio::EFFECT_SCHEMA_VERSION },
+        { "id",             id                          },
+        { "name",           name                        },
+        { "layers", json::array({ json::object({
+              { "primitive", "wave" },
+              { "speed",     speed  } }) }) },
+    });
+    studio::EffectDocument d;
+    std::vector<std::string> perrs;
+    CHECK(studio::EffectDocumentFromJson(ej, d, &perrs));
+    if(!perrs.empty())
+    {
+        std::printf("  (effect parse: %s)\n", perrs.front().c_str());
+    }
+    return d;
+}
+
+static void TestEffectResourceInstall()
+{
+    const fs::path types = g_tmp / "types-fx";
+    fs::create_directories(types);
+    WriteText((types / "mini-fan.device.json").string(),
+              TypeJson("mini-fan", 8, "base"));
+
+    WorkspaceStore::Deps deps;
+    deps.devices = RegistryWith(types.string());
+    const fs::path root = g_tmp / "ws11";
+    WorkspaceStore store(root.string(), deps);
+    const fs::path wsdir = root / "desk";
+    const fs::path elib  = root / "library" / "effects";
+
+    WorkspaceCandidate cand;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("desk", "mini-fan")),
+                        deps.devices, deps.effects, cand));
+    WorkspaceStore::CommitResult cr =
+        store.Commit("desk", cand, std::string(), 0);
+    CHECK(cr.ok);                       /* ws_rev 1, res_rev 1 */
+
+    /* No workspace at all — refused before touching disk. */
+    {
+        auto r = store.InstallEffectResource(
+            "ghost", EffectDoc("look_a", "A", 1.0), 0, 0);
+        CHECK(!r.ok);
+        CHECK(!r.error.empty());
+    }
+    /* A bad id fails validation before any write. */
+    {
+        studio::EffectDocument bad;
+        bad.id = "bad id!";
+        auto r = store.InstallEffectResource("desk", bad, 1, 1);
+        CHECK(!r.ok);
+        CHECK(!fs::exists(elib / "bad id!.effect.json"));
+    }
+    /* Stale revisions refuse — both gates. */
+    {
+        auto r = store.InstallEffectResource(
+            "desk", EffectDoc("look_a", "A", 1.0), 0, 1);
+        CHECK(!r.ok);
+        r = store.InstallEffectResource(
+            "desk", EffectDoc("look_a", "A", 1.0), 1, 0);
+        CHECK(!r.ok);
+    }
+
+    /* Clean install — resource_revision bumps, workspace
+       revision + active generation untouched. */
+    studio::EffectDocument look = EffectDoc("my_look", "Mine", 0.4);
+    {
+        auto r = store.InstallEffectResource("desk", look, 1, 1);
+        if(!r.ok)
+        {
+            std::printf("  (install: %s)\n", r.error.c_str());
+        }
+        CHECK(r.ok);
+        CHECK(r.landed_id == "my_look");
+        CHECK(r.workspace_revision == 1);
+        CHECK(r.resource_revision == 2);
+        CHECK(!r.reused);
+        CHECK(fs::exists(elib / "my_look.effect.json"));
+        WorkspaceStore::LoadResult lr = store.Load("desk");
+        CHECK(lr.status == WorkspaceStore::LoadStatus::Loaded);
+        CHECK(lr.workspace_revision == 1);
+        CHECK(lr.resource_revision == 2);
+        /* The effective registry now resolves the landed look. */
+        const studio::EffectRegistry reg =
+            store.EffectiveEffectRegistry();
+        CHECK(reg.Contains("my_look"));
+    }
+
+    /* Identical content reuses — no file write, no revision
+       bump. */
+    {
+        auto r = store.InstallEffectResource("desk", look, 1, 2);
+        CHECK(r.ok && r.reused);
+        CHECK(r.landed_id == "my_look");
+        CHECK(r.resource_revision == 2);
+        CHECK(!fs::exists(elib / "my_look-2.effect.json"));
+    }
+
+    /* Different content under a taken id lands suffixed; the
+       existing file's bytes are byte-identical afterwards. */
+    const std::string original =
+        ReadText((elib / "my_look.effect.json").string());
+    {
+        studio::EffectDocument clash =
+            EffectDoc("my_look", "Different", 9.9);
+        auto r = store.InstallEffectResource("desk", clash, 1, 2);
+        CHECK(r.ok);
+        CHECK(!r.reused);
+        CHECK(r.landed_id == "my_look-2");
+        CHECK(r.resource_revision == 3);
+        CHECK(fs::exists(elib / "my_look-2.effect.json"));
+        CHECK(ReadText((elib / "my_look.effect.json").string())
+                  == original);            /* never overwritten */
+        /* The suffixed file carries its own id. */
+        std::vector<std::string> verrs;
+        studio::EffectDocument landed;
+        CHECK(studio::EffectDocumentFromJsonFile(
+            (elib / "my_look-2.effect.json").string(),
+            landed, &verrs));
+        CHECK(landed.id == "my_look-2");
+        /* The name the user gave survives the suffix. */
+        CHECK(landed.name == "Different");
+    }
+
+    /* An unreadable marker refuses the install and leaves the
+       library + last-good state intact. */
+    WriteText((wsdir / "active").string(), "garbage{{{");
+    WriteText((wsdir / "active.lkg").string(), "also-bad");
+    {
+        auto r = store.InstallEffectResource(
+            "desk", EffectDoc("another", "B", 1.0), 1, 3);
+        CHECK(!r.ok);
+        CHECK(!r.error.empty());
+        CHECK(!fs::exists(elib / "another.effect.json"));
+        CHECK(ReadText((elib / "my_look.effect.json").string())
+                  == original);
+        WorkspaceStore::LoadResult lr = store.Load("desk");
+        CHECK(lr.status == WorkspaceStore::LoadStatus::Failed);
+    }
+}
+
 int main()
 {
     g_tmp = fs::temp_directory_path() /
@@ -866,6 +1020,7 @@ int main()
     TestGenerationBound();
     TestServiceSurface();
     TestFutureGenerationNotRewritten();
+    TestEffectResourceInstall();
 
     fs::remove_all(g_tmp, ec);
     std::printf("%d checks, %d failures\n", checks, failures);

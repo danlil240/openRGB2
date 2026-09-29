@@ -88,8 +88,21 @@ Rectangle {
                     AppButton {
                         objectName: "lookApply_" + modelData.id
                         text: qsTr("Apply")
-                        onClicked:
-                            effectEdit.selectPreset(modelData.id)
+                        onClicked: {
+                            /* Explicit notice before replacing
+                               authored layers (plan mandate) —
+                               a pick that loses nothing (no
+                               authored stack) goes straight
+                               through. */
+                            if(effectEdit.hasInlineLayers) {
+                                applyDialog.lookId   = modelData.id
+                                applyDialog.lookName =
+                                    modelData.name || modelData.id
+                                applyDialog.open()
+                            } else {
+                                effectEdit.selectPreset(modelData.id)
+                            }
+                        }
                     }
                 }
             }
@@ -199,5 +212,27 @@ Rectangle {
                       .arg(shelf.ready ? effectEdit.presetId : "")
         }
         onAccepted: effectEdit.resetToPreset()
+    }
+
+    /* Same mandated notice for adopting a look over an authored
+       inline stack — the pick is one undoable edit. */
+    Dialog {
+        id: applyDialog
+        objectName: "lookApplyDialog"
+        property string lookId: ""
+        property string lookName: ""
+        title: qsTr("Replace effect layers?")
+        modal: true
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        anchors.centerIn: Overlay.overlay
+        Text {
+            width: 320
+            wrapMode: Text.WordWrap
+            color: Theme.text
+            font.pixelSize: Theme.fontSizeBody
+            text: qsTr("Applying “%1” replaces the authored layer stack with the named look. You can undo this edit.")
+                      .arg(applyDialog.lookName)
+        }
+        onAccepted: effectEdit.selectPreset(applyDialog.lookId)
     }
 }

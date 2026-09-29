@@ -220,6 +220,17 @@ public:
     void RegisterLookForTesting(const studio::EffectDocument& d);
     std::vector<studio::EffectLayer> EffectiveLayersForTesting()
         const { return EffectiveLayers(); }
+    /* Feed a catalog kind=effects entries array through the same
+       path the wire reply uses (offline tests can't correlate a
+       real request). */
+    void FeedEffectsCatalogForTesting(const QVariantList& entries)
+        { ApplyEffectsCatalog(entries); }
+    /* Latch a fake in-flight install so the disconnect-unlatch
+       path is exercisable offline. */
+    void SetSavingForTesting()
+        { pending_save_req_ = 1; pending_save_job_ = 7;
+          pending_save_id_ = QStringLiteral("test_look");
+          saving_look_ = true; }
 
 signals:
     void readyChanged();
@@ -262,6 +273,10 @@ private:
                       const std::function<bool(
                           studio::StudioDocument&)>& mut);
 
+    /* Build shelf rows + feed the local look registry from a
+       catalog kind=effects entries array (reply handler and the
+       test hook share this one path). */
+    void ApplyEffectsCatalog(const QVariantList& entries);
     void SetStatus(const QString& s);
     void OnReplyReceived(int requestId, const QString& typeName,
                          const QVariantMap& body);
@@ -286,11 +301,13 @@ private:
     int          selected_layer_ = -1;
 
     /* saveLookAs in flight — the request correlator, then the
-       job id once the engine accepts. */
+       job id once the engine accepts; the requested name rides
+       along so the adopted document keeps the display name. */
     bool         saving_look_      = false;
     int          pending_save_req_ = 0;
     quint64      pending_save_job_ = 0;
     QString      pending_save_id_;
+    QString      pending_save_name_;
     /* catalog kind=effects request correlator. */
     int          pending_catalog_  = 0;
 };

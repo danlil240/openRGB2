@@ -31,6 +31,7 @@
 // at src/core/presets/effects so the packaged looks resolve.
 
 #include "EngineBridge.h"
+#include "JsonVariant.h"          /* JsonToVariant */
 #include "WorkspaceController.h"
 #include "WorkspaceEditSession.h"
 #include "studio/EffectEditorController.h"
@@ -45,7 +46,9 @@
 #include <QCoreApplication>
 #include <QGuiApplication>
 #include <QQmlComponent>
+#include <QQmlContext>
 #include <QQmlEngine>
+#include <QQuickItem>
 #include <QQuickStyle>
 #include <QSignalSpy>
 
@@ -522,6 +525,84 @@ int main(int argc, char** argv)
         CHECK(row.value("primitive").toString() == "wave");
     }
 
+    std::printf("-- catalog feed: a saved look resolves in a "
+                "fresh session\n");
+    {
+        /* A fresh session has no same-session save — the look
+           only resurfaces because the catalog's file-supplied
+           entry carries its document (the restart path). */
+        Rig rig;
+        studio::EffectDocument d;
+        d.id   = "my_look";
+        d.name = "My Look";
+        nlohmann::ordered_json l;
+        l["primitive"] = "ripple";
+        l["opacity"]   = 0.6;
+        d.layers.push_back(l);
+
+        QVariantMap e;
+        e["id"] = "my_look"; e["name"] = "My Look";
+        e["needs"] = ""; e["from_file"] = true;
+        e["document"] =
+            JsonToVariant(studio::EffectDocumentToJson(d));
+        /* A file-supplied row under a PACKAGED id is not a
+           personal look — the compiled-in id set filters it
+           (bridge_->presets() merges file looks, so it cannot
+           serve as the filter). */
+        QVariantMap pk;
+        pk["id"] = "aurora"; pk["name"] = "Aurora";
+        pk["needs"] = ""; pk["from_file"] = true;
+        rig.ctl.FeedEffectsCatalogForTesting({ e, pk });
+
+        const QVariantList looks = rig.ctl.looks();
+        CHECK(looks.size() == 1);
+        CHECK(looks.first().toMap().value("id").toString()
+                  == "my_look");
+        CHECK(looks.first().toMap().value("name").toString()
+                  == "My Look");
+
+        /* Resolution survives: a draft naming the look gets the
+           real stack, and the materialize/edit contract holds. */
+        rig.LoadDoc(CompactDoc("my_look"));
+        CHECK(rig.ctl.layerCount() == 1);
+        CHECK(rig.ctl.layerAt(0).value("primitive").toString()
+                  == "ripple");
+        rig.ctl.setLayerOpacity(0, 0.5);
+        CHECK(rig.ctl.hasInlineLayers());
+    }
+
+    std::printf("-- disconnect mid-save unlatches + fails "
+                "honestly\n");
+    {
+        Rig rig;
+        rig.LoadDoc(CompactDoc("aurora"));
+        QSignalSpy results(&rig.ctl,
+            &EffectEditorController::lookSaveResult);
+        rig.ctl.SetSavingForTesting();
+        CHECK(rig.ctl.savingLook());
+        /* Emitting the signal directly exercises the same
+           disconnect branch a real connection drop runs. */
+        emit rig.bridge.connectionStateChanged();
+        CHECK(!rig.ctl.savingLook());
+        CHECK(results.count() == 1);
+        if(results.count() == 1)
+        {
+            const QVariantMap res =
+                results.first().first().toMap();
+            CHECK(res.value("ok").toBool() == false);
+            CHECK(res.value("id").toString() == "test_look");
+        }
+    }
+
+    std::printf("-- addLayer refused keeps selection\n");
+    {
+        Rig rig;
+        rig.LoadDoc(CompactDoc("aurora"));
+        rig.ctl.setSelectedLayer(0);
+        rig.ctl.addLayer("not_a_primitive");
+        CHECK(rig.ctl.selectedLayer() == 0);
+    }
+
     /*======================================================*\
     || B. EffectLayerModel row-diff contract                ||
     \*======================================================*/
@@ -626,6 +707,88 @@ int main(int argc, char** argv)
                             c.errorString().toUtf8().constData());
             }
             CHECK(o != nullptr);
+        }
+    }
+
+    std::printf("-- qml: look apply prompts before replacing "
+                "authored layers\n");
+    {
+        Rig rig;
+        rig.LoadDoc(CompactDoc("aurora"));
+        rig.ctl.setLayerOpacity(0, 0.5);   /* authored stack */
+        CHECK(rig.ctl.hasInlineLayers());
+
+        /* A personal look row for the shelf (same feed the wire
+           catalog reply takes). */
+        studio::EffectDocument d;
+        d.id = "shelf_look"; d.name = "Shelf Look";
+        nlohmann::ordered_json l;
+        l["primitive"] = "static";
+        d.layers.push_back(l);
+        QVariantMap e;
+        e["id"] = "shelf_look"; e["name"] = "Shelf Look";
+        e["needs"] = ""; e["from_file"] = true;
+        e["document"] =
+            JsonToVariant(studio::EffectDocumentToJson(d));
+        rig.ctl.FeedEffectsCatalogForTesting({ e });
+
+        QQmlEngine eng;
+        eng.rootContext()->setContextProperty(
+            QStringLiteral("effectEdit"), &rig.ctl);
+        QQmlComponent c(&eng, QUrl(QStringLiteral(
+            "qrc:/qt/qml/OpenRGB2/UI/studio/LookShelf.qml")));
+        CHECK(!c.isError());
+        std::unique_ptr<QObject> o(c.create(eng.rootContext()));
+        CHECK(o != nullptr);
+        /* Qt6 Repeater delegates aren't QObject children —
+           reach them through itemAt(). */
+        QObject* rep =
+            o ? o->findChild<QObject*>("lookRows") : nullptr;
+        QQuickItem* row = nullptr;
+        if(rep != nullptr)
+        {
+            QMetaObject::invokeMethod(rep, "itemAt",
+                Q_RETURN_ARG(QQuickItem*, row), Q_ARG(int, 0));
+        }
+        QObject* btn =
+            row ? row->findChild<QObject*>("lookApply_shelf_look")
+                : nullptr;
+        CHECK(rep != nullptr);
+        CHECK(row != nullptr);
+        CHECK(btn != nullptr);
+        QObject* dlg =
+            o ? o->findChild<QObject*>("lookApplyDialog")
+              : nullptr;
+        CHECK(dlg != nullptr);
+        if(btn != nullptr && dlg != nullptr)
+        {
+            /* Apply over an authored stack → the mandated notice
+               engages instead of silently replacing layers. A
+               modal Popup can't show without a window — the
+               observable proof is the dialog's armed look id +
+               the authored stack remaining untouched. */
+            const bool inv =
+                QMetaObject::invokeMethod(btn, "clicked");
+            CHECK(inv);
+            CHECK(dlg->property("lookId").toString()
+                  == "shelf_look");
+            CHECK(rig.ctl.hasInlineLayers());
+            CHECK(rig.ctl.presetId() == "aurora");
+
+            /* Cancel preserves the authored layers. */
+            QMetaObject::invokeMethod(dlg, "reject");
+            CHECK(rig.ctl.hasInlineLayers());
+            CHECK(rig.ctl.presetId() == "aurora");
+
+            /* Accept applies the pick through one undoable
+               record. */
+            QMetaObject::invokeMethod(btn, "clicked");
+            QMetaObject::invokeMethod(dlg, "accept");
+            CHECK(!rig.ctl.hasInlineLayers());
+            CHECK(rig.ctl.presetId() == "shelf_look");
+            rig.ctl.undo();
+            CHECK(rig.ctl.hasInlineLayers());
+            CHECK(rig.ctl.presetId() == "aurora");
         }
     }
 

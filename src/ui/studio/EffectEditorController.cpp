@@ -102,6 +102,31 @@ EffectEditorController::EffectEditorController(EngineBridge* bridge,
                     {
                         RequestEffectsCatalog();
                     }
+                    else
+                    {
+                        /* A pending request/job can never resolve
+                           after disconnect — unlatch so the save
+                           button doesn't wedge, and fail the
+                           outcome honestly. */
+                        pending_catalog_ = 0;
+                        if(pending_save_req_ != 0
+                           || pending_save_job_ != 0
+                           || saving_look_)
+                        {
+                            pending_save_req_ = 0;
+                            pending_save_job_ = 0;
+                            saving_look_      = false;
+                            emit lookSaveChanged();
+                            QVariantMap res;
+                            res["ok"]     = false;
+                            res["id"]     = pending_save_id_;
+                            res["errors"] = QStringList{
+                                QStringLiteral(
+                                    "engine disconnected during "
+                                    "the look install") };
+                            emit lookSaveResult(res);
+                        }
+                    }
                 });
         if(bridge_->connected())
         {
@@ -608,6 +633,7 @@ QVariantMap EffectEditorController::saveLookAs(const QString& id,
     pending_save_req_ = req;
     pending_save_job_ = 0;
     pending_save_id_  = QString::fromStdString(lid);
+    pending_save_name_ = QString::fromStdString(d.name);
     saving_look_      = true;
     emit lookSaveChanged();
     out["ok"] = true;
@@ -618,6 +644,67 @@ QVariantMap EffectEditorController::saveLookAs(const QString& id,
 void EffectEditorController::refreshLooks()
 {
     RequestEffectsCatalog();
+}
+
+void EffectEditorController::ApplyEffectsCatalog(
+    const QVariantList& entries)
+{
+    QVariantList rows;
+    /* The COMPILED-IN look ids — NOT bridge_->presets():
+       GetPresets already merges file-supplied looks, so
+       filtering against it would hide every personal row. */
+    std::set<std::string> packaged;
+    for(const studio::PresetInfo& p : studio::PresetList())
+    {
+        packaged.insert(p.id);
+    }
+    bool registered = false;
+    for(const QVariant& v : entries)
+    {
+        const QVariantMap e = v.toMap();
+        const QString eid = e.value("id").toString();
+        /* File-supplied entries carry their document — feed
+           the local registry so a saved look resolves across
+           sessions/restarts, not only in the saving session. */
+        const QVariant docv = e.value("document");
+        if(docv.isValid())
+        {
+            studio::EffectDocument d;
+            std::vector<std::string> errs;
+            if(studio::EffectDocumentFromJson(
+                   nlohmann::ordered_json::parse(
+                       VariantToJson(docv).dump(), nullptr,
+                       false),
+                   d, &errs) &&
+               ui_looks_.Add(d, nullptr))
+            {
+                registered = true;
+            }
+        }
+        /* The shelf lists LOOKS the packaged registry doesn't
+           carry — personal installs + engine-side files. */
+        const bool personal = e.value("from_file").toBool()
+            && !packaged.count(eid.toStdString());
+        if(!personal)
+        {
+            continue;
+        }
+        QVariantMap row;
+        row["id"]   = eid;
+        row["name"] = e.value("name").toString();
+        row["needs"] = e.value("needs").toString();
+        row["fromFile"] = true;
+        rows.push_back(row);
+    }
+    looks_ = rows;
+    emit looksChanged();
+    if(registered)
+    {
+        /* Newly-resolvable ids can change the effective stack
+           a named-preset draft displays. */
+        RefreshModel();
+        emit stackChanged();
+    }
 }
 
 void EffectEditorController::RequestEffectsCatalog()
@@ -649,36 +736,7 @@ void EffectEditorController::OnReplyReceived(int requestId,
         {
             return;   /* Unavailable/ERROR — local rows stand */
         }
-        QVariantList rows;
-        const QVariantList entries =
-            body.value("entries").toList();
-        std::set<std::string> packaged;
-        for(const QVariant& v : bridge_->presets())
-        {
-            packaged.insert(v.toMap().value("id")
-                                .toString().toStdString());
-        }
-        for(const QVariant& v : entries)
-        {
-            const QVariantMap e = v.toMap();
-            const QString eid = e.value("id").toString();
-            /* The shelf lists LOOKS the packaged registry doesn't
-               carry — personal installs + engine-side files. */
-            const bool personal = e.value("from_file").toBool()
-                && !packaged.count(eid.toStdString());
-            if(!personal)
-            {
-                continue;
-            }
-            QVariantMap row;
-            row["id"]   = eid;
-            row["name"] = e.value("name").toString();
-            row["needs"] = e.value("needs").toString();
-            row["fromFile"] = true;
-            rows.push_back(row);
-        }
-        looks_ = rows;
-        emit looksChanged();
+        ApplyEffectsCatalog(body.value("entries").toList());
         return;
     }
 
@@ -772,10 +830,12 @@ void EffectEditorController::OnEventReceived(const QString& kind,
             : result.value("landed_id").toString();
 
     /* Rebuild the installed document from the EFFECTIVE stack —
-       the same serialization saveLookAs sent. */
+       the same serialization saveLookAs sent; the requested
+       display name survives (an id is never the name). */
     studio::EffectDocument doc;
     doc.id    = landed.toStdString();
-    doc.name  = doc.id;
+    doc.name  = pending_save_name_.isEmpty()
+        ? doc.id : pending_save_name_.toStdString();
     const std::vector<studio::EffectLayer> stack = EffectiveLayers();
     static const char* const order[] = {
         "primitive", "space", "blend", "opacity", "speed", "scale",
@@ -884,9 +944,17 @@ void EffectEditorController::addLayer(const QString& primitive)
             "unknown primitive '%1'").arg(primitive));
         return;
     }
-    ApplyOp(Editor()->AddLayer(primitive.toStdString()));
-    selected_layer_ = (int)layer_model_.count() - 1;
-    emit selectedLayerChanged();
+    std::optional<studio::EditorEdit> e =
+        Editor()->AddLayer(primitive.toStdString());
+    const bool added = e.has_value();
+    ApplyOp(std::move(e));
+    /* Select the appended row only when the op actually
+       landed — a refused add must not move selection. */
+    if(added)
+    {
+        selected_layer_ = (int)layer_model_.count() - 1;
+        emit selectedLayerChanged();
+    }
 }
 
 void EffectEditorController::removeLayer(int index)
