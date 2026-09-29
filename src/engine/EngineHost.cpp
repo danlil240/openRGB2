@@ -821,6 +821,39 @@ bool EngineHost::Start(std::string& err)
             opts_.effects_dir, nullptr);
     }
 
+    /* Task 2 (studio-import): the managed workspace store +
+       commit service. Its publish seam is the same scene-apply
+       path --scene and SET_SCENE use; its libraries are the
+       packaged types/looks plus the managed root's own
+       library layer (types the workspace actually uses are
+       snapshotted per generation regardless). The store is
+       purely file state — constructing it never touches
+       output. Built BEFORE the IPC service so the
+       WORKSPACE_COMMAND surface can bind to it. */
+    {
+        WorkspaceService::Deps wdeps;
+        wdeps.devices = BuildDeviceRegistry(
+            opts_.devices_dir,
+            [this](const std::string& l) { Log(l); });
+        wdeps.effects = studio::EffectLooks();
+        /* apply_scene references service_ lazily — the lambda
+           fires only from a workspace job, long after the
+           service exists. */
+        wdeps.apply_scene =
+            [this](std::shared_ptr<const studio::SceneDocument> doc,
+                   std::string& aerr) -> bool
+            {
+                return service_ &&
+                       service_->ApplySceneDocument(std::move(doc),
+                                                  aerr);
+            };
+        workspaces_ = std::make_unique<WorkspaceService>(
+            opts_.workspace_root.empty()
+                ? WorkspaceStore::DefaultRoot()
+                : opts_.workspace_root,
+            std::move(wdeps));
+    }
+
     /* The IPC service owns the scene-apply path (Task 3.5): the
        --scene CLI and SET_SCENE both go through
        ApplySceneDocument, so a UI-applied scene and a
@@ -880,37 +913,13 @@ bool EngineHost::Start(std::string& err)
                     }
                 }
             };
+        /* studio-import Task 3: binding the workspace service
+           makes the WORKSPACE_COMMAND verb surface exist —
+           WELCOME advertises "studio_workspace_v1" exactly
+           then. */
+        ipc_deps.workspace = workspaces_.get();
         service_ = std::make_unique<ipc::EngineService>(
             engine_, std::move(ipc_deps));
-    }
-
-    /* Task 2 (studio-import): the managed workspace store +
-       commit service. Its publish seam is the same scene-apply
-       path --scene and SET_SCENE use; its libraries are the
-       packaged types/looks plus the managed root's own
-       library layer (types the workspace actually uses are
-       snapshotted per generation regardless). The store is
-       purely file state — constructing it never touches
-       output. */
-    {
-        WorkspaceService::Deps wdeps;
-        wdeps.devices = BuildDeviceRegistry(
-            opts_.devices_dir,
-            [this](const std::string& l) { Log(l); });
-        wdeps.effects = studio::EffectLooks();
-        wdeps.apply_scene =
-            [this](std::shared_ptr<const studio::SceneDocument> doc,
-                   std::string& aerr) -> bool
-            {
-                return service_ &&
-                       service_->ApplySceneDocument(std::move(doc),
-                                                  aerr);
-            };
-        workspaces_ = std::make_unique<WorkspaceService>(
-            opts_.workspace_root.empty()
-                ? WorkspaceStore::DefaultRoot()
-                : opts_.workspace_root,
-            std::move(wdeps));
     }
 
     if(opts_.ipc_enabled && !StartIpc())
@@ -1348,6 +1357,14 @@ const OrderlyShutdown::Result& EngineHost::Stop()
                  std::chrono::milliseconds(2000),
                  [this]
                  { if(ipc_server_) ipc_server_->Stop(); });
+    /* Workspace job worker joins BEFORE frame production and
+       the IPC service stop — an in-flight commit's apply_scene
+       seam reaches service_ + engine_, so no workspace job may
+       still be running when those destruct. */
+    shutdown.Add("workspace-jobs",
+                 std::chrono::milliseconds(2000),
+                 [this]
+                 { if(workspaces_) workspaces_->Shutdown(); });
     shutdown.Add("scene-worker",
                  std::chrono::milliseconds(2000),
                  [this] { engine_.Stop(); });

@@ -56,6 +56,10 @@ void Usage(const char* argv0)
         "  set-scene <file>           apply a SceneDocument JSON file\n"
         "  set-playback <mode> [control=playing|paused|stopped]\n"
         "                 [speed=N] [reverse] [color=#RRGGBB]\n"
+        "  workspace <verb> [json]    WORKSPACE_COMMAND {verb,args}\n"
+        "                             (get|list|catalog|validate|commit|\n"
+        "                              import_inspect|export|job_status|\n"
+        "                              transfer_*|preview_*)\n"
         "  subscribe [seconds]        SUBSCRIBE all; print EVENTs\n"
         "  raw <type-hex> [json]      arbitrary verb (escape hatch)\n"
         "\n"
@@ -610,6 +614,27 @@ int main(int argc, char** argv)
         {
             body["params"] = params;
         }
+    }
+    else if(cmd == "workspace")
+    {
+        if(args.size() < 2)
+        {
+            std::fprintf(stderr,
+                "workspace needs a verb (see --help)\n");
+            return 2;
+        }
+        type = ipc::MsgType::WorkspaceCommand;
+        if(args.size() >= 3)
+        {
+            body = nlohmann::json::parse(args[2], nullptr, false);
+            if(body.is_discarded() || !body.is_object())
+            {
+                std::fprintf(stderr,
+                    "workspace args must be a JSON object\n");
+                return 1;
+            }
+        }
+        body["verb"] = args[1];
     }
     else if(cmd == "subscribe")
     {

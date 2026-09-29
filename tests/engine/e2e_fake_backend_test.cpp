@@ -380,13 +380,18 @@ int main()
 
     static const char* want_order[] = {
         "power-monitor", "ipc-listeners", "ipc-server",
+        /* studio-import Task 3: the workspace job worker joins
+           before scene-worker/service teardown so an in-flight
+           commit's apply_scene seam can never race a
+           destructing IPC service. */
+        "workspace-jobs",
         "scene-worker", "reactive-inputs",
         "delivery-pipeline", "sdk-transport",
     };
-    CHECK(sd.steps.size() == 7);
-    if(sd.steps.size() == 7)
+    CHECK(sd.steps.size() == 8);
+    if(sd.steps.size() == 8)
     {
-        for(size_t i = 0; i < 7; ++i)
+        for(size_t i = 0; i < 8; ++i)
         {
             CHECK(sd.steps[i].name == want_order[i]);
             CHECK(sd.steps[i].within);

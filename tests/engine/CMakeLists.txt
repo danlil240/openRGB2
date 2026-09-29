@@ -167,3 +167,20 @@ target_link_libraries(ipc_engine_service_test PRIVATE openrgb2_ipc)
 # EngineHost::OwnershipJson serializer as the provider — a
 # scripted body would ship a field-name typo green.
 target_link_libraries(ipc_engine_service_test PRIVATE openrgb2_host)
+
+# Studio-import Task 3 — WORKSPACE_COMMAND: capability
+# negotiation, session-bound bounded transfers, revision-checked
+# async jobs, disconnect/cancel discipline, and the managed-
+# workspace legacy-mutation gate — all over the REAL EngineService
+# + WorkspaceService + IpcServer on in-process channels.
+add_executable(ipc_workspace_test ipc_workspace_test.cpp)
+target_link_libraries(ipc_workspace_test PRIVATE
+    openrgb2_engine
+    openrgb2_ipc)
+target_include_directories(ipc_workspace_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(ipc_workspace_test PRIVATE NDEBUG)
+add_test(NAME ipc_workspace_test COMMAND ipc_workspace_test)
+set_tests_properties(ipc_workspace_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})

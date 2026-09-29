@@ -32,6 +32,8 @@
 
 #include "IpcServer.h"
 #include "IpcService.h"
+#include "WorkspaceCommands.h"
+#include "WorkspaceTransfer.h"
 
 #include "DeliveryPipeline.h"
 #include "DeviceMapper.h"
@@ -40,6 +42,7 @@
 #include "PlaybackController.h"
 #include "PowerLifecycle.h"
 #include "ReactiveInputs.h"
+#include "WorkspaceService.h"
 
 #include "effects/Presets.h"
 #include "scene/SceneTypes.h"
@@ -62,6 +65,12 @@ struct EngineServiceOptions
        must stay fluid: ~30 Hz cap (~25 Hz delivered on the
        owner loop's 20 ms fast tick). */
     uint32_t frame_status_min_interval_ms = 33;
+
+    /* studio-import Task 3: workspace transfer bounds — the
+       defaults are the plan-§3.3 limits; the offline suite
+       injects shorter expiries/smaller caps. Only consulted
+       when Deps::workspace is wired. */
+    WorkspaceTransfer::Options transfers;
 };
 
 class EngineService final : public IIpcService
@@ -143,11 +152,26 @@ public:
            field is an honest null (no scan wired), never a
            fabricated "no conflicts". */
         std::function<nlohmann::json()> ownership;
+
+        /* studio-import Task 3: the managed-workspace commit
+           surface (engine side). When set, the WORKSPACE_COMMAND
+           verb space is live, WELCOME advertises
+           "studio_workspace_v1", session-bound transfers and
+           jobs exist, and — once a workspace is managed —
+           lossy legacy scene mutations (SET_SCENE, the layout
+           edit verbs) are refused with bad_request +
+           "workspace_required". Nullptr -> the verb space
+           answers Unavailable honestly and no capability is
+           advertised. */
+        WorkspaceService* workspace = nullptr;
     };
 
     explicit EngineService(Engine& engine);
     EngineService(Engine& engine, Deps deps,
                   EngineServiceOptions options = EngineServiceOptions{});
+    /* Clears the workspace job-event hook (it captures this)
+       before member teardown. */
+    ~EngineService() override;
 
     EngineService(const EngineService&)            = delete;
     EngineService& operator=(const EngineService&) = delete;
@@ -198,6 +222,14 @@ public:
     nlohmann::json OnWelcome() override;
     IpcReply       Dispatch(MsgType type,
                             const nlohmann::json& body) override;
+    /* Session-bound dispatch: WORKSPACE_COMMAND verbs bind
+       jobs/transfers to the calling session. */
+    IpcReply       DispatchSession(uint64_t session_id,
+                                   MsgType type,
+                                   const nlohmann::json& body) override;
+    /* Session teardown: queued workspace jobs + staged
+       transfers of the dead session are cancelled. */
+    void           OnSessionEnd(uint64_t session_id) override;
     bool           SnapshotEvent(const std::string& kind,
                                  nlohmann::json& out) override;
 
@@ -212,6 +244,11 @@ private:
     Engine&             engine_;
     Deps                deps_;
     EngineServiceOptions options_;
+
+    /* studio-import Task 3: the WORKSPACE_COMMAND verb
+       surface + session-bound bounded transfers — exists iff
+       deps_.workspace is wired. */
+    std::unique_ptr<WorkspaceCommands> ws_commands_;
 
     mutable std::mutex  mutex_;
     std::shared_ptr<const studio::SceneDocument> scene_;
@@ -245,9 +282,17 @@ private:
     IpcReply       HandleReactiveCommand(const std::string& verb,
                                          const nlohmann::json& body);
     IpcReply       HandleIdentify(const nlohmann::json& body);
+    /* studio-import Task 3 gate: HandleLayoutMutate refuses
+       lossy legacy edits while a managed workspace is active
+       (detail "workspace_required") and forwards to the impl. */
     IpcReply       HandleLayoutMutate(const std::string& verb,
                                       const nlohmann::json& body);
+    IpcReply       HandleLayoutMutateImpl(const std::string& verb,
+                                          const nlohmann::json& body);
     std::vector<DeviceSnapshot> LayoutSnapshots() const;
+    /* studio-import Task 3: true once a managed workspace is
+       active — the lossy legacy mutation gate (plan 3.3). */
+    bool           WorkspaceManaged() const;
     nlohmann::json SceneJsonLocked() const;
     nlohmann::json PlaybackJson() const;
     nlohmann::json PowerJson() const;

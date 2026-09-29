@@ -103,6 +103,18 @@ class EngineBridge : public QObject
        reason — never a fabricated toggle set. */
     Q_PROPERTY(QVariantMap reactive READ reactive
                    NOTIFY reactiveChanged)
+    /* studio-import Task 3: true exactly when WELCOME advertised
+       "studio_workspace_v1". A false bridge falls back to the
+       legacy scene verbs — workspaceCommand still sends (the
+       engine answers Unavailable honestly), but pages bind
+       their workspace UI to this flag. */
+    Q_PROPERTY(bool hasWorkspace READ hasWorkspace
+                   NOTIFY hasWorkspaceChanged)
+    /* Last "workspace" event payload — the get reply's managed
+       metadata for the initial snapshot, the job status record
+       for completions. */
+    Q_PROPERTY(QVariantMap workspace READ workspace
+                   NOTIFY workspaceChanged)
 
 public:
     explicit EngineBridge(QObject* parent = nullptr);
@@ -139,6 +151,13 @@ public:
        reactive body; the "reactive" event updates the store. */
     Q_INVOKABLE int reactiveCommand(const QString& verb,
                                     const QVariantMap& args);
+    /* WORKSPACE_COMMAND {verb,...args} — section 3.3 verbs
+       (get/list/catalog/validate/commit/save_copy, the
+       transfer_* trio, job_status/job_cancel, preview_*). The
+       reply lands in replyReceived with the request id; terminal
+       job results also arrive as "workspace" EVENTs. */
+    Q_INVOKABLE int workspaceCommand(const QString& verb,
+                                     const QVariantMap& args);
     Q_INVOKABLE int quitEngine();
 
     /*---- state ------------------------------------------------*/
@@ -160,6 +179,8 @@ public:
     QVariantMap diagnostics() const;
     QVariantMap stateReport() const;
     QVariantMap reactive() const;
+    bool        hasWorkspace() const;
+    QVariantMap workspace() const;
 
     /*---- test hooks (call before start()) ----------------------*/
     using ChannelFactory =
@@ -189,6 +210,8 @@ signals:
     void diagnosticsChanged();
     void stateReportChanged();
     void reactiveChanged();
+    void hasWorkspaceChanged();
+    void workspaceChanged();
 
     /* requestId echoes SendRequest's correlator; typeName is the
        wire type (MsgTypeName — e.g. "PONG", "SNAPSHOTS", "ERROR"). */
@@ -220,6 +243,7 @@ private:
     void setLastError(const QString& s);
     void setDegraded(bool d);
     void setRetryInMs(int ms);
+    void setHasWorkspace(bool h);
 
     EngineWireClient          wire_;
     EngineWireClient::Options wire_options_;
@@ -255,6 +279,8 @@ private:
     QVariantMap diagnostics_;
     QVariantMap state_report_;
     QVariantMap reactive_;
+    bool        has_workspace_ = false;
+    QVariantMap workspace_;
 };
 
 } /* namespace ui */

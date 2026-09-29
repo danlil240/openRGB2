@@ -281,8 +281,13 @@ private:
     std::unique_ptr<PowerLifecycle>          lifecycle_;
     std::unique_ptr<ReactiveInputs>          reactive_;
     platform::WinPowerMonitor                power_monitor_;
-    std::unique_ptr<ipc::EngineService>      service_;
+    /* Declaration order matters: members destroy in reverse.
+       workspaces_ is declared FIRST so service_ (which holds a
+       raw WorkspaceService* dep and clears the job-event hook
+       capturing `this` in ~EngineService) dies before it — the
+       hook clear can never touch freed state. */
     std::unique_ptr<WorkspaceService>        workspaces_;
+    std::unique_ptr<ipc::EngineService>      service_;
     std::unique_ptr<ipc::IpcServer>          ipc_server_;
     std::unique_ptr<ipc::NamedPipeListener>  cmd_listener_;
     std::unique_ptr<ipc::NamedPipeListener>  diag_listener_;

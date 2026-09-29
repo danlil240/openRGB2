@@ -6,6 +6,7 @@
 
 #include "EngineWireClient.h"
 
+#include <algorithm>
 #include <chrono>
 
 namespace openrgb2
@@ -32,6 +33,30 @@ uint16_t EngineWireClient::NegotiatedVersion() const
 uint64_t EngineWireClient::DroppedWrites() const
 {
     return dropped_writes_.load();
+}
+
+bool EngineWireClient::HasCapability(const std::string& name) const
+{
+    std::lock_guard<std::mutex> lock(caps_mu_);
+    return std::find(capabilities_.begin(), capabilities_.end(),
+                     name) != capabilities_.end();
+}
+
+bool EngineWireClient::SendWorkspaceCommand(
+    const std::string& verb, const nlohmann::json& args,
+    uint32_t& id_out, std::string& err)
+{
+    nlohmann::json body = nlohmann::json::object();
+    if(args.is_object())
+    {
+        for(auto it = args.begin(); it != args.end(); ++it)
+        {
+            body[it.key()] = it.value();
+        }
+    }
+    body["verb"] = verb;
+    return SendRequest(ipc::MsgType::WorkspaceCommand, body,
+                       id_out, err);
 }
 
 bool EngineWireClient::Cancelled() const
@@ -213,6 +238,13 @@ EngineWireClient::EndReason EngineWireClient::Run(
             out_queue_.clear();
         }
         keep_running_ = nullptr;
+        /* A capability must never outlive the session that
+           advertised it — a reconnect to an older engine would
+           otherwise look capable while refusing verbs. */
+        {
+            std::lock_guard<std::mutex> lock(caps_mu_);
+            capabilities_.clear();
+        }
         detail = d;
         return r;
     };
@@ -329,6 +361,25 @@ EngineWireClient::EndReason EngineWireClient::Run(
                 return finish(EndReason::HandshakeFailed,
                               "connected to the read-only "
                               "diagnostics pipe");
+            }
+        }
+        /* Advertised capability set ("studio_workspace_v1", …).
+           Non-string members are skipped — a partial advertisement
+           degrades to fewer verbs, never a crash. */
+        {
+            std::lock_guard<std::mutex> lock(caps_mu_);
+            capabilities_.clear();
+            const auto caps_it = welcome.find("capabilities");
+            if(caps_it != welcome.end() && caps_it->is_array())
+            {
+                for(const nlohmann::json& c : *caps_it)
+                {
+                    if(c.is_string())
+                    {
+                        capabilities_.push_back(
+                            c.get<std::string>());
+                    }
+                }
             }
         }
         /* The writer owns the pipe from here: SUBSCRIBE and every

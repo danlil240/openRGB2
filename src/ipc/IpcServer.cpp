@@ -46,6 +46,7 @@ bool IsRequestType(MsgType t)
     case MsgType::Ping:
     case MsgType::GetPresets:
     case MsgType::Quit:
+    case MsgType::WorkspaceCommand:
     case MsgType::DiagGet:
         return true;
     default:
@@ -554,6 +555,7 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
                 ++stats_.rejected_hellos;
             }
             account_resync();
+            try { service_.OnSessionEnd(s->id); } catch(...) {}
             s->stop.store(true);
             s->channel->Close();
             s->out_cv.notify_all();
@@ -853,7 +855,12 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
             IpcReply r;
             try
             {
-                r = service_.Dispatch(msg.type, body);
+                /* DispatchSession carries the session id so
+                   session-bound surfaces (workspace transfers
+                   and jobs, studio-import Task 3) bind to the
+                   caller; services without session state see
+                   the plain Dispatch() forward. */
+                r = service_.DispatchSession(s->id, msg.type, body);
             }
             catch(const nlohmann::json::exception& e)
             {
@@ -907,6 +914,14 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
 
 done:
     account_resync();
+    /* Session-bound state dies with the session: queued
+       workspace jobs and staged transfers belonging to this
+       session are cancelled here (studio-import Task 3 — a
+       commit already past the durable marker is unaffected;
+       the client reconciles by revision/content hash on
+       reconnect). Guarded: a throwing service must not kill
+       the session teardown. */
+    try { service_.OnSessionEnd(s->id); } catch(...) {}
     s->stop.store(true);
     s->channel->Close();
     s->out_cv.notify_all();

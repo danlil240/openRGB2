@@ -134,6 +134,22 @@ public:
     };
     LoadResult Load(const std::string& id) const;
 
+    /* The durable revision counters for `id` without parsing a
+       generation — the IPC commit path re-checks the client's
+       base + resource revisions against these at commit time
+       (plan 3.3). exists=false with empty error means no
+       managed workspace lives under the id (revisions are 0);
+       an unreadable marker falls back to the marker backup and
+       reports `error` honestly. */
+    struct Revisions
+    {
+        bool        exists             = false;
+        uint64_t    workspace_revision = 0;
+        uint64_t    resource_revision  = 0;
+        std::string error;
+    };
+    Revisions LoadRevisions(const std::string& id) const;
+
     /* Managed workspace ids (dirs with a marker or generations —
        the shared "library" dir is never listed). */
     std::vector<std::string> List() const;

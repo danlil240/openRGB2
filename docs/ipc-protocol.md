@@ -75,8 +75,19 @@ The first message a client sends MUST be `HELLO` (type `0x0001`,
   "channel": "command" | "diagnostics",
   "max_body_bytes": 1048576,
   "engine": "openrgb2-engine", "running": true,
+  "capabilities": ["studio_workspace_v1"],
   "state": { "... GET_STATE body ..." }
 }
+```
+
+`capabilities` is a string array of optional feature surfaces. Absent
+capability → the client falls back to the legacy verb set; sending a
+verb belonging to an unadvertised surface gets `ERROR(unavailable)`.
+Defined values:
+
+| capability | surface |
+| --- | --- |
+| `studio_workspace_v1` | `WORKSPACE_COMMAND` (managed workspace jobs, revisions, transfers — §5) |
 ```
 
 After the handshake every message's header `version` MUST equal
@@ -148,6 +159,7 @@ Request → reply. `request_id` echoes.
 | 0x010B | GET_PRESETS | `{}` | PRESETS |
 | 0x010C | QUIT | `{}` | OK `{shutting_down:true, ordered:true}` / ERROR |
 | 0x010D | REACTIVE_COMMAND | `{verb, ...args}` | OK `<reactive body>` / ERROR |
+| 0x010E | WORKSPACE_COMMAND | `{verb, ...args}` | OK `<verb body>` / ERROR |
 | 0x0300 | DIAG_GET | `{}` | DIAGNOSTICS (valid on both pipes) |
 
 Reply types: WELCOME 0x8001, OK 0x8002, ERROR 0x8003, SNAPSHOTS 0x8100,
@@ -456,6 +468,54 @@ capability path as every other unsupported scene.
 `backend_counters` is `null` until the backend's own read-only counters
 pipe lands (a separate plan item — engine-side aggregate view only).
 
+**WORKSPACE_COMMAND** (`0x010E`, requires `studio_workspace_v1`) —
+the managed-workspace surface. Body `{verb:<string>, ...args}`; every
+reply is `OK <verb body>` or `ERROR` with a stable machine `detail`
+token alongside the human `message`. Handlers only validate, enqueue,
+or read snapshots — every file-touching operation is a job on the
+workspace service's single bounded worker.
+
+Revisions are uint64 counters: `workspace_revision` moves on durable
+commit, `resource_revision` on resource-set change. Candidate verbs
+(`commit`, `save_copy`, `import_commit`) carry `base_revision` and
+`resource_revision`; a stale value fails the job with
+`detail:"revision_conflict"` — never silently wins. While a managed
+workspace is active the legacy mutation verbs (`SET_SCENE`,
+`SET_PLAYBACK_MODE`, `LAYOUT_COMMAND` set_*) are refused — read-only
+state verbs and the workspace surface stay live.
+
+| verb | body | reply |
+| --- | --- | --- |
+| `get` | `{id?}` | `{managed,id?,workspace_revision,resource_revision,generation?,name?,content_sha256?,source_form?}` — `id` reads the durable marker of a non-current workspace |
+| `list` | `{offset?,limit?}` (limit ≤256) | `{workspaces:[id...],total,offset,limit,active}` |
+| `catalog` | `{kind:devices|effects|workspaces,offset?,limit?}` | `{kind,entries:[...],total,offset,limit}` |
+| `validate`/`commit`/`save_copy`/`import_inspect`/`import_commit`/`export`/`reload` | `{staged?|document?, base_revision?, resource_revision?, id?, name?, ...}` | `OK {accepted:true,job_id}` or `OK {accepted:false,detail:"busy"}` (bounded queue full); `staged` is a finished upload token owned by this session |
+| `job_status` | `{job_id}` | job status record (below) |
+| `job_cancel` | `{job_id}` | `{cancelled:true,job_id}` / ERROR |
+| `transfer_begin` | `{direction:"upload",kind,length,sha256}` / `{direction:"download",kind,id}` | upload: `{transfer_id,max_chunk_bytes}`; download: `{transfer_id,length,sha256,max_chunk_bytes}` — client-supplied paths are never accepted; staging is server-named inside the managed root |
+| `transfer_chunk` | `{transfer_id,offset,data:<base64>}` (upload) / `{transfer_id,offset,max_bytes?}` (download) | upload: `{offset,received}`; download: `{offset,data:<base64>,eof}` — ordered, ≤192 KiB decoded per chunk |
+| `transfer_finish` | `{transfer_id}` | `{finished:true,staged?,bytes?}` — upload verifies declared length + SHA-256 before minting the `staged` token |
+| `transfer_cancel` | `{transfer_id}` | `{cancelled:true}` |
+| `preview_begin`/`preview_update`/`preview_end` | `{...}` | stable `ERROR(unavailable)` until the preview engine lands (Task 7) |
+
+Job status record (`job_status` reply and terminal `workspace` EVENT
+`data`):
+
+```json
+{ "found": true, "job_id": 1, "session_id": 1, "verb": "commit",
+  "state": "queued|running|succeeded|failed|cancelled",
+  "committed": false, "applied": false, "recovered": false,
+  "generation": 0, "workspace_revision": 0, "resource_revision": 0,
+  "result": {}, "error": "?", "detail": "revision_conflict" }
+```
+
+Jobs and transfers are session-bound: session teardown cancels queued
+jobs and staged transfers; a commit already past the durable marker
+stays durable (the reconnecting client reconciles by
+revision/content_sha256). Document/type/look content moves ONLY
+through transfers — the 1 MiB envelope bound is never expanded to fit
+a scene or a binary asset.
+
 ## 6. Diagnostics channel (read-only by construction)
 
 `\\.\pipe\openrgb2-engine-diag` speaks the SAME framing and HELLO/WELCOME
@@ -485,6 +545,7 @@ matches the corresponding pull body:
 | `connection` | `sdk` object | SDK link state change |
 | `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |
 | `frame_status` | `{aggregate, controllers:[{key,sequence,colors,stats}]}` | ≤ ~30 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses |
+| `workspace` | `get` body (initial snapshot) / job status record (terminal job event) | SUBSCRIBE initial push; a workspace job reaching a terminal state |
 
 An `events` field that is neither `"all"` nor an array of strings, or any
 unknown kind name → `bad_request` (subscription unchanged). Queue overflow

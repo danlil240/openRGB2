@@ -302,6 +302,36 @@ EngineService::EngineService(Engine& engine, Deps deps,
         engine_.Worker().SetIdleFrameHook(
             [m] { return m->IdentifyActive(); });
     }
+
+    /* studio-import Task 3: the managed-workspace verb space.
+       The command layer exists only while the dep is wired —
+       WELCOME advertises "studio_workspace_v1" exactly when
+       this is non-null. */
+    if(deps_.workspace)
+    {
+        ws_commands_ = std::make_unique<WorkspaceCommands>(
+            deps_.workspace, options_.transfers);
+        /* Completion events are emitted OFF the workspace job
+           mutex (the worker calls this after the record is
+           stored) — a slow subscriber never stalls workspace
+           work, and the bounded event queue still applies. */
+        deps_.workspace->SetJobEventHook(
+            [this](const WorkspaceService::JobStatus& st)
+            {
+                Emit(event_kind::kWorkspace,
+                     JobStatusToJson(st));
+            });
+    }
+}
+
+EngineService::~EngineService()
+{
+    /* The event hook captures `this` — clear it before the
+       workspace service outlives us into its own teardown. */
+    if(deps_.workspace)
+    {
+        deps_.workspace->SetJobEventHook(nullptr);
+    }
 }
 
 void EngineService::SetEventSink(
@@ -495,6 +525,11 @@ nlohmann::json EngineService::SceneJsonLocked() const
     }
     out["applied_revision"] = engine_.Worker().AppliedRevision();
     out["playing"]          = engine_.Worker().HasScene();
+    /* studio-import Task 3: SCENE replies tell old clients the
+       managed workspace state — the gate rule lives here, not
+       in guesswork. */
+    out["workspace"] = nlohmann::json::object(
+        {{ "managed", WorkspaceManaged() }});
     return out;
 }
 
@@ -849,10 +884,20 @@ nlohmann::json EngineService::DiagnosticsJson(TimePoint now) const
 
 nlohmann::json EngineService::OnWelcome()
 {
+    nlohmann::json caps = nlohmann::json::array();
+    if(ws_commands_)
+    {
+        /* studio-import Task 3: managed-workspace jobs,
+           revisions, and bounded transfers (plan 3.3). A client
+           that doesn't see it falls back to the legacy surface
+           unchanged. */
+        caps.push_back("studio_workspace_v1");
+    }
     return nlohmann::json::object({
-        { "engine",    "openrgb2-engine" },
-        { "running",   engine_.Running() },
-        { "state",     StateJson()       },
+        { "engine",       "openrgb2-engine" },
+        { "running",      engine_.Running() },
+        { "capabilities", caps              },
+        { "state",        StateJson()       },
     });
 }
 
@@ -889,7 +934,53 @@ bool EngineService::SnapshotEvent(const std::string& kind,
         out = ReactiveJson();
         return true;
     }
+    if(kind == event_kind::kWorkspace)
+    {
+        /* The initial snapshot is the `get` reply — metadata
+           only; document/type/look content rides transfers. */
+        out = ws_commands_ ? ws_commands_->SnapshotJson()
+                           : nlohmann::json::object(
+                                 {{ "managed", false }});
+        return true;
+    }
     return false;
+}
+
+bool EngineService::WorkspaceManaged() const
+{
+    return deps_.workspace != nullptr &&
+           deps_.workspace->ManagedActive();
+}
+
+IpcReply EngineService::DispatchSession(uint64_t session_id,
+                                        MsgType type,
+                                        const nlohmann::json& body)
+{
+    if(type == MsgType::WorkspaceCommand)
+    {
+        if(!ws_commands_)
+        {
+            return IpcReply::Fail(ErrCode::Unavailable,
+                "the studio_workspace_v1 capability is not "
+                "present on this server — use the legacy "
+                "surface");
+        }
+        return ws_commands_->Handle(session_id, body);
+    }
+    return Dispatch(type, body);
+}
+
+void EngineService::OnSessionEnd(uint64_t session_id)
+{
+    /* Session-bound workspace state dies with the session:
+       queued jobs and staged transfers are cancelled. A commit
+       already past the durable marker is never rolled back —
+       the reconnecting client reconciles by revision/content
+       hash. */
+    if(ws_commands_)
+    {
+        ws_commands_->OnSessionEnd(session_id);
+    }
 }
 
 IpcReply EngineService::Dispatch(MsgType type,
@@ -897,6 +988,13 @@ IpcReply EngineService::Dispatch(MsgType type,
 {
     switch(type)
     {
+    /* A WorkspaceCommand arriving through the non-session
+       dispatch path (direct service calls in harnesses) binds
+       to session 0 — the jobs/transfers still work, scoped to
+       a virtual session that never disconnects. */
+    case MsgType::WorkspaceCommand:
+        return DispatchSession(0, type, body);
+
     case MsgType::GetSnapshots:
         return IpcReply::Success(MsgType::Snapshots,
                                  SnapshotsJson());
@@ -907,6 +1005,22 @@ IpcReply EngineService::Dispatch(MsgType type,
 
     case MsgType::SetScene:
     {
+        /* studio-import Task 3: once a managed workspace is
+           active, the lossy legacy scene path is refused — the
+           workspace is the authoring surface (plan 3.3). The
+           gate is honest: reads (GET_SCENE), identify, and
+           telemetry stay available; only document mutations
+           are refused. */
+        if(WorkspaceManaged())
+        {
+            IpcReply r = IpcReply::Fail(ErrCode::BadRequest,
+                "a managed workspace is active — edit it through "
+                "WORKSPACE_COMMAND (base_revision + "
+                "resource_revision), not the lossy legacy "
+                "scene path");
+            r.body["detail"] = "workspace_required";
+            return r;
+        }
         if(!body.is_object() || !body.contains("document")
            || !body["document"].is_object())
         {
@@ -1514,6 +1628,26 @@ IpcReply EngineService::HandleIdentify(const nlohmann::json& body)
 IpcReply EngineService::HandleLayoutMutate(
     const std::string& verb, const nlohmann::json& body)
 {
+    /* studio-import Task 3: layout mutation verbs are lossy
+       legacy edits — with a managed workspace active they are
+       refused so a raw edit can never bypass the generation
+       history. `identify` is NOT a mutation and stays live
+       (it is handled before this gate). */
+    if(WorkspaceManaged())
+    {
+        IpcReply r = IpcReply::Fail(ErrCode::BadRequest,
+            "a managed workspace is active — layout changes go "
+            "through WORKSPACE_COMMAND commit, not the legacy "
+            "mutation path");
+        r.body["detail"] = "workspace_required";
+        return r;
+    }
+    return HandleLayoutMutateImpl(verb, body);
+}
+
+IpcReply EngineService::HandleLayoutMutateImpl(
+    const std::string& verb, const nlohmann::json& body)
+{
     if(!body.is_object() ||
        !body.value("object_id", nlohmann::json()).is_string() ||
        body["object_id"].get<std::string>().empty())
@@ -2011,6 +2145,15 @@ void EngineService::PollEvents(TimePoint now)
     for(const IpcEvent& ev : pending)
     {
         Emit(ev.kind, ev.data);
+    }
+
+    /* Idle workspace transfers expire on the owner tick too —
+       the lazy sweep inside each WORKSPACE_COMMAND is the
+       primary expiry path; this keeps a truly abandoned
+       upload from waiting for the next command. */
+    if(ws_commands_)
+    {
+        ws_commands_->SweepExpired();
     }
 
     /* frame_status emits last — the same ordering it had as

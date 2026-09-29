@@ -59,6 +59,8 @@ constexpr const char* kPlayback    = "playback";      /* playback state changed 
 constexpr const char* kConnection  = "connection";    /* SDK link state         */
 constexpr const char* kFrameStatus = "frame_status";  /* delivery stats/colors  */
 constexpr const char* kReactive    = "reactive";      /* reactive input state   */
+constexpr const char* kWorkspace   = "workspace";     /* workspace job result —
+                                                         data = job_status body */
 }
 
 /* The set SnapshotEvent/SUBSCRIBE validation knows. */
@@ -93,6 +95,11 @@ enum class MsgType : uint16_t
                                        plan section 4)                  */
     ReactiveCommand  = 0x010d,   /* {verb,args} -> Ok; Task 4.6 reactive
                                        input controls (audio/screen/key)*/
+    WorkspaceCommand = 0x010e,   /* {verb,args} -> Ok; studio-import
+                                       Task 3: managed workspace jobs,
+                                       revisions, and bounded transfers
+                                       (plan section 3.3; capability
+                                       "studio_workspace_v1")           */
 
     /*---- diagnostics channel (the only post-HELLO verb) ---*/
     DiagGet          = 0x0300,   /* -> Diagnostics                      */

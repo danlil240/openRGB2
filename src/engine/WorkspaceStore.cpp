@@ -875,6 +875,52 @@ std::vector<std::string> WorkspaceStore::List() const
     return out;
 }
 
+WorkspaceStore::Revisions WorkspaceStore::LoadRevisions(
+    const std::string& id) const
+{
+    Revisions r;
+    if(!IsWorkspaceId(id))
+    {
+        r.error = "invalid workspace id '" + id + "'";
+        return r;
+    }
+    const fs::path wsdir = WorkspaceDir(id);
+    std::error_code ec;
+    if(!fs::is_directory(wsdir, ec))
+    {
+        return r;    /* no managed workspace under this id */
+    }
+    const Marker primary = ReadMarker(wsdir / "active");
+    if(primary.valid)
+    {
+        r.exists             = true;
+        r.workspace_revision = primary.workspace_revision;
+        r.resource_revision  = primary.resource_revision;
+        return r;
+    }
+    /* Marker backup carries the last-known-good counters — a
+       torn primary never silently reads as revision 0. */
+    const Marker backup = ReadMarker(wsdir / "active.lkg");
+    if(backup.valid)
+    {
+        r.exists             = true;
+        r.workspace_revision = backup.workspace_revision;
+        r.resource_revision  = backup.resource_revision;
+        if(primary.exists)
+        {
+            r.error = "primary marker unreadable — revisions are "
+                      "the last-known-good marker's";
+        }
+        return r;
+    }
+    if(primary.exists || backup.exists)
+    {
+        r.exists = true;
+        r.error  = "active marker unreadable";
+    }
+    return r;
+}
+
 namespace
 {
 
