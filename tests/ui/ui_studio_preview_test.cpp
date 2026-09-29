@@ -544,6 +544,31 @@ int main(int argc, char** argv)
             return !rig.vm->lastError().isEmpty();
         }));
         CHECK(!rig.vm->previewActive());
+
+        /* The refusal LATCHES: re-evaluating the want state
+           does not retry against a rejecting engine. */
+        const int refused_begins = rig.engine.begins;
+        rig.vm->setWantPreview(false);
+        rig.vm->setWantPreview(true);
+        rig.PumpUntil([&] { return false; }, 400);   /* drain */
+        CHECK(rig.engine.begins == refused_begins);
+        CHECK(!rig.vm->previewActive());
+        /* A NEW draft clears the latch — the next edit sends a
+           fresh candidate, not a retry of the refused one. */
+        rig.engine.refuse_begin = false;
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d)
+            {
+                d.meta.name = "retry";
+                return true;
+            });
+        rig.ctl.NoteDraftEdited();
+        CHECK(rig.PumpUntil([&] {
+            return rig.engine.begins > refused_begins;
+        }));
+        CHECK(rig.PumpUntil([&] {
+            return rig.vm->previewActive();
+        }));
     }
 
     /*========================================================*\

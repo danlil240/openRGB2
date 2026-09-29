@@ -60,13 +60,18 @@ ApplicationWindow {
     }
 
     /* studio-import Task 7: the draft preview publishes only
-       while a surface that can show it is on screen — the
-       engine pauses (paused/hidden) when it isn't. */
+       while a surface that can show it is on screen AND the
+       window itself is up — tray-hide or minimize pauses the
+       feed (engine reports paused/hidden) just like a page
+       switch does. */
     function syncViewportVisible() {
         if(typeof viewport !== "undefined")
             viewport.visible =
-                root.currentView === 1 || root.currentView === 2;
+                root.visible
+                && (root.currentView === 1
+                    || root.currentView === 2);
     }
+    onVisibleChanged: syncViewportVisible()
     /* Geometry + last view are UI-owned — saved on close and
        on view change (write-through; QSettings batches the
        platform write). */

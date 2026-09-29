@@ -203,6 +203,12 @@ void StudioViewportModel::Begin()
     {
         return;
     }
+    /* A refused begin latches until the draft changes — no
+       retry storm against a rejecting engine. */
+    if(refused_)
+    {
+        return;
+    }
     const QVariantMap args =
         DraftArgs(workspace_, ++push_rev_, true, visible_);
     const int id = bridge_->workspaceCommand(
@@ -223,7 +229,7 @@ void StudioViewportModel::Begin()
 void StudioViewportModel::PushUpdate()
 {
     if(!bridge_ || !active_ || !workspace_ ||
-       !workspace_->ready())
+       !workspace_->ready() || refused_)
     {
         return;
     }

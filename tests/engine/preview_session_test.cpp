@@ -1020,6 +1020,57 @@ int main()
             { "draft_revision", 1 } })).value("active", false));
     }
 
+    /*---- malformed bodies never mutate live state ------------*/
+    {
+        std::printf("-- ipc: validation before mutation\n");
+        Rig rig(g_tmp / "r10");
+        rig.eopts.preview.max_sessions = 1;
+        rig.Start();
+        TestClient c;
+        Welcome(c, *rig.server);
+        /* A begin whose visible flag is the wrong type is
+           refused BEFORE a slot is allocated — the single
+           global slot stays free for a healthy client. */
+        WsCallErr(c, seq, json::object({
+            { "verb", "preview_begin" },
+            { "document", CompactDoc(1, 0, 1.0) },
+            { "visible", "yes" } }),
+            ErrCode::BadRequest);
+        TestClient c2;
+        Welcome(c2, *rig.server);
+        CHECK(WsCall(c2, seq, json::object({
+            { "verb", "preview_begin" },
+            { "document", CompactDoc(1, 0, 1.0) },
+            { "draft_revision", 7 } })).value("active", false));
+        /* c2 holds the one slot — nothing leaked from the
+           refused begin. */
+        WsCallErr(c, seq, json::object({
+            { "verb", "preview_begin" },
+            { "document", CompactDoc(1, 0, 1.0) } }),
+            ErrCode::Busy, "preview_limit");
+
+        /* A document-bearing update with a malformed visible
+           is refused WITHOUT touching the live candidate —
+           revision 7 keeps previewing. */
+        WsCallErr(c2, seq, json::object({
+            { "verb", "preview_update" },
+            { "document", CompactDoc(1, 0, 1.0) },
+            { "draft_revision", 99 },
+            { "visible", 42 } }),
+            ErrCode::BadRequest);
+        const json up = WsCall(c2, seq, json::object({
+            { "verb", "preview_update" },
+            { "visible", true } }));
+        CHECK(up.value("active", false));
+        CHECK(up.value("draft_revision", 0ull) == 7);
+        /* A document update omitting draft_revision keeps the
+           session's current one — never a silent reset to 0. */
+        const json u2 = WsCall(c2, seq, json::object({
+            { "verb", "preview_update" },
+            { "document", CompactDoc(1, 0, 1.0) } }));
+        CHECK(u2.value("draft_revision", 0ull) == 7);
+    }
+
     /*---- disconnect releases the preview --------------------*/
     {
         std::printf("-- ipc: disconnect cleanup\n");

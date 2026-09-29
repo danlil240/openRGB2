@@ -1081,7 +1081,9 @@ IpcReply WorkspaceCommands::PreviewCandidate(
             "bad_request");
     }
 
-    draft_revision = 0;
+    /* draft_revision is caller-seeded (begin: 0; update: the
+       session's current revision) — omitted means "keep the
+       one already previewing", never a silent reset to 0. */
     if(body.contains("draft_revision") &&
        !BodyU64(body, "draft_revision", draft_revision))
     {
@@ -1117,6 +1119,14 @@ IpcReply WorkspaceCommands::HandlePreviewBegin(
         return FailDetail(ErrCode::Unavailable,
             "the preview engine is not wired on this server",
             "unavailable");
+    }
+    /* Validate EVERY body field before any mutation — a
+       bad_request must leave no live preview behind. */
+    if(body.contains("visible") && !body["visible"].is_boolean())
+    {
+        return FailDetail(ErrCode::BadRequest,
+                          "visible must be a boolean",
+                          "bad_request");
     }
     std::shared_ptr<WorkspaceCandidate> cand;
     uint64_t rev = 0;
@@ -1161,12 +1171,6 @@ IpcReply WorkspaceCommands::HandlePreviewBegin(
     }
     if(body.contains("visible"))
     {
-        if(!body["visible"].is_boolean())
-        {
-            return FailDetail(ErrCode::BadRequest,
-                              "visible must be a boolean",
-                              "bad_request");
-        }
         it->second.session->SetVisible(
             body["visible"].get<bool>());
     }
@@ -1184,10 +1188,11 @@ IpcReply WorkspaceCommands::HandlePreviewBegin(
                       { "draft_revision", rev },
                   }) },
         "status");
+    const uint32_t interval = preview_deps_.min_interval_ms;
     return IpcReply::Success(MsgType::Ok, nlohmann::json::object({
         { "active",         true },
         { "draft_revision", rev  },
-        { "rate_hz",        1000 / preview_deps_.min_interval_ms },
+        { "rate_hz",        interval ? 1000 / interval : 0 },
     }));
 }
 
@@ -1200,6 +1205,31 @@ IpcReply WorkspaceCommands::HandlePreviewUpdate(
             "the preview engine is not wired on this server",
             "unavailable");
     }
+    /* Every body field validates BEFORE any mutation — a
+       bad_request leaves the live preview untouched. */
+    if(body.contains("visible") && !body["visible"].is_boolean())
+    {
+        return FailDetail(ErrCode::BadRequest,
+                          "visible must be a boolean",
+                          "bad_request");
+    }
+    /* Parse OUTSIDE preview_mutex_ — staged-token file reads
+       and a multi-MiB candidate parse must not stall the
+       publish tick (PollPreviews shares this mutex). */
+    std::shared_ptr<WorkspaceCandidate> cand;
+    uint64_t                          rev = 0;
+    const bool have_doc =
+        body.contains("document") || body.contains("staged");
+    if(have_doc)
+    {
+        const IpcReply parsed =
+            PreviewCandidate(session_id, body, cand, rev);
+        if(parsed.code != ErrCode::Ok)
+        {
+            return parsed;
+        }
+    }
+
     std::lock_guard<std::mutex> lock(preview_mutex_);
     auto it = previews_.find(session_id);
     if(it == previews_.end())
@@ -1208,15 +1238,13 @@ IpcReply WorkspaceCommands::HandlePreviewUpdate(
             "no preview session is active — begin first",
             "no_preview");
     }
-    if(body.contains("document") || body.contains("staged"))
+    if(have_doc)
     {
-        std::shared_ptr<WorkspaceCandidate> cand;
-        uint64_t rev = it->second.session->DraftRevision();
-        const IpcReply parsed =
-            PreviewCandidate(session_id, body, cand, rev);
-        if(parsed.code != ErrCode::Ok)
+        /* draft_revision omitted -> keep the revision the
+           session already previews; never a silent 0. */
+        if(!body.contains("draft_revision"))
         {
-            return parsed;
+            rev = it->second.session->DraftRevision();
         }
         std::string err;
         /* Latest-wins: the newer draft replaces the held
@@ -1231,12 +1259,6 @@ IpcReply WorkspaceCommands::HandlePreviewUpdate(
     }
     if(body.contains("visible"))
     {
-        if(!body["visible"].is_boolean())
-        {
-            return FailDetail(ErrCode::BadRequest,
-                              "visible must be a boolean",
-                              "bad_request");
-        }
         it->second.session->SetVisible(
             body["visible"].get<bool>());
     }
