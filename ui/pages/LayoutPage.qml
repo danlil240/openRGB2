@@ -60,7 +60,10 @@ Item {
     readonly property bool quick3dUp:
         typeof quick3dAvailable !== "undefined"
         && quick3dAvailable === true
-    property bool show3d:
+    /* stays a binding — uiPrefs.layoutShow3d holds the user's
+       intent, quick3dUp gates display (fix round 1: assigning
+       this would have killed the binding). */
+    readonly property bool show3d:
         (typeof uiPrefs !== "undefined" ? uiPrefs.layoutShow3d : false)
         && quick3dUp
     /* The loaded viewport item (null in 2D mode / on load
@@ -69,9 +72,8 @@ Item {
     property bool viewportLoadFailed: false
 
     function setShow3d(on) {
-        show3d = on && quick3dUp;
         if(typeof uiPrefs !== "undefined")
-            uiPrefs.layoutShow3d = show3d;
+            uiPrefs.layoutShow3d = on;
     }
 
     function draftColorsFor(id) {
@@ -202,6 +204,32 @@ Item {
     Connections {
         target: root.ctlUp ? layoutCtl : null
         function onItemsChanged() { root.refreshItems(); }
+    }
+
+    /* Task 8 fix round 1: reconcile the two selection surfaces —
+       the 3D viewport selects through objectCtl while the 2D
+       canvas, SELECTION card and LED views read layoutCtl.
+       Mirror the primary instance both ways (guarded against
+       ping-pong; each select() also early-outs on no change). */
+    property bool selSyncing: false
+    Connections {
+        target: root.studioUp ? objectCtl : null
+        function onSelectionChanged() {
+            if (root.selSyncing) return
+            root.selSyncing = true
+            const ids = objectCtl.selectedInstances
+            layoutCtl.select(ids.length ? ids[ids.length - 1] : "")
+            root.selSyncing = false
+        }
+    }
+    Connections {
+        target: root.studioUp ? layoutCtl : null
+        function onSelectedChanged() {
+            if (root.selSyncing) return
+            root.selSyncing = true
+            objectCtl.select(layoutCtl.selectedId)
+            root.selSyncing = false
+        }
     }
     Component.onCompleted: refreshItems()
     onWidthChanged: computeView()
@@ -407,6 +435,35 @@ Item {
                                         uiPrefs.viewportBloom = checked;
                                 }
                             }
+                            /* Reduced motion — meta.ui.reduced_motion
+                               on the draft (display-only temporal-AA
+                               gate) with the UiSettings fallback;
+                               same write-through shape as bloom. */
+                            AppCheckBox {
+                                objectName: "viewportMotionCheck"
+                                text: qsTr("reduced motion")
+                                visible: root.show3d
+                                checked: {
+                                    if(root.studioUp
+                                       && typeof workspace
+                                          !== "undefined"
+                                       && workspace.ready)
+                                        return workspace.reducedMotion;
+                                    return typeof uiPrefs
+                                           !== "undefined"
+                                           && uiPrefs.viewportReducedMotion;
+                                }
+                                onToggled: {
+                                    if(root.studioUp
+                                       && typeof workspace
+                                          !== "undefined"
+                                       && workspace.ready)
+                                        workspace.reducedMotion = checked;
+                                    if(typeof uiPrefs !== "undefined")
+                                        uiPrefs.viewportReducedMotion =
+                                            checked;
+                                }
+                            }
                         }
 
                         /* studio-import Task 8: the Quick3D
@@ -450,6 +507,8 @@ Item {
                                     (typeof uiPrefs !== "undefined")
                                     ? uiPrefs : null;
                                 item.focusPeer = transformInspector;
+                                item.focusPeer2 = deviceTree;
+                                item.focusPeer3 = deviceLibrary;
                                 /* LIVE = the transport-accepted
                                    frame_status feed — draft preview
                                    colors are labelled separately,

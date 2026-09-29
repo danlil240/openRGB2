@@ -11,6 +11,7 @@
 |||                                                       ||
 |||   `ctx` = StudioViewport object delegate (see           ||
 |||   Keyboard.qml for the contract).                    ||
+||   SPDX-License-Identifier: GPL-2.0-or-later            ||
 \*---------------------------------------------------------*/
 import QtQuick
 import QtQuick3D

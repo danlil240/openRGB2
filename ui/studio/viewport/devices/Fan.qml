@@ -22,6 +22,7 @@
 |||   `ctx` = StudioViewport object delegate (contract in   ||
 |||   Keyboard.qml). Rotations are quaternions — no      ||
 |||   eulerRotation on scene objects.                    ||
+||   SPDX-License-Identifier: GPL-2.0-or-later            ||
 \*---------------------------------------------------------*/
 import QtQuick
 import QtQuick3D

@@ -7,6 +7,7 @@
 |||   — this is the decor card.                          ||
 |||                                                       ||
 |||   `ctx` = StudioViewport object delegate.               ||
+||   SPDX-License-Identifier: GPL-2.0-or-later            ||
 \*---------------------------------------------------------*/
 import QtQuick
 import QtQuick3D

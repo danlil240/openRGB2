@@ -120,6 +120,10 @@ class WorkspaceController : public QObject
                    WRITE setRenderQuality NOTIFY renderPrefsChanged)
     Q_PROPERTY(bool renderBloom READ renderBloom
                    WRITE setRenderBloom NOTIFY renderPrefsChanged)
+    /* meta.ui.reduced_motion — display-only temporal-AA gate;
+       shares renderPrefsChanged (it is a render surface pref). */
+    Q_PROPERTY(bool reducedMotion READ reducedMotion
+                   WRITE setReducedMotion NOTIFY renderPrefsChanged)
 
 public:
     explicit WorkspaceController(EngineBridge* bridge,
@@ -218,7 +222,8 @@ public:
     /* meta.ui.reduced_motion — the viewport reads the document
        pref through this; the shell-level default lives on
        UiSettings.viewportReducedMotion. */
-    Q_INVOKABLE bool reducedMotion() const;
+    bool        reducedMotion() const;
+    void        setReducedMotion(bool on);
 
     /*---- test hooks --------------------------------------------*/
     void setDraftDirForTesting(const QString& dir);

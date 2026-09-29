@@ -121,7 +121,9 @@ TestCase {
         property var camLog: []
         signal cameraChanged()
         signal renderPrefsChanged()
-        function reducedMotion() { return false }
+        /* NOTIFY'd property on the real controller — the viewport
+           reads reducedMotion (no parens) as a binding. */
+        property bool reducedMotion: false
         function setCameraState(s) {
             camLog.push("cam")
             cameraState = s

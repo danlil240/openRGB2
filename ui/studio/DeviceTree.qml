@@ -63,6 +63,12 @@ Rectangle {
     function pokeSel() { selStamp++ }
 
     property string search: ""
+    /* Task 8 fix: the 3D viewport's focusPeer reads this — true
+       while the search field or an in-row rename input owns text
+       focus so viewport shortcuts (W/E/P/F/Home) never eat typing. */
+    readonly property bool textFocus:
+        searchField.activeFocus || renameFocus
+    property bool renameFocus: false
     /* Rows currently matching the search — recomputed by
        treeList.recount() on model/search/delegate changes. */
     property int shownCount: 0
@@ -405,9 +411,11 @@ Rectangle {
                                 treeRoot.br().renameInstance(row.rowInst, text)
                             row.renaming = false
                         }
-                        onActiveFocusChanged:
+                        onActiveFocusChanged: {
+                            treeRoot.renameFocus = activeFocus
                             if (!activeFocus && row.renaming)
                                 row.renaming = false
+                        }
                     }
 
                     /* Status chip — text + color, never color alone. */

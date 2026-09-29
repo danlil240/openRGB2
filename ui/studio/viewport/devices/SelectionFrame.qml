@@ -8,6 +8,7 @@
 |||   never bloom-dependent. Instantiated directly in    ||
 |||   the StudioViewport delegate so its size binds the     ||
 |||   node's oBx/oBy/oBz.                                ||
+||   SPDX-License-Identifier: GPL-2.0-or-later            ||
 \*---------------------------------------------------------*/
 import QtQuick
 import QtQuick3D

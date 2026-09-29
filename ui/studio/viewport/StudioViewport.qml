@@ -136,9 +136,11 @@ Rectangle {
     }
 
     /* Reduced motion — meta.ui.reduced_motion with the draft,
-       UiSettings.viewportReducedMotion otherwise. */
+       UiSettings.viewportReducedMotion otherwise. A NOTIFY'd
+       property read (renderPrefsChanged), so a live toggle
+       re-applies the environment. */
     readonly property bool reducedMotion:
-        workspaceReady ? workspaceCtl.reducedMotion()
+        workspaceReady ? workspaceCtl.reducedMotion
                        : (prefs ? prefs.viewportReducedMotion : false)
 
     readonly property bool bloomOn:

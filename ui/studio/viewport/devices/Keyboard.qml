@@ -15,6 +15,7 @@
 |||   (oBx/oBy/oBz meters, oId pick id, ghostBody,       ||
 |||   emitterPos, emitterColors). Drawn in meters; the   ||
 |||   100-unit primitives scale as meters/100.           ||
+||   SPDX-License-Identifier: GPL-2.0-or-later            ||
 \*---------------------------------------------------------*/
 import QtQuick
 import QtQuick3D

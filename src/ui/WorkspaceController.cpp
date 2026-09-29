@@ -1856,5 +1856,20 @@ bool WorkspaceController::reducedMotion() const
            && session_.Working().meta.ui.reduced_motion;
 }
 
+void WorkspaceController::setReducedMotion(bool on)
+{
+    const bool changed = session_.SetMeta(
+        [on](studio::WorkspaceMeta& meta)
+        {
+            meta.ui.reduced_motion = on;
+            return true;
+        });
+    if(changed)
+    {
+        emit renderPrefsChanged();
+        NoteDraftEdited();
+    }
+}
+
 } /* namespace ui */
 } /* namespace openrgb2 */

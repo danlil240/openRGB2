@@ -10,6 +10,7 @@
 |||   ctx.emitterPos and falls back to a 60 mm default.  ||
 |||                                                       ||
 |||   `ctx` = StudioViewport object delegate.               ||
+||   SPDX-License-Identifier: GPL-2.0-or-later            ||
 \*---------------------------------------------------------*/
 import QtQuick
 import QtQuick3D

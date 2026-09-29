@@ -26,16 +26,22 @@
 // Runs fully offline: DLS_PRESET_DIR (set by CMake) points the
 // controller's registry at src/core/presets/devices.
 
+#include "DiagnosticsController.h"
 #include "EngineBridge.h"
+#include "LayoutController.h"
+#include "SceneEditController.h"
+#include "StartupTaskController.h"
 #include "StudioViewportModel.h"
 #include "UiSettings.h"
 #include "WorkspaceController.h"
 #include "WorkspaceEditSession.h"
+#include "studio/EffectEditorController.h"
 #include "studio/ObjectEditorController.h"
 #include "studio/SceneObjectModel.h"
 
 #include "config/StudioConfig.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QGuiApplication>
 #include <QJSValue>
@@ -340,6 +346,16 @@ int main(int argc, char** argv)
         rig.ws.setRenderBloom(false);
         CHECK(!rig.ws.renderBloom());
         CHECK(rig.UndoCount() == 0);
+        /* Reduced motion rides the same meta path — writes flip
+           meta.ui.reduced_motion, notify renderPrefsChanged, and
+           mint no undo record (fix round 1). */
+        CHECK(!rig.ws.reducedMotion());
+        const int rpCount0 = rpSpy.count();
+        rig.ws.setReducedMotion(true);
+        CHECK(rig.ws.reducedMotion());
+        CHECK(rpSpy.count() == rpCount0 + 1);
+        CHECK(rig.UndoCount() == 0);
+        rig.ws.setReducedMotion(false);
         CHECK(!rig.ws.reducedMotion());
         CHECK(rig.ws.dirty());
     }
@@ -770,7 +786,128 @@ Ed.CameraController {
     }
 
     /*======================================================*\
-    || D. Viewport QML files compile                          ||
+    || D. The REAL Layout page — selection reconcile +      ||
+    ||    focus peers (fix round 1)                           ||
+    \*======================================================*/
+    std::printf("-- layout page: reconcile + focus peers\n");
+    {
+        QTemporaryDir prefsDir;
+        CHECK(prefsDir.isValid());
+        UiSettings prefs;
+        prefs.setPathForTesting(
+            prefsDir.filePath(QStringLiteral("ui.ini")));
+
+        EngineBridge bridge;
+        WorkspaceController ws(&bridge);
+        SceneEditController scene_edit(&bridge);
+        LayoutController layout_ctl(&bridge);
+        scene_edit.setWorkspace(&ws);
+        layout_ctl.setWorkspace(&ws);
+        ObjectEditorController ctl(&bridge, &ws);
+        EffectEditorController eff(&bridge, &ws);
+        StudioViewportModel preview(&bridge, &ws);
+        DiagnosticsController diag(&bridge);
+        StartupTaskController startup(QDir::tempPath());
+        scene_edit.setUiSettings(&prefs);
+
+        ws.Session().LoadApplied(ParseCompact(CompactDoc()), 1, 1);
+        ctl.LoadPresetDirectory(preset_dir ? preset_dir : "");
+
+        QQmlEngine eng;
+        QQmlContext* rc = eng.rootContext();
+        rc->setContextProperty(QStringLiteral("bridge"), &bridge);
+        rc->setContextProperty(QStringLiteral("sceneEdit"),
+                               &scene_edit);
+        rc->setContextProperty(QStringLiteral("layoutCtl"),
+                               &layout_ctl);
+        rc->setContextProperty(QStringLiteral("workspace"), &ws);
+        rc->setContextProperty(QStringLiteral("objectCtl"), &ctl);
+        rc->setContextProperty(QStringLiteral("effectEdit"), &eff);
+        rc->setContextProperty(QStringLiteral("viewport"),
+                               &preview);
+        rc->setContextProperty(QStringLiteral("diagCtl"), &diag);
+        rc->setContextProperty(QStringLiteral("uiPrefs"), &prefs);
+        rc->setContextProperty(QStringLiteral("startupTask"),
+                               &startup);
+        rc->setContextProperty(QStringLiteral("quick3dAvailable"),
+                               true);
+        rc->setContextProperty(QStringLiteral("trayAvailable"),
+                               false);
+        rc->setContextProperty(QStringLiteral("startHidden"),
+                               false);
+
+        QQmlComponent comp(&eng,
+            QUrl(QStringLiteral(
+                "qrc:/qt/qml/OpenRGB2/UI/pages/LayoutPage.qml")));
+        if(comp.isError())
+        {
+            ++failures;
+            std::printf("FAIL layout page:\n%s\n",
+                        comp.errorString().toUtf8().constData());
+        }
+        else
+        {
+            std::unique_ptr<QObject> page(
+                comp.create(rc));
+            CHECK(page != nullptr);
+            if(page)
+            {
+                /* objectCtl -> layoutCtl: a viewport selection
+                   lands in the SELECTION card's data source. */
+                ctl.selectInstance(QStringLiteral("fan0"));
+                CHECK(layout_ctl.selectedId()
+                      == QStringLiteral("fan0"));
+                /* layoutCtl -> objectCtl: a 2D-canvas selection
+                   shows as viewport selection on the next 3D
+                   toggle. */
+                layout_ctl.select(QStringLiteral("fan1"));
+                CHECK(ctl.selectedInstances()
+                      == QVariantList({ "fan1" }));
+                /* Empty propagates too. */
+                ctl.clearEditorSelection();
+                CHECK(layout_ctl.selectedId().isEmpty());
+
+                /* Focus peers: with 3D enabled the viewport's
+                   editingText() reaches the docked panels'
+                   textFocus (fix round 1 — search fields no
+                   longer leak keystrokes into shortcuts). */
+                prefs.setLayoutShow3d(true);
+                QCoreApplication::processEvents();
+                QObject* loader = page->findChild<QObject*>(
+                    QStringLiteral("viewportLoader"));
+                CHECK(loader != nullptr);
+                if(loader)
+                {
+                    QObject* vp = loader->property("item")
+                                      .value<QObject*>();
+                    CHECK(vp != nullptr);
+                    QObject* dt = page->findChild<QObject*>(
+                        QStringLiteral("deviceTreePanel"));
+                    QObject* dl = page->findChild<QObject*>(
+                        QStringLiteral("deviceLibraryPanel"));
+                    CHECK(dt != nullptr && dl != nullptr);
+                    if(vp && dt && dl)
+                    {
+                        CHECK(vp->property("focusPeer")
+                                  .value<QObject*>() != nullptr);
+                        CHECK(vp->property("focusPeer2")
+                                  .value<QObject*>() == dt);
+                        CHECK(vp->property("focusPeer3")
+                                  .value<QObject*>() == dl);
+                        /* The panels expose textFocus — the
+                           peer seam reads a real property, not
+                           undefined. */
+                        CHECK(dt->property("textFocus").isValid());
+                        CHECK(dl->property("textFocus").isValid());
+                        CHECK(!dt->property("textFocus").toBool());
+                    }
+                }
+            }
+        }
+    }
+
+    /*======================================================*\
+    || E. Viewport QML files compile                          ||
     \*======================================================*/
     std::printf("-- viewport: file compile smoke\n");
     {

@@ -72,6 +72,13 @@ Rectangle {
 
     property string search: ""
     property string category: ""      /* "" = All */
+    /* Task 8 fix: the 3D viewport's focusPeer reads this — true
+       while any of the panel's text inputs (search + the type
+       editor's id/name fields) owns text focus so viewport
+       shortcuts never eat typing. */
+    readonly property bool textFocus:
+        searchField.activeFocus
+        || idField.activeFocus || nameField.activeFocus
 
     Connections {
         target: lib.brQObj()
