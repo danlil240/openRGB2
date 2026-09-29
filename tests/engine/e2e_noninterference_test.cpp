@@ -295,6 +295,9 @@ static EngineHostOptions MakeOpts(
     opts.scan_owners        = false;
     opts.single_instance    = true;
     opts.instance_name      = "Local\\openrgb2-engine-nonint-test";
+    /* Deterministic start: a leftover last-scene.json beside this
+       state file would restore a scene the test never applied. */
+    opts.scene_restore      = false;
     opts.state_path         = state_path;
     opts.backend_config_dir = "";
     opts.log                = [](const std::string&) {};

@@ -621,6 +621,10 @@ static int TestBody(const std::filesystem::path& self_exe)
     opts.scan_owners        = true;
     opts.single_instance    = true;
     opts.instance_name      = "Local\\openrgb2-engine-lifecycle-test";
+    /* Deterministic start: a leftover last-scene.json in this
+       fixed temp dir would restore a scene the test never
+       applied. */
+    opts.scene_restore      = false;
     opts.state_path         =
         (tmpdir / "engine-state.json").generic_string();
     opts.backend_config_dir = "";

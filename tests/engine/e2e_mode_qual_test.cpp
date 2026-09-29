@@ -326,6 +326,10 @@ static int TestBody()
     opts.scan_owners        = false;
     opts.single_instance    = true;
     opts.instance_name      = "Local\\openrgb2-engine-modequal-test";
+    /* Deterministic start: a leftover last-scene.json in this
+       fixed temp dir would restore a scene and void Phase A's
+       no-scene assumptions. */
+    opts.scene_restore      = false;
     opts.state_path         =
         (tmpdir / "engine-state.json").generic_string();
     opts.backend_config_dir = "";
