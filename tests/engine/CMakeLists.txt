@@ -30,6 +30,11 @@ engine_suite(shutdown_test)
 # bindings, last-known-good, durable PlaybackMode, scene loader.
 engine_suite(profile_store_test)
 
+# Studio-import Task 2 — managed workspace store: immutable
+# generations, atomic active-generation marker, last-valid
+# recovery, resource snapshots, revision-checked service.
+engine_suite(workspace_store_test)
+
 # Task 3.9 — ownership: competing-owner classifier, managed-config
 # sole-writer check, single-instance guard, listener-PID lookup.
 engine_suite(ownership_scan_test)

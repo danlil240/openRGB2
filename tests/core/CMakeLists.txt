@@ -32,6 +32,10 @@ dls_suite(device_preset_test)
 dls_suite(studio_editor_test)
 dls_suite(effect_json_test)
 
+# Studio-import Task 2 — the canonical workspace candidate
+# (parse/migrate/validate/resolve for every persisted form).
+dls_suite(workspace_candidate_test)
+
 add_executable(playback_test
     playback_test.cpp
     ${CMAKE_SOURCE_DIR}/src/core/playback/PlaybackLoop.cpp

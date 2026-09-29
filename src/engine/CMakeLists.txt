@@ -38,6 +38,8 @@ add_library(openrgb2_engine STATIC
     ProfileStore.cpp
     ReactiveInputs.cpp
     SceneLoader.cpp
+    WorkspaceStore.cpp
+    WorkspaceService.cpp
     SingleInstance.cpp
     OwnershipScan.cpp
     Engine.cpp

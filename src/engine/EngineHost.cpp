@@ -881,6 +881,35 @@ bool EngineHost::Start(std::string& err)
             engine_, std::move(ipc_deps));
     }
 
+    /* Task 2 (studio-import): the managed workspace store +
+       commit service. Its publish seam is the same scene-apply
+       path --scene and SET_SCENE use; its libraries are the
+       packaged types/looks plus the managed root's own
+       library layer (types the workspace actually uses are
+       snapshotted per generation regardless). The store is
+       purely file state — constructing it never touches
+       output. */
+    {
+        WorkspaceService::Deps wdeps;
+        wdeps.devices = BuildDeviceRegistry(
+            opts_.devices_dir,
+            [this](const std::string& l) { Log(l); });
+        wdeps.effects = studio::EffectLooks();
+        wdeps.apply_scene =
+            [this](std::shared_ptr<const studio::SceneDocument> doc,
+                   std::string& aerr) -> bool
+            {
+                return service_ &&
+                       service_->ApplySceneDocument(std::move(doc),
+                                                  aerr);
+            };
+        workspaces_ = std::make_unique<WorkspaceService>(
+            opts_.workspace_root.empty()
+                ? WorkspaceStore::DefaultRoot()
+                : opts_.workspace_root,
+            std::move(wdeps));
+    }
+
     if(opts_.ipc_enabled && !StartIpc())
     {
         /* StartIpc logs the honest reason and continues —
@@ -956,17 +985,20 @@ bool EngineHost::ApplyStartupScene(std::string& err)
     {
         return true;
     }
-    /* Task 3.8: --scene resolves through the profile/
-       workspace layer — expanded scene JSON, a compact
-       studio.json workspace, or a legacy host-settings
-       blob all land on the same SceneDocument. */
+    /* Task 2: --scene loads through the canonical workspace
+       candidate — expanded scene JSON, a compact studio.json
+       workspace, a v1/v2 expanded workspace, or a legacy
+       host-settings blob all land on the same resolved
+       SceneDocument while the compact authoring form survives
+       for the workspace layer. */
     const studio::PresetRegistry device_registry =
         BuildDeviceRegistry(opts_.devices_dir,
                             [this](const std::string& l) { Log(l); });
-    std::shared_ptr<studio::SceneDocument> doc;
+    WorkspaceCandidate cand;
     std::vector<std::string> warnings;
-    if(!LoadSceneDocument(opts_.scene_path, device_registry,
-                          doc, err, &warnings))
+    if(!LoadWorkspaceCandidate(opts_.scene_path, device_registry,
+                               studio::EffectLooks(),
+                               cand, err, &warnings))
     {
         return false;
     }
@@ -974,7 +1006,10 @@ bool EngineHost::ApplyStartupScene(std::string& err)
     {
         Log(opts_.scene_path + ": " + w);
     }
-    if(!service_->ApplySceneDocument(doc, err))
+    Log(opts_.scene_path + ": loaded " +
+        WorkspaceSourceFormName(cand.source_form) +
+        (cand.migrated ? " (migrated)" : ""));
+    if(!service_->ApplySceneDocument(cand.resolved, err))
     {
         err = "scene apply failed: " + err;
         return false;

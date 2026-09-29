@@ -22,6 +22,7 @@ add_library(openrgb2_studio_core STATIC
     scene/DefaultDesk.cpp
     config/StudioConfig.cpp
     config/ConfigMigration.cpp
+    config/WorkspaceCandidate.cpp
     effects/EffectTypes.cpp
     effects/EffectEngine.cpp
     effects/EffectJson.cpp
