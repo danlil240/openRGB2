@@ -23,16 +23,23 @@ usage:
     qa.py type SEL TEXT [--clear]
     qa.py key "Ctrl+2" | "Tab" | "a"
     qa.py scroll SEL DY [DX]      (DY in wheel steps, -3 = down 3)
+    qa.py reveal SEL              scroll until SEL's rect is inside the window
     qa.py shot [PATH.png]
     qa.py wait SEL [PROP VALUE] [--timeout MS]
     qa.py eval "this.currentView = 2"
     qa.py raw '{"op":"tree","all":true}'
+
+Extra flags: `click SEL --reveal` scrolls the target into view
+first (flickables clip; a bare click on a scrolled-out item hits
+off-window coordinates and silently does nothing). `shot` creates
+the parent directory before asking the app to write.
 """
 
 import json
 import os
 import socket
 import sys
+import time
 
 DEFAULT_PORT = 5583
 HOST = "127.0.0.1"
@@ -80,6 +87,46 @@ def send(req, port):
         return json.loads(buf.decode("utf-8"))
     except json.JSONDecodeError:
         die(f"unparseable reply: {buf!r}", 1)
+
+
+def reveal(sel, port, margin=40, max_steps=20):
+    """Scroll the page until SEL's rect is inside the window.
+
+    Flickables clip: an item can report visible:true while its
+    scene rect is off-window (clicks then land nowhere). Pumps a
+    few wheel steps toward the item, settling each time.
+    """
+    for _ in range(max_steps):
+        st = send({"op": "state"}, port)
+        if not st.get("ok"):
+            return st
+        win_h = st["result"].get("height", 0)
+        g = send({"op": "geom", "sel": sel}, port)
+        if not g.get("ok"):
+            return g
+        r = g["result"].get("rect") or [0, 0, 0, 0]
+        cy = r[1] + r[3] / 2
+        if margin <= cy <= win_h - margin:
+            # In-bounds isn't enough — a Flickable keeps moving
+            # after the wheel input (momentum), and clicks resolve
+            # coords once. Require two identical rects ~150ms apart
+            # before calling it settled.
+            time.sleep(0.15)
+            g2 = send({"op": "geom", "sel": sel}, port)
+            if not g2.get("ok"):
+                return g2
+            r2 = g2["result"].get("rect") or [0, 0, 0, 0]
+            if r2 == r:
+                return {"ok": True,
+                        "result": {"rect": r, "height": win_h}}
+            continue
+        # dy<0 scrolls content up (reveals items below the fold)
+        dy = -6 if cy > win_h - margin else 6
+        send({"op": "scroll", "x": 960, "y": win_h / 2, "dy": dy},
+             port)
+        time.sleep(0.35)
+    return {"ok": False, "error": "reveal_timeout",
+            "message": f"could not scroll {sel} into view"}
 
 
 def build(op, args):
@@ -157,7 +204,14 @@ def build(op, args):
     if op == "shot":
         req = {"op": "shot"}
         if args:
-            req["path"] = args[0]
+            # The app resolves the path in ITS cwd — pin it to the
+            # caller's intent with an absolute path, and pre-create
+            # the directory (the app will not mkdir).
+            p = os.path.abspath(args[0])
+            parent = os.path.dirname(p)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            req["path"] = p
         return req
     if op == "wait":
         req = {"op": "wait", "sel": parse_sel(args[0])}
@@ -193,8 +247,20 @@ def main():
     if not args:
         print(__doc__)
         sys.exit(2)
-    req = build(args[0], args[1:])
-    reply = send(req, port)
+    if args[0] == "reveal":
+        reply = reveal(parse_sel(args[1]), port)
+    else:
+        if args[0] == "click" and "--reveal" in args:
+            args.remove("--reveal")
+            is_xy = args[1].lstrip("-").replace(".", "", 1).isdigit()
+            if not is_xy:
+                r = reveal(parse_sel(args[1]), port)
+                if not r.get("ok"):
+                    print(json.dumps(r, indent=2))
+                    sys.exit(1)
+                time.sleep(0.15)
+        req = build(args[0], args[1:])
+        reply = send(req, port)
     # Windows consoles default to cp1252 — QML text carries
     # typographic chars, so never let encoding kill the reply.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
