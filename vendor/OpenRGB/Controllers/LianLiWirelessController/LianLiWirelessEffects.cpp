@@ -35,6 +35,46 @@ static void HueToRgb(unsigned int hue, uint8_t* rgb)
     }
 }
 
+/*---------------------------------------------------------*\
+| Caller-supplied layout tables are untrusted input:         |
+|                                                            |
+|  * RenderRainbowWave writes out[... dst] where             |
+|    dst = fan * leds_per_fan + led_order[slot]. An entry    |
+|    >= leds_per_fan escapes the fan's LED slice and becomes |
+|    a heap out-of-bounds write.                             |
+|  * The stack renderers feed stack_pos[] / led_height[]     |
+|    through StackCoord/StackHeight. A stack_pos entry >= 24 |
+|    produces a coordinate outside the loop path, and a      |
+|    led_count that is not a multiple of leds_per_fan lets   |
+|    i / leds_per_fan reach the fan count, underflowing the  |
+|    right-edge term (fans - 1 - fan).                       |
+|                                                            |
+| A table that fails validation disables the mapping and     |
+| falls back to linear layout rather than indexing or        |
+| writing out of bounds.                                     |
+\*---------------------------------------------------------*/
+static bool TableInRange(const uint8_t* table, size_t entries, size_t limit)
+{
+    if(table == nullptr)
+    {
+        return false;
+    }
+    for(size_t i = 0; i < entries; ++i)
+    {
+        if(table[i] >= limit)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Per-fan indexing is only well-defined on a whole number of fans. */
+static bool FanLayoutValid(size_t led_count, size_t leds_per_fan)
+{
+    return leds_per_fan > 0 && led_count % leds_per_fan == 0;
+}
+
 std::vector<uint8_t> LianLiWireless::RenderSpectrumCycle(size_t led_count,
                                                        size_t frame_count)
 {
@@ -69,8 +109,13 @@ std::vector<uint8_t> LianLiWireless::RenderRainbowWave(size_t led_count,
         return out;
     }
 
-    const bool per_fan = leds_per_fan > 0 && led_count % leds_per_fan == 0;
-    const bool remap   = per_fan && led_order != nullptr;
+    const bool per_fan = FanLayoutValid(led_count, leds_per_fan);
+    /*---------------------------------------------------------*\
+    | led_order[slot] indexes the fan's LED slice — require     |
+    | every entry < leds_per_fan or dst leaves the frame.       |
+    \*---------------------------------------------------------*/
+    const bool remap   = per_fan
+                      && TableInRange(led_order, leds_per_fan, leds_per_fan);
 
     for(size_t f = 0; f < frame_count; f++)
     {
@@ -182,15 +227,24 @@ std::vector<uint8_t> LianLiWireless::RenderPerimeterWave(size_t led_count,
     {
         return out;
     }
-    const size_t fans   = leds_per_fan ? led_count / leds_per_fan : 1;
-    const double length = (double)(stack_pos ? fans * 24 : led_count);
+    /*---------------------------------------------------------*\
+    | Trust the stack_pos table only when the fan layout is     |
+    | regular and every entry is a valid loop position (< 24).  |
+    | Otherwise the coordinate path collapses to linear index.  |
+    \*---------------------------------------------------------*/
+    const bool fan_layout = FanLayoutValid(led_count, leds_per_fan);
+    const uint8_t* pos    = (fan_layout
+                           && TableInRange(stack_pos, leds_per_fan, 24))
+                          ? stack_pos : nullptr;
+    const size_t fans     = fan_layout ? led_count / leds_per_fan : 1;
+    const double length   = (double)(pos ? fans * 24 : led_count);
 
     for(size_t f = 0; f < frame_count; f++)
     {
         const int phase = (int)(360 * f / frame_count);
         for(size_t i = 0; i < led_count; i++)
         {
-            int hue = (int)(360.0 * StackCoord(i, leds_per_fan, fans, stack_pos)
+            int hue = (int)(360.0 * StackCoord(i, leds_per_fan, fans, pos)
                             / length);
             hue = reverse ? hue - phase : hue + phase;
             hue = ((hue % 360) + 360) % 360;
@@ -212,16 +266,20 @@ std::vector<uint8_t> LianLiWireless::RenderPerimeterComet(size_t led_count,
     {
         return out;
     }
-    const size_t fans   = leds_per_fan ? led_count / leds_per_fan : 1;
-    const double length = (double)(stack_pos ? fans * 24 : led_count);
-    const double tail   = length / 4.0;
+    const bool fan_layout = FanLayoutValid(led_count, leds_per_fan);
+    const uint8_t* pos    = (fan_layout
+                           && TableInRange(stack_pos, leds_per_fan, 24))
+                          ? stack_pos : nullptr;
+    const size_t fans     = fan_layout ? led_count / leds_per_fan : 1;
+    const double length   = (double)(pos ? fans * 24 : led_count);
+    const double tail     = length / 4.0;
 
     for(size_t f = 0; f < frame_count; f++)
     {
         const double head = length * f / frame_count;
         for(size_t i = 0; i < led_count; i++)
         {
-            double d = StackCoord(i, leds_per_fan, fans, stack_pos);
+            double d = StackCoord(i, leds_per_fan, fans, pos);
             d = reverse ? d - head : head - d;
             d = std::fmod(d + length, length);          /* distance behind head */
             const double s = d < tail ? 1.0 - d / tail : 0.0;
@@ -245,16 +303,20 @@ std::vector<uint8_t> LianLiWireless::RenderPerimeterChase(size_t led_count,
     {
         return out;
     }
-    const size_t fans   = leds_per_fan ? led_count / leds_per_fan : 1;
-    const double length = (double)(stack_pos ? fans * 24 : led_count);
-    const double seg    = 4.0;                     /* LEDs per chase block */
+    const bool fan_layout = FanLayoutValid(led_count, leds_per_fan);
+    const uint8_t* pos    = (fan_layout
+                           && TableInRange(stack_pos, leds_per_fan, 24))
+                          ? stack_pos : nullptr;
+    const size_t fans     = fan_layout ? led_count / leds_per_fan : 1;
+    const double length   = (double)(pos ? fans * 24 : led_count);
+    const double seg      = 4.0;                     /* LEDs per chase block */
 
     for(size_t f = 0; f < frame_count; f++)
     {
         const double shift = length * f / frame_count;
         for(size_t i = 0; i < led_count; i++)
         {
-            double p = StackCoord(i, leds_per_fan, fans, stack_pos);
+            double p = StackCoord(i, leds_per_fan, fans, pos);
             p = std::fmod(p + (reverse ? -shift : shift) + length, length);
             /* three colored segments chasing around the loop */
             const unsigned block = (unsigned)std::fmod(p / seg, 3.0);
@@ -278,9 +340,13 @@ std::vector<uint8_t> LianLiWireless::RenderPerimeterPingPong(size_t led_count,
     {
         return out;
     }
-    const size_t fans   = leds_per_fan ? led_count / leds_per_fan : 1;
-    const double length = (double)(stack_pos ? fans * 24 : led_count);
-    const double tail   = length / 5.0;
+    const bool fan_layout = FanLayoutValid(led_count, leds_per_fan);
+    const uint8_t* pos    = (fan_layout
+                           && TableInRange(stack_pos, leds_per_fan, 24))
+                          ? stack_pos : nullptr;
+    const size_t fans     = fan_layout ? led_count / leds_per_fan : 1;
+    const double length   = (double)(pos ? fans * 24 : led_count);
+    const double tail     = length / 5.0;
 
     for(size_t f = 0; f < frame_count; f++)
     {
@@ -290,7 +356,7 @@ std::vector<uint8_t> LianLiWireless::RenderPerimeterPingPong(size_t led_count,
         const double head = t * length;
         for(size_t i = 0; i < led_count; i++)
         {
-            const double d = head - StackCoord(i, leds_per_fan, fans, stack_pos);
+            const double d = head - StackCoord(i, leds_per_fan, fans, pos);
             const double s = (d >= 0.0 && d < tail) ? 1.0 - d / tail : 0.0;
             uint8_t* dst = &out[(f * led_count + i) * 3];
             dst[0] = (uint8_t)(r * s);
@@ -311,14 +377,22 @@ std::vector<uint8_t> LianLiWireless::RenderStackWave(size_t led_count,
     {
         return out;
     }
-    const size_t fans = leds_per_fan ? led_count / leds_per_fan : 1;
+    /*---------------------------------------------------------*\
+    | led_height entries are inherently 0..255 so no range      |
+    | check is needed, but the per-fan indexing still requires  |
+    | a regular layout — a partial last fan would index a fan   |
+    | number past the group size.                               |
+    \*---------------------------------------------------------*/
+    const bool fan_layout = FanLayoutValid(led_count, leds_per_fan);
+    const uint8_t* height = fan_layout ? led_height : nullptr;
+    const size_t fans     = fan_layout ? led_count / leds_per_fan : 1;
 
     for(size_t f = 0; f < frame_count; f++)
     {
         const double center = (double)f / frame_count;   /* rising crest */
         for(size_t i = 0; i < led_count; i++)
         {
-            double d = StackHeight(i, led_count, leds_per_fan, fans, led_height) - center;
+            double d = StackHeight(i, led_count, leds_per_fan, fans, height) - center;
             d = std::fmod(d + 1.5, 1.0) - 0.5;           /* wrapped distance */
             const double s = d > 0.0 ? 0.0 : -d * 4.0;   /* glow below crest */
             const double v = s > 1.0 ? 1.0 : s;
@@ -343,7 +417,9 @@ std::vector<uint8_t> LianLiWireless::RenderStackRainbow(size_t led_count,
     {
         return out;
     }
-    const size_t fans = leds_per_fan ? led_count / leds_per_fan : 1;
+    const bool fan_layout = FanLayoutValid(led_count, leds_per_fan);
+    const uint8_t* height = fan_layout ? led_height : nullptr;
+    const size_t fans     = fan_layout ? led_count / leds_per_fan : 1;
 
     for(size_t f = 0; f < frame_count; f++)
     {
@@ -351,7 +427,7 @@ std::vector<uint8_t> LianLiWireless::RenderStackRainbow(size_t led_count,
         for(size_t i = 0; i < led_count; i++)
         {
             int hue = (int)(360.0 * StackHeight(i, led_count, leds_per_fan,
-                                                fans, led_height));
+                                                fans, height));
             hue = reverse ? hue + phase : hue - phase;
             hue = ((hue % 360) + 360) % 360;
             HueToRgb((unsigned int)hue, &out[(f * led_count + i) * 3]);

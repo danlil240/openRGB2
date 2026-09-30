@@ -98,6 +98,9 @@ compile_commands.json
 # QtCreator local machine specific files for imported projects
 *creator.user*
 *.qrc
+# qt/resources.qrc is a real source (referenced by OpenRGB.pro RESOURCES),
+# not a QtCreator-generated file — it must stay tracked.
+!qt/resources.qrc
 
 # Visual Studio generated files
 *.ib_pdb_index
@@ -123,3 +126,8 @@ compile_commands.json
 
 # Generated i18n files
 *.qm
+
+# Pinned build recipe — a real source, referenced by AGENTS.md and
+# packaging/windows/build-and-deploy.ps1. Must stay tracked despite *.bat
+# and *build-* above.
+!scripts/build-windows.bat

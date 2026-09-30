@@ -53,6 +53,33 @@ target_compile_definitions(service_pending_test PRIVATE ${LLW_DEFINES})
 add_test(NAME service_pending_test COMMAND service_pending_test)
 set_tests_properties(service_pending_test PROPERTIES LABELS backend)
 
+# Mode-table regression (QA F05): constructs the real
+# RGBController_LianLiWireless over a fake link/clock and asserts the full
+# 11-mode table plus admitted multi-frame uploads for playback modes 5-10.
+# Pulls in RGBController.cpp (Qt-free; its only external hooks are
+# StringUtils + the LOG_* macros, which the test stubs) and the vendor
+# root include dir for LogManager.h/StringUtils.h/filesystem.h.
+add_executable(mode_table_test
+    mode_table_test.cpp
+    ${CTRL}/LianLiWirelessController.cpp
+    ${CTRL}/RGBController_LianLiWireless.cpp
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/RGBController/RGBController.cpp
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/StringUtils.cpp
+    ${LLW_SOURCES})
+
+target_include_directories(mode_table_test PRIVATE
+    ${LLW_INCLUDES}
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/RGBController
+    ${DEPS}/json)
+
+target_compile_definitions(mode_table_test PRIVATE ${LLW_DEFINES})
+
+add_test(NAME mode_table_test COMMAND mode_table_test)
+set_tests_properties(mode_table_test PROPERTIES
+    LABELS backend
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Bounded-diagnostics harness: also compiles the device-side controller so
 # the compression call sites are exercised (RGBControllerInterface.h is
 # Qt-free; nlohmann/json is vendored under dependencies/json).
