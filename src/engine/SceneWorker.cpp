@@ -7,6 +7,7 @@
 #include "SceneWorker.h"
 
 #include <cmath>
+#include <exception>
 #include <utility>
 
 namespace openrgb2
@@ -61,6 +62,35 @@ void SceneWorker::SetInputProvider(InputProvider provider)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     input_provider_ = std::move(provider);
+}
+
+void SceneWorker::SetLogger(EngineLogFn log)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    log_ = std::move(log);
+}
+
+void SceneWorker::Log(const std::string& line)
+{
+    EngineLogFn sink;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sink = log_;
+    }
+    EmitEngineLog(sink, line);
+}
+
+void SceneWorker::NoteStepFailure(const std::string& msg)
+{
+    /* Step is single-caller (the worker thread owns it), so the
+       counter needs no lock. Throttle: a persistent fault would
+       otherwise print 60 lines/second — first 3 immediately,
+       then one summary line every ~10 s of ticks. */
+    const uint64_t n = ++step_failures_;
+    if(n <= 3 || n % 600 == 0)
+    {
+        Log(msg + " (step failure #" + std::to_string(n) + ")");
+    }
 }
 
 TimePoint SceneWorker::Epoch() const
@@ -170,28 +200,48 @@ bool SceneWorker::Step(TimePoint now)
        callback may re-enter the worker (SubmitScene/SubmitInput)
        without deadlocking. Idle-hook frames skip evaluation: there
        is no scene, so colors stay empty and the callback's overlay
-       pass (identify) is what produces output. */
-    if(evaluate)
+       pass (identify) is what produces output.
+
+       Fault containment (QA hardening): an exception escaping
+       Evaluate or the frame callback would propagate out of Run()
+       and std::terminate the process. Catch, log (throttled), and
+       continue — the tick counts as produced so the sequence stays
+       monotonic; a bad callback can never kill the worker. */
+    try
     {
-        /* Task 6: transient key events resolve to emitter world
-           positions through the prepared scene's lookup — the
-           copy stays local to this tick; typed-text history is
-           never retained on the worker. */
-        const studio::InputState* input = active_input_.get();
-        std::shared_ptr<const studio::InputState> positioned;
-        if(input != nullptr && !input->events.empty() &&
-           !active_scene_.scene.key_positions.empty())
+        if(evaluate)
         {
-            positioned = std::make_shared<studio::InputState>(
-                PositionStudioInput(*input, active_scene_.scene));
-            input = positioned.get();
+            /* Task 6: transient key events resolve to emitter world
+               positions through the prepared scene's lookup — the
+               copy stays local to this tick; typed-text history is
+               never retained on the worker. */
+            const studio::InputState* input = active_input_.get();
+            std::shared_ptr<const studio::InputState> positioned;
+            if(input != nullptr && !input->events.empty() &&
+               !active_scene_.scene.key_positions.empty())
+            {
+                positioned = std::make_shared<studio::InputState>(
+                    PositionStudioInput(*input, active_scene_.scene));
+                input = positioned.get();
+            }
+            engine_.Evaluate(*active_scene_.scene.doc,
+                             frame.scene_time_s,
+                             frame.colors, input);
         }
-        engine_.Evaluate(*active_scene_.scene.doc, frame.scene_time_s,
-                         frame.colors, input);
+        if(cb)
+        {
+            cb(frame);
+        }
     }
-    if(cb)
+    catch(const std::exception& e)
     {
-        cb(frame);
+        NoteStepFailure(std::string("scene worker step threw: ") +
+                        e.what());
+    }
+    catch(...)
+    {
+        NoteStepFailure("scene worker step threw an unknown "
+                        "exception");
     }
     return true;
 }
