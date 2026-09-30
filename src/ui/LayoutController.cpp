@@ -20,6 +20,7 @@
 #include <QDateTime>
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <set>
 #include <vector>
@@ -898,6 +899,15 @@ bool LayoutController::moveObject(const QString& objectId,
            dragged. Desk-plane move — world y stays. */
         const studio::Vec3 wt = studio::Mat4Translation(
             WsInstanceWorld(objectId.toStdString()));
+        /* F09: a plain click releases on the same spot — the
+           editor would refuse the unchanged position as an
+           "edit refused" error. A zero-delta request is a
+           silent success, never an edit. */
+        if(std::fabs((float)x - wt.x) < 1e-4f &&
+           std::fabs((float)z - wt.z) < 1e-4f)
+        {
+            return true;
+        }
         const studio::Vec3 pos{ (float)x, wt.y, (float)z };
         return WsApply(
             ws_->Session().Editor().SetPositionWorld(
@@ -967,6 +977,13 @@ bool LayoutController::rotateObject(const QString& objectId,
         const studio::Vec3 rot{ it->second.rotation_deg.x,
                                 (float)(yawDeg - parent_yaw),
                                 it->second.rotation_deg.z };
+        /* F09: same guard as moveObject — an unchanged yaw
+           must not surface "edit refused". */
+        if(std::fabs(rot.y - it->second.rotation_deg.y) <
+               1e-4f)
+        {
+            return true;
+        }
         return WsApply(
             ws_->Session().Editor().SetRotation(
                 objectId.toStdString(), rot),

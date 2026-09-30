@@ -805,6 +805,17 @@ Item {
                                         enabled: root.editable
                                         property real grabX: 0
                                         property real grabY: 0
+                                        /* F09: press marks the drag
+                                           intent but NOT the drag —
+                                           only an actual position
+                                           change arms the move
+                                           commit. A plain click is
+                                           select-only and must never
+                                           reach moveObject with its
+                                           unchanged position (the
+                                           editor used to surface
+                                           that as "edit refused"). */
+                                        property bool dragMoved: false
                                         /* Task 5 fix: the inspector's
                                            Paint tool turns clicks into
                                            paintObject(paintColor) and
@@ -825,6 +836,7 @@ Item {
                                             }
                                             grabX = m.x;
                                             grabY = m.y;
+                                            dragMoved = false;
                                             d.dragging = true;
                                             layoutCtl.select(d.o.id);
                                         }
@@ -833,18 +845,28 @@ Item {
                                             var p = mapToItem(
                                                 canvasRect,
                                                 m.x, m.y);
-                                            d.x = Math.max(0, Math.min(
+                                            var nx = Math.max(0, Math.min(
                                                 canvasRect.width
                                                     - d.width,
                                                 p.x - grabX));
-                                            d.y = Math.max(0, Math.min(
+                                            var ny = Math.max(0, Math.min(
                                                 canvasRect.height
                                                     - d.height,
                                                 p.y - grabY));
+                                            if(nx !== d.x || ny !== d.y) {
+                                                dragMoved = true;
+                                                d.x = nx;
+                                                d.y = ny;
+                                            }
                                         }
                                         onReleased: {
                                             if(!d.dragging) return;
                                             d.dragging = false;
+                                            /* Selection already
+                                               happened on press —
+                                               a release without a
+                                               drag is done. */
+                                            if(!dragMoved) return;
                                             /* The rect centers on the
                                                footprint (origin + ox/oz)
                                                — the move target is the
