@@ -500,6 +500,10 @@ telemetry stay live — the plan only gates document mutation.
 | `preview_begin` | `{document?|staged?, draft_revision?, visible?}` | `OK {active:true,draft_revision,rate_hz}` — begins (or re-begins) this session's draft preview; `document` is the same compact v3 authoring document `commit` accepts and `staged` a finished upload token owned by this session. Errors: `bad_request`+`invalid_document` (parse/resolve failure), `bad_request`+`bad_request` (no document/staged), `busy`+`preview_limit` (global session cap reached) |
 | `preview_update` | `{document?|staged?, draft_revision?, visible?}` | `OK {active:true,draft_revision}` — latest-wins candidate replacement and/or visibility on this session's preview; `ERROR bad_request`+`no_preview` when none is active |
 | `preview_end` | `{}` | `OK {active:false}` — idempotent; ends this session's preview |
+| `calibration_begin` | `{controller:<DeviceKey>, zone:<string>}` | `OK <calibration status>` — takes the single engine calibration lease for one zone; `pending:true` while wireless groups drain/switch to direct mode. Errors: `busy`, `invalid_zone`, `device_gone`, `output_paused`, `unavailable` (no session wired) |
+| `calibration_show` | `{token:<string>, led:<int>}` | `OK <calibration status>` — latest-only per-LED show; `led:-1` blacks the zone. Errors: `starting`, `no_session`, `bad_token`, `out_of_range` |
+| `calibration_end` | `{token?:<string>}` | `OK <calibration status>` — ends the session; restore drains asynchronously on the engine worker |
+| `calibration_status` | `{}` | `OK <calibration status>` — poll equivalent of the `calibration` EVENT |
 
 Task-9 verb details — the portable-bundle and resource surface:
 
@@ -572,6 +576,33 @@ snapshot read-only and never writes a device frame or starts an
 input. A hidden view (`visible:false`) or a display-off event pauses
 sampling and publishing without ending the session.
 
+Task-11 verb details — physical single-LED calibration:
+
+- `calibration_begin` takes the engine's ONE calibration lease
+  (`CalibrationSession`) for `{controller, zone}`; uploaded
+  playback is held (`PlaybackController` output hold) and any
+  owned wireless group switches to direct/custom mode while the
+  target zone is darkened — all on the engine worker. The reply's
+  `token` is session-bound lease material the owner must quote on
+  `calibration_show`; a second client gets `busy`.
+- `calibration_show` writes ONE LED index (`led:-1` blacks the
+  zone); writes are coalesced latest-only by the engine — a
+  faster client cannot queue stale frames.
+- `calibration_end` releases the lease; the worker drains the
+  calibration lane and restores hardware by revalidating and
+  replaying the CURRENT playback intent — never a saved frame.
+- Status body (all four verbs' reply + the `calibration` EVENT):
+  `{active, starting, ending, owner, zone, zone_index,
+  led_count, last_shown, owns_group, frames_written}` and, for
+  the owning session only, `{controller, controller_name,
+  generation, token, message?}`; `begin` additionally carries
+  `pending`. A non-owner sees `owner:true` with every owner
+  field blanked — token and per-LED progress never leak.
+  Calibration EVENTs are session-targeted (only the recorded
+  owner gets them, emitted on every status change and once more
+  after release). Session teardown ends the session like
+  `calibration_end`.
+
 Job status record (`job_status` reply and terminal `workspace` EVENT
 `data`):
 
@@ -621,6 +652,7 @@ matches the corresponding pull body:
 | `frame_status` | `{aggregate, controllers:[{key,sequence,colors,stats}]}` | ≤ ~30 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses |
 | `workspace` | `get` body (initial snapshot) / job status record (terminal job event) | SUBSCRIBE initial push; a workspace job reaching a terminal state |
 | `preview` | `{type:"status"\|"frame", ...}` (below) | ≤ 30 Hz, **session-targeted** — delivered only to the session that owns the preview, never broadcast |
+| `calibration` | `<calibration status>` body (WORKSPACE_COMMAND `calibration_*` reply shape) | **session-targeted** — delivered only to the session holding the calibration lease, on every status change and once more after release |
 
 The `preview` feed is the draft-preview push channel (Task 7). It is
 session-bound: `EmitTo` delivers only to the owning session, the

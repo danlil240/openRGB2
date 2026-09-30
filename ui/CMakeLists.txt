@@ -84,6 +84,7 @@ qt_add_qml_module(openrgb2_ui
         pages/SettingsPage.qml
         studio/DeviceLibrary.qml
         studio/DevicePresetEditor.qml
+        studio/LedCalibrator.qml
         studio/DeviceTree.qml
         studio/TransformInspector.qml
         studio/WorkspaceImportDialog.qml
@@ -136,6 +137,8 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/studio/EffectEditorController.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/studio/DevicePresetController.h
         ${CMAKE_SOURCE_DIR}/src/ui/studio/DevicePresetController.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/CalibrationController.h
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/CalibrationController.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/QaServer.h
         ${CMAKE_SOURCE_DIR}/src/ui/QaServer.cpp)
 

@@ -42,6 +42,7 @@
 
 #pragma once
 
+#include "CalibrationSession.h"
 #include "DeliveryPipeline.h"
 #include "DeviceMapper.h"
 #include "Engine.h"
@@ -235,6 +236,7 @@ public:
 private:
     PlaybackController::Deps   BuildPlaybackDeps();
     PowerLifecycle::Deps       BuildLifecycleDeps();
+    CalibrationSession::Deps   BuildCalibrationDeps();
     bool StartIpc();
     bool ApplyStartupScene(std::string& err);
     void ScanOwners();
@@ -281,6 +283,14 @@ private:
     std::unique_ptr<PowerLifecycle>          lifecycle_;
     std::unique_ptr<ReactiveInputs>          reactive_;
     platform::WinPowerMonitor                power_monitor_;
+    /* studio-import Task 11: the engine-owned physical LED
+       calibration session (calibration_* workspace verbs).
+       Declared AFTER the deps it calls (pipeline_, sdk_,
+       playback_, lifecycle_) and BEFORE service_ — teardown
+       order is service_ first (its raw pointer dep stays
+       valid through ~EngineService), then this session's
+       Stop() can still release its lane/playback claims. */
+    std::unique_ptr<CalibrationSession>      calibration_;
     /* Declaration order matters: members destroy in reverse.
        workspaces_ is declared FIRST so service_ (which holds a
        raw WorkspaceService* dep and clears the job-event hook

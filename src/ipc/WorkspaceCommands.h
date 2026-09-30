@@ -29,6 +29,13 @@
 |||     session bound, 30 Hz chunked publishing to the    ||
 |||     owning session only. NO hardware path exists in   ||
 |||     this code — the preview feed is pure evaluation.  ||
+|||   - calibration_begin / calibration_show /            ||
+|||     calibration_end / calibration_status: the         ||
+|||     engine-owned PHYSICAL LED-calibration session      ||
+|||     (Task 11) — session-bound opaque token, whole-     ||
+|||     wireless-group hardware lease, latest-only LED    ||
+|||     writes. Distinct from LAYOUT_COMMAND calibrate_led||
+|||     (a document edit); this is the physical wizard.   ||
 |||                                                           ||
 |||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 \*---------------------------------------------------------*/
@@ -56,6 +63,7 @@
 
 namespace openrgb2
 {
+class CalibrationSession;
 namespace ipc
 {
 
@@ -137,6 +145,41 @@ public:
        preview. */
     nlohmann::json PreviewStatusJson(uint64_t session_id) const;
 
+    /*-----------------------------------------------------*\
+    | studio-import Task 11 — physical LED calibration.      |
+    |                                                        |
+    |   The calibration_begin/show/end/status verbs drive   |
+    |   the ENGINE-OWNED CalibrationSession — hardware        |
+    |   authority, never a client-side loop. Each begin       |
+    |   returns an opaque token bound to the calling IPC      |
+    |   session; show/end validate BOTH, so a leaked token    |
+    |   from a dead session cannot steer the lease. Status    |
+    |   pushes ride the session-targeted emitter the preview  |
+    |   feed uses (replace_slot "status").                    |
+    \*-----------------------------------------------------*/
+    struct CalibrationDeps
+    {
+        /* The engine session — nullptr keeps the verbs
+           answering Unavailable honestly. */
+        CalibrationSession* session = nullptr;
+        /* (session_id, event, replace_slot) ->
+           IpcServer::EmitTo. */
+        std::function<void(uint64_t, const IpcEvent&,
+                           const std::string&)> emit;
+    };
+    void           SetCalibrationDeps(CalibrationDeps deps);
+
+    /* The "calibration" event's session-bound snapshot —
+       the OWNER sees token + full status; another session
+       sees the shared fields plus owner:true while a lease
+       is held by someone else. Also lazily releases our
+       claim when the engine session died beneath it. */
+    nlohmann::json CalibrationStatusJson(uint64_t session_id);
+    /* Pushes the owner's current status — the
+       CalibrationSession::Deps::changed hook calls this
+       through EngineService::EmitCalibrationStatus. */
+    void           EmitCalibrationStatus();
+
     /* Job-surface wiring consumed by EngineService (the job
        worker reads staged uploads and stages downloads
        through these). */
@@ -174,6 +217,15 @@ private:
     IpcReply HandlePreviewUpdate(uint64_t session_id,
                                  const nlohmann::json& body);
     IpcReply HandlePreviewEnd(uint64_t session_id);
+    /* Task 11 — session-bound opaque-token lease over the
+       engine-owned physical calibration session. */
+    IpcReply HandleCalibrationBegin(uint64_t session_id,
+                                    const nlohmann::json& body);
+    IpcReply HandleCalibrationShow(uint64_t session_id,
+                                   const nlohmann::json& body);
+    IpcReply HandleCalibrationEnd(uint64_t session_id,
+                                  const nlohmann::json& body);
+    IpcReply HandleCalibrationStatus(uint64_t session_id);
 
     /* Reader-side caches — handlers must not re-run file work
        per request (plan 3.3). The library cache keys on the
@@ -236,6 +288,19 @@ private:
     PreviewDeps                       preview_deps_;
     mutable std::mutex                preview_mutex_;
     std::map<uint64_t, PreviewSlot>   previews_;
+
+    /* Task 11 calibration bookkeeping — the ENGINE session
+       owns the opaque token and validates owner+token on
+       every verb; this layer only remembers WHICH IPC
+       session to target status pushes at (the engine's
+       Status clears client_session on the final end push,
+       so the target must outlive the session record).
+       Guarded because verbs run on per-session reader
+       threads. */
+    CalibrationDeps   cal_deps_;
+    mutable std::mutex cal_mutex_;
+    bool              cal_owned_     = false;
+    uint64_t          cal_owner_     = 0;
 
     /* Shared tail of begin/update: parse the document body
        (inline or staged-upload token) into an immutable

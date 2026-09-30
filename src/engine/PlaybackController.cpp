@@ -407,14 +407,16 @@ PlaybackController::Result PlaybackController::RequestImpl(
             PersistLocked();
             early_accept = true;
         }
-        else if(power_gate_ && !force_restore)
+        else if((power_gate_ || output_hold_) && !force_restore)
         {
-            /* Parked across the power gate (Task 5.4): the
-               request is already validated above, so record
-               the selection + intent and DO NOT write — the
-               suspend/wake window must see zero hardware
-               writes from the request path, matching the
-               lifecycle's own SetIntendedControl parking.
+            /* Parked across the power gate (Task 5.4) or the
+               Task 11 calibration output hold: the request is
+               already validated above, so record the
+               selection + intent and DO NOT write — the
+               suspend/wake window (or the calibration
+               session's group ownership) must see zero
+               hardware writes from the request path, matching
+               the lifecycle's own SetIntendedControl parking.
                Poll() replays the parked intent through this
                same validated path the first ungated tick;
                the latest parked intent wins. */
@@ -979,7 +981,8 @@ void PlaybackController::Poll(TimePoint now)
         PlaybackParams  params;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if(deferred_request_ && !transition_ && !power_gate_)
+            if(deferred_request_ && !transition_ &&
+               !power_gate_ && !output_hold_)
             {
                 deferred_request_ = false;
                 replay            = true;
@@ -1018,13 +1021,14 @@ void PlaybackController::Poll(TimePoint now)
     PlaybackControl want_control = PlaybackControl::Playing;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if(transition_ || power_gate_)
+        if(transition_ || power_gate_ || output_hold_)
         {
             /* A serialized transition is in flight — or the
-               lifecycle parked the controller across a suspend:
-               no acknowledgement refresh, clock sampling, or
-               transport control may run while the power gate
-               is set (Task 3.7). */
+               lifecycle parked the controller across a suspend,
+               or a calibration session owns the group (Task
+               11): no acknowledgement refresh, clock sampling,
+               or transport control may run while the power
+               gate or output hold is set (Task 3.7). */
             return;
         }
         epoch = epoch_;
@@ -1344,6 +1348,18 @@ bool PlaybackController::PowerGate() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return power_gate_;
+}
+
+void PlaybackController::SetOutputHold(bool held)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    output_hold_ = held;
+}
+
+bool PlaybackController::OutputHold() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return output_hold_;
 }
 
 PlaybackController::RevalidateResult

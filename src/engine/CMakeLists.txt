@@ -33,6 +33,7 @@ add_library(openrgb2_engine STATIC
     PlaybackPresets.cpp
     PlaybackClockSync.cpp
     PlaybackController.cpp
+    CalibrationSession.cpp
     PowerLifecycle.cpp
     OrderlyShutdown.cpp
     ProfileStore.cpp

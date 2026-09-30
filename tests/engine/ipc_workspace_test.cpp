@@ -1366,6 +1366,243 @@ int main()
         CHECK(str_.value("state", "") == "succeeded");
     }
 
+    /*---- Task 11: calibration_* session verbs ---------------*/
+    {
+        Rig rig(g_tmp / "cal");
+
+        /* The engine session on injected fakes (the same
+           shape calibration_session_test uses): one wired
+           controller, a captured submit list, a fake lane
+           flag. Wired -> no playback hold needed. */
+        DeviceSnapshot snap;
+        snap.key   = DeviceKey{ "ASUSTek: Aura MB", "",
+                                "usb:1-4", "" };
+        snap.name  = "Aura MB";
+        snap.topology_generation = 3;
+        snap.zones = { { "Header", 6 } };
+        snap.modes = { "Direct" };
+        snap.connection = ConnectionState::Connected;
+        bool suppressed = false;
+        std::vector<RgbFrame> submits;
+        CalibrationSession::Deps cd;
+        cd.snapshots =
+            [&snap]
+            { return std::vector<DeviceSnapshot>{ snap }; };
+        cd.set_suppressed =
+            [&suppressed](const DeviceKey&, bool s,
+                          const std::string&)
+            { suppressed = s; };
+        cd.is_suppressed =
+            [&suppressed](const DeviceKey&)
+            { return suppressed; };
+        cd.direct_submit =
+            [&submits](const RgbFrame& f)
+            {
+                submits.push_back(f);
+                return SubmitResult::Accept();
+            };
+        cd.changed = [&rig]
+        {
+            if(rig.svc)
+            {
+                rig.svc->EmitCalibrationStatus();
+            }
+        };
+        CalibrationSession cal(cd);
+        rig.edeps.calibration = &cal;
+        rig.Start();
+        /* Session-targeted status pushes ride EmitTo — the
+           same sink preview frames use. */
+        rig.svc->SetSessionEventSink(
+            [&rig](uint64_t sid, const IpcEvent& ev,
+                   const std::string& key)
+            { rig.server->EmitTo(sid, ev, key); });
+
+        TestClient c, other;
+        Welcome(c, *rig.server);
+        Welcome(other, *rig.server);
+
+        /* Honest idle status before any session — owner:
+           false, never a fabricated token. */
+        const json st0 = WsCall(c, seq, json::object(
+            {{ "verb", "calibration_status" }}));
+        CHECK(st0.value("active", true) == false);
+        CHECK(st0.value("owner", true) == false);
+        CHECK(!st0.contains("token"));
+
+        /* Malformed requests refuse with honest codes. */
+        WsCallErr(c, seq, json::object(
+            {{ "verb", "calibration_begin" }}),
+            ErrCode::BadRequest);
+        WsCallErr(c, seq, json::object({
+            { "verb", "calibration_begin" },
+            { "controller", json::object({{ "device", "x" }}) },
+        }), ErrCode::BadRequest);          /* zone missing    */
+        WsCallErr(c, seq, json::object({
+            { "verb", "calibration_begin" },
+            { "controller", json::object(
+                {{ "device", "nope" }, { "location", "loc" }}) },
+            { "zone", "Header" },
+        }), ErrCode::Unavailable, "device_gone");
+        WsCallErr(c, seq, json::object({
+            { "verb", "calibration_begin" },
+            { "controller", json::object(
+                {{ "device", "ASUSTek: Aura MB" },
+                 { "location", "usb:1-4" }}) },
+            { "zone", "NoSuch" },
+        }), ErrCode::BadRequest, "invalid_zone");
+
+        /* Owner subscribes to the session-bound event. */
+        c.SendMsg(MsgType::Subscribe, ++seq,
+                  json::object(
+                      {{ "events", json::array({"calibration"}) }}));
+        Message sm;
+        std::vector<json> evs;
+        CHECK(RecvReply(c, seq, sm, &evs));
+        /* The subscribe reply is followed by the kind's
+           initial snapshot EVENT. */
+
+        /* Begin: the pending reply carries the opaque token;
+           the lane claim lands synchronously. */
+        const json key_j = json::object(
+            {{ "device",   "ASUSTek: Aura MB" },
+             { "serial",   ""                 },
+             { "location", "usb:1-4"          },
+             { "zone",     ""                 }});
+        const json b = WsCall(c, seq, json::object({
+            { "verb",       "calibration_begin" },
+            { "controller", key_j               },
+            { "zone",       "Header"            },
+        }), &evs);
+        CHECK(b.value("pending", false));
+        const std::string tok = b.value("token", "");
+        CHECK(!tok.empty());
+        CHECK(cal.Busy());
+        CHECK(suppressed);
+
+        /* Poll status until the worker activates. */
+        bool active = false;
+        for(int i = 0; i < 400 && !active; ++i)
+        {
+            const json s = WsCall(c, seq, json::object(
+                {{ "verb", "calibration_status" }}), &evs);
+            active = s.value("active", false);
+            if(active)
+            {
+                CHECK(s.value("led_count", 0) == 6);
+                CHECK(s.value("zone", "") == "Header");
+                CHECK(s.value("token", "") == tok);
+            }
+            else
+            {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(2));
+            }
+        }
+        CHECK(active);
+
+        /* Show: wrong session, wrong token, and out-of-range
+           all refuse — and write NOTHING to the hardware. */
+        WsCallErr(other, seq, json::object({
+            { "verb", "calibration_show" },
+            { "token", tok }, { "led", 0 },
+        }), ErrCode::Unavailable);
+        WsCallErr(c, seq, json::object({
+            { "verb", "calibration_show" },
+            { "token", "bogus" }, { "led", 0 },
+        }), ErrCode::Unavailable);
+        WsCallErr(c, seq, json::object({
+            { "verb", "calibration_show" },
+            { "token", tok }, { "led", 6 },
+        }), ErrCode::Unavailable, "out_of_range");
+        const size_t writes = submits.size();
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(30));
+        CHECK(submits.size() == writes);
+
+        /* A valid show returns the status body; last_shown
+           lands on the worker asynchronously. */
+        const json sh = WsCall(c, seq, json::object({
+            { "verb", "calibration_show" },
+            { "token", tok }, { "led", 2 },
+        }), &evs);
+        CHECK(sh.value("active", false));
+        bool shown = false;
+        for(int i = 0; i < 400 && !shown; ++i)
+        {
+            const json s = WsCall(c, seq, json::object(
+                {{ "verb", "calibration_status" }}), &evs);
+            shown = s.value("last_shown", -2) == 2;
+            if(!shown)
+            {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(2));
+            }
+        }
+        CHECK(shown);
+
+        /* A non-owner sees owner:true and NO token — the
+           lease material never leaves the owning session. */
+        const json st_o = WsCall(other, seq, json::object(
+            {{ "verb", "calibration_status" }}));
+        CHECK(st_o.value("owner", false));
+        CHECK(!st_o.contains("token"));
+
+        /* The second client cannot begin while the session
+           is held. */
+        WsCallErr(other, seq, json::object({
+            { "verb", "calibration_begin" },
+            { "controller", key_j }, { "zone", "Header" },
+        }), ErrCode::Unavailable, "busy");
+
+        /* A "calibration" status EVENT reached the subscribed
+           owner (begin/activate/show pushes). */
+        bool ev_seen = false;
+        for(const json& e : evs)
+        {
+            if(e.value("kind", "") == "calibration")
+            {
+                ev_seen = true;
+            }
+        }
+        CHECK(ev_seen);
+
+        /* End: claims release asynchronously; idempotent. */
+        const json en = WsCall(c, seq, json::object({
+            { "verb", "calibration_end" }, { "token", tok },
+        }), &evs);
+        CHECK(en.contains("active"));
+        for(int i = 0; i < 400 && cal.Busy(); ++i)
+        {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(2));
+        }
+        CHECK(!cal.Busy());
+        CHECK(!suppressed);
+
+        /* Disconnect mid-session ends the lease — the dead
+           client's session teardown reaches EndForSession. */
+        {
+            TestClient dead;
+            Welcome(dead, *rig.server);
+            const json b2 = WsCall(dead, seq, json::object({
+                { "verb",       "calibration_begin" },
+                { "controller", key_j               },
+                { "zone",       "Header"            },
+            }));
+            CHECK(b2.value("pending", false));
+            CHECK(cal.Busy());
+            dead.CloseInbound();
+            for(int i = 0; i < 1000 && cal.Busy(); ++i)
+            {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(2));
+            }
+            CHECK(!cal.Busy());
+            CHECK(!suppressed);
+        }
+    }
+
     std::printf("\n%d checks, %d failures\n", checks, failures);
     std::error_code ec;
     fs::remove_all(g_tmp, ec);

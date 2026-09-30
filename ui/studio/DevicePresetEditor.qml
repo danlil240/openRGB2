@@ -53,6 +53,107 @@ Popup {
     property string appliedName: ""
     property string fetchId: ""
 
+    /*---- Task 11 calibrator seams -----------------------------
+       The LedCalibrator overlay edits the CANDIDATE (a parsed
+       view of bodyField) in place; touch() pushes it back into
+       the JSON body — Save persists it like any other edit.
+       `stamp` bumps on every candidate replacement so the
+       calibrator's bindings re-derive; while its panel is open
+       the candidate is authoritative (typed JSON edits refresh
+       only when it is closed). */
+    property var  candidate: null
+    property int  stamp: 0
+    property int  selZoneIdx: -1
+    function refreshCandidate() {
+        try {
+            var c = JSON.parse(bodyField.text)
+            candidate = (c !== null && typeof c === "object"
+                         && !Array.isArray(c)) ? c : null
+        } catch (e) {
+            candidate = null
+        }
+        stamp++
+    }
+    /* The calibrator (or any seam caller) mutated `candidate` —
+       write it back as the draft body. */
+    function touch() {
+        if (candidate === null || typeof candidate !== "object")
+            return
+        bodyField.text = JSON.stringify(candidate, null, 4)
+        stamp++
+    }
+    /* Points count IS the zone's LED count once a points
+       layout lands — keep the declaration honest. */
+    function syncZoneLedCount(zi) {
+        var c = candidate
+        if (c && c.zones && c.zones[zi] && c.zones[zi].layout
+                && c.zones[zi].layout.type === "points")
+            c.zones[zi].led_count = c.zones[zi].layout.points.length
+    }
+    /* Materialize a generated zone layout into explicit
+       points + identity addresses so the wizard can re-map
+       individual LEDs. ring/strip/(static) matrix only — a
+       dynamic matrix resolves against bound hardware at
+       runtime and is refused honestly. Emitters are
+       entity-local: the face plane is X/Z at face_y_m. */
+    function convertZone(zi) {
+        var c = candidate
+        if (!c || !c.zones || !c.zones[zi])
+            return false
+        var z = c.zones[zi]
+        var l = z.layout || {}
+        var n = z.led_count || 0
+        var face = (l.face_y_m !== undefined) ? l.face_y_m : 0.0
+        var org = l.origin || [0, 0, 0]
+        var o = function(i) {
+            return (org && org[i] !== undefined) ? org[i] : 0 }
+        var pts = [], addr = [], i, a
+        if (l.type === "ring" && l.radius_m > 0 && n > 0) {
+            var a0 = (l.start_angle_deg || 0) * Math.PI / 180
+            var dir = l.reverse ? -1 : 1
+            for (i = 0; i < n; i++) {
+                a = a0 + dir * i * 2 * Math.PI / n
+                pts.push([o(0) + l.radius_m * Math.cos(a),
+                          face, o(2) + l.radius_m * Math.sin(a)])
+                addr.push(i)
+            }
+        } else if (l.type === "strip" && n > 0) {
+            var s = l.spacing_m || 0.01
+            for (i = 0; i < n; i++) {
+                pts.push([o(0) + i * s, face, o(2)])
+                addr.push(i)
+            }
+        } else if (l.type === "matrix" && l.dynamic !== true
+                   && l.rows > 0 && l.cols > 0 && l.map && n > 0) {
+            /* map[cell] = emitter index — place each emitter at
+               its cell (unknown cells stay at the origin). */
+            var px = l.pitch_x_m || 0.01
+            var pz = l.pitch_z_m || 0.01
+            var slots = []
+            for (i = 0; i < n; i++)
+                slots.push(null)
+            for (var cell = 0; cell < l.map.length; cell++) {
+                var em = l.map[cell]
+                if (em >= 0 && em < n) {
+                    var row = Math.floor(cell / l.cols)
+                    var col = cell % l.cols
+                    slots[em] = [o(0) + col * px, face,
+                                 o(2) + row * pz]
+                }
+            }
+            for (i = 0; i < n; i++) {
+                pts.push(slots[i] || [o(0), face, o(2)])
+                addr.push(i)
+            }
+        } else {
+            return false
+        }
+        z.layout = { type: "points", points: pts,
+                     addresses: addr }
+        touch()
+        return true
+    }
+
     function buildCandidate() {
         var body = {}
         try {
@@ -109,6 +210,7 @@ Popup {
             "{\n    \"entities\": [],\n    \"zones\": [],\n    \"binding_hints\": {}\n}"
         appliedBody = bodyField.text
         appliedName = ""
+        refreshCandidate()
         open()
     }
 
@@ -131,6 +233,16 @@ Popup {
         bodyField.text = JSON.stringify(body, null, 4)
         appliedBody = bodyField.text
         appliedName = nameField.text
+        /* The calibrator works on this parsed view — refresh at
+           load boundaries so `candidate` and the visible body
+           start identical. The JSON round-trip is NOT redundant:
+           `doc` arrives as QVariantMap-backed wrappers whose
+           nested objects return a fresh JS proxy on every access
+           (mutating zones[i].layout on one proxy is silently
+           lost) — the parse gives a plain JS object with stable
+           references so the calibrator's in-place edits land. */
+        candidate = JSON.parse(JSON.stringify(body))
+        stamp++
         status = packaged
             ? qsTr("Packaged default — saving writes a user override")
             : qsTr("%1 instance(s) use this type").arg(instances)
@@ -277,6 +389,13 @@ Popup {
                 font.pixelSize: Theme.fontSizeBody
                 color: Theme.textPrimary
                 wrapMode: TextEdit.NoWrap
+                /* Typed edits refresh the candidate ONLY while
+                   the calibrator is closed — open, the candidate
+                   is authoritative and touch() writes this text. */
+                onTextChanged: {
+                    if (!calibPanel.panelOpen)
+                        editor.refreshCandidate()
+                }
                 background: Rectangle {
                     color: Theme.bg; radius: Theme.radiusS
                     border.color: bodyField.activeFocus ? Theme.accent
@@ -377,6 +496,22 @@ Popup {
                 }
             }
             AppButton {
+                objectName: "presetCalibrateBtn"
+                text: qsTr("Calibrate…")
+                enabled: !editor.busy
+                /* Task 11: the LED-calibration wizard — lights
+                   one hardware LED at a time on a picked
+                   controller zone; Apply writes the zone's
+                   points+addresses into THIS draft body, never
+                   the library file. */
+                onClicked: {
+                    editor.refreshCandidate()
+                    calibPanel.openForZone(editor,
+                        editor.selZoneIdx >= 0 ? editor.selZoneIdx
+                                               : 0)
+                }
+            }
+            AppButton {
                 objectName: "presetSaveBtn"
                 text: editor.editing ? qsTr("Save") : qsTr("Create")
                 enabled: !editor.busy
@@ -403,5 +538,15 @@ Popup {
                 onClicked: editor.close()
             }
         }
+    }
+
+    /* Task 11 — the physical LED-calibration overlay. Closed
+       by default; "Calibrate…" opens it on the picked draft
+       zone. Its Apply mutates `candidate` only — the draft
+       body persists through Save like any other edit. */
+    property alias calibrator: calibPanel
+    LedCalibrator {
+        id: calibPanel
+        anchors.fill: parent
     }
 }

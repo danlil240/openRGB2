@@ -283,6 +283,19 @@ public:
     void   SetPowerGate(bool gated);
     bool   PowerGate() const;
 
+    /* Task 11 calibration hold — a physical calibration
+       session owns the WHOLE wireless group for its
+       duration: same park semantics as the power gate
+       (Requests validate+record+defer, Poll stays dark),
+       but an independent flag because the lifecycle's
+       ApplyGateAndCapture rewrites power_gate_ on every
+       event — a shared flag would let a display-off/on
+       edge silently lift the calibration hold. Released
+       by CalibrationSession's end path BEFORE the
+       RevalidateAndRestore that replays parked intent. */
+    void   SetOutputHold(bool held);
+    bool   OutputHold() const;
+
     /* Suspend/reconnect recovery (plan section 3.4: recovery
        revalidates identity before restoring playback):
        Phase 1 — RefreshStatus + re-resolve the owned group's
@@ -428,6 +441,7 @@ private:
     PlaybackControl    requested_control_= PlaybackControl::Playing;
     bool               transition_       = false;  /* serialized  */
     bool               power_gate_       = false;  /* suspending  */
+    bool               output_hold_      = false;  /* calibrating */
     /* Task 5.4 gate-window bookkeeping: a request validated
        while power_gate_ held is parked here (never written);
        Poll() replays it the first ungated tick. */

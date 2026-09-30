@@ -21,6 +21,7 @@
 
 #include "WorkspaceCommands.h"
 
+#include "CalibrationSession.h"        /* Task 11 engine session */
 #include "config/StudioConfig.h"       /* studio::ToJson(doc)  */
 #include "config/WorkspaceCandidate.h" /* ParseWorkspaceCandidate */
 #include "presets/PresetRegistry.h"
@@ -1004,6 +1005,17 @@ IpcReply WorkspaceCommands::Handle(uint64_t session_id,
     if(verb == "preview_update") return HandlePreviewUpdate(session_id, body);
     if(verb == "preview_end")    return HandlePreviewEnd(session_id);
 
+    /* Task 11 physical calibration — the engine-owned
+       session behind an opaque session-bound token. */
+    if(verb == "calibration_begin")
+        return HandleCalibrationBegin(session_id, body);
+    if(verb == "calibration_show")
+        return HandleCalibrationShow(session_id, body);
+    if(verb == "calibration_end")
+        return HandleCalibrationEnd(session_id, body);
+    if(verb == "calibration_status")
+        return HandleCalibrationStatus(session_id);
+
     return FailDetail(ErrCode::BadRequest,
                       "unknown workspace verb '" + verb + "'",
                       "bad_request");
@@ -1024,6 +1036,30 @@ void WorkspaceCommands::OnSessionEnd(uint64_t session_id)
     {
         std::lock_guard<std::mutex> lock(preview_mutex_);
         previews_.erase(session_id);
+    }
+    /* Task 11: a dead session's calibration lease dies with
+       it. The claim is released FIRST (a late show/end with
+       the old token then fails "bad_token"), THEN the
+       engine session ends — End() emits its own changed
+       hook and restores playback, and EmitTo on the dead
+       session id is a safe drop. End() runs OUTSIDE
+       cal_mutex_ because its changed hook re-enters this
+       object (EmitCalibrationStatus). */
+    CalibrationSession* cal_end = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(cal_mutex_);
+        if(cal_owned_ && cal_owner_ == session_id)
+        {
+            cal_end    = cal_deps_.session;
+            cal_owned_ = false;
+            cal_owner_ = 0;
+        }
+    }
+    if(cal_end)
+    {
+        /* The dead client supplies no token — the session
+           ends on the owner record alone. */
+        cal_end->EndForSession(session_id);
     }
 }
 
@@ -1574,6 +1610,343 @@ void WorkspaceCommands::PollPreviews(TimePoint now)
             ++chunk;
         }
     }
+}
+
+/*---------------------------------------------------------*\
+|| Task 11 — physical LED calibration                       ||
+||                                                           ||
+||   The calibration_* verbs are the session-bound lease   ||
+||   over the engine-owned CalibrationSession: begin       ||
+||   returns an opaque token tied to the calling session;  ||
+||   show/end validate token AND session, so a leaked or   ||
+||   dead-session token cannot steer someone else's        ||
+||   hardware. Hardware authority — pause, mode switch,    ||
+||   latest-only LED writes, restore — lives entirely in   ||
+||   src/engine/CalibrationSession.*; this layer only      ||
+||   validates, binds, and reports the honest status.      ||
+\*---------------------------------------------------------*/
+
+void WorkspaceCommands::SetCalibrationDeps(CalibrationDeps deps)
+{
+    std::lock_guard<std::mutex> lock(cal_mutex_);
+    cal_deps_ = std::move(deps);
+}
+
+namespace
+{
+
+/* Client-side DeviceKey codec — the same {device,serial,
+   location,zone} object shape the LAYOUT surface's identify
+   verb uses; wrong-typed fields become empty strings, never
+   a throw (session-thread rule). */
+DeviceKey CalKeyFromJson(const nlohmann::json& j)
+{
+    DeviceKey k;
+    if(j.is_object())
+    {
+        const auto field = [&j](const char* name) -> std::string
+        {
+            const auto it = j.find(name);
+            return (it != j.end() && it->is_string())
+                       ? it->get<std::string>()
+                       : std::string();
+        };
+        k.device   = field("device");
+        k.serial   = field("serial");
+        k.location = field("location");
+        k.zone     = field("zone");
+    }
+    return k;
+}
+
+nlohmann::json CalKeyToJson(const DeviceKey& k)
+{
+    return nlohmann::json::object({
+        { "device",   k.device   },
+        { "serial",   k.serial   },
+        { "location", k.location },
+        { "zone",     k.zone     },
+    });
+}
+
+} /* anonymous namespace */
+
+nlohmann::json WorkspaceCommands::CalibrationStatusJson(
+    uint64_t session_id)
+{
+    CalibrationSession* session = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(cal_mutex_);
+        session = cal_deps_.session;
+    }
+    CalibrationSession::Status s;
+    if(session)
+    {
+        s = session->GetStatus();
+    }
+    /* "held" is the engine's record, not our bookkeeping —
+       a dead session reports Idle no matter what we cached. */
+    const bool held = session && session->Busy();
+
+    std::lock_guard<std::mutex> lock(cal_mutex_);
+    /* Lazily release the emit-target record: the engine's
+       client_session clears on the final end push, and any
+       owner mismatch means our record is stale (begin never
+       double-books — the engine refuses a second session
+       while one is live). */
+    if(cal_owned_ &&
+       (!held || s.client_session != cal_owner_))
+    {
+        cal_owned_ = false;
+        cal_owner_ = 0;
+    }
+    const bool mine = held && s.client_session == session_id;
+    nlohmann::json out = nlohmann::json::object({
+        { "active",       mine && s.active   },
+        { "starting",     mine && s.starting },
+        { "ending",       mine && s.ending   },
+        /* A session SOMEONE ELSE holds — the busy
+           affordance; a non-owner never sees token,
+           controller, or per-LED progress. */
+        { "owner",        held && !mine              },
+        { "zone",         mine ? s.zone : ""         },
+        { "zone_index",   mine ? s.zone_index : -1   },
+        { "led_count",    mine ? s.led_count : 0     },
+        { "last_shown",   mine ? s.last_shown : -2   },
+        { "owns_group",   mine && s.owns_group       },
+        { "frames_written",
+          mine ? s.frames_written : (uint64_t)0      },
+    });
+    if(mine)
+    {
+        out["controller"]      = CalKeyToJson(s.controller);
+        out["controller_name"] = s.controller_name;
+        out["generation"]      = s.generation;
+        /* Owner-only lease material. */
+        out["token"]           = s.token;
+        if(!s.message.empty())
+        {
+            out["message"] = s.message;
+        }
+    }
+    return out;
+}
+
+void WorkspaceCommands::EmitCalibrationStatus()
+{
+    uint64_t  owner = 0;
+    CalibrationSession* session = nullptr;
+    std::function<void(uint64_t, const IpcEvent&,
+                       const std::string&)> emit;
+    {
+        std::lock_guard<std::mutex> lock(cal_mutex_);
+        session = cal_deps_.session;
+        emit    = cal_deps_.emit;
+        owner   = cal_owned_ ? cal_owner_ : 0;
+    }
+    if(!session || !emit || !owner)
+    {
+        return;
+    }
+    /* The status body refreshes the claim lazily — after
+       the engine's final end push clears client_session,
+       this still reaches the recorded owner ONCE (the body
+       reports inactive), then the released record makes the
+       next emit a no-op. */
+    emit(owner,
+         IpcEvent{ event_kind::kCalibration,
+                   CalibrationStatusJson(owner) },
+         "status");
+}
+
+IpcReply WorkspaceCommands::HandleCalibrationBegin(
+    uint64_t session_id, const nlohmann::json& body)
+{
+    CalibrationSession* session;
+    {
+        std::lock_guard<std::mutex> lock(cal_mutex_);
+        session = cal_deps_.session;
+    }
+    if(!session)
+    {
+        return FailDetail(ErrCode::Unavailable,
+            "the calibration engine is not wired on this server",
+            "unavailable");
+    }
+    /* {controller:<DeviceKey>, zone:"<zone name>"} — the
+       same controller-key object the identify verb takes;
+       zone is explicit (the wizard calibrates ONE zone). */
+    if(!body.contains("controller") ||
+       !body["controller"].is_object())
+    {
+        return FailDetail(ErrCode::BadRequest,
+            "calibration_begin requires "
+            "{controller:<DeviceKey>, zone:<string>}",
+            "bad_request");
+    }
+    const DeviceKey key = CalKeyFromJson(body["controller"]);
+    if(!body.contains("zone") || !body["zone"].is_string())
+    {
+        return FailDetail(ErrCode::BadRequest,
+                          "zone must be a string",
+                          "bad_request");
+    }
+
+    const CalibrationSession::BeginResult r =
+        session->Begin(session_id, key,
+                       body["zone"].get<std::string>());
+    if(!r.accepted)
+    {
+        /* Honest machine details per cause — "try again"
+           vs "fix the request" vs "hardware is gone". */
+        ErrCode             code   = ErrCode::Unavailable;
+        const char*         detail = "begin_failed";
+        const std::string&  e      = r.error;
+        if(e.find("already") != std::string::npos ||
+           e.find("in flight") != std::string::npos)
+        {
+            detail = "busy";
+        }
+        else if(e.find("no zone") != std::string::npos ||
+                e.find("explicit zone") != std::string::npos ||
+                e.find("no LEDs") != std::string::npos)
+        {
+            code   = ErrCode::BadRequest;
+            detail = "invalid_zone";
+        }
+        else if(e.find("not in the current topology") !=
+                    std::string::npos ||
+                e.find("not connected") != std::string::npos)
+        {
+            detail = "device_gone";
+        }
+        else if(e.find("paused") != std::string::npos)
+        {
+            detail = "output_paused";
+        }
+        else if(e.find("not wired") != std::string::npos)
+        {
+            detail = "unavailable";
+        }
+        return FailDetail(code, e, detail);
+    }
+    {
+        std::lock_guard<std::mutex> lock(cal_mutex_);
+        cal_owned_ = true;
+        cal_owner_ = session_id;
+    }
+    /* The reply carries the owner-side status — token
+       included, pending:true while activation drains on
+       the session's worker. */
+    nlohmann::json st = CalibrationStatusJson(session_id);
+    st["pending"] = r.pending;
+    return IpcReply::Success(MsgType::Ok, std::move(st));
+}
+
+IpcReply WorkspaceCommands::HandleCalibrationShow(
+    uint64_t session_id, const nlohmann::json& body)
+{
+    CalibrationSession* session;
+    {
+        std::lock_guard<std::mutex> lock(cal_mutex_);
+        session = cal_deps_.session;
+    }
+    if(!session)
+    {
+        return FailDetail(ErrCode::Unavailable,
+            "the calibration engine is not wired on this server",
+            "unavailable");
+    }
+    if(!body.contains("token") || !body["token"].is_string())
+    {
+        return FailDetail(ErrCode::BadRequest,
+            "calibration_show requires {token:<string>, "
+            "led:<int>}",
+            "bad_request");
+    }
+    if(!body.contains("led") || !body["led"].is_number_integer())
+    {
+        return FailDetail(ErrCode::BadRequest,
+                          "led must be an integer",
+                          "bad_request");
+    }
+    std::string err;
+    /* The ENGINE session validates owner + token — this
+       layer never weakens that check. */
+    if(!session->Show(session_id,
+                      body["token"].get<std::string>(),
+                      body["led"].get<int>(), err))
+    {
+        const char* detail = "show_failed";
+        if(err.find("still starting") != std::string::npos)
+        {
+            detail = "starting";
+        }
+        else if(err.find("no active") != std::string::npos)
+        {
+            detail = "no_session";
+        }
+        else if(err.find("different client") != std::string::npos)
+        {
+            detail = "bad_token";
+        }
+        else if(err.find("out of range") != std::string::npos)
+        {
+            detail = "out_of_range";
+        }
+        return FailDetail(ErrCode::Unavailable, err, detail);
+    }
+    return IpcReply::Success(MsgType::Ok,
+                             CalibrationStatusJson(session_id));
+}
+
+IpcReply WorkspaceCommands::HandleCalibrationEnd(
+    uint64_t session_id, const nlohmann::json& body)
+{
+    CalibrationSession* session;
+    {
+        std::lock_guard<std::mutex> lock(cal_mutex_);
+        session = cal_deps_.session;
+    }
+    if(!session)
+    {
+        return FailDetail(ErrCode::Unavailable,
+            "the calibration engine is not wired on this server",
+            "unavailable");
+    }
+    /* token is OPTIONAL here — the owning session may end
+       without quoting it (End validates the owner record);
+       a provided token must equal the issued one. */
+    std::string token;
+    if(body.contains("token"))
+    {
+        if(!body["token"].is_string())
+        {
+            return FailDetail(ErrCode::BadRequest,
+                              "token must be a string",
+                              "bad_request");
+        }
+        token = body["token"].get<std::string>();
+    }
+    std::string err;
+    if(!session->End(session_id, token, err))
+    {
+        return FailDetail(ErrCode::BadRequest, err,
+                          "bad_token");
+    }
+    /* End() is accepted, not drained — the worker restores
+       asynchronously; the reply reports the honest ending/
+       idle state and the final push lands on the owner via
+       the changed hook. */
+    return IpcReply::Success(MsgType::Ok,
+                             CalibrationStatusJson(session_id));
+}
+
+IpcReply WorkspaceCommands::HandleCalibrationStatus(
+    uint64_t session_id)
+{
+    return IpcReply::Success(MsgType::Ok,
+                             CalibrationStatusJson(session_id));
 }
 
 }} // namespace openrgb2::ipc

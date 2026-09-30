@@ -354,6 +354,27 @@ EngineService::EngineService(Engine& engine, Deps deps,
         pd.display_budget_leds =
             options_.preview.display_budget_leds;
         ws_commands_->SetPreviewDeps(std::move(pd));
+
+        /* studio-import Task 11: the physical calibration
+           session — the calibration_* verbs bind client
+           session + opaque token to the engine-owned
+           CalibrationSession. Its status pushes share the
+           session-targeted emitter the preview feed uses —
+           the owning client sees state flips; nobody else
+           sees the token. */
+        WorkspaceCommands::CalibrationDeps cd;
+        cd.session = deps_.calibration;
+        cd.emit =
+            [this](uint64_t sid, const IpcEvent& ev,
+                   const std::string& key)
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if(session_sink_)
+                {
+                    session_sink_(sid, ev, key);
+                }
+            };
+        ws_commands_->SetCalibrationDeps(std::move(cd));
     }
 }
 
@@ -869,6 +890,18 @@ void EngineService::EmitReactive()
     Emit(event_kind::kReactive, ReactiveJson());
 }
 
+void EngineService::EmitCalibrationStatus()
+{
+    /* Task 11: the calibration session's changed hook —
+       session-targeted status through the commands layer
+       (the owner gets the token-carrying body; the push
+       replaces queued copies on the "status" slot). */
+    if(ws_commands_)
+    {
+        ws_commands_->EmitCalibrationStatus();
+    }
+}
+
 nlohmann::json EngineService::OwnershipJson() const
 {
     /* Task 4.7: no provider wired -> honest null (the IPC
@@ -1039,6 +1072,20 @@ bool EngineService::SnapshotEventFor(uint64_t session_id,
                         { "type",   "status" },
                         { "active", false    },
                         { "paused", false    },
+                    });
+        return true;
+    }
+    if(kind == event_kind::kCalibration)
+    {
+        /* Task 11: session-bound — this session's own
+           calibration view; the token is only reported to
+           the session that owns the session. */
+        out = ws_commands_
+                  ? ws_commands_->CalibrationStatusJson(session_id)
+                  : nlohmann::json::object({
+                        { "active",   false },
+                        { "starting", false },
+                        { "ending",   false },
                     });
         return true;
     }
@@ -1694,11 +1741,19 @@ IpcReply EngineService::HandleIdentify(const nlohmann::json& body)
     /* An uploaded loop owns the wireless group — identification
        frames would only be suppressed at the lane, so the
        honest answer is Unavailable (Task 3.6: one producer
-       per group). */
+       per group). A physical calibration session owns the
+       controller's lane the same way (Task 11). */
     if(deps_.playback && deps_.playback->OwnsGroup(key))
     {
         return IpcReply::Fail(ErrCode::Unavailable,
             "an uploaded animation loop owns '" + snap->name +
+            "' — identification frames are suppressed while "
+            "it is active");
+    }
+    if(deps_.calibration && deps_.calibration->OwnsGroup(key))
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "a calibration session owns '" + snap->name +
             "' — identification frames are suppressed while "
             "it is active");
     }

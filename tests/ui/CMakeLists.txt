@@ -373,6 +373,35 @@ set_tests_properties(ui_workspace_import_test PROPERTIES
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${QT_BIN_DIR}")
 
+# studio-import Task 11: the physical LED-calibration
+# wizard — the real CalibrationController offline (one
+# status shape for replies/events, FeedStatusForTesting
+# session transitions, owner vs. non-owner views, honest
+# offline refusals) plus the adapted source
+# tst_calibrator.qml cases against the REAL
+# DevicePresetEditor + LedCalibrator headless with plain-JS
+# stubs (assign fast path, steal, verify, place, apply to
+# the candidate draft, out-of-range rejection, cancel-
+# while-starting, draft-zone follow, shapes, safe close).
+add_executable(ui_studio_calibration_test
+    ui_studio_calibration_test.cpp)
+target_link_libraries(ui_studio_calibration_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Test)
+target_include_directories(ui_studio_calibration_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(ui_studio_calibration_test PRIVATE NDEBUG)
+set_target_properties(ui_studio_calibration_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(ui_studio_calibration_test)
+add_test(NAME ui_studio_calibration_test COMMAND ui_studio_calibration_test)
+set_tests_properties(ui_studio_calibration_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
+
 # studio-import Task 10: file actions + external-change
 # recovery — the real EngineBridge + WorkspaceController over
 # the in-process pipe against the real IpcServer +

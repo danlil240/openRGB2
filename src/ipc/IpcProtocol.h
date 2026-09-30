@@ -64,6 +64,9 @@ constexpr const char* kWorkspace   = "workspace";     /* workspace job result �
 constexpr const char* kPreview     = "preview";       /* draft preview — TARGETED:
                                                          data = preview status or
                                                          one frame chunk (Task 7) */
+constexpr const char* kCalibration = "calibration";   /* physical calibration —
+                                                         TARGETED to the owning
+                                                         session (Task 11) */
 }
 
 /* The set SnapshotEvent/SUBSCRIBE validation knows. */

@@ -174,6 +174,15 @@ set_tests_properties(e2e_noninterference_test PROPERTIES
     LABELS engine
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Studio-import Task 11 — the engine-owned physical LED-
+# calibration session: begin/show/end sequencing, lane +
+# output-hold claims, latest-only LED writes, cancellation
+# during the pending start, topology/pause/timeout endings,
+# wired-vs-wireless ownership, and honest failures — all
+# against a real DeliveryPipeline + PlaybackController with
+# injected fakes.
+engine_suite(calibration_session_test)
+
 # Task 3.5 — IPC layer. ipc_server_test additionally needs the
 # named-pipe transport + ACL APIs.
 engine_suite(ipc_protocol_test)

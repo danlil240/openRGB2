@@ -35,6 +35,7 @@
 #include "WorkspaceCommands.h"
 #include "WorkspaceTransfer.h"
 
+#include "CalibrationSession.h"
 #include "DeliveryPipeline.h"
 #include "DeviceMapper.h"
 #include "Engine.h"
@@ -112,6 +113,13 @@ public:
            classified from the applied scene, and scene
            applies restore the persisted selection. */
         PlaybackController* playback = nullptr;
+
+        /* studio-import Task 11: the engine-owned physical
+           calibration session — the calibration_begin/show/
+           end/status WORKSPACE verbs bind client session +
+           opaque token to it. Nullptr -> those verbs answer
+           Unavailable honestly. */
+        CalibrationSession* calibration = nullptr;
 
         /* Playback capability source — fallback when no
            controller is wired (tests, bare engine): the
@@ -252,6 +260,11 @@ public:
        state — the ReactiveInputs manager's changed hook
        calls this (enable/disable, pause transitions). */
     void EmitReactive();
+
+    /* Task 11: emits the session-targeted "calibration"
+       event carrying the session's status — the
+       CalibrationSession::Deps::changed hook calls this. */
+    void EmitCalibrationStatus();
 
     /*---- IIpcService ---------------------------------------*/
     nlohmann::json OnWelcome() override;

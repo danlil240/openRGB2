@@ -23,6 +23,7 @@
 #include "studio/EffectEditorController.h"
 #include "studio/ObjectEditorController.h"
 #include "studio/DevicePresetController.h"
+#include "studio/CalibrationController.h"
 
 #include <QApplication>
 #include <QCryptographicHash>
@@ -256,6 +257,11 @@ int main(int argc, char** argv)
        private document or a direct file write). */
     openrgb2::ui::DevicePresetController preset_ctl(
         &bridge, &workspace_ctl, &object_ctl);
+    /* studio-import Task 11: the physical LED-calibration
+       wizard's engine bridge — WORKSPACE_COMMAND
+       calibration_* verbs behind an opaque session token;
+       the engine owns every hardware write. */
+    openrgb2::ui::CalibrationController calib_ctl(&bridge);
     /* studio-import Task 7: the bounded draft preview — the
        UNSAVED workspace draft evaluated engine-side and
        pushed back over the session-bound "preview" event
@@ -298,6 +304,8 @@ int main(int argc, char** argv)
                                              &effect_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("presetCtl"),
                                              &preset_ctl);
+    engine.rootContext()->setContextProperty(QStringLiteral("calibCtl"),
+                                             &calib_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("viewport"),
                                              &viewport_model);
     engine.rootContext()->setContextProperty(QStringLiteral("diagCtl"),
