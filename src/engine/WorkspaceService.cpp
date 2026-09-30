@@ -521,8 +521,9 @@ void WorkspaceService::Shutdown()
 
 WorkspaceService::Result WorkspaceService::Open(const std::string& id)
 {
-    std::lock_guard<std::mutex> g(mutex_);
     Result res;
+    {
+    std::lock_guard<std::mutex> g(mutex_);
     if(!WorkspaceStore::IsWorkspaceId(id))
     {
         res.error = "invalid workspace id '" + id + "'";
@@ -548,6 +549,10 @@ WorkspaceService::Result WorkspaceService::Open(const std::string& id)
     case WorkspaceStore::LoadStatus::Loaded:
         break;
     }
+    if(current_.id != id)
+    {
+        active_notify_ = true;   /* host persists the adopted id */
+    }
     current_.id                = id;
     current_.candidate         = lr.candidate;
     current_.workspace_revision = lr.workspace_revision;
@@ -564,6 +569,8 @@ WorkspaceService::Result WorkspaceService::Open(const std::string& id)
     res.generation         = lr.generation;
     res.workspace_revision = lr.workspace_revision;
     res.resource_revision  = lr.resource_revision;
+    }
+    FlushActiveNotify();
     return res;
 }
 
@@ -658,6 +665,11 @@ WorkspaceService::Result WorkspaceService::CommitCommon(
     res.workspace_revision = cr.workspace_revision;
     res.resource_revision  = cr.resource_revision;
 
+    if(current_.id != id)
+    {
+        active_notify_ = true;   /* adopting a different id —
+                                    the host persists it */
+    }
     current_.id                = id;
     current_.candidate         = cr.candidate;
     current_.workspace_revision = cr.workspace_revision;
@@ -859,6 +871,7 @@ WorkspaceService::Result WorkspaceService::RestoreBackup(
                 " (the marker backup's last-valid generation)");
         }
     }
+    FlushActiveNotify();
     ApplyAfterCommit(apply_cand, res.generation, res);
     return res;
 }
@@ -907,6 +920,7 @@ WorkspaceService::Result WorkspaceService::Save(
                            /*apply_after=*/true, &apply_cand,
                            /*prior_warnings=*/res.warnings);
     }
+    FlushActiveNotify();
     /* The apply runs after the lock is released — a scene
        publish emits events that re-enter this service. */
     ApplyAfterCommit(apply_cand, res.generation, res);
@@ -918,8 +932,9 @@ WorkspaceService::Result WorkspaceService::Import(
     const nlohmann::json& document,
     uint64_t expected_workspace_revision)
 {
-    std::lock_guard<std::mutex> g(mutex_);
     Result res;
+    {
+    std::lock_guard<std::mutex> g(mutex_);
     if(!WorkspaceStore::IsWorkspaceId(id))
     {
         res.error = "invalid workspace id '" + id + "'";
@@ -966,10 +981,13 @@ WorkspaceService::Result WorkspaceService::Import(
 
     /* Imports NEVER auto-apply — the committed generation waits
        for an explicit open/apply decision. */
-    return CommitCommon(id, cand, document.dump(2),
-                        expected_workspace_revision,
-                        /*apply_after=*/false, nullptr,
-                        /*prior_warnings=*/res.warnings);
+    res = CommitCommon(id, cand, document.dump(2),
+                       expected_workspace_revision,
+                       /*apply_after=*/false, nullptr,
+                       /*prior_warnings=*/res.warnings);
+    }
+    FlushActiveNotify();
+    return res;
 }
 
 WorkspaceService::Result WorkspaceService::ImportFile(
@@ -977,8 +995,9 @@ WorkspaceService::Result WorkspaceService::ImportFile(
     const std::string& path,
     uint64_t expected_workspace_revision)
 {
-    std::lock_guard<std::mutex> g(mutex_);
     Result res;
+    {
+    std::lock_guard<std::mutex> g(mutex_);
     if(!WorkspaceStore::IsWorkspaceId(id))
     {
         res.error = "invalid workspace id '" + id + "'";
@@ -1047,10 +1066,13 @@ WorkspaceService::Result WorkspaceService::ImportFile(
 
     /* The original imported bytes are retained verbatim in the
        generation — recovery never needs to re-derive them. */
-    return CommitCommon(id, cand, bytes,
-                        expected_workspace_revision,
-                        /*apply_after=*/false, nullptr,
-                        /*prior_warnings=*/res.warnings);
+    res = CommitCommon(id, cand, bytes,
+                       expected_workspace_revision,
+                       /*apply_after=*/false, nullptr,
+                       /*prior_warnings=*/res.warnings);
+    }
+    FlushActiveNotify();
+    return res;
 }
 
 std::shared_ptr<const WorkspaceCandidate>
@@ -1078,6 +1100,31 @@ void WorkspaceService::PublishLocked()
     }
     std::lock_guard<std::mutex> g(snap_mutex_);
     snap_ = std::move(s);
+}
+
+void WorkspaceService::FlushActiveNotify()
+{
+    /* Drains the adoption flag set under mutex_ by Open/
+       CommitCommon. The callback fires OFF the service locks —
+       it persists through the host and may legitimately read
+       back Snapshot()/ManagedActive(). Never fires with an
+       empty id: there is no close path, and a failed open
+       leaves the previous current untouched. */
+    std::string id;
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        if(!active_notify_)
+        {
+            return;
+        }
+        active_notify_ = false;
+        id             = current_.id;
+    }
+    if(!id.empty() && deps_.active_workspace_changed)
+    {
+        try { deps_.active_workspace_changed(id); }
+        catch(...) {}
+    }
 }
 
 WorkspaceService::PublishedState
@@ -1283,6 +1330,11 @@ WorkspaceService::JobResult WorkspaceService::Enqueue(
         job.st.session_id = session_id;
         job.st.verb       = verb;
         job.st.state      = JobState::Queued;
+        /* The target workspace rides on the record from
+           enqueue — verbs that may omit id (reload /
+           restore_backup / export) overwrite it with the
+           resolved id on the worker. */
+        job.st.workspace_id = id;
         job.body          = body;
         job.seq           = next_job_seq_++;
         const uint64_t jid = job.st.job_id;
@@ -1910,8 +1962,9 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
             std::lock_guard<std::mutex> g(mutex_);
             if(body.contains("id"))
             {
+                st.workspace_id = body.value("id", std::string());
                 const WorkspaceStore::LoadResult lr =
-                    store_.Load(body.value("id", std::string()));
+                    store_.Load(st.workspace_id);
                 if(lr.status == WorkspaceStore::LoadStatus::Loaded ||
                    lr.status == WorkspaceStore::LoadStatus::Recovered)
                 {
@@ -1921,6 +1974,7 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
             else
             {
                 cand = current_.candidate;
+                st.workspace_id = current_.id;
             }
         }
         if(!cand)
@@ -2038,6 +2092,8 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
             return fail("no managed workspace is active",
                         "bad_request");
         }
+        st.workspace_id = id;   /* the record names the resolved
+                                   target, not just the body's */
         /* Task 10: when the caller passes its last-seen
            revisions, a reload issued against state the engine
            already moved past refuses honestly rather than
@@ -2106,6 +2162,7 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
             return fail("no managed workspace is active",
                         "bad_request");
         }
+        st.workspace_id = id;
         uint64_t base_rev = 0, res_rev = 0;
         JsonU64(body, "base_revision",     base_rev);
         JsonU64(body, "resource_revision", res_rev);
@@ -2235,6 +2292,7 @@ WorkspaceService::Result WorkspaceService::CommitJson(
             }
         }
     }
+    FlushActiveNotify();
     /* The scene publish runs AFTER the commit lock releases —
        the emitted event's payload re-reads this service (the
        managed flag), so applying under the lock is a same-
@@ -2251,7 +2309,10 @@ WorkspaceService::Result WorkspaceService::ImportStagedJson(
     uint64_t expected_workspace_revision,
     uint64_t expected_resource_revision)
 {
-    std::lock_guard<std::mutex> g(mutex_);
+    /* unique_lock (not lock_guard): each CommitCommon tail
+       unlocks BEFORE FlushActiveNotify — the adopt callback
+       runs outside the commit boundary like apply_scene. */
+    std::unique_lock<std::mutex> g(mutex_);
     Result res;
     if(!WorkspaceStore::IsWorkspaceId(id))
     {
@@ -2630,10 +2691,13 @@ WorkspaceService::Result WorkspaceService::ImportStagedJson(
            wire form. */
         const std::string retained =
             studio::ToJson(cand.document).dump(2);
-        return CommitCommon(id, cand, retained,
-                            expected_workspace_revision,
-                            /*apply_after=*/false, nullptr,
-                            /*prior_warnings=*/res.warnings);
+        res = CommitCommon(id, cand, retained,
+                           expected_workspace_revision,
+                           /*apply_after=*/false, nullptr,
+                           /*prior_warnings=*/res.warnings);
+        g.unlock();
+        FlushActiveNotify();
+        return res;
     }
 
     /* Flat bundle form: {format, workspace:{...},
@@ -2791,10 +2855,13 @@ WorkspaceService::Result WorkspaceService::ImportStagedJson(
 
     /* Imports NEVER auto-apply — the committed generation waits
        for an explicit open/apply decision. */
-    return CommitCommon(id, cand, original_bytes,
-                        expected_workspace_revision,
-                        /*apply_after=*/false, nullptr,
-                        /*prior_warnings=*/res.warnings);
+    res = CommitCommon(id, cand, original_bytes,
+                       expected_workspace_revision,
+                       /*apply_after=*/false, nullptr,
+                       /*prior_warnings=*/res.warnings);
+    g.unlock();
+    FlushActiveNotify();
+    return res;
 }
 
 nlohmann::json WorkspaceService::InspectPackedBundle(
@@ -3076,6 +3143,13 @@ nlohmann::json JobStatusToJson(const WorkspaceService::JobStatus& st)
         { "resource_revision",  st.resource_revision      },
         { "result",             st.result                 },
     });
+    /* The target workspace — clients scope revision movement
+       to their managed id; a job on another workspace must
+       never bump this one's counters. */
+    if(!st.workspace_id.empty())
+    {
+        out["id"] = st.workspace_id;
+    }
     if(!st.error.empty())
     {
         out["error"] = st.error;

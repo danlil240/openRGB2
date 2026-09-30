@@ -646,11 +646,22 @@ Job status record (`job_status` reply and terminal `workspace` EVENT
 
 ```json
 { "found": true, "job_id": 1, "session_id": 1, "verb": "commit",
+  "id": "ws-id?",
   "state": "queued|running|succeeded|failed|cancelled",
   "committed": false, "applied": false, "recovered": false,
   "generation": 0, "workspace_revision": 0, "resource_revision": 0,
   "result": {}, "error": "?", "detail": "revision_conflict" }
 ```
+
+`id` is the workspace the job targeted — the request body's `id`, or
+the resolved current workspace for the verbs that may omit it
+(`reload`, `restore_backup`, `export`); it is absent when the job
+names none (`import_inspect` reports a staged bundle, not a
+workspace). Consumers MUST scope the record's revision fields to that
+workspace: a job another client ran on a different id carries THAT
+workspace's revisions and must never move this one's. Additive in v1 —
+an older engine omits the field and consumers keep the previous
+(unguarded) behavior.
 
 Jobs and transfers are session-bound: session teardown cancels queued
 jobs and staged transfers; a commit already past the durable marker

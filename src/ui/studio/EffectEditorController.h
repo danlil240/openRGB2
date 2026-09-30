@@ -231,6 +231,10 @@ public:
         { pending_save_req_ = 1; pending_save_job_ = 7;
           pending_save_id_ = QStringLiteral("test_look");
           saving_look_ = true; }
+    /* How many catalog refreshes the controller asked for —
+       the save-completion path's re-request is observable even
+       with a disconnected bridge. */
+    int CatalogRequestsForTesting() const { return catalog_requests_; }
 
 signals:
     void readyChanged();
@@ -310,6 +314,8 @@ private:
     QString      pending_save_name_;
     /* catalog kind=effects request correlator. */
     int          pending_catalog_  = 0;
+    /* Test-visible count of RequestEffectsCatalog calls. */
+    int          catalog_requests_ = 0;
     /* Byte-budgeted catalog pages arrive in more/next_offset
        steps — entries accumulate here until the walk ends. */
     QVariantList pending_catalog_entries_;

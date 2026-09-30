@@ -33,16 +33,19 @@
 //      rejoins and takes a preview (the dead session's slot was
 //      released), then two more clean attaches.
 //   E. engine restart — second EngineHost on the SAME workspace
-//      root: managed ids list back, nothing is adopted until the
-//      UI re-opens (reload), authored data (moved object, re-verified
-//      zones, personal-look preset) and the resolved scene survive,
-//      the managed resource library persisted, and frames resume.
+//      root: the persisted active workspace is re-adopted at start
+//      (managed:true, revisions intact, NO scene re-apply — the
+//      last-scene snapshot stays the applied truth), managed ids
+//      list back, an explicit reload re-opens the authored
+//      workspace, and frames resume.
 //   F. export / reimport round-trip — the portable bundle stages
 //      for download (sanitized: no verified, no identity), packs
 //      the referenced types, re-imports onto a fresh id, and the
 //      round-tripped workspace reloads + resolves.
 //   G. external-change honesty — a byte poked into the managed
 //      generation reports "modified" on the polled get.
+//   H. missing workspace — a persisted active workspace whose
+//      directory vanished logs the failure and boots unmanaged.
 //
 // No sockets beyond the loopback named pipes, no hardware; the SDK
 // side is the in-process fake backend. "UI" sessions are real
@@ -70,6 +73,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -1210,11 +1214,36 @@ int main()
     /*======================================================*\
     || Phase E: engine restart — durable workspace survives ||
     \*======================================================*/
+    /* Engine truth BEFORE the stop — the restart must re-adopt
+       exactly this workspace at these revisions (F06). */
+    json pre_get;
+    {
+        UiClient uip;
+        CHECK(uip.Connect(cmd_pipe));
+        CHECK(HasCaps(uip.Hello()));
+        pre_get = uip.Ws(json::object({{ "verb", "get" }}));
+    }
+    CHECK(pre_get.value("managed", false));
+    CHECK(pre_get.value("id", "") == "desk-bundle");
+
     const OrderlyShutdown::Result sd1 = h1.Stop();
     CHECK(sd1.all_within_bound);
     /* The single-instance guard releases with the EngineHost
        object — a "restarted" engine process is a new object. */
     h1.host.reset();
+
+    /* The adoption is durable profile state — a real
+       `active_workspace` field, not an extension blob. */
+    {
+        std::ifstream pf(opts.state_path);
+        const json state = json::parse(
+            std::string(std::istreambuf_iterator<char>(pf),
+                        std::istreambuf_iterator<char>()),
+            nullptr, false);
+        CHECK(!state.is_discarded());
+        CHECK(state.value("active_workspace",
+                          std::string()) == "desk-bundle");
+    }
 
     Host h2;
     if(!h2.Start(server, opts))
@@ -1233,11 +1262,21 @@ int main()
     CHECK(ui3.Connect(cmd_pipe));
     CHECK(HasCaps(ui3.Hello()));
 
-    /* Nothing is adopted across the restart — the UI re-opens
-       explicitly; the managed ids list back honestly. */
+    /* The restart RE-ADOPTED the last managed workspace — no
+       client had to re-open it; revisions survive verbatim.
+       Open() is adoption-only: it NEVER applies a scene, so
+       the persisted last-scene snapshot ("legacy desk") stays
+       the applied truth — the re-adopted workspace's own
+       scene ("bundled desk") must not appear. */
     {
         const json g0 = ui3.Ws(json::object({{ "verb", "get" }}));
-        CHECK(g0.value("managed", true) == false);
+        CHECK(g0.value("managed", false));
+        CHECK(g0.value("id", "") == "desk-bundle");
+        CHECK(g0.value("workspace_revision", 0ull) ==
+              pre_get.value("workspace_revision", 0ull));
+        CHECK(g0.value("resource_revision", 0ull) ==
+              pre_get.value("resource_revision", 0ull));
+        CHECK(ui3.GetScene().value("name", "") == "legacy desk");
         const json l = ui3.Ws(json::object({{ "verb", "list" }}));
         bool has_legacy = false, has_bundle = false;
         for(const json& w :
@@ -1474,6 +1513,60 @@ int main()
     CHECK(sd2.all_within_bound);
     CHECK(h2.host->GetSdk()->State() ==
           ConnectionState::Disconnected);
+    h2.host.reset();
+
+    /*======================================================*\
+    || Phase H: persisted workspace dir gone — graceful     ||
+    || unmanaged boot                                       ||
+    \*======================================================*/
+    {
+        /* Whatever id the last adopt persisted (desk-copy after
+           Phase F), delete its directory: the re-adopt must
+           fail honestly — logged, then the engine runs
+           unmanaged rather than refusing to start. */
+        std::ifstream pf(opts.state_path);
+        const json state = json::parse(
+            std::string(std::istreambuf_iterator<char>(pf),
+                        std::istreambuf_iterator<char>()),
+            nullptr, false);
+        const std::string persisted =
+            state.value("active_workspace", std::string());
+        CHECK(!persisted.empty());
+        std::error_code dec;
+        fs::remove_all(tmp / "workspaces" / persisted, dec);
+        CHECK(!dec);
+
+        Host h3;
+        CHECK(h3.Start(server, opts));
+        if(h3.host)
+        {
+            CHECK(h3.WaitFor([&]{
+                return h3.host->GetSdk() &&
+                       h3.host->GetSdk()->State() ==
+                           ConnectionState::Connected;
+            }, 15000));
+            UiClient ui4;
+            CHECK(ui4.Connect(cmd_pipe));
+            CHECK(HasCaps(ui4.Hello()));
+            const json g3 =
+                ui4.Ws(json::object({{ "verb", "get" }}));
+            CHECK(g3.value("managed", true) == false);
+            /* The engine is fully functional — surviving
+               workspaces still list + re-open on demand. */
+            const json l3 =
+                ui4.Ws(json::object({{ "verb", "list" }}));
+            bool survivors = false;
+            for(const json& w :
+                    l3.value("workspaces", json::array()))
+            {
+                survivors |= w.is_string() &&
+                             w.get<std::string>() != persisted;
+            }
+            CHECK(survivors);
+            h3.host->RequestStop();
+            CHECK(h3.host->Stop().all_within_bound);
+        }
+    }
 
     std::error_code rec;
     fs::remove_all(tmp, rec);

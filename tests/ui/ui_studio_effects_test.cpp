@@ -596,6 +596,58 @@ int main(int argc, char** argv)
         }
     }
 
+    std::printf("-- 'succeeded' terminal job resolves the look "
+                "save\n");
+    {
+        /* The engine's terminal state name is "succeeded" — a
+           record that spells it must unlatch savingLook,
+           report ok, and re-request the catalog (previously
+           only the legacy "completed" alias was accepted, so
+           the save hung forever — F07). */
+        Rig rig;
+        rig.LoadDoc(CompactDoc("aurora"));
+        QSignalSpy results(&rig.ctl,
+            &EffectEditorController::lookSaveResult);
+        rig.ctl.SetSavingForTesting();
+        CHECK(rig.ctl.savingLook());
+        const int reqs_before = rig.ctl.CatalogRequestsForTesting();
+        /* Emitting through the bridge signal exercises the real
+           dispatch — the same payload the wire delivers. */
+        emit rig.bridge.eventReceived(
+            QStringLiteral("workspace"),
+            QVariantMap({
+                { "job_id", 7 },          /* matches the latched job */
+                { "verb",   "resource_install" },
+                { "state",  "succeeded" },
+                { "committed", false },
+                { "result", QVariantMap{
+                      { "landed_id", "test_look" } } },
+            }));
+        CHECK(!rig.ctl.savingLook());
+        CHECK(results.count() == 1);
+        if(results.count() == 1)
+        {
+            const QVariantMap res =
+                results.first().first().toMap();
+            CHECK(res.value("ok").toBool() == true);
+            CHECK(res.value("id").toString() == "test_look");
+        }
+        /* The shelf re-requested the effects catalog. */
+        CHECK(rig.ctl.CatalogRequestsForTesting() ==
+              reqs_before + 1);
+        /* The landed look was adopted through the same one
+           undoable record the connected path uses: the stack
+           is a preset REFERENCE to the locally-registered
+           document (the effective aurora stack it serialized),
+           not inline layers. */
+        CHECK(rig.ctl.presetId() == QStringLiteral("test_look"));
+        CHECK(!rig.ctl.hasInlineLayers());
+        CHECK(rig.ctl.layerCount() ==
+              (int)rig.ctl.EffectiveLayersForTesting().size());
+        CHECK(rig.ctl.layerCount() > 0);
+        CHECK(rig.UndoCount() == 1);
+    }
+
     std::printf("-- addLayer refused keeps selection\n");
     {
         Rig rig;

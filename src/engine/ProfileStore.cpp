@@ -333,6 +333,10 @@ nlohmann::json EngineStateToJson(const EngineState& state)
         }));
     }
     j["reactive"] = std::move(reactive);
+
+    /* The last managed workspace id — the engine re-adopts it
+       at start (adoption only, never a scene re-apply). */
+    j["active_workspace"] = state.active_workspace;
     return j;
 }
 
@@ -753,6 +757,32 @@ bool EngineStateFromJson(const nlohmann::json& j,
         }
     }
 
+    /*---- active workspace ----------------------------------*\
+    || The id the engine re-adopts at start. A real field —   ||
+    || never an extension passthrough — so a write validates. ||
+    \*---------------------------------------------------------*/
+    const auto wit = j.find("active_workspace");
+    if(wit != j.end() && !wit->is_null())
+    {
+        if(wit->is_string())
+        {
+            candidate.active_workspace =
+                wit->get<std::string>();
+        }
+        else if(legacy)
+        {
+            /* Legacy documents read leniently — a wrong-typed
+               member just means "no workspace to re-open". */
+            warn.push_back("active_workspace: not a string — "
+                           "ignored");
+        }
+        else
+        {
+            AddErr(errs, "active_workspace", "expected string");
+            return false;
+        }
+    }
+
     /* Unknown top-level members are retained verbatim — a
        migrated document never silently drops fields that
        still apply. */
@@ -760,7 +790,8 @@ bool EngineStateFromJson(const nlohmann::json& j,
     {
         if(it.key() != "kind" && it.key() != "schema_version" &&
            it.key() != "scenes" && it.key() != "bindings" &&
-           it.key() != "reactive")
+           it.key() != "reactive" &&
+           it.key() != "active_workspace")
         {
             candidate.extensions[it.key()] = it.value();
         }
