@@ -565,6 +565,62 @@ IpcReply WorkspaceCommands::HandleCatalog(const nlohmann::json& body)
     }));
 }
 
+IpcReply WorkspaceCommands::HandleResourceGet(const nlohmann::json& body)
+{
+    /* studio-import Task 9 — one library resource's full
+       document for the type/look editors. The catalog row's
+       metadata page stays lean; the document rides this
+       single-item read (a device type is far under the reply
+       cap). */
+    const std::string kind = body.value("kind", std::string());
+    const std::string rid  = body.value("id",   std::string());
+    if(rid.empty() || !studio::IsPresetId(rid))
+    {
+        return FailDetail(ErrCode::BadRequest,
+            "resource_get requires {kind, id:<preset id>}",
+            "bad_request");
+    }
+    if(kind == "device_type")
+    {
+        const std::shared_ptr<const studio::PresetRegistry> reg =
+            CachedDevices();
+        const studio::DevicePreset* p = reg->Find(rid);
+        if(p == nullptr)
+        {
+            return FailDetail(ErrCode::Unavailable,
+                "no device type '" + rid + "'", "unavailable");
+        }
+        return IpcReply::Success(MsgType::Ok, nlohmann::json::object({
+            { "kind",             kind                      },
+            { "id",               rid                       },
+            { "from_file",        reg->HasFile(rid)         },
+            { "packaged_default", reg->HasDefault(rid)      },
+            { "document",         studio::ToJson(*p)        },
+        }));
+    }
+    if(kind == "effect")
+    {
+        const std::shared_ptr<const studio::EffectRegistry> reg =
+            CachedEffects();
+        const studio::EffectDocument* d = reg->Find(rid);
+        if(d == nullptr)
+        {
+            return FailDetail(ErrCode::Unavailable,
+                "no effect look '" + rid + "'", "unavailable");
+        }
+        return IpcReply::Success(MsgType::Ok, nlohmann::json::object({
+            { "kind",             kind                          },
+            { "id",               rid                           },
+            { "from_file",        reg->HasFile(rid)             },
+            { "packaged_default", reg->HasDefault(rid)          },
+            { "document",         studio::EffectDocumentToJson(*d) },
+        }));
+    }
+    return FailDetail(ErrCode::BadRequest,
+        "resource_get kind must be device_type|effect",
+        "bad_request");
+}
+
 /*---------------------------------------------------------*\
 ||| Job verbs                                                 ||
 \*---------------------------------------------------------*/
@@ -897,11 +953,13 @@ IpcReply WorkspaceCommands::Handle(uint64_t session_id,
     if(verb == "get")     return HandleGet(session_id, body);
     if(verb == "list")    return HandleList(body);
     if(verb == "catalog") return HandleCatalog(body);
+    if(verb == "resource_get") return HandleResourceGet(body);
 
     if(verb == "validate"       || verb == "commit"      ||
        verb == "save_copy"      || verb == "import_inspect" ||
        verb == "import_commit"  || verb == "export"      ||
        verb == "resource_install" ||
+       verb == "resource_remove"  ||
        verb == "reload")
     {
         return HandleJobVerb(session_id, verb, body);

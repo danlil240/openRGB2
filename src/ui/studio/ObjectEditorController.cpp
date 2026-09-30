@@ -1390,5 +1390,28 @@ std::vector<std::string> ObjectEditorController::LoadPresetDirectory(
     return errors;
 }
 
+void ObjectEditorController::RegisterPresetForSession(
+    const studio::DevicePreset& p)
+{
+    /* The engine landed this type — the draft resolves it
+       immediately instead of waiting on a catalog pull. */
+    types_.Add(p, nullptr);
+    preset_model_.Reload();
+    emit presetLibraryChanged();
+    RefreshAll();
+}
+
+void ObjectEditorController::UnregisterPresetForSession(
+    const std::string& id)
+{
+    if(!types_.RemoveFile(id))
+    {
+        return;      /* nothing on the file layer to drop */
+    }
+    preset_model_.Reload();
+    emit presetLibraryChanged();
+    RefreshAll();
+}
+
 } /* namespace ui */
 } /* namespace openrgb2 */

@@ -45,6 +45,15 @@ Rectangle {
             return bridgeOverride
         try { return objectCtl } catch (e) { return null }
     }
+    /* Task 9 authoring bridge — the device-type controller is a
+       separate context object; stubs can carry it as a
+       `presetCtl` field on the override. */
+    function presetBr() {
+        if (bridgeOverride !== null
+                && bridgeOverride.presetCtl !== undefined)
+            return bridgeOverride.presetCtl
+        try { return presetCtl } catch (e) { return null }
+    }
     function hasBr() { return br() !== null }
     /* Connections targets must be real QObjects — test stubs are
        plain JS values (no objectName property). */
@@ -55,13 +64,13 @@ Rectangle {
     /* Type authoring exists only when the controller exposes it —
        today that's Task 9; the buttons hide rather than dead-end. */
     function canAuthorTypes() {
-        var b = br()
+        var b = presetBr()
         return b !== null
             && typeof b.saveInstanceAsVariant === "function"
             && typeof b.createTypeFromSelection === "function"
     }
     function canDeleteTypes() {
-        var b = br()
+        var b = presetBr()
         return b !== null && typeof b.deletePresetType === "function"
     }
 
@@ -188,7 +197,7 @@ Rectangle {
     /* Returns "" on success, else the refusal — the caller
        (delete dialog) shows it inline. */
     function deleteType(tid) {
-        var b = br()
+        var b = presetBr()
         if (!b || typeof b.deletePresetType !== "function")
             return "type deletion isn't available yet"
         var r = b.deletePresetType(tid)
@@ -237,7 +246,7 @@ Rectangle {
        mode "variant" repoints `inst`; "assembly" builds a
        child-ref type from the CURRENT selection. */
     function submitNewType(mode, inst, tid, nm) {
-        var b = br()
+        var b = presetBr()
         if (!b)
             return
         if (mode === "variant") {

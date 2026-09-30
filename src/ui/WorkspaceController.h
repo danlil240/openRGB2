@@ -169,6 +169,28 @@ public:
        sanitize + no adopt). */
     Q_INVOKABLE void importDocument(const QString& name,
                                     const QByteArray& bytes);
+    /*---- Task 9 bundle import (inspect -> choose -> commit) ---*\
+    |  inspectImport stages `bytes` and runs import_inspect;    |
+    |  the report (validity, type conflicts + suggested import  |
+    |  ids, bundled assets, warnings) arrives in                 |
+    |  importInspectionReady. confirmImport commits the SAME    |
+    |  staged upload with the caller's {conflict_id: import_id} |
+    |  choices; cancelImport drops the pending inspect (the     |
+    |  staged upload expires engine-side). mode may be          |
+    |  "preset_import" — types only, no document commit.        |
+    \*----------------------------------------------------------*/
+    Q_INVOKABLE void inspectImport(const QString& name,
+                                   const QByteArray& bytes);
+    Q_INVOKABLE void confirmImport(const QVariantMap& choices,
+                                   const QString& mode = QString());
+    Q_INVOKABLE void cancelImport();
+    /* Bounded local file IO for the import/export dialogs —
+       reads cap at the 64 MiB bundle ceiling, writes refuse to
+       overwrite an existing file. QML returns {ok, base64,
+       error} / {ok, error} — never a silent truncation. */
+    Q_INVOKABLE QVariantMap readLocalFile(const QString& path);
+    Q_INVOKABLE QVariantMap writeLocalFile(const QString& path,
+                                           const QString& bytesBase64);
     /* Every named entry of the UI profile library, imported as
        its own managed workspace — originals are retained
        (nothing is deleted or renamed). */
@@ -257,6 +279,10 @@ signals:
                      const QString& bytesBase64);
     void importFinished(const QString& name, bool ok,
                         const QString& error);
+    /* Task 9 — the import_inspect report for the pending staged
+       upload: {valid, types[], conflicts[], assets[],
+       warnings[], errors[]}. */
+    void importInspectionReady(const QVariantMap& report);
     /* save() completed — `ok` distinguishes committed from
        refused so pages can surface honestly. */
     void saveFinished(bool ok);
@@ -331,6 +357,12 @@ private:
     /* job_id -> purpose for terminal workspace events not part
        of the save flow (import/export/reload). */
     std::map<uint64_t, QString> tracked_jobs_;
+
+    /* Task 9 bundle import — the staged upload token + target
+       name between import_inspect and confirmImport (the
+       staged token stays consumable for the same session). */
+    QString     pending_inspect_token_;
+    QString     pending_inspect_name_;
 
     /*---- transfer state machines (bounded: one each) ---------*/
     struct Download

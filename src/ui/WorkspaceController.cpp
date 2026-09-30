@@ -29,7 +29,9 @@
 #include "config/StudioConfig.h"
 
 #include <QCryptographicHash>
+#include <QFile>
 #include <QMetaObject>
+#include <QUrl>
 
 namespace openrgb2
 {
@@ -352,6 +354,18 @@ void WorkspaceController::OnEngineLost(const QString& reason)
         emit importFinished(imp.name, false, lost);
     }
     import_queue_.clear();
+    /* A pending bundle inspect dies with the session — the
+       dialog sees the honest failure, never a hang. */
+    if(!pending_inspect_token_.isEmpty() ||
+       !pending_inspect_name_.isEmpty())
+    {
+        pending_inspect_token_.clear();
+        pending_inspect_name_.clear();
+        emit importInspectionReady(QVariantMap({
+            { QStringLiteral("valid"),  false },
+            { QStringLiteral("errors"), QStringList{ lost } },
+        }));
+    }
 }
 
 void WorkspaceController::OnWorkspaceChanged()
@@ -905,6 +919,163 @@ void WorkspaceController::importDocument(const QString& name,
     PumpImportQueue();
 }
 
+void WorkspaceController::inspectImport(const QString& name,
+                                        const QByteArray& bytes)
+{
+    auto bad = [this](const QString& why)
+    {
+        emit importInspectionReady(QVariantMap({
+            { QStringLiteral("valid"),  false },
+            { QStringLiteral("errors"), QStringList{ why } },
+        }));
+    };
+    if(bytes.isEmpty())
+    {
+        bad(QStringLiteral("empty import document"));
+        return;
+    }
+    if(!available_)
+    {
+        bad(QStringLiteral("engine not connected"));
+        return;
+    }
+    pending_inspect_name_  = name;
+    pending_inspect_token_.clear();
+    if(!BeginUpload(QStringLiteral("inspect:") + name, bytes,
+                    QStringLiteral("import_inspect"),
+                    QVariantMap()))
+    {
+        bad(ul_.has_value()
+            ? QStringLiteral("another transfer is in flight")
+            : QStringLiteral("upload could not begin"));
+    }
+}
+
+void WorkspaceController::confirmImport(const QVariantMap& choices,
+                                        const QString& mode)
+{
+    if(pending_inspect_token_.isEmpty())
+    {
+        emit importFinished(pending_inspect_name_, false,
+            QStringLiteral("no staged import to confirm"));
+        return;
+    }
+    const QString name = pending_inspect_name_;
+    const QString id   = SlugFor(name);
+    /* The revisions gate on the TARGET workspace — a fresh id
+       expects 0/0; importing over the open workspace passes its
+       known revisions (a stale pair fails revision_conflict —
+       honest, never clobbered). */
+    const bool target_is_current = (id == ws_id_);
+    QVariantMap args({
+        { QStringLiteral("staged"), pending_inspect_token_ },
+        { QStringLiteral("id"),     id },
+        { QStringLiteral("name"),   name },
+        { QStringLiteral("base_revision"),
+          QVariant::fromValue<qulonglong>(
+              target_is_current ? ws_rev_ : 0) },
+        { QStringLiteral("resource_revision"),
+          QVariant::fromValue<qulonglong>(
+              target_is_current ? res_rev_ : 0) },
+    });
+    if(!choices.isEmpty())
+    {
+        args.insert(QStringLiteral("choices"), choices);
+    }
+    if(!mode.isEmpty())
+    {
+        args.insert(QStringLiteral("mode"), mode);
+    }
+    import_submit_names_.push_back(name);
+    if(SendCommand(QStringLiteral("import_commit"), args,
+                   QStringLiteral("job:import_commit")) <= 0)
+    {
+        import_submit_names_.pop_back();
+        emit importFinished(name, false,
+            QStringLiteral("commit could not be sent"));
+        return;
+    }
+    pending_inspect_token_.clear();
+}
+
+void WorkspaceController::cancelImport()
+{
+    pending_inspect_token_.clear();
+    pending_inspect_name_.clear();
+}
+
+QVariantMap WorkspaceController::readLocalFile(const QString& path)
+{
+    QVariantMap out;
+    if(path.isEmpty())
+    {
+        out["ok"]    = false;
+        out["error"] = QStringLiteral("no path given");
+        return out;
+    }
+    QFile f(QUrl(path).isValid() && path.startsWith(QLatin1String("file:"))
+                ? QUrl(path).toLocalFile() : path);
+    if(!f.open(QIODevice::ReadOnly))
+    {
+        out["ok"]    = false;
+        out["error"] = f.errorString();
+        return out;
+    }
+    /* The bundle ceiling — a bigger file can never be a
+       portable workspace anyway. */
+    constexpr qint64 kCap = 64ll * 1024 * 1024;
+    if(f.size() > kCap)
+    {
+        out["ok"]    = false;
+        out["error"] = QStringLiteral("file exceeds the 64 MiB "
+                                      "bundle bound");
+        return out;
+    }
+    const QByteArray bytes = f.readAll();
+    out["ok"]     = true;
+    out["base64"] = QString::fromLatin1(bytes.toBase64());
+    return out;
+}
+
+QVariantMap WorkspaceController::writeLocalFile(
+    const QString& path, const QString& bytesBase64)
+{
+    QVariantMap out;
+    if(path.isEmpty())
+    {
+        out["ok"]    = false;
+        out["error"] = QStringLiteral("no path given");
+        return out;
+    }
+    const QString local =
+        path.startsWith(QLatin1String("file:"))
+            ? QUrl(path).toLocalFile() : path;
+    if(QFile::exists(local))
+    {
+        out["ok"]    = false;
+        out["error"] = QStringLiteral(
+            "file exists — never overwriting");
+        return out;
+    }
+    QFile f(local);
+    if(!f.open(QIODevice::WriteOnly | QIODevice::NewOnly))
+    {
+        out["ok"]    = false;
+        out["error"] = f.errorString();
+        return out;
+    }
+    const QByteArray bytes =
+        QByteArray::fromBase64(bytesBase64.toLatin1());
+    if(f.write(bytes) != bytes.size())
+    {
+        out["ok"]    = false;
+        out["error"] = QStringLiteral("write failed");
+        return out;
+    }
+    out["ok"] = true;
+    return out;
+}
+
 int WorkspaceController::importProfiles(ProfileLibrary* library)
 {
     if(!library)
@@ -1132,6 +1303,7 @@ void WorkspaceController::OnJobReply(const QString& verb,
         pending_job_id_ = job;
     }
     else if(verb == QLatin1String("reload") ||
+            verb == QLatin1String("import_inspect") ||
             verb == QLatin1String("import_commit") ||
             verb == QLatin1String("export"))
     {
@@ -1249,6 +1421,18 @@ void WorkspaceController::ResolveJob(const QVariantMap& st)
             SetLoading(false);
             SetError(err, QStringLiteral("engine"));
         }
+        else if(verb == QLatin1String("import_inspect"))
+        {
+            /* The staged upload stays staged — the caller may
+               still fix choices or retry; only the report
+               carries the failure. */
+            QVariantMap report;
+            report[QStringLiteral("valid")]  = false;
+            report[QStringLiteral("errors")] = QStringList{
+                err.isEmpty() ? QStringLiteral(
+                    "inspection failed") : err };
+            emit importInspectionReady(report);
+        }
         else if(verb == QLatin1String("import_commit"))
         {
             const quint64 j = JU64(st, "job_id");
@@ -1307,6 +1491,13 @@ void WorkspaceController::ResolveJob(const QVariantMap& st)
     {
         force_adopt_ = true;
         FetchDocument();
+    }
+    else if(verb == QLatin1String("import_inspect"))
+    {
+        /* Task 9 — the report drives the import dialog's
+           conflict choices; nothing was committed. */
+        emit importInspectionReady(
+            st.value(QStringLiteral("result")).toMap());
     }
     else if(verb == QLatin1String("import_commit"))
     {
@@ -1565,6 +1756,16 @@ void WorkspaceController::OnUploadReply(const QString& stage,
                                 error_);
             PumpImportQueue();
         }
+        else if(purpose.startsWith(QLatin1String("inspect:")))
+        {
+            emit importInspectionReady(QVariantMap({
+                { QStringLiteral("valid"),  false },
+                { QStringLiteral("errors"),
+                  QStringList{ error_.isEmpty()
+                      ? QStringLiteral("upload failed")
+                      : error_ } },
+            }));
+        }
         return;
     }
     if(stage == QLatin1String("begin"))
@@ -1612,6 +1813,13 @@ void WorkspaceController::OnUploadReply(const QString& stage,
                 import_submit_names_.push_back(
                     u.args.value(QStringLiteral("name"))
                         .toString());
+            }
+            else if(u.verb == QLatin1String("import_inspect"))
+            {
+                /* The staged token stays consumable for the
+                   SAME session — confirmImport reuses it for
+                   the commit (never re-uploads). */
+                pending_inspect_token_ = token;
             }
             const int id = SendCommand(u.verb, args,
                 QStringLiteral("job:") + u.verb);

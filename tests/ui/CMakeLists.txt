@@ -313,6 +313,31 @@ set_tests_properties(ui_studio_effects_test PROPERTIES
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${QT_BIN_DIR};DLS_EFFECT_DIR=set:${CMAKE_SOURCE_DIR}/src/core/presets/effects")
 
+# studio-import Task 9: device-TYPE authoring + the portable
+# workspace dialogs — the real DevicePresetController offline
+# (candidate validation/private preview, offline job refusals,
+# variant/assembly guards, fed resource_get + job events), plus
+# DevicePresetEditor + WorkspaceImportDialog headless against
+# stub controllers. DLS_PRESET_DIR feeds the registry probe.
+add_executable(ui_studio_presets_test ui_studio_presets_test.cpp)
+target_link_libraries(ui_studio_presets_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    openrgb2_studio_core
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Test)
+target_include_directories(ui_studio_presets_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(ui_studio_presets_test PRIVATE NDEBUG)
+set_target_properties(ui_studio_presets_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(ui_studio_presets_test)
+add_test(NAME ui_studio_presets_test COMMAND ui_studio_presets_test)
+set_tests_properties(ui_studio_presets_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR};DLS_PRESET_DIR=set:${CMAKE_SOURCE_DIR}/src/core/presets/devices")
+
 # studio-import Task 8: the Quick3D Layout viewport — the real
 # WorkspaceController/ObjectEditorController offline drive the
 # adapted SelectionController/CameraController (gesture routing,

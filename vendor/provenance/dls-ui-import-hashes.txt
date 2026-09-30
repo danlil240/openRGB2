@@ -168,3 +168,13 @@ f67fb712b928ad0328d3bbc36d1a46a67f9532aeb410e9472b1ad5d8485ec3b8 | plugin/Deskto
 70235e1a15719a8ac7ce5c3226d2db2807f32a66b38884796ed169441f165e30 | plugin/metadata.json | — | reference only — plugin host/bridge/tab replaced by openrgb2-ui + engine IPC
 a7529403537ff5bda67671311eb363146116217918a1a29fd214e7fd86f056cd | verify-package.bat | — | reference only — build/deploy packaging machinery not carried over
 4ebf45d65744546c2d8f17d27909cce7078f0132077588924b7bc756f56a7e08 | verify-package.sh | — | reference only — build/deploy packaging machinery not carried over
+#
+# === Task 9 — device-type authoring + portable workspace bundles (2026-09-30) ===
+77689ec13f2419f76b07c7ad078b7fe0c5882a87dc7116d39a5c99aabeacf092 | plugin/SceneBridge.cpp | src/ui/studio/DevicePresetController.cpp | Task 9 — preset-authoring half (validate/preview/variant/assembly/delete) adapted onto engine resource jobs + WorkspaceEditSession
+6a48c31cfe04f34025b4d2f26d4027143a6bcff57c1c96a37e97b24b7d165d41 | plugin/SceneBridge.h | src/ui/studio/DevicePresetController.h | Task 9 — authoring controller contract (queued revision-gated verbs, no direct resource writes)
+ff4403203a6cddd39a3909425a1d121f212aa49ce99315bffddcf7d56eb8dd41 | ui/components/DevicePresetEditor.qml | ui/studio/DevicePresetEditor.qml | Task 9 — adapted: entity/layout/LED-section fields, JSON body pane, presetCtl seam, Theme tokens
+9ced9f3965f254ede6b553e7e7ddc632ec6952b18a3e7ae1d94fb92e3065bbb5 | ui/StudioWorkspace.qml | ui/studio/WorkspaceImportDialog.qml | Task 9 — file-action panel split; inspect → conflict → confirm flow over the packed-bundle IPC surface
+02fdcb0c7569f9bdca83bc439279236cb208a3b89664d600a24e0012a0e5514d | presets/PresetBundle.cpp | src/core/presets/PresetBundle.cpp | Task 9 — InspectBundle/ApplyImport/ExportBundle reused unchanged; look layers materialized inline at export (no look files in bundles)
+15851084b3f2ee4bee72528ed8d1658809534eaa6306dc1aa9522e6cb8da0e33 | presets/PresetBundle.h | src/core/presets/PresetBundle.h | Task 9 — unchanged by design; bundle scope stays device types + assets
+300e66a4ce2172138328c41ea6ff23bc3363b57d41eff6b0e8a8461b71243318 | ../tests/editor_qml/tst_preset_editor.qml | tests/ui/ui_studio_presets_test.cpp | Task 9 — preset-editor stub tests adapted to the C++ harness + offline controller seam
+060040adf5d52e29ae1c6b657aa9b711a88185b29ea82a11fac892c409e71bce | ../tests/editor_qml/tst_workspace.qml | tests/engine/workspace_bundle_test.cpp | Task 9 — workspace import/export behaviors ported to offline store/service/IPC coverage

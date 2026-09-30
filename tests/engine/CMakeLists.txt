@@ -35,6 +35,15 @@ engine_suite(profile_store_test)
 # recovery, resource snapshots, revision-checked service.
 engine_suite(workspace_store_test)
 
+# Studio-import Task 9 — the portable bundle: PresetBundle
+# export/inspect/apply on disk (transitive closure, sanitize,
+# conflict remaps + nested cascade, never-overwrite), the
+# store's single-resource install/remove gates, and the packed
+# wire form through a real WorkspaceService with lambdas for
+# the staged-transfer surface (inline look materialization,
+# hostile-path refusal, no auto-apply).
+engine_suite(workspace_bundle_test)
+
 # Task 3.9 — ownership: competing-owner classifier, managed-config
 # sole-writer check, single-instance guard, listener-PID lookup.
 engine_suite(ownership_scan_test)

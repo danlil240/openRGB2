@@ -22,6 +22,7 @@
 #include "WorkspaceController.h"
 #include "studio/EffectEditorController.h"
 #include "studio/ObjectEditorController.h"
+#include "studio/DevicePresetController.h"
 
 #include <QApplication>
 #include <QCryptographicHash>
@@ -248,6 +249,13 @@ int main(int argc, char** argv)
        or undo stack). */
     openrgb2::ui::EffectEditorController effect_ctl(
         &bridge, &workspace_ctl);
+    /* studio-import Task 9: device-TYPE authoring — variant/
+       assembly creation, the preset editor's
+       validate/preview/save/delete, all through the shared
+       draft + the engine's bounded resource jobs (never a
+       private document or a direct file write). */
+    openrgb2::ui::DevicePresetController preset_ctl(
+        &bridge, &workspace_ctl, &object_ctl);
     /* studio-import Task 7: the bounded draft preview — the
        UNSAVED workspace draft evaluated engine-side and
        pushed back over the session-bound "preview" event
@@ -288,6 +296,8 @@ int main(int argc, char** argv)
                                              &object_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("effectEdit"),
                                              &effect_ctl);
+    engine.rootContext()->setContextProperty(QStringLiteral("presetCtl"),
+                                             &preset_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("viewport"),
                                              &viewport_model);
     engine.rootContext()->setContextProperty(QStringLiteral("diagCtl"),

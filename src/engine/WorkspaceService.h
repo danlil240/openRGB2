@@ -308,15 +308,42 @@ private:
                       uint64_t expected_resource_revision,
                       bool apply_after,
                       bool adopt);
-    /* Parse + sanitize staged import bytes (a bundle document
-       or a bare compact document) then commit — never applies.
-       Bundled types/looks become extracted resources (the
-       store's collision-aware install owns rename/remap). */
+    /* Parse + sanitize staged import bytes then commit — never
+       applies. Three staged shapes are accepted:
+         - packed bundle  {format:"openrgb2-bundle-files",
+                           files:{rel:{encoding,data}}} — unpacked
+           into the workspace's staging dir, run through
+           studio::InspectBundle + ApplyImport INSIDE staging,
+           and only then committed (assets land under
+           <root>/assets via the candidate's extracted_assets);
+         - flat bundle    {format:"openrgb2-workspace-bundle",
+                           workspace:{...}, resources:{...}};
+         - bare document  a compact v3 workspace.
+       `choices` carries the conflict-resolution map ApplyImport
+       needs (conflict id -> import-as id); `mode` may request
+       "preset_import" (types-only bundle: installs the types
+       into the managed library WITHOUT touching the active
+       document). Bundled types/looks become extracted
+       resources (the store's collision-aware install owns
+       rename/remap). */
     Result ImportStagedJson(const std::string& id,
                             const nlohmann::json& bytes_json,
                             const std::string& original_bytes,
+                            const std::map<std::string,
+                                           std::string>& choices,
+                            const std::string& mode,
                             uint64_t expected_workspace_revision,
                             uint64_t expected_resource_revision);
+    /* Packed-bundle inspection (worker path) — unpacks the
+       staged files into a scratch dir inside the managed root
+       and runs studio::InspectBundle; report carries per-type
+       status, conflict ids + suggested import ids, bundled
+       assets, warnings, and the same bounded arrays the flat
+       path reports. Never writes outside the scratch dir. */
+    nlohmann::json InspectPackedBundle(
+        const nlohmann::json& bundle_doc,
+        std::vector<std::string>& errors,
+        std::vector<std::string>& warnings);
     /* Bounded candidate introspection (the worker's
        validate/import_inspect path — never commits). */
     static nlohmann::json InspectCandidateJson(

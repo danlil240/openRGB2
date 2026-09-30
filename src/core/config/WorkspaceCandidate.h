@@ -94,6 +94,15 @@ struct WorkspaceCandidate
        Empty for plain document parses. */
     std::vector<studio::EffectDocument> extracted_effects;
 
+    /* Bundled asset payloads harvested by a bundle import —
+       (bundle-relative path, staged absolute source path). The
+       store copies them into <root>/assets/<rel> during commit
+       with the same never-overwrite discipline the type library
+       keeps; paths are re-validated (IsPresetAssetPath) and the
+       staged source must sit inside the managed root. */
+    std::vector<std::pair<std::string, std::string>>
+        extracted_assets;
+
     /* Registry snapshots taken at parse time — the versioned
        resource set this workspace resolved against. Copied from
        the supplied registries plus extracted types; the caller's

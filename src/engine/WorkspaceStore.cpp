@@ -783,6 +783,103 @@ bool InstallEffectLooks(const fs::path& dir,
     return true;
 }
 
+/* Copy staged bundle assets into the shared <root>/assets/
+   pool — never overwriting an existing file: byte-equal is a
+   silent reuse hit, different content keeps the local file and
+   warns. rel paths are re-validated (bundle-relative only) and
+   every staged source must sit INSIDE the managed root — the
+   import flow stages there, so a caller-supplied absolute path
+   outside the root is refused rather than followed. */
+bool InstallAssets(const std::string& root,
+                   const std::string& wsid,
+    const std::vector<std::pair<std::string, std::string>>& assets,
+                   std::vector<std::string>& warnings,
+                   std::string& err)
+{
+    if(assets.empty())
+    {
+        return true;
+    }
+    std::error_code ec;
+    const fs::path dst_root =
+        (fs::path(root) / "assets").lexically_normal();
+    fs::create_directories(dst_root, ec);
+    if(ec)
+    {
+        err = "cannot create " + dst_root.string() + ": " +
+              ec.message();
+        return false;
+    }
+    std::set<std::string> seen;
+    for(const auto& kv : assets)
+    {
+        const std::string& rel = kv.first;
+        if(!seen.insert(rel).second)
+        {
+            continue;
+        }
+        if(!studio::IsPresetAssetPath(rel))
+        {
+            warnings.push_back("asset '" + rel +
+                               "' fails the portable-path rules — "
+                               "skipped");
+            continue;
+        }
+        const fs::path src = fs::path(kv.second).lexically_normal();
+        const fs::path dst =
+            (dst_root / fs::path(rel)).lexically_normal();
+        if(!InsideRoot(root, src))
+        {
+            err = "asset '" + rel + "' source '" + kv.second +
+                  "' is outside the managed root — refused";
+            return false;
+        }
+        if(!InsideRoot(dst_root.string(), dst) ||
+           dst.parent_path().empty())
+        {
+            err = "asset '" + rel +
+                  "' escapes the assets root — refused";
+            return false;
+        }
+        if(!fs::is_regular_file(src, ec))
+        {
+            err = "asset '" + rel + "' staged source '" +
+                  kv.second + "' is missing";
+            return false;
+        }
+        if(fs::exists(dst, ec))
+        {
+            /* Byte-compare: equal content is a reuse hit;
+               different content keeps the local file. */
+            std::string have, inc;
+            if(ReadFileBytes(dst, have) && ReadFileBytes(src, inc)
+               && have == inc)
+            {
+                continue;
+            }
+            warnings.push_back("asset '" + rel +
+                               "' exists locally — kept");
+            continue;
+        }
+        fs::create_directories(dst.parent_path(), ec);
+        if(ec)
+        {
+            err = "cannot create asset dir for '" + rel + "': " +
+                  ec.message();
+            return false;
+        }
+        fs::copy_file(src, dst, fs::copy_options::none, ec);
+        if(ec)
+        {
+            err = "asset '" + rel + "' copy failed: " +
+                  ec.message();
+            return false;
+        }
+    }
+    (void)wsid;
+    return true;
+}
+
 } /* anonymous namespace */
 
 /*---------------------------------------------------------*\
@@ -822,6 +919,11 @@ std::string WorkspaceStore::LibraryDevicesDir() const
 std::string WorkspaceStore::LibraryEffectsDir() const
 {
     return (fs::path(root_) / "library" / "effects").string();
+}
+
+std::string WorkspaceStore::LibraryAssetsDir() const
+{
+    return (fs::path(root_) / "assets").string();
 }
 
 studio::PresetRegistry WorkspaceStore::EffectiveDeviceRegistry() const
@@ -1320,7 +1422,9 @@ WorkspaceStore::CommitResult WorkspaceStore::Commit(
                                res.warnings, ierr) ||
            !InstallEffectLooks(LibraryEffectsDir(), deps_.effects,
                                work_doc, ex_fx,
-                               res.warnings, ierr))
+                               res.warnings, ierr) ||
+           !InstallAssets(root_, id, candidate.extracted_assets,
+                          res.warnings, ierr))
         {
             return fail("resource install failed: " + ierr);
         }
@@ -1808,6 +1912,473 @@ WorkspaceStore::ResourceInstallResult WorkspaceStore::InstallEffectResource(
 
     res.ok                 = true;
     res.landed_id          = landed;
+    res.workspace_revision = current.workspace_revision;
+    res.resource_revision  = next_res_rev;
+    return res;
+}
+
+/*---------------------------------------------------------*\
+|||| InstallDeviceTypeResource — studio-import Task 9.     ||
+|||| One validated device type into the managed library:   ||
+|||| same revision gate + collision discipline as the      ||
+|||| effect install, plus the editor's explicit `replace`  ||
+|||| (the file layer is the authored override — rewriting  ||
+|||| it IS the save). A packaged default is never touched;||
+|||| replace simply lands the file override.               ||
+\*---------------------------------------------------------*/
+
+namespace
+{
+
+/* Shared marker gate for the single-resource ops — the same
+   primary/backup/unreadable discipline InstallEffectResource
+   keeps. */
+bool LoadResourceGate(const WorkspaceStore& store,
+                      const std::string& id,
+                      uint64_t expected_workspace_revision,
+                      uint64_t expected_resource_revision,
+                      Marker& current,
+                      fs::path& wsdir,
+                      std::string& err)
+{
+    std::error_code ec;
+    wsdir = fs::path(store.WorkspaceDir(id));
+    if(fs::exists(wsdir, ec) && !InsideRoot(store.Root(), wsdir))
+    {
+        err = "workspace dir '" + wsdir.string() +
+              "' escapes the managed root — refused";
+        return false;
+    }
+    const Marker primary = ReadMarker(wsdir / "active");
+    const Marker backup  = ReadMarker(wsdir / "active.lkg");
+    if(primary.valid)
+    {
+        current = primary;
+    }
+    else if(primary.exists && backup.valid)
+    {
+        current = backup;
+    }
+    else if(primary.exists)
+    {
+        err = "active marker is unreadable (" + primary.error +
+              ") — recover the workspace before touching resources";
+        return false;
+    }
+    else if(backup.valid)
+    {
+        current = backup;
+    }
+    else
+    {
+        err = "workspace '" + id +
+              "' has no readable marker — nothing to act on";
+        return false;
+    }
+    if(expected_workspace_revision != current.workspace_revision)
+    {
+        err = "stale workspace revision: expected " +
+              std::to_string(expected_workspace_revision) +
+              " but '" + id + "' is at " +
+              std::to_string(current.workspace_revision);
+        return false;
+    }
+    if(expected_resource_revision != current.resource_revision)
+    {
+        err = "stale resource revision: expected " +
+              std::to_string(expected_resource_revision) +
+              " but '" + id + "' is at " +
+              std::to_string(current.resource_revision);
+        return false;
+    }
+    return true;
+}
+
+bool BumpResourceRevision(const fs::path& wsdir, const Marker& current,
+                          uint64_t& next_res_rev, std::string& err)
+{
+    next_res_rev = current.resource_revision + 1;
+    const nlohmann::json marker = nlohmann::json::object({
+        { "kind",               kMarkerKind    },
+        { "schema_version",     kRecordSchema  },
+        { "generation",         current.generation },
+        { "workspace_revision", current.workspace_revision },
+        { "resource_revision",  next_res_rev   },
+    });
+    return WriteAtomicFile(wsdir / "active.tmp",
+                           wsdir / "active",
+                           marker.dump(2), err);
+}
+
+/* Ids a REMOVE would strand: every workspace's ACTIVE document
+   parsed for `devices.*.type` (+ ui.favorites) or
+   `effects.preset`. Cheap bounded reads — one document.json per
+   managed id via the marker path. */
+bool ResourceInUse(const WorkspaceStore& store,
+                   const std::string& kind,
+                   const std::string& res_id,
+                   std::vector<std::string>& users)
+{
+    for(const std::string& wid : store.List())
+    {
+        std::string bytes, derr;
+        if(!store.ReadActiveDocumentBytes(wid, bytes, derr))
+        {
+            continue;    /* unreadable generation — no doc */
+        }
+        const nlohmann::json j =
+            nlohmann::json::parse(bytes, nullptr, false);
+        if(j.is_discarded())
+        {
+            continue;
+        }
+        bool hit = false;
+        if(kind == "device_type")
+        {
+            /* j.value() returns a temporary — bind it before
+               .items() or the iteration proxy dangles. */
+            const nlohmann::json devices =
+                j.value("devices", nlohmann::json::object());
+            for(const auto& kv : devices.items())
+            {
+                hit |= kv.value().value("type", std::string())
+                       == res_id;
+            }
+            if(!hit && j.contains("meta") &&
+               j["meta"].contains("ui") &&
+               j["meta"]["ui"].contains("favorites") &&
+               j["meta"]["ui"]["favorites"].is_array())
+            {
+                for(const nlohmann::json& f :
+                        j["meta"]["ui"]["favorites"])
+                {
+                    hit |= f.is_string() &&
+                           f.get<std::string>() == res_id;
+                }
+            }
+        }
+        else if(kind == "effect")
+        {
+            hit = j.contains("effects") &&
+                  j["effects"].value("preset", std::string())
+                      == res_id;
+        }
+        if(hit)
+        {
+            users.push_back(wid);
+        }
+    }
+    return !users.empty();
+}
+
+} /* anonymous namespace */
+
+WorkspaceStore::ResourceInstallResult
+WorkspaceStore::InstallDeviceTypeResource(
+    const std::string& id,
+    const studio::DevicePreset& preset,
+    bool allow_replace,
+    uint64_t expected_workspace_revision,
+    uint64_t expected_resource_revision)
+{
+    ResourceInstallResult res;
+    auto fail = [&](std::string e) -> ResourceInstallResult
+    {
+        res.error = std::move(e);
+        return res;
+    };
+    if(!IsWorkspaceId(id))
+    {
+        return fail("invalid workspace id '" + id + "'");
+    }
+    if(!studio::IsPresetId(preset.id))
+    {
+        return fail("type id '" + preset.id +
+                    "' is not a valid identifier");
+    }
+    /* Re-validate the serialized form — the file that lands
+       must re-parse to the same preset (bounded, canonical). */
+    const nlohmann::json pj = studio::ToJson(preset);
+    {
+        studio::DevicePreset check;
+        std::vector<std::string> verrs;
+        if(!studio::DevicePresetFromJson(pj, check, &verrs))
+        {
+            return fail("type '" + preset.id +
+                        "' failed validation: " +
+                        (verrs.empty() ? std::string("invalid")
+                                       : verrs.front()));
+        }
+    }
+    /* Dependency graph check against the EFFECTIVE registry
+       with the candidate layered on — missing/cyclic child refs
+       refuse before any write. */
+    {
+        studio::PresetRegistry tmp = EffectiveDeviceRegistry();
+        std::vector<std::string> derrs;
+        if(!tmp.Add(preset, &derrs))
+        {
+            return fail("type '" + preset.id +
+                        "' dependency check failed: " +
+                        (derrs.empty() ? std::string("invalid")
+                                       : derrs.front()));
+        }
+    }
+    const std::string bytes = pj.dump(2);
+    if(bytes.size() > 1024 * 1024)
+    {
+        return fail("type '" + preset.id +
+                    "' exceeds the 1 MiB resource bound");
+    }
+
+    fs::path wsdir;
+    Marker   current;
+    if(!LoadResourceGate(*this, id,
+                         expected_workspace_revision,
+                         expected_resource_revision,
+                         current, wsdir, res.error))
+    {
+        return res;
+    }
+
+    std::error_code ec;
+    const fs::path dir = fs::path(LibraryDevicesDir());
+    fs::create_directories(dir, ec);
+    if(ec)
+    {
+        return fail("cannot create " + dir.string() + ": " +
+                    ec.message());
+    }
+
+    const fs::path target = dir / (preset.id + ".device.json");
+    bool        have_file = fs::exists(target, ec);
+    bool        identical = false;
+    bool        have_default = deps_.devices.HasDefault(preset.id);
+    if(have_file)
+    {
+        studio::DevicePreset existing;
+        if(studio::DevicePresetFromJsonFile(target.string(),
+                                          existing, nullptr))
+        {
+            identical = studio::ToJson(existing) == pj;
+        }
+    }
+    else if(const studio::DevicePreset* p =
+                deps_.devices.Find(preset.id))
+    {
+        have_default = true;
+        identical    = studio::ToJson(*p) == pj;
+    }
+
+    bool wrote = false;
+    std::string landed = preset.id;
+    if((have_file || have_default) && identical)
+    {
+        res.reused = true;      /* nothing to write */
+    }
+    else if((have_file || have_default) && !allow_replace)
+    {
+        /* Collision-safe import semantics: differing content
+           never overwrites — a suffixed id lands instead. */
+        std::set<std::string> claimed;
+        landed = FreeTypeId(dir, deps_.devices, claimed,
+                            preset.id);
+        res.warnings.push_back(
+            "type '" + preset.id +
+            "' collides with existing content — installed as '" +
+            landed + "'");
+    }
+    if(!res.reused)
+    {
+        studio::DevicePreset to_write = preset;
+        to_write.id = landed;
+        const std::string wbytes =
+            studio::ToJson(to_write).dump(2);
+        const fs::path wtarget = dir / (landed + ".device.json");
+        const bool overwrite = allow_replace && have_file;
+        if(!overwrite && fs::exists(wtarget, ec))
+        {
+            /* Another writer landed the id mid-install —
+               still never overwritten. */
+            return fail("type file '" + landed +
+                        ".device.json' appeared during install");
+        }
+        if(!WriteAtomicFile(wtarget.string() + ".tmp", wtarget,
+                            wbytes, res.error))
+        {
+            return res;
+        }
+        /* Read-back verification — the landed file must parse
+           to the preset written. */
+        studio::DevicePreset landed_p;
+        std::vector<std::string> verrs;
+        if(!studio::DevicePresetFromJsonFile(wtarget.string(),
+                                           landed_p, &verrs) ||
+           studio::ToJson(landed_p) != studio::ToJson(to_write))
+        {
+            return fail("installed type '" + landed +
+                        "' failed read-back verification");
+        }
+        wrote = true;
+        if(overwrite)
+        {
+            res.replaced = true;
+        }
+    }
+
+    uint64_t next_res_rev = current.resource_revision;
+    if(wrote)
+    {
+        std::string werr;
+        if(!BumpResourceRevision(wsdir, current, next_res_rev,
+                                 werr))
+        {
+            return fail(werr);
+        }
+    }
+    res.ok                 = true;
+    res.landed_id          = landed;
+    res.workspace_revision = current.workspace_revision;
+    res.resource_revision  = next_res_rev;
+    return res;
+}
+
+/*---------------------------------------------------------*\
+|||| RemoveResource — file-layer delete with honest        ||
+|||| refusal (Task 9): packaged defaults have nothing on  ||
+|||| disk; in-use ids and child-ref'd ids are refused by   ||
+|||| name. A deleted override of a packaged default        ||
+|||| reverts to it.                                        ||
+\*---------------------------------------------------------*/
+
+WorkspaceStore::ResourceRemoveResult WorkspaceStore::RemoveResource(
+    const std::string& id,
+    const std::string& kind,
+    const std::string& resource_id,
+    uint64_t expected_workspace_revision,
+    uint64_t expected_resource_revision)
+{
+    ResourceRemoveResult res;
+    auto fail = [&](std::string e) -> ResourceRemoveResult
+    {
+        res.error = std::move(e);
+        return res;
+    };
+    if(!IsWorkspaceId(id))
+    {
+        return fail("invalid workspace id '" + id + "'");
+    }
+    const bool is_type = kind == "device_type";
+    const bool is_fx   = kind == "effect";
+    if(!is_type && !is_fx)
+    {
+        return fail("resource kind '" + kind +
+                    "' must be device_type|effect");
+    }
+    if(!studio::IsPresetId(resource_id))
+    {
+        return fail("resource id '" + resource_id +
+                    "' is not a valid identifier");
+    }
+    fs::path wsdir;
+    Marker   current;
+    if(!LoadResourceGate(*this, id,
+                         expected_workspace_revision,
+                         expected_resource_revision,
+                         current, wsdir, res.error))
+    {
+        return res;
+    }
+
+    /* File-layer existence first — the packaged default has
+       nothing on disk to remove. */
+    const fs::path dir = is_type
+        ? fs::path(LibraryDevicesDir())
+        : fs::path(LibraryEffectsDir());
+    const fs::path target = dir / (resource_id +
+        (is_type ? ".device.json" : ".effect.json"));
+    std::error_code ec;
+    if(!fs::exists(target, ec))
+    {
+        const bool packaged = is_type
+            ? deps_.devices.HasDefault(resource_id)
+            : deps_.effects.HasDefault(resource_id);
+        return fail("'" + resource_id + "'" +
+                    (packaged
+                        ? " is a packaged default — nothing to delete"
+                        : " has no file-layer entry"));
+    }
+
+    /* In-use across EVERY managed workspace's active document —
+       removing it would strand that workspace's next resolve. */
+    std::vector<std::string> users;
+    if(ResourceInUse(*this, kind, resource_id, users))
+    {
+        std::string e = "'" + resource_id + "' is in use by ";
+        for(size_t i = 0; i < users.size(); ++i)
+        {
+            e += (i ? ", " : "") + users[i];
+        }
+        return fail(e);
+    }
+
+    /* Referenced-as-child: another type's entity `type` ref
+       (file layer AND packaged defaults — a revert must not
+       strand a default either). */
+    if(is_type)
+    {
+        std::vector<std::string> dependents;
+        studio::PresetRegistry all = EffectiveDeviceRegistry();
+        for(const std::string& oid : all.Ids())
+        {
+            if(oid == resource_id)
+            {
+                continue;
+            }
+            const studio::DevicePreset* op = all.Find(oid);
+            if(op == nullptr)
+            {
+                continue;
+            }
+            for(const std::string& dep :
+                    studio::PresetDependencies(*op))
+            {
+                if(dep == resource_id)
+                {
+                    dependents.push_back(oid);
+                    break;
+                }
+            }
+        }
+        if(!dependents.empty())
+        {
+            std::string e = "'" + resource_id +
+                            "' is referenced by ";
+            for(size_t i = 0; i < dependents.size(); ++i)
+            {
+                e += (i ? ", " : "") + dependents[i];
+            }
+            return fail(e);
+        }
+    }
+
+    if(!fs::remove(target, ec) || ec)
+    {
+        return fail("cannot remove '" + target.string() + "'" +
+                    (ec ? ": " + ec.message() : ""));
+    }
+
+    uint64_t next_res_rev = current.resource_revision;
+    std::string werr;
+    if(!BumpResourceRevision(wsdir, current, next_res_rev, werr))
+    {
+        return fail(werr);
+    }
+    res.removed = true;
+    res.reverted_to_default = is_type
+        ? deps_.devices.HasDefault(resource_id)
+        : deps_.effects.HasDefault(resource_id);
+    res.ok                 = true;
     res.workspace_revision = current.workspace_revision;
     res.resource_revision  = next_res_rev;
     return res;

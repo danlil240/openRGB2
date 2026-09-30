@@ -10,6 +10,10 @@
 ||||   Layout:                                             ||
 ||||     <root>/library/devices/*.device.json   managed    ||
 ||||     <root>/library/effects/*.effect.json   libraries  ||
+||||     <root>/assets/<rel>                    shared       ||
+||||                               bundled asset payloads  ||
+||||                               (Task 9 — never         ||
+||||                               overwritten)            ||
 ||||     <root>/<id>/active        marker: which           ||
 ||||                               generation is live +    ||
 ||||                               the workspace/resource  ||
@@ -104,6 +108,10 @@ public:
     std::string WorkspaceDir(const std::string& id) const;
     std::string LibraryDevicesDir() const;
     std::string LibraryEffectsDir() const;
+    /* Shared bundled-asset pool (<root>/assets/<rel>) — the
+       same <workspace>/assets convention the bundle format
+       keeps, with the managed root as the workspace. */
+    std::string LibraryAssetsDir() const;
 
     /* Base registries overlaid with the managed library — the
        libraries new candidates parse against. Computed fresh so
@@ -190,6 +198,10 @@ public:
        - The candidate's extracted_types / extracted_effects are
          installed into the managed library first; renames remap
          the committed document's references.
+       - extracted_assets (rel -> staged source inside the managed
+         root) land under <root>/assets/ — never overwriting;
+         byte-equal is a reuse hit, different content keeps the
+         local file and warns.
        On failure the previous generation stays active and `error`
        says what happened. */
     CommitResult Commit(const std::string& id,
@@ -215,6 +227,8 @@ public:
     {
         bool        ok                 = false;
         bool        reused             = false; /* identical existed */
+        bool        replaced           = false; /* file overwritten
+                                                   (editor replace)  */
         std::string landed_id;                  /* final effect id   */
         uint64_t    workspace_revision = 0;
         uint64_t    resource_revision  = 0;
@@ -224,6 +238,66 @@ public:
     ResourceInstallResult InstallEffectResource(
         const std::string& id,
         const studio::EffectDocument& effect,
+        uint64_t expected_workspace_revision,
+        uint64_t expected_resource_revision);
+
+    /*---- Device types (studio-import Task 9) --------------*\
+    |  InstallDeviceTypeResource: one validated device type   |
+    |  into the managed library. Same collision discipline as |
+    |  the effect install — identical content reuses,         |
+    |  differing content lands suffixed — PLUS the editor's   |
+    |  explicit `replace` intent: when set, an existing FILE  |
+    |  layer entry for the id is rewritten atomically         |
+    |  (validate -> temp+rename -> read-back verify); a       |
+    |  packaged default is still never touched — replace      |
+    |  lands a file override. A "replace" of identical        |
+    |  content is a no-op reuse. Without `replace` differing  |
+    |  content lands under a suffixed id like an import.      |
+    |  `landed_id` reports the final id; `replaced` says an   |
+    |  existing file was rewritten.                           |
+    \*-------------------------------------------------------*/
+    ResourceInstallResult InstallDeviceTypeResource(
+        const std::string& id,
+        const studio::DevicePreset& preset,
+        bool allow_replace,
+        uint64_t expected_workspace_revision,
+        uint64_t expected_resource_revision);
+
+    /*---- Resource removal (studio-import Task 9) ----------*\
+    |  RemoveResource deletes ONE file-layer entry from the   |
+    |  managed library — never the packaged defaults.         |
+    |  Refusals are honest and named:                         |
+    |    - the resource does not exist as a file-layer entry  |
+    |      (a packaged default reports "packaged default —    |
+    |      nothing to delete");                               |
+    |    - `in_use`: the active generation's document of ANY  |
+    |      managed workspace references the id (device type   |
+    |      in devices.*.type / favorites, or look in          |
+    |      effects.preset);                                   |
+    |    - `referenced`: another managed type declares the    |
+    |      id as a child-entity ref.                          |
+    |  Deleting a file that shadows a packaged default        |
+    |  REVERTS to it — `reverted_to_default` reports the      |
+    |  shadow cleared. A successful remove bumps              |
+    |  resource_revision; workspace_revision and the active   |
+    |  generation are untouched (the generation's own         |
+    |  snapshot still resolves the pinned copy).              |
+    \*-------------------------------------------------------*/
+    struct ResourceRemoveResult
+    {
+        bool        ok                 = false;
+        bool        removed            = false;
+        bool        reverted_to_default = false;
+        uint64_t    workspace_revision = 0;
+        uint64_t    resource_revision  = 0;
+        std::string error;
+        std::vector<std::string> warnings;
+    };
+    /* kind: "device_type" | "effect". */
+    ResourceRemoveResult RemoveResource(
+        const std::string& id,
+        const std::string& kind,
+        const std::string& resource_id,
         uint64_t expected_workspace_revision,
         uint64_t expected_resource_revision);
 

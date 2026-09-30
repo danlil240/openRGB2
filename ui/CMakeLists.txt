@@ -83,8 +83,10 @@ qt_add_qml_module(openrgb2_ui
         pages/LightingPage.qml
         pages/SettingsPage.qml
         studio/DeviceLibrary.qml
+        studio/DevicePresetEditor.qml
         studio/DeviceTree.qml
         studio/TransformInspector.qml
+        studio/WorkspaceImportDialog.qml
         studio/EffectEditor.qml
         studio/EffectInspector.qml
         studio/LayerStack.qml
@@ -131,6 +133,8 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/studio/EffectLayerModel.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/studio/EffectEditorController.h
         ${CMAKE_SOURCE_DIR}/src/ui/studio/EffectEditorController.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/DevicePresetController.h
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/DevicePresetController.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/QaServer.h
         ${CMAKE_SOURCE_DIR}/src/ui/QaServer.cpp)
 

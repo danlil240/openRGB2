@@ -61,6 +61,12 @@ public:
     /* File-layer look first, then the packaged default. */
     const EffectDocument* Find(const std::string& id) const;
     bool Contains(const std::string& id) const { return Find(id) != nullptr; }
+    /* Layer membership — a remove op distinguishes a file
+       override from a packaged default (nothing on disk). */
+    bool HasFile(const std::string& id) const
+        { return effects.count(id) != 0; }
+    bool HasDefault(const std::string& id) const
+        { return defaults.count(id) != 0; }
 
     std::vector<std::string> Ids() const;      /* all resolvable ids */
     size_t FileCount() const { return effects.size(); }

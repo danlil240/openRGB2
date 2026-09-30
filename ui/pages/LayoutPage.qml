@@ -280,6 +280,18 @@ Item {
                     enabled: root.ctlUp && root.engineUp
                     onClicked: layoutCtl.reload()
                 }
+                AppButton {
+                    objectName: "wsBundleButton"
+                    /* Task 9: portable workspace bundle — inspect
+                       + conflict-resolve an import, or stage the
+                       export download. Enabled whenever a managed
+                       draft exists; the dialog reports engine
+                       refusals itself. */
+                    text: qsTr("Import / Export…")
+                    enabled: typeof workspace !== "undefined"
+                             && workspace.ready
+                    onClicked: bundleDlg.open()
+                }
                 Text {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignRight
@@ -1417,6 +1429,13 @@ Item {
                                canvas keeps canvasCenter(). */
                             sceneView: root.viewport3d
                                        ? root.viewport3d : root
+                            /* Task 9: the row edit button and the
+                               header ✚ dispatch onto the preset
+                               editor popup hosted below. */
+                            onEditRequested: function(typeId) {
+                                presetEditor.openFor(typeId)
+                            }
+                            onNewRequested: presetEditor.openNew()
                         }
                         TransformInspector {
                             id: transformInspector
@@ -1681,5 +1700,18 @@ Item {
                 }
             }
         }
+    }
+
+    /* Task 9 popups — the device-type editor (from the library's
+       edit / new seams) and the portable-workspace bundle dialog
+       (from the toolbar button). Both take their controller from
+       the context object; nothing here holds workspace state. */
+    DevicePresetEditor {
+        id: presetEditor
+        anchors.centerIn: parent
+    }
+    WorkspaceImportDialog {
+        id: bundleDlg
+        anchors.centerIn: parent
     }
 }

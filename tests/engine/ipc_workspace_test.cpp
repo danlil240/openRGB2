@@ -1310,13 +1310,24 @@ int main()
         CHECK(eof);
         const json bj = json::parse(bundle, nullptr, false);
         CHECK(bj.is_object());
-        CHECK(bj.value("format", "") ==
-              "openrgb2-workspace-bundle");
+        /* Task 9: export packs the bundle directory into the
+           wire `files` map so presets/assets travel with the
+           workspace — decode studio.json for the hygiene check. */
+        CHECK(bj.value("format", "") == "openrgb2-bundle-files");
+        CHECK(bj.value("files", json()).is_object());
+        const json sjf = bj["files"].value("studio.json", json());
+        CHECK(sjf.value("encoding", "") == "utf8");
+        const json sj = json::parse(sjf.value("data", ""),
+                                    nullptr, false);
+        CHECK(sj.is_object());
         /* export hygiene: the portable form strips verified
            ownership (SanitizeForExport) — the key is absent or
            false, never true */
-        CHECK(bj["workspace"]["device_settings"]["fan"]["zones"]
+        CHECK(sj["device_settings"]["fan"]["zones"]
               ["ring"].value("verified", false) == false);
+        /* the type the workspace uses travels in the bundle */
+        CHECK(bj["files"].contains(
+            "presets/devices/test-fan.device.json"));
 
         /* inspect the exported bundle via a fresh upload */
         Rig rig2(g_tmp / "imported");

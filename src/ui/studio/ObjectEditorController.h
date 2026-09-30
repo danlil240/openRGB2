@@ -228,6 +228,13 @@ public:
     std::vector<std::string> LoadPresetDirectory(
         const std::string& dir);
     const studio::PresetRegistry& Presets() const { return types_; }
+    /* Task 9 device-type authoring: register/remove a type the
+       engine library just gained/lost so the draft resolves it
+       before the next catalog pull (mirrors the effect editor's
+       session-look overlay). Both refresh the preset model and
+       re-resolve — a type change is never transforms-only. */
+    void RegisterPresetForSession(const studio::DevicePreset& p);
+    void UnregisterPresetForSession(const std::string& id);
     SceneObjectModel&     ModelForTesting() { return object_model_; }
 
 signals:

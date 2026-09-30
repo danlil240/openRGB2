@@ -151,6 +151,9 @@ private:
                        const nlohmann::json& body);
     IpcReply HandleList(const nlohmann::json& body);
     IpcReply HandleCatalog(const nlohmann::json& body);
+    /* Task 9 — one library resource's full document
+       (device_type|effect) for the type/look editors. */
+    IpcReply HandleResourceGet(const nlohmann::json& body);
     IpcReply HandleJobVerb(uint64_t session_id,
                            const std::string& verb,
                            const nlohmann::json& body);
