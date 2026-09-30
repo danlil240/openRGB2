@@ -195,19 +195,12 @@ Popup {
         RowLayout {
             Layout.fillWidth: true
             spacing: Theme.spaceS
-            TextField {
+            AppTextField {
                 id: pathField
                 objectName: "importPathField"
                 Layout.fillWidth: true
                 placeholderText: qsTr("path to .or2studio bundle")
-                color: Theme.textPrimary
-                font.pixelSize: Theme.fontSizeBody
                 enabled: dialog.phase === "idle" || dialog.phase === "report"
-                background: Rectangle {
-                    color: Theme.bg; radius: Theme.radiusS
-                    border.color: pathField.activeFocus ? Theme.accent
-                                                        : Theme.borderStrong
-                }
             }
             AppButton {
                 objectName: "inspectBtn"
@@ -318,22 +311,17 @@ Popup {
                                 text: "→"
                                 color: Theme.textDisabled
                             }
-                            TextField {
+                            AppTextField {
                                 objectName: "rename_" + modelData.id
                                 Layout.fillWidth: true
                                 text: modelData.suggested_id !== undefined
                                     ? modelData.suggested_id
                                     : modelData.id
-                                color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSizeSmall
                                 onTextChanged: {
                                     var m = dialog.renameMap
                                     m[modelData.id] = text.trim()
                                     dialog.renameMap = m
-                                }
-                                background: Rectangle {
-                                    color: Theme.bg; radius: Theme.radiusS
-                                    border.color: Theme.borderStrong
                                 }
                             }
                         }
@@ -344,7 +332,7 @@ Popup {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Theme.spaceS
-                CheckBox {
+                AppCheckBox {
                     id: overwriteBox
                     objectName: "overwriteBox"
                     /* Commits the imported document onto the
@@ -391,6 +379,32 @@ Popup {
                      || dialog.phase === "committing"
                      || dialog.phase === "exporting"
             running: visible
+            /* F10: the stock Basic indicator draws near-invisible
+               arcs on the dark surface — a themed dot ring. */
+            contentItem: Item {
+                implicitWidth: 28
+                implicitHeight: 28
+                Repeater {
+                    model: 8
+                    delegate: Rectangle {
+                        required property int index
+                        width: 5
+                        height: 5
+                        radius: 2.5
+                        color: Theme.accent
+                        opacity: 0.25 + (index / 8.0) * 0.75
+                        x: 14 + Math.cos(index * Math.PI / 4) * 10 - 2.5
+                        y: 14 + Math.sin(index * Math.PI / 4) * 10 - 2.5
+                    }
+                }
+                RotationAnimator on rotation {
+                    running: parent.visible
+                    loops: Animation.Infinite
+                    from: 0
+                    to: 360
+                    duration: 900
+                }
+            }
         }
 
         /*---- export ----*/
@@ -402,19 +416,12 @@ Popup {
         RowLayout {
             Layout.fillWidth: true
             spacing: Theme.spaceS
-            TextField {
+            AppTextField {
                 id: exportPathField
                 objectName: "exportPathField"
                 Layout.fillWidth: true
                 placeholderText: qsTr("destination path (.or2studio)")
-                color: Theme.textPrimary
-                font.pixelSize: Theme.fontSizeBody
                 enabled: dialog.phase === "idle"
-                background: Rectangle {
-                    color: Theme.bg; radius: Theme.radiusS
-                    border.color: exportPathField.activeFocus
-                                  ? Theme.accent : Theme.borderStrong
-                }
             }
             AppButton {
                 objectName: "exportBtn"

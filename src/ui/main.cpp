@@ -34,6 +34,7 @@
 #include <QLocalSocket>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPalette>
 #include <QProcess>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -126,6 +127,45 @@ int main(int argc, char** argv)
     const QIcon app_icon(QStringLiteral(":/OpenRGB2.ico"));
     QApplication::setWindowIcon(app_icon);
     QQuickStyle::setStyle(QStringLiteral("Basic"));
+    /* F10: any Basic control that still falls back to stock
+       palette roles (native file dialogs, the odd unstyled
+       control) must default to the dark theme rather than
+       light-chrome black-text-on-white. Values mirror
+       ui/theme/Theme.qml — keep them in step. */
+    {
+        QPalette dark;
+        const QColor bg(0x0C, 0x10, 0x17);
+        const QColor surface(0x14, 0x1B, 0x25);
+        const QColor surfaceAlt(0x1A, 0x23, 0x30);
+        const QColor border(0x3B, 0x4C, 0x61);
+        const QColor text(0xE9, 0xEE, 0xF4);
+        const QColor textDim(0x7B, 0x87, 0x94);
+        const QColor accent(0x7F, 0xCF, 0xFF);
+        dark.setColor(QPalette::Window, surface);
+        dark.setColor(QPalette::WindowText, text);
+        dark.setColor(QPalette::Base, surfaceAlt);
+        dark.setColor(QPalette::AlternateBase, bg);
+        dark.setColor(QPalette::ToolTipBase, surfaceAlt);
+        dark.setColor(QPalette::ToolTipText, text);
+        dark.setColor(QPalette::Text, text);
+        dark.setColor(QPalette::Button, surfaceAlt);
+        dark.setColor(QPalette::ButtonText, text);
+        dark.setColor(QPalette::BrightText, accent);
+        dark.setColor(QPalette::Link, accent);
+        dark.setColor(QPalette::Highlight, accent);
+        dark.setColor(QPalette::HighlightedText,
+                      QColor(0x06, 0x12, 0x1D));
+        dark.setColor(QPalette::PlaceholderText, textDim);
+        dark.setColor(QPalette::Mid, border);
+        dark.setColor(QPalette::Dark, bg);
+        dark.setColor(QPalette::Light, surfaceAlt);
+        dark.setColor(QPalette::Disabled, QPalette::WindowText,
+                      textDim);
+        dark.setColor(QPalette::Disabled, QPalette::Text, textDim);
+        dark.setColor(QPalette::Disabled, QPalette::ButtonText,
+                      textDim);
+        app.setPalette(dark);
+    }
 
     /* The packaged desktop entry is a single UI. A second click
        restores the existing window, including from the tray. QA and

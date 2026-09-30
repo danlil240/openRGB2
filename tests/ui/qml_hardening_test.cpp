@@ -26,6 +26,10 @@
 #include "LayoutController.h"
 #include "SceneEditController.h"
 #include "UiSettings.h"
+#include "WorkspaceController.h"
+#include "WorkspaceEditSession.h"
+
+#include "config/StudioConfig.h"
 
 #include "test_pipe.h"
 
@@ -654,6 +658,123 @@ int main(int argc, char** argv)
         win->setVisible(true);
         QCoreApplication::processEvents();
         CHECK(PumpBoth(s, [&] { return diag_ctl.active(); }));
+    }
+
+    /*---- F09/F02: the shared-draft canvas delegates ----------
+       A plain click on a 2D object must be select-only (never
+       reach moveObject with its unchanged position — the "edit
+       refused" regression), and Ctrl+Z while a canvas delegate
+       holds focus must rebuild the delegate list through the
+       event loop, not inside the key dispatch that still owns
+       it (the access-violation signature). */
+    std::printf("-- ws-mode canvas: click-no-drag + focused "
+                "ctrl+z\n");
+    {
+        WorkspaceController workspace_ctl(&bridge);
+        engine.rootContext()->setContextProperty(
+            QStringLiteral("workspace"), &workspace_ctl);
+        layout_ctl.setWorkspace(&workspace_ctl);
+        studio::StudioDocument doc;
+        std::vector<std::string> perr;
+        CHECK(studio::FromJson(nlohmann::json::object({
+            { "schema_version", 3 },
+            { "name",           "desk" },
+            { "devices", nlohmann::json::object({
+                { "fan0", nlohmann::json::object({
+                    { "type", "fan-slw" }, { "x", 0.1 },
+                    { "y", 0.0 }, { "z", 0.2 } }) },
+                { "fan1", nlohmann::json::object({
+                    { "type", "fan-slw" }, { "x", 0.3 },
+                    { "y", 0.0 }, { "z", 0.2 } }) },
+            }) },
+            { "device_settings", nlohmann::json::object() },
+        }), doc, &perr));
+        workspace_ctl.Session().LoadApplied(doc, 1, 1);
+        /* LoadApplied is the session-level entry — the draft
+           notification the controllers consume is the
+           controller's own signal. */
+        emit workspace_ctl.draftChanged();
+        QCoreApplication::processEvents();
+
+        QTest::keyClick(win, Qt::Key_3, Qt::ControlModifier);
+        /* Repeater delegates are item-tree children only — not
+           QObject children — so findChild cannot reach them in
+           Qt 6.8; poll the Repeater's count and fetch via
+           itemAt(). */
+        QObject* rep =
+            win_obj->findChild<QObject*>("canvasItems");
+        CHECK(rep != nullptr);
+        CHECK(PumpBoth(s, [&] {
+            return win_obj->property("currentView").toInt() == 2
+                   && rep != nullptr
+                   && rep->property("count").toInt() == 2;
+        }));
+        QQuickItem* obj = nullptr;
+        if(rep)
+        {
+            for(int i = 0;
+                i < rep->property("count").toInt() && !obj; ++i)
+            {
+                QQuickItem* cand = nullptr;
+                QMetaObject::invokeMethod(
+                    rep, "itemAt",
+                    Q_RETURN_ARG(QQuickItem*, cand),
+                    Q_ARG(int, i));
+                if(cand && cand->objectName()
+                               == QLatin1String("canvasObj_fan0"))
+                {
+                    obj = cand;
+                }
+            }
+        }
+        CHECK(obj != nullptr);
+
+        /* F09: press+release with no motion — select only.
+           lastError must stay empty and the draft untouched:
+           no "edit refused", no undo record. */
+        if(obj)
+        {
+            const QPoint c =
+                obj->mapToScene(
+                    obj->boundingRect().center()).toPoint();
+            QTest::mouseClick(win, Qt::LeftButton,
+                              Qt::NoModifier, c);
+            QCoreApplication::processEvents();
+            CHECK(layout_ctl.lastError().isEmpty());
+            CHECK(!workspace_ctl.Session().Dirty());
+            CHECK(workspace_ctl.Session().UndoCount() == 0);
+        }
+
+        /* F02: stage a real move (undo record), focus the
+           delegate, Ctrl+Z — the undo's draft refresh is
+           posted past the key dispatch; the delegate list
+           rebuilds without dangling the focused item. */
+        CHECK(layout_ctl.moveObject(QStringLiteral("fan0"),
+                                    0.25, 0.35));
+        CHECK(workspace_ctl.Session().Dirty());
+        if(obj)
+        {
+            obj->forceActiveFocus();
+            QTest::keyClick(win, Qt::Key_Z,
+                            Qt::ControlModifier);
+            /* The deliverable: the undo landed (position
+               reverted), no error, and after the deferred
+               refresh the canvas shows the same instance
+               again — the dispatch that owned the old
+               delegate already unwound. */
+            QCoreApplication::processEvents();
+            CHECK(layout_ctl.lastError().isEmpty());
+            const studio::StudioDocument& w =
+                workspace_ctl.Session().Working();
+            CHECK(w.devices.at("fan0").position.x == 0.1f);
+            CHECK(w.devices.at("fan0").position.z == 0.2f);
+            CHECK(PumpBoth(s, [&] {
+                return rep != nullptr
+                       && rep->property("count").toInt() == 2;
+            }));
+        }
+        layout_ctl.setWorkspace(nullptr);
+        QCoreApplication::processEvents();
     }
 
     /*---- Quit All: confirm -> QUIT -> ordered -> close --------*/

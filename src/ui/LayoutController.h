@@ -292,6 +292,12 @@ private:
        or cyclic parent degrades to "no parent" — the document
        validator rejects bad chains, display stays honest. */
     studio::Mat4  WsInstanceWorld(const std::string& iid) const;
+    /* itemsChanged + selectedChanged (+historyChanged when the
+       change touches the undo surface) posted through the event
+       loop — a synchronous emission inside a delegate's own
+       input handler tears the delegate down mid-dispatch (F02:
+       the reported access violation). */
+    void          QueueViewNotify(bool history);
     QString       WsBindingState(const studio::DeviceBinding& b,
                                  bool& connected) const;
     /* Emitters of the APPLIED resolved scene under instance

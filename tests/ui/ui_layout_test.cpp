@@ -23,6 +23,10 @@
 #include "EngineBridge.h"
 #include "LayoutController.h"
 #include "LayoutEditModel.h"
+#include "WorkspaceController.h"
+#include "WorkspaceEditSession.h"
+
+#include "config/StudioConfig.h"
 
 #include "test_pipe.h"
 
@@ -1254,6 +1258,72 @@ static void BridgeTests()
             return s.scene_saves == sc + 2 && !ctl.busy()
                    && ctl.items().size() == 9;
         }));
+    }
+
+    /*---- F09: ws-mode zero-delta move is a silent no-op -----*/
+    std::printf("-- ws-mode no-op move (F09)\n");
+    {
+        /* A plain canvas click released on the same spot used
+           to reach the editor as a same-position SetPositionWorld
+           — refused as "edit refused" and surfaced as an error.
+           The controller must treat a zero-delta request as a
+           silent success: no wire traffic, no error surface,
+           no undo record, no dirty flag. */
+        WorkspaceController ws(&bridge);
+        ctl.setWorkspace(&ws);
+        studio::StudioDocument doc;
+        std::vector<std::string> perr;
+        CHECK(studio::FromJson(nlohmann::json::object({
+            { "schema_version", 3 },
+            { "name",           "desk" },
+            { "devices", nlohmann::json::object({
+                { "fan0", nlohmann::json::object({
+                    { "type", "fan-slw" }, { "x", 0.1 },
+                    { "y", 0.0 }, { "z", 0.2 } }) },
+                { "fan1", nlohmann::json::object({
+                    { "type", "fan-slw" }, { "x", 0.3 },
+                    { "y", 0.0 }, { "z", 0.2 } }) },
+            }) },
+            { "device_settings", nlohmann::json::object() },
+        }), doc, &perr));
+        ws.Session().LoadApplied(doc, 1, 1);
+
+        const int lc = s.layout_commands;
+        const int sc = s.scene_saves;
+        ctl.select(QStringLiteral("fan0"));
+        /* The plain-click request — position unchanged. */
+        CHECK(ctl.moveObject(QStringLiteral("fan0"), 0.1, 0.2));
+        CHECK(ctl.lastError().isEmpty());
+        CHECK(s.layout_commands == lc);
+        CHECK(s.scene_saves == sc);
+        CHECK(!ws.Session().Dirty());
+        CHECK(!ctl.canUndo());
+        /* Same-position rotation is silent too. */
+        CHECK(ctl.rotateObject(QStringLiteral("fan0"), 0.0));
+        CHECK(ctl.lastError().isEmpty());
+        CHECK(!ws.Session().Dirty());
+        /* A real move still stages honestly — and repeating the
+           identical request is the no-op again (one undo
+           record only). */
+        CHECK(ctl.moveObject(QStringLiteral("fan0"), 0.4, 0.2));
+        CHECK(ws.Session().Dirty());
+        CHECK(ctl.moveObject(QStringLiteral("fan0"), 0.4, 0.2));
+        CHECK(ctl.lastError().isEmpty());
+        CHECK(ws.Session().UndoCount() == 1);
+        /* A locked instance keeps its honest refusal — a real
+           delta reports the lock (the no-op early-out sits
+           AFTER the lock check so "refused" stays truthful). */
+        CHECK(ws.Session().CommitDocEdit("lock fan0",
+            [](studio::StudioDocument& d) {
+                d.device_settings["fan0"].locked = true;
+                return true;
+            }));
+        CHECK(!ctl.moveObject(QStringLiteral("fan0"), 0.9, 0.9));
+        CHECK(ctl.lastError().contains(QStringLiteral("locked")));
+        CHECK(ctl.lastErrorSource() == QStringLiteral("input"));
+        CHECK(s.layout_commands == lc);
+        CHECK(s.scene_saves == sc);
+        ctl.setWorkspace(nullptr);
     }
 
     bridge.stop();

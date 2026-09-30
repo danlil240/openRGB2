@@ -106,10 +106,19 @@ ObjectEditorController::ObjectEditorController(EngineBridge* bridge,
                 ? &ws_->Session().Working().meta.ui.favorites
                 : nullptr);
 
+        /* QUEUED: these slots run RefreshAll() — a full
+           SceneObjectModel reset that destroys the inspector and
+           canvas delegates. draftEdited fires inside whatever
+           input dispatch caused the edit (shortcut, click
+           release, field commit); running the reset there is the
+           F02 use-after-free, so the slot runs once the stack
+           has unwound. */
         connect(ws_, &WorkspaceController::draftEdited,
-                this, &ObjectEditorController::OnWorkspaceDraftEdited);
+                this, &ObjectEditorController::OnWorkspaceDraftEdited,
+                Qt::QueuedConnection);
         connect(ws_, &WorkspaceController::draftChanged,
-                this, &ObjectEditorController::OnWorkspaceDraftChanged);
+                this, &ObjectEditorController::OnWorkspaceDraftChanged,
+                Qt::QueuedConnection);
         connect(ws_, &WorkspaceController::historyChanged,
                 this, [this] { emit undoChanged(); });
         connect(ws_, &WorkspaceController::availabilityChanged,
@@ -450,6 +459,42 @@ void ObjectEditorController::RefreshAll()
     emit sceneChanged();
 }
 
+void ObjectEditorController::ScheduleModelRefresh()
+{
+    /* RefreshAll()'s SceneObjectModel reset destroys the tree /
+       canvas delegates — running it synchronously inside the
+       input dispatch that caused the edit (shortcut, button
+       click, field commit) is the F02 use-after-free. Post the
+       rebuild + selection re-sync; the flag dedups bursts. */
+    if(refresh_pending_)
+    {
+        return;
+    }
+    refresh_pending_ = true;
+    QMetaObject::invokeMethod(this, [this] {
+        refresh_pending_ = false;
+        RefreshAll();
+        emit selectionChanged();
+    }, Qt::QueuedConnection);
+}
+
+void ObjectEditorController::ScheduleModelReset()
+{
+    /* Same contract, narrower scope — a structural CommitEdit's
+       row rebuild + viewport reload, deferred out of the
+       originating input dispatch. */
+    if(reset_pending_)
+    {
+        return;
+    }
+    reset_pending_ = true;
+    QMetaObject::invokeMethod(this, [this] {
+        reset_pending_ = false;
+        object_model_.ResetFrom();
+        emit sceneChanged();
+    }, Qt::QueuedConnection);
+}
+
 void ObjectEditorController::PreviewAdopt(
     const std::set<std::string>& ids)
 {
@@ -491,13 +536,16 @@ void ObjectEditorController::CommitEdit(studio::EditorEdit e)
     RebuildResolved();
     if(structural)
     {
-        object_model_.ResetFrom();
+        /* A full reset destroys tree/canvas delegates — post it
+           (with the viewport reload) so a commit raised inside a
+           delegate's own input handler unwinds first (F02). */
+        ScheduleModelReset();
     }
     else
     {
         object_model_.UpdateTransforms(touched);
+        emit sceneChanged();
     }
-    emit sceneChanged();
     emit undoChanged();
 }
 
@@ -1271,8 +1319,7 @@ void ObjectEditorController::undo()
     if(s->Undo())
     {
         ws_->NoteDraftEdited();
-        RefreshAll();
-        emit selectionChanged();
+        ScheduleModelRefresh();
         emit undoChanged();
     }
 }
@@ -1287,8 +1334,7 @@ void ObjectEditorController::redo()
     if(s->Redo())
     {
         ws_->NoteDraftEdited();
-        RefreshAll();
-        emit selectionChanged();
+        ScheduleModelRefresh();
         emit undoChanged();
     }
 }
