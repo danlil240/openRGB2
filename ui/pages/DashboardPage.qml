@@ -178,8 +178,10 @@ Item {
                     }
                 }
 
-                /* Wireless performance — honest unknown until the
-                   delivery counters actually move. */
+                /* Wireless performance — the wireless lane's OWN
+                   counters (frame_status.wireless), never the
+                   pipeline-wide aggregate which mixes in every
+                   wired controller (QA F11). */
                 Card {
                     title: qsTr("WIRELESS PERFORMANCE")
                     Layout.fillWidth: true
@@ -191,11 +193,20 @@ Item {
                             text: {
                                 if(!root.engineUp)
                                     return qsTr("—");
-                                const ag = bridge.frameStatus.aggregate;
-                                if(ag && ag.mean_interval_s
-                                   && ag.mean_interval_s > 0)
+                                const wl = bridge.frameStatus.wireless;
+                                if(!wl)
+                                    return qsTr("not measured");
+                                /* An uploaded loop (or a
+                                   calibration session) owns the
+                                   group — the lane is suppressed
+                                   by design, not unmeasured. */
+                                if(wl.owned || wl.suppressed)
+                                    return qsTr("owned by playback");
+                                const st = wl.stats;
+                                if(st && st.interval_count > 0
+                                       && st.mean_interval_s > 0)
                                     return qsTr("%1 updates/s")
-                                        .arg((1 / ag.mean_interval_s)
+                                        .arg((1 / st.mean_interval_s)
                                              .toFixed(1));
                                 return qsTr("not measured");
                             }
@@ -207,11 +218,17 @@ Item {
                             text: {
                                 if(!root.engineUp)
                                     return qsTr("engine offline");
-                                const ag = bridge.frameStatus.aggregate;
-                                if(ag && ag.provenance)
+                                const wl = bridge.frameStatus.wireless;
+                                if(!wl)
+                                    return qsTr("no wireless lane enumerated");
+                                if(wl.owned || wl.suppressed)
+                                    return qsTr("uploaded loop owns the group — live delivery suppressed");
+                                const st = wl.stats;
+                                if(st && st.interval_count > 0
+                                       && st.provenance)
                                     return qsTr("transport-accepted · %1")
-                                        .arg(ag.provenance);
-                                return qsTr("no delivery counters yet");
+                                        .arg(st.provenance);
+                                return qsTr("no wireless deliveries yet");
                             }
                             color: Theme.textSecondary
                             font.pixelSize: Theme.fontSizeSmall
@@ -249,6 +266,15 @@ Item {
                             }
                             FrameStrip {
                                 colors: modelData.colors || []
+                            }
+                            /* QA F04: the lane exists but the
+                               transport never accepted a frame —
+                               visible, not an absent row. */
+                            Text {
+                                visible: modelData.delivered === false
+                                text: qsTr("no frames delivered")
+                                color: Theme.textDisabled
+                                font.pixelSize: Theme.fontSizeSmall
                             }
                         }
                     }
