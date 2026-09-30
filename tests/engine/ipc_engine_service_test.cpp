@@ -1644,6 +1644,286 @@ int main()
         }
     }
 
+    /*---- QA F11 + F04: wireless lane + never-delivered rows --
+           frame_status/delivery_stats carry the wireless lane's
+           OWN counters (the pipeline-wide aggregate mixes wired
+           lanes and must never be read as a wireless rate) and
+           list lanes that never delivered — "bound but never
+           delivered" is a visible row, not an absent one. */
+    {
+        Engine           engine9;
+        DeliveryPipeline pipe9;
+        DeviceMapper     mapper9;
+
+        DeviceSnapshot wsnap;
+        wsnap.key = DeviceKey{ "Lian Li: SL Wireless",
+                               "FAKEWIRELESS",
+                               "Wireless: FA:KE:WI:RE:LE:SS", "" };
+        wsnap.topology_generation = 1;
+        wsnap.zones = { ZoneSnapshot{ "Fan 1", 40 } };
+        wsnap.connection = ConnectionState::Connected;
+        DeviceSnapshot wsnap_wired;
+        wsnap_wired.key = DeviceKey{ "Corsair: Vengeance RGB",
+                                     "DIMM-9", "smbus:0-DIMM-9", "" };
+        wsnap_wired.topology_generation = 1;
+        wsnap_wired.zones = { ZoneSnapshot{ "DIMM", 12 } };
+        wsnap_wired.connection = ConnectionState::Connected;
+
+        /* Both lanes registered; the transport accepts
+           everything, but only the WIRED lane ever delivers —
+           the wireless lane is the F04 "never delivered"
+           shape. */
+        pipe9.RegisterDevice(wsnap);
+        pipe9.RegisterDevice(wsnap_wired);
+        pipe9.SetTransport(std::make_shared<NullFrameSink>());
+
+        RgbFrame wf;
+        wf.controller           = wsnap_wired.key;
+        wf.topology_generation  = 1;
+        wf.sequence             = 1;
+        wf.colors.assign(12, RgbColor{ 7, 8, 9 });
+        CHECK(pipe9.SubmitLatest(wf).status ==
+              SubmitStatus::Accepted);
+        CHECK(pipe9.DrainDue(wsnap_wired.key, Clock::now()) == 1);
+
+        EngineService::Deps d9;
+        d9.pipeline  = &pipe9;
+        d9.mapper    = &mapper9;
+        d9.snapshots = [&wsnap, &wsnap_wired]
+        {
+            return std::vector<DeviceSnapshot>{ wsnap,
+                                                wsnap_wired };
+        };
+        EngineService svc9(engine9, d9);
+
+        /* frame_status: the wireless block is present and
+           reports the WIRELESS lane's counters — zero
+           deliveries — while the aggregate counts the wired
+           delivery. */
+        nlohmann::json fs;
+        CHECK(svc9.SnapshotEvent(event_kind::kFrameStatus, fs));
+        CHECK(fs.contains("wireless"));
+        CHECK(fs["wireless"].is_object());
+        if(fs["wireless"].is_object())
+        {
+            CHECK(fs["wireless"]["key"]["location"]
+                      .get<std::string>()
+                  == "Wireless: FA:KE:WI:RE:LE:SS");
+            CHECK(fs["wireless"]["stats"]["interval_count"]
+                      .get<uint64_t>() == 0);
+            CHECK(fs["wireless"]["stats"]["transport_completed"]
+                      .get<uint64_t>() == 0);
+            CHECK(fs["wireless"]["suppressed"].get<bool>()
+                  == false);
+            CHECK(fs["wireless"]["owned"].get<bool>() == false);
+            CHECK(fs["wireless"]["pending"].get<uint64_t>() == 0);
+        }
+        CHECK(fs["aggregate"]["transport_completed"]
+                  .get<uint64_t>() == 1);
+        {
+            const nlohmann::json& rows = fs["controllers"];
+            CHECK(rows.is_array());
+            CHECK(rows.size() == 2);
+            bool saw_wireless_row = false, saw_wired_row = false;
+            for(const nlohmann::json& row : rows)
+            {
+                if(row["wireless"].get<bool>())
+                {
+                    /* lane exists, never delivered — visible
+                       with zeroed stats and no colors */
+                    saw_wireless_row = true;
+                    CHECK(row["delivered"].get<bool>() == false);
+                    CHECK(row["lane"].get<bool>() == true);
+                    CHECK(row["colors"].empty());
+                    CHECK(row["stats"]["submitted"]
+                              .get<uint64_t>() == 0);
+                }
+                else
+                {
+                    saw_wired_row = true;
+                    CHECK(row["delivered"].get<bool>() == true);
+                    CHECK(row["colors"].size() == 12);
+                }
+            }
+            CHECK(saw_wireless_row && saw_wired_row);
+        }
+
+        /* DELIVERY_STATS carries the same wireless block and
+           the F04 map_stats observability object. */
+        IpcReply r = svc9.Dispatch(MsgType::GetDeliveryStats,
+                                   nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["wireless"].is_object());
+        CHECK(r.body["map_stats"].is_object());
+        if(r.body["map_stats"].is_object())
+        {
+            CHECK(r.body["map_stats"].contains("objects_bound"));
+            CHECK(r.body["map_stats"].contains(
+                      "objects_writable"));
+            CHECK(r.body["map_stats"].contains(
+                      "skipped_unverified_or_unresolved"));
+            CHECK(r.body["map_stats"].contains("frames_emitted"));
+        }
+        {
+            const nlohmann::json& rows = r.body["controllers"];
+            CHECK(rows.size() == 2);
+            for(const nlohmann::json& row : rows)
+            {
+                CHECK(row.contains("delivered"));
+                CHECK(row.contains("wireless"));
+            }
+        }
+
+        /* DIAG_GET embeds both — and answers promptly (the
+           F12 fix: no whole-StateJson re-run for the ipc
+           field, one shared topology capture). */
+        const TimePoint t0 = Clock::now();
+        r = svc9.Dispatch(MsgType::DiagGet,
+                          nlohmann::json::object());
+        const double diag_ms =
+            std::chrono::duration<double, std::milli>(
+                Clock::now() - t0).count();
+        CHECK(r.code == ErrCode::Ok);
+        /* generous bound — the assertion guards the shape,
+           the timing guards the contention regression */
+        CHECK(diag_ms < 1000.0);
+        CHECK(r.body["delivery"]["wireless"].is_object());
+        CHECK(r.body["delivery"]["map_stats"].is_object());
+
+        /* A wireless-absent engine reports wireless:null —
+           "not measured", never wired numbers. */
+        Engine           engine10;
+        DeliveryPipeline pipe10;
+        DeviceSnapshot   only_wired = wsnap_wired;
+        pipe10.RegisterDevice(only_wired);
+        EngineService::Deps d10;
+        d10.pipeline  = &pipe10;
+        d10.snapshots = [&only_wired]
+        {
+            return std::vector<DeviceSnapshot>{ only_wired };
+        };
+        EngineService svc10(engine10, d10);
+        nlohmann::json fs10;
+        CHECK(svc10.SnapshotEvent(event_kind::kFrameStatus,
+                                  fs10));
+        CHECK(fs10.contains("wireless"));
+        CHECK(fs10["wireless"].is_null());
+        /* the wired-only row still reports (delivered:false) */
+        CHECK(fs10["controllers"].size() == 1);
+        CHECK(fs10["controllers"][0]["delivered"].get<bool>()
+              == false);
+
+        /* No mapper wired -> map_stats is an honest null. */
+        r = svc10.Dispatch(MsgType::GetDeliveryStats,
+                           nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["map_stats"].is_null());
+    }
+
+    /*---- QA F03: an apply-time playback rejection is a
+           persistent, visible failure — never silent ---------
+           OnSceneApplied now returns a Result; a rejected
+           re-apply (the persisted selection can't be honored —
+           here the wireless group vanished) must surface in
+           PLAYBACK.detail AND emit a playback event, while the
+           scene apply itself still succeeds — the commit stays
+           good, the retained old effect is reported. */
+    {
+        Engine           engine11;
+        DeliveryPipeline pipe11;
+
+        std::vector<DeviceSnapshot> live_snaps;
+        DeviceSnapshot wsnap;
+        wsnap.key = DeviceKey{ "Lian Li: SL Wireless",
+                               "FAKEWIRELESS",
+                               "Wireless: FA:KE:WI:RE:LE:SS", "" };
+        wsnap.topology_generation = 1;
+        wsnap.zones = { ZoneSnapshot{ "Fan 1", 40 } };
+        wsnap.modes = { "Direct", "Breathing" };
+        wsnap.connection = ConnectionState::Connected;
+        live_snaps.push_back(wsnap);
+        pipe11.RegisterDevice(wsnap);
+
+        PlaybackController::Deps pd;
+        pd.snapshots = [&live_snaps] { return live_snaps; };
+        pd.select_mode =
+            [](const DeviceKey&, const std::string&,
+               const PlaybackModePatch&, std::string&)
+            { return true; };
+        pd.set_suppressed =
+            [&pipe11](const DeviceKey& k, bool s,
+                      const std::string& r)
+            { pipe11.SetSuppressed(k, s, r); };
+        pd.drop_pending =
+            [&pipe11](const DeviceKey& k)
+            { return pipe11.DropPending(k); };
+        pd.wait_idle =
+            [&pipe11](const DeviceKey& k, Clock::duration t)
+            { return pipe11.WaitIdle(k, t); };
+        const TimePoint fixed_now{};
+        pd.now = [fixed_now] { return fixed_now; };
+        PlaybackController ctl11(pd);
+
+        EngineService::Deps d11;
+        d11.pipeline = &pipe11;
+        d11.playback = &ctl11;
+        EngineService svc11(engine11, d11);
+        std::vector<IpcEvent> evs11;
+        svc11.SetEventSink(
+            [&](const IpcEvent& ev) { evs11.push_back(ev); });
+
+        const nlohmann::json doc11 = nlohmann::json::object({
+            { "version", 2 },
+            { "name",    "f03" },
+            { "effect",  nlohmann::json::object(
+                {{"preset","breathing"}}) },
+        });
+        IpcReply r = svc11.Dispatch(MsgType::SetScene,
+            nlohmann::json::object({{"document", doc11}}));
+        CHECK(r.code == ErrCode::Ok);
+
+        /* Persist an animation selection for this scene —
+           the controller records it under the document key. */
+        r = svc11.Dispatch(MsgType::SetPlaybackMode,
+            nlohmann::json::object(
+                {{"mode","animation_playback"}}));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["pending"].get<bool>() == true);
+
+        /* The wireless group vanishes; re-applying the SAME
+           scene asks the controller to restore a selection it
+           cannot honor. The apply still succeeds — and the
+           rejection now reaches the wire instead of vanishing
+           with the dropped Result. */
+        live_snaps.clear();
+        evs11.clear();
+        r = svc11.Dispatch(MsgType::SetScene,
+            nlohmann::json::object({{"document", doc11}}));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(ctl11.LastApplyResult().accepted == false);
+        bool saw_play_ev = false;
+        for(const IpcEvent& ev : evs11)
+        {
+            if(ev.kind == event_kind::kPlayback)
+            {
+                saw_play_ev = true;
+                CHECK(ev.data["detail"].is_string());
+                CHECK(ev.data["detail"].get<std::string>()
+                          .find("wireless") !=
+                      std::string::npos);
+            }
+        }
+        /* the persistent surface: PLAYBACK.detail carries the
+           reason until a later transition succeeds */
+        CHECK(saw_play_ev);
+        r = svc11.Dispatch(MsgType::GetPlayback,
+                           nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["detail"].is_string());
+        CHECK(r.body["detail"].get<std::string>()
+                  .find("wireless") != std::string::npos);
+    }
+
     std::printf("ipc_engine_service_test: %d checks, %d failures\n",
                 checks, failures);
     return failures ? 1 : 0;

@@ -177,6 +177,23 @@ nlohmann::json StatsToJson(const DeliveryStats& s)
     });
 }
 
+/* QA F04: the mapper's per-pass counters — object
+   bound/writable/emitted plus frames produced/dropped — the
+   surface that makes "bound but never delivered" visible. */
+nlohmann::json MapStatsToJson(const MapStats& m)
+{
+    return nlohmann::json::object({
+        { "objects_total",      m.objects_total    },
+        { "objects_bound",      m.objects_bound    },
+        { "objects_writable",   m.objects_writable },
+        { "objects_emitted",    m.objects_emitted  },
+        { "skipped_unverified_or_unresolved",
+                                m.skipped_unverified_or_unresolved },
+        { "frames_emitted",     m.frames_emitted   },
+        { "frames_dropped",     m.frames_dropped   },
+    });
+}
+
 nlohmann::json SnapshotToJson(const DeviceSnapshot& snap,
                               bool include_colors)
 {
@@ -581,7 +598,26 @@ bool EngineService::ApplyPreparedScene(const PreparedStudioScene& prepared,
        against the NEW document's capabilities (Task 3.6). */
     if(deps_.playback)
     {
-        deps_.playback->OnSceneApplied(doc);
+        /* QA F03: the Result is never dropped. A rejected
+           re-apply — the persisted preset lost its capability
+           under the new document, the backend refused the
+           mode, a transition is in flight — leaves the OLD
+           effect playing on hardware while the scene commit
+           itself legitimately succeeded (the apply is NOT
+           failed; the retained effect is the honest state).
+           The controller already records the reason in
+           Detail() — PLAYBACK's "detail" field, persistent
+           until a later transition succeeds — so emit the
+           playback event now, the same emission
+           SET_PLAYBACK_MODE performs after every transition,
+           instead of leaving subscribers to notice on the
+           next diff poll. */
+        const PlaybackController::Result pr =
+            deps_.playback->OnSceneApplied(doc);
+        if(!pr.accepted)
+        {
+            Emit(event_kind::kPlayback, PlaybackJson());
+        }
     }
     /* The event carries the full SCENE body — the documented
        contract is that event data matches the corresponding
@@ -704,10 +740,15 @@ nlohmann::json EngineService::ConnectionJson() const
     });
     if(deps_.sdk)
     {
-        out["state"]             = ConnStateName(deps_.sdk->State());
-        out["protocol_version"]  = deps_.sdk->ProtocolVersion();
-        out["reconnect_attempt"] = deps_.sdk->ReconnectAttempt();
-        out["last_error"]        = deps_.sdk->LastError();
+        /* QA F12: ONE state-lock acquisition for all four
+           fields — four separate getters could each queue
+           behind wire I/O. */
+        const sdk::ConnectionSnapshotInfo cs =
+            deps_.sdk->ConnectionSnapshot();
+        out["state"]             = ConnStateName(cs.state);
+        out["protocol_version"]  = cs.protocol_version;
+        out["reconnect_attempt"] = cs.reconnect_attempt;
+        out["last_error"]        = cs.last_error;
     }
     else
     {
@@ -736,7 +777,8 @@ nlohmann::json EngineService::SnapshotsJson(bool include_colors) const
 }
 
 nlohmann::json EngineService::DeliveryStatsJson(
-    const nlohmann::json& body) const
+    const nlohmann::json& body,
+    const std::vector<DeviceSnapshot>& snaps) const
 {
     if(!deps_.pipeline)
     {
@@ -763,32 +805,43 @@ nlohmann::json EngineService::DeliveryStatsJson(
     }
 
     nlohmann::json controllers = nlohmann::json::array();
-    if(deps_.sdk)
+    for(const DeviceSnapshot& snap : snaps)
     {
-        for(const DeviceSnapshot& snap : deps_.sdk->Snapshots())
+        DeliveryStats stats;
+        if(deps_.pipeline->Stats(snap.key, stats))
         {
-            DeliveryStats stats;
-            if(deps_.pipeline->Stats(snap.key, stats))
+            nlohmann::json c;
+            c["key"]                 = KeyToJson(snap.key);
+            c["stats"]               = StatsToJson(stats);
+            c["pending"]             =
+                deps_.pipeline->PendingCount(snap.key);
+            /* QA F04/F11 qualifiers: a lane with zero
+               deliveries is still reported (it always was —
+               Stats() covers registered lanes) but now says
+               so explicitly instead of implying it through
+               absent colors/budget. */
+            c["delivered"]           = false;
+            c["wireless"]            =
+                IsWirelessGroupController(snap);
+            c["suppressed"]          =
+                deps_.pipeline->IsSuppressed(snap.key);
+            c["owned"]               =
+                deps_.playback &&
+                deps_.playback->OwnsGroup(snap.key);
+            c["colors"]              = nlohmann::json::array();
+            RgbFrame delivered;
+            Clock::duration budget;
+            if(deps_.pipeline->LastDelivered(snap.key,
+                                             delivered, &budget))
             {
-                nlohmann::json c;
-                c["key"]                 = KeyToJson(snap.key);
-                c["stats"]               = StatsToJson(stats);
-                c["pending"]             =
-                    deps_.pipeline->PendingCount(snap.key);
-                c["colors"]              = nlohmann::json::array();
-                RgbFrame delivered;
-                Clock::duration budget;
-                if(deps_.pipeline->LastDelivered(snap.key,
-                                                 delivered, &budget))
-                {
-                    c["colors"] = ColorsToJson(delivered.colors);
-                    c["budget_ms"] =
-                        std::chrono::duration_cast<
-                            std::chrono::milliseconds>(budget)
-                            .count();
-                }
-                controllers.push_back(std::move(c));
+                c["delivered"] = true;
+                c["colors"] = ColorsToJson(delivered.colors);
+                c["budget_ms"] =
+                    std::chrono::duration_cast<
+                        std::chrono::milliseconds>(budget)
+                        .count();
             }
+            controllers.push_back(std::move(c));
         }
     }
     return nlohmann::json::object({
@@ -796,39 +849,113 @@ nlohmann::json EngineService::DeliveryStatsJson(
         { "aggregate",   StatsToJson(deps_.pipeline->Stats())       },
         { "pending",     deps_.pipeline->PendingCount()             },
         { "controllers", std::move(controllers)                     },
+        /* QA F11: the wireless lane's own counters — the
+           aggregate mixes wired lanes and must never be read
+           as the wireless rate. */
+        { "wireless",    WirelessLaneJson(snaps)                    },
+        /* QA F04 observability: the last MapFrame pass —
+           "bound but unwritable/unresolved" objects emit no
+           frames and are invisible in delivery counters; the
+           mapper's counters are the only surface that counts
+           them. Null when no mapper is wired. */
+        { "map_stats",   deps_.mapper
+                             ? MapStatsToJson(
+                                   deps_.mapper->LastMapStats())
+                             : nlohmann::json(nullptr)              },
     });
 }
 
-nlohmann::json EngineService::FrameStatusJson() const
+nlohmann::json EngineService::WirelessLaneJson(
+    const std::vector<DeviceSnapshot>& snaps) const
+{
+    /* The Lian Li wireless service owns ONE full-group LED
+       buffer — its controllers carry the "Wireless:" location
+       (IsWirelessGroupController). The first enumerated group
+       with a registered delivery lane reports its OWN lane
+       counters; null when no wireless lane exists. */
+    if(!deps_.pipeline)
+    {
+        return nullptr;
+    }
+    for(const DeviceSnapshot& snap : snaps)
+    {
+        if(!IsWirelessGroupController(snap))
+        {
+            continue;
+        }
+        DeliveryStats ws;
+        if(!deps_.pipeline->Stats(snap.key, ws))
+        {
+            /* Enumerated but no lane yet — keep looking; a
+               laneless group reports "not measured" through
+               the null, never through wired numbers. */
+            continue;
+        }
+        return nlohmann::json::object({
+            { "key",        KeyToJson(snap.key)                  },
+            { "stats",      StatsToJson(ws)                      },
+            { "suppressed", deps_.pipeline->IsSuppressed(
+                                snap.key)                        },
+            { "pending",    (uint64_t)deps_.pipeline->PendingCount(
+                                snap.key)                        },
+            { "owned",      deps_.playback &&
+                            deps_.playback->OwnsGroup(snap.key)   },
+        });
+    }
+    return nullptr;
+}
+
+nlohmann::json EngineService::FrameStatusJson(
+    const std::vector<DeviceSnapshot>& snaps) const
 {
     /* The delivered-state feed for the Dashboard preview: what
        the transport last accepted per controller (plan
        section 5 — preview and output share the same sampled
-       colors; preview FPS is labelled separately). */
+       colors; preview FPS is labelled separately).
+       QA F04: a lane that has never delivered still produces a
+       row — delivered:false, zeroed counters, empty colors —
+       so "bound but never delivered" is a visible state, not
+       an absent row. */
     nlohmann::json controllers = nlohmann::json::array();
-    if(deps_.pipeline && deps_.sdk)
+    if(deps_.pipeline)
     {
-        for(const DeviceSnapshot& snap : deps_.sdk->Snapshots())
+        for(const DeviceSnapshot& snap : snaps)
         {
             RgbFrame delivered;
-            if(deps_.pipeline->LastDelivered(snap.key, delivered))
-            {
-                DeliveryStats stats;
+            const bool has_delivered =
+                deps_.pipeline->LastDelivered(snap.key, delivered);
+            DeliveryStats stats;
+            const bool has_lane =
                 deps_.pipeline->Stats(snap.key, stats);
-                controllers.push_back(nlohmann::json::object({
-                    { "key",          KeyToJson(snap.key)          },
-                    { "sequence",     delivered.sequence           },
-                    { "colors",       ColorsToJson(delivered.colors)},
-                    { "stats",        StatsToJson(stats)           },
-                }));
-            }
+            controllers.push_back(nlohmann::json::object({
+                { "key",        KeyToJson(snap.key)                },
+                { "delivered",  has_delivered                      },
+                { "lane",       has_lane                           },
+                { "wireless",   IsWirelessGroupController(snap)    },
+                { "suppressed", deps_.pipeline->IsSuppressed(
+                                    snap.key)                      },
+                { "owned",      deps_.playback &&
+                                deps_.playback->OwnsGroup(
+                                    snap.key)                      },
+                { "pending",    (uint64_t)deps_.pipeline->
+                                    PendingCount(snap.key)         },
+                { "sequence",   has_delivered
+                                    ? delivered.sequence : 0       },
+                { "colors",     has_delivered
+                                    ? ColorsToJson(delivered.colors)
+                                    : nlohmann::json::array()      },
+                { "stats",      StatsToJson(stats)                 },
+            }));
         }
     }
     return nlohmann::json::object({
         { "aggregate",   deps_.pipeline
                              ? StatsToJson(deps_.pipeline->Stats())
                              : StatsToJson(DeliveryStats{}) },
-        { "controllers", std::move(controllers)                   },
+        /* QA F11: the wireless lane's own counters — never the
+           wired-mixing aggregate under a wireless label. */
+        { "wireless",    WirelessLaneJson(snaps)              },
+        { "controllers", std::move(controllers)               },
     });
 }
 
@@ -930,26 +1057,33 @@ nlohmann::json EngineService::OwnershipJson() const
     return j.is_object() ? j : nullptr;
 }
 
+/* QA F12: the IPC counters body on its own — STATE and
+   DIAGNOSTICS both embed it; building it here keeps DIAG_GET
+   from re-serializing an entire StateJson for one field. */
+nlohmann::json EngineService::IpcStatsJson() const
+{
+    if(!deps_.server_stats)
+    {
+        return nullptr;
+    }
+    const IpcServerStats st = deps_.server_stats();
+    return nlohmann::json::object({
+        { "sessions_active",  st.sessions_active  },
+        { "sessions_total",   st.sessions_total   },
+        { "messages_in",      st.messages_in      },
+        { "responses_out",    st.responses_out    },
+        { "events_sent",      st.events_sent      },
+        { "events_dropped",   st.events_dropped   },
+        { "queued_events",    st.queued_events    },
+        { "resync_bytes",     st.resync_bytes     },
+        { "rejected_hellos",  st.rejected_hellos  },
+        { "rate_limited",     st.rate_limited     },
+        { "refused_busy",     st.refused_busy     },
+    });
+}
+
 nlohmann::json EngineService::StateJson() const
 {
-    nlohmann::json ipc_stats = nullptr;
-    if(deps_.server_stats)
-    {
-        const IpcServerStats st = deps_.server_stats();
-        ipc_stats = nlohmann::json::object({
-            { "sessions_active",  st.sessions_active  },
-            { "sessions_total",   st.sessions_total   },
-            { "messages_in",      st.messages_in      },
-            { "responses_out",    st.responses_out    },
-            { "events_sent",      st.events_sent      },
-            { "events_dropped",   st.events_dropped   },
-            { "queued_events",    st.queued_events    },
-            { "resync_bytes",     st.resync_bytes     },
-            { "rejected_hellos",  st.rejected_hellos  },
-            { "rate_limited",     st.rate_limited     },
-            { "refused_busy",     st.refused_busy     },
-        });
-    }
     return nlohmann::json::object({
         { "engine", nlohmann::json::object({
             { "running",         engine_.Running()          },
@@ -962,7 +1096,7 @@ nlohmann::json EngineService::StateJson() const
         { "power",      PowerJson()                          },
         { "reactive",   ReactiveJson()                       },
         { "ownership",  OwnershipJson()                      },
-        { "ipc",        ipc_stats                            },
+        { "ipc",        IpcStatsJson()                       },
     });
 }
 
@@ -974,6 +1108,12 @@ nlohmann::json EngineService::DiagnosticsJson(TimePoint now) const
         std::chrono::duration<double, std::milli>(
             now.time_since_epoch()).count();
 
+    /* QA F12: ONE topology capture shared by every section
+       that needs it — the old body re-ran the whole
+       StateJson() for "ipc" alone and let each section take
+       its own SDK lock acquisition. */
+    const std::vector<DeviceSnapshot> snaps = LayoutSnapshots();
+
     return nlohmann::json::object({
         { "engine", nlohmann::json::object({
             { "running",        engine_.Running()           },
@@ -984,14 +1124,13 @@ nlohmann::json EngineService::DiagnosticsJson(TimePoint now) const
         { "scene",            SceneJsonLocked()              },
         { "playback",         PlaybackJson()                 },
         { "delivery",         DeliveryStatsJson(
-                                  nlohmann::json::object())  },
+                                  nlohmann::json::object(),
+                                  snaps)                     },
         { "sdk",              ConnectionJson()               },
         { "power",            PowerJson()                    },
         { "reactive",         ReactiveJson()                 },
         { "ownership",        OwnershipJson()                },
-        { "ipc",              deps_.server_stats
-                                  ? StateJson()["ipc"]
-                                  : nlohmann::json(nullptr)  },
+        { "ipc",              IpcStatsJson()                 },
         { "clock", nlohmann::json::object({
             { "steady_ms", steady_ms },
         })},
@@ -1049,7 +1188,7 @@ bool EngineService::SnapshotEvent(const std::string& kind,
     }
     if(kind == event_kind::kFrameStatus)
     {
-        out = FrameStatusJson();
+        out = FrameStatusJson(LayoutSnapshots());
         return true;
     }
     if(kind == event_kind::kReactive)
@@ -1397,8 +1536,9 @@ IpcReply EngineService::Dispatch(MsgType type,
                     "with string fields");
             }
         }
-        return IpcReply::Success(MsgType::DeliveryStats,
-                                 DeliveryStatsJson(body));
+        return IpcReply::Success(
+            MsgType::DeliveryStats,
+            DeliveryStatsJson(body, LayoutSnapshots()));
     }
 
     case MsgType::GetState:
@@ -2653,7 +2793,8 @@ void EngineService::PollFrameStatus(TimePoint now)
            since_last >= options_.frame_status_min_interval_ms)
         {
             last_frame_status_ = now;
-            Emit(event_kind::kFrameStatus, FrameStatusJson());
+            Emit(event_kind::kFrameStatus,
+                 FrameStatusJson(LayoutSnapshots()));
         }
         else
         {

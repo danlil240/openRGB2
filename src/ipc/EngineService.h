@@ -380,9 +380,31 @@ private:
     nlohmann::json StateJson() const;
     nlohmann::json ReactiveJson() const;
     nlohmann::json SnapshotsJson(bool include_colors = true) const;
-    nlohmann::json DeliveryStatsJson(const nlohmann::json& body) const;
+    /* F12: DIAGNOSTICS and GET_DELIVERY_STATS share ONE
+       topology capture per call — `snaps` is the caller's
+       LayoutSnapshots() result, never a second SDK read. */
+    nlohmann::json DeliveryStatsJson(
+        const nlohmann::json& body,
+        const std::vector<DeviceSnapshot>& snaps) const;
     nlohmann::json ConnectionJson() const;
-    nlohmann::json FrameStatusJson() const;
+    /* The delivered-state feed (`frame_status` event): every
+       enumerated controller produces a row — never-delivered
+       lanes report delivered:false + zeroed counters so
+       "bound but never delivered" is visible (QA F04). */
+    nlohmann::json FrameStatusJson(
+        const std::vector<DeviceSnapshot>& snaps) const;
+    /* The wireless lane's OWN counters (QA F11): the
+       pipeline-wide aggregate mixes every wired lane, so a
+       "wireless performance" surface must read the wireless
+       lane alone. Null when no wireless lane exists — "not
+       measured", never a wired number under a wireless
+       label. */
+    nlohmann::json WirelessLaneJson(
+        const std::vector<DeviceSnapshot>& snaps) const;
+    /* IPC server counters (IpcServer::Stats provider) —
+       shared by STATE and DIAGNOSTICS so DIAG never re-runs
+       the whole StateJson for one field (QA F12). */
+    nlohmann::json IpcStatsJson() const;
     nlohmann::json OwnershipJson() const;
 };
 
