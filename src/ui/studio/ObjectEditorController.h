@@ -272,6 +272,14 @@ private:
        and reset the object model rows. */
     void RebuildResolved();
     void RefreshAll();       /* rebuild + full model reset + emits  */
+    /* RefreshAll()'s SceneObjectModel reset destroys tree/canvas
+       delegates — a synchronous call inside the input dispatch
+       that caused the change (shortcut, button click, field
+       commit) tears down the item still being delivered to
+       (F02). These post the destructive half through the event
+       loop; the pending flags dedup burst commits. */
+    void ScheduleModelRefresh();
+    void ScheduleModelReset();
 
     QString BoundStatusFor(const std::string& binding_id) const;
     const studio::SceneObject* ResolvedObject(
@@ -313,6 +321,8 @@ private:
     bool        snap_       = false;
     QColor      paint_color_ = QColor(255, 255, 255);
     int         pending_catalog_ = 0;
+    bool        refresh_pending_  = false;
+    bool        reset_pending_    = false;
 };
 
 } /* namespace ui */

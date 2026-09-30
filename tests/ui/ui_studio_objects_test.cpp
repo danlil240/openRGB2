@@ -564,6 +564,10 @@ int main(int argc, char** argv)
         rig.ctl.selectInstance("fan0");
         rig.ctl.selectInstance("fan1", true);
         rig.ctl.groupSelected();
+        /* The structural row rebuild is event-loop-deferred now
+           (F02 — a commit inside a delegate's input dispatch
+           must not destroy the delegate mid-handler). Pump it. */
+        QCoreApplication::processEvents();
         std::string gid;
         for(const auto& kv : rig.Working().devices)
         {
@@ -610,6 +614,7 @@ int main(int argc, char** argv)
            preserved (local values re-derive, world stays). */
         rig.ctl.selectInstance(QString::fromStdString(gid));
         rig.ctl.ungroupSelected();
+        QCoreApplication::processEvents();   /* deferred reset */
         const auto u0 = wof("fan0");
         CHECK(std::fabs(u0.first - g2.first) < 1e-4);
         CHECK(std::fabs(u0.second - g2.second) < 1e-4);

@@ -72,7 +72,7 @@ LayoutController::LayoutController(EngineBridge* bridge,
         }
         SetLastError(QStringLiteral("engine connection lost"),
                      QStringLiteral("connection"));
-        emit itemsChanged();
+        QueueViewNotify(false);
     });
 }
 
@@ -89,22 +89,23 @@ void LayoutController::setWorkspace(WorkspaceController* ws)
     }
     /* The shared draft's mutation signals re-drive exactly
        the properties the LAYOUT_COMMAND replies used to
-       refresh. */
+       refresh. The notifications are POSTED, never emitted
+       synchronously: draftEdited fires inside whatever input
+       dispatch triggered the edit (arrow-key move, Ctrl+Z,
+       delegate commit), and a synchronous itemsChanged would
+       destroy the very delegate still being delivered to —
+       the F02 access-violation signature. */
     connect(ws_, &WorkspaceController::draftEdited, this,
             [this] {
-                emit itemsChanged();
-                emit selectedChanged();
-                emit historyChanged();
+                QueueViewNotify(true);
             });
     connect(ws_, &WorkspaceController::draftChanged, this,
             [this] {
-                emit itemsChanged();
-                emit selectedChanged();
+                QueueViewNotify(false);
             });
     connect(ws_, &WorkspaceController::workspaceChanged, this,
             [this] {
-                emit itemsChanged();
-                emit selectedChanged();
+                QueueViewNotify(false);
             });
     connect(ws_, &WorkspaceController::historyChanged,
             this, &LayoutController::historyChanged);
@@ -159,9 +160,7 @@ bool LayoutController::WsApply(std::optional<studio::EditorEdit> e,
     SetLastError(QString());
     SetStatus(QStringLiteral("staged: %1 — unsaved until "
                              "Save").arg(label));
-    emit itemsChanged();
-    emit selectedChanged();
-    emit historyChanged();
+    QueueViewNotify(true);
     return true;
 }
 
@@ -186,9 +185,7 @@ bool LayoutController::WsDocEdit(
     SetLastError(QString());
     SetStatus(QStringLiteral("staged: %1 — unsaved until "
                              "Save").arg(QString::fromStdString(label)));
-    emit itemsChanged();
-    emit selectedChanged();
-    emit historyChanged();
+    QueueViewNotify(true);
     return true;
 }
 
@@ -621,12 +618,14 @@ void LayoutController::OnSceneChanged()
     const QVariantMap s = bridge_->scene();
     model_.LoadApplied(
         VariantToJson(s.value(QStringLiteral("document"))));
-    emit itemsChanged();
-    emit selectedChanged();
-    emit historyChanged();   /* undo docs still hold snapshots,
-                                counts only change on edits —
-                                but canUndo/canRedo reads stay
-                                honest across LOAD_SCENE      */
+    /* Posted — a same-frame bridge notification can land inside
+       a delegate's own input dispatch, and a synchronous
+       itemsChanged would tear that delegate down mid-handler
+       (F02). */
+    QueueViewNotify(true);
+    /* undo docs still hold snapshots, counts only change on
+       edits — but canUndo/canRedo reads stay honest across
+       LOAD_SCENE (historyChanged rides along in the post). */
 }
 
 void LayoutController::OnSnapshotsChanged()
@@ -637,8 +636,7 @@ void LayoutController::OnSnapshotsChanged()
         snaps.push_back(VariantToJson(sv));
     }
     model_.SetSnapshots(std::move(snaps));
-    emit itemsChanged();
-    emit selectedChanged();
+    QueueViewNotify(false);
 }
 
 /*---- replies ------------------------------------------------*/
@@ -761,6 +759,24 @@ void LayoutController::OnReplyReceived(int id,
 }
 
 /*---- helpers ------------------------------------------------*/
+
+void LayoutController::QueueViewNotify(bool history)
+{
+    /* itemsChanged rebuilds the canvas's delegate Repeater —
+       emitting it synchronously inside an input dispatch (key
+       press, click release, field commit) destroys the very
+       item still being delivered to. Posting the batch lets
+       the dispatch unwind first; QML sees the same ordering,
+       one frame later (F02). */
+    QMetaObject::invokeMethod(this, [this, history] {
+        emit itemsChanged();
+        emit selectedChanged();
+        if(history)
+        {
+            emit historyChanged();
+        }
+    }, Qt::QueuedConnection);
+}
 
 void LayoutController::SetLastError(const QString& e,
                                     const QString& source)
@@ -1528,9 +1544,7 @@ void LayoutController::undo()
         /* Shared timeline — the draft edit is local; undo is
            a doc revert, no engine round-trip. */
         ws_->undo();
-        emit itemsChanged();
-        emit selectedChanged();
-        emit historyChanged();
+        QueueViewNotify(true);
         return;
     }
     if(pending_.id != 0)
@@ -1572,9 +1586,7 @@ void LayoutController::redo()
     if(WsMode())
     {
         ws_->redo();
-        emit itemsChanged();
-        emit selectedChanged();
-        emit historyChanged();
+        QueueViewNotify(true);
         return;
     }
     if(pending_.id != 0)
