@@ -517,37 +517,15 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
         return;
     }
 
-    /* Stale-echo guard: a replayed older snapshot carries the
-       SAME content hash — drop it so an out-of-order push can
-       never roll the view back or clobber newer draft state.
-       A LOWER revision with a DIFFERENT hash is a real rollback
-       (the store recovered a tampered generation and adopted
-       the last-valid one) — it must be fetched+adopted, not
-       ignored, or the UI latches stale flags forever. */
-    if(id == ws_id_ && managed_ && ws < ws_rev_ &&
-       (sha.isEmpty() || sha == ws_sha256_))
-    {
-        return;
-    }
-
-    const bool ws_changed  = id != ws_id_;
-    if(ws_changed || id == pending_switch_id_)
-    {
-        /* The open-target switch resolved — the ws_changed
-           fetch below now downloads the RIGHT id. */
-        pending_switch_id_.clear();
-    }
-    const bool revs_moved  = ws_changed || ws != ws_rev_ ||
-                             res != res_rev_;
-    const bool sha_changed = sha != ws_sha256_;
-    ws_id_   = id;
-    ws_name_ = snap.value(QStringLiteral("name")).toString();
-    ws_rev_  = ws;
-    res_rev_ = res;
-    ws_sha256_ = sha;
     /* Task 10: the poll reply also carries the managed paths
-       and the engine's passive file compare. Absent fields
-       (a scripted/older engine) leave prior state alone. */
+       and the engine's passive file compare — LIVE disk truth,
+       orthogonal to the document's revision ordering. It must
+       land BEFORE the stale-echo guard below: a dropped
+       doc/revision field must never freeze the external-change
+       latch (a recovered reload publishes a LOWER revision —
+       dropping those replies left "modified" latched forever).
+       Absent fields (a scripted/older engine) leave prior
+       state alone. */
     const QString new_root =
         snap.value(QStringLiteral("workspace_root")).toString();
     const QString new_dir  =
@@ -570,6 +548,40 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
                     snap.value(QStringLiteral("external_detail"))
                         .toString());
     }
+
+    /* Stale-echo guard: a replayed older snapshot carries the
+       SAME content hash — drop the doc/revision fields so an
+       out-of-order push can never roll the view back or
+       clobber newer draft state. A LOWER revision with a
+       DIFFERENT hash is a real rollback (the store recovered a
+       tampered generation and adopted the last-valid one) — it
+       must be fetched+adopted, not ignored, or the UI latches
+       stale flags forever. */
+    if(id == ws_id_ && managed_ && ws < ws_rev_ &&
+       (sha.isEmpty() || sha == ws_sha256_))
+    {
+        if(identity_changed)
+        {
+            emit workspaceChanged();
+        }
+        return;
+    }
+
+    const bool ws_changed  = id != ws_id_;
+    if(ws_changed || id == pending_switch_id_)
+    {
+        /* The open-target switch resolved — the ws_changed
+           fetch below now downloads the RIGHT id. */
+        pending_switch_id_.clear();
+    }
+    const bool revs_moved  = ws_changed || ws != ws_rev_ ||
+                             res != res_rev_;
+    const bool sha_changed = sha != ws_sha256_;
+    ws_id_   = id;
+    ws_name_ = snap.value(QStringLiteral("name")).toString();
+    ws_rev_  = ws;
+    res_rev_ = res;
+    ws_sha256_ = sha;
     if(!managed_ || ws_changed || revs_moved || identity_changed)
     {
         managed_ = true;

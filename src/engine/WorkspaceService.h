@@ -334,13 +334,17 @@ private:
     std::pair<uint64_t, uint64_t>
         StoreExpectedRevs(const std::string& id,
                           uint64_t ws_rev, uint64_t res_rev);
+    /* prior_warnings: notices the caller already accumulated
+       (parse/import/load warnings) — seeded into the result so
+       assigning `res = CommitCommon(...)` never drops them. */
     Result CommitCommon(const std::string& id,
                         WorkspaceCandidate& cand,
                         const std::string& original_bytes,
                         uint64_t expected_rev,
                         bool apply_after,
                         std::shared_ptr<const WorkspaceCandidate>*
-                            apply_cand);
+                            apply_cand,
+                        std::vector<std::string> prior_warnings = {});
     /* Runs deps_.apply_scene OFF the service mutex and folds
        the outcome into `res` (committed stays durable; an
        apply failure is reported, never rolled back). */

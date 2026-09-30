@@ -463,6 +463,36 @@ int main(int argc, char** argv)
         return rig.ctl.externalChange().isEmpty(); }, 8000));
 
     /*========================================================*\
+    || F2. tamper + reload -> RECOVERED publish clears the     ||
+    ||     latch (the dev-QA wedge: a recovered reload         ||
+    ||     publishes a LOWER revision — the stale-echo guard   ||
+    ||     must never freeze externalChange; the engine's      ||
+    ||     live compare always lands)                          ||
+    \*========================================================*/
+    std::printf("-- tamper+reload recovers -> external clears\n");
+    {
+        /* F ended on gen-000003 (rev 3). Corrupt the active
+           generation's document — the scan surfaces
+           "modified", then a clean-session reload recovers
+           the marker backup and publishes a revision LOWER
+           than the held 3. */
+        const fs::path gen3dir =
+            wsdir / "generations" / "gen-000003";
+        WriteAll(gen3dir / "document.json", "{ corrupt ");
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.externalChange() ==
+                   QLatin1String("modified"); }, 8000));
+        rig.ctl.reload();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.externalChange().isEmpty(); }, 10000));
+        /* The recovered publish adopted — the revision
+           rewound to the backup marker's, and the doc the
+           session holds is what the backup carries. */
+        CHECK(rig.ctl.workspaceRevision() < 3);
+        CHECK(rig.ctl.Session().Working().meta.name == "first");
+    }
+
+    /*========================================================*\
     || G. openWorkspace over a dirty draft latches; the draft  ||
     ||    survives the switch in the durable store             ||
     \*========================================================*/

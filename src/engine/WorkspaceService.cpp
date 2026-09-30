@@ -604,9 +604,11 @@ WorkspaceService::Result WorkspaceService::CommitCommon(
     const std::string& original_bytes,
     uint64_t expected_rev,
     bool apply_after,
-    std::shared_ptr<const WorkspaceCandidate>* apply_cand)
+    std::shared_ptr<const WorkspaceCandidate>* apply_cand,
+    std::vector<std::string> prior_warnings)
 {
     Result res;
+    res.warnings = std::move(prior_warnings);
     /* Service-level stale-writer fast path for the workspace
        currently open — the store's marker check below is the
        authoritative gate either way. */
@@ -637,7 +639,10 @@ WorkspaceService::Result WorkspaceService::CommitCommon(
     const WorkspaceStore::CommitResult cr =
         store_.Commit(id, cand, original_bytes,
                       store_expected_rev);
-    res.warnings = cr.warnings;
+    /* Append — the recovery notice and the caller's prior
+       warnings already sit in res.warnings. */
+    res.warnings.insert(res.warnings.end(),
+                        cr.warnings.begin(), cr.warnings.end());
     if(!cr.ok)
     {
         res.error = cr.error;
@@ -844,7 +849,8 @@ WorkspaceService::Result WorkspaceService::RestoreBackup(
         WorkspaceCandidate cand = *lr.candidate;
         res = CommitCommon(id, cand, std::string(),
                            expected_workspace_revision,
-                           /*apply_after=*/true, &apply_cand);
+                           /*apply_after=*/true, &apply_cand,
+                           /*prior_warnings=*/lr.warnings);
         if(res.ok)
         {
             res.recovered = true;
@@ -898,7 +904,8 @@ WorkspaceService::Result WorkspaceService::Save(
         }
         res = CommitCommon(id, cand, document.dump(2),
                            expected_workspace_revision,
-                           /*apply_after=*/true, &apply_cand);
+                           /*apply_after=*/true, &apply_cand,
+                           /*prior_warnings=*/res.warnings);
     }
     /* The apply runs after the lock is released — a scene
        publish emits events that re-enter this service. */
@@ -961,7 +968,8 @@ WorkspaceService::Result WorkspaceService::Import(
        for an explicit open/apply decision. */
     return CommitCommon(id, cand, document.dump(2),
                         expected_workspace_revision,
-                        /*apply_after=*/false, nullptr);
+                        /*apply_after=*/false, nullptr,
+                        /*prior_warnings=*/res.warnings);
 }
 
 WorkspaceService::Result WorkspaceService::ImportFile(
@@ -1041,7 +1049,8 @@ WorkspaceService::Result WorkspaceService::ImportFile(
        generation — recovery never needs to re-derive them. */
     return CommitCommon(id, cand, bytes,
                         expected_workspace_revision,
-                        /*apply_after=*/false, nullptr);
+                        /*apply_after=*/false, nullptr,
+                        /*prior_warnings=*/res.warnings);
 }
 
 std::shared_ptr<const WorkspaceCandidate>
@@ -2163,7 +2172,8 @@ WorkspaceService::Result WorkspaceService::CommitJson(
         {
             res = CommitCommon(id, cand, original_bytes,
                                expected_workspace_revision,
-                               apply_after, &apply_cand);
+                               apply_after, &apply_cand,
+                               /*prior_warnings=*/res.warnings);
         }
         else
         {
@@ -2176,7 +2186,11 @@ WorkspaceService::Result WorkspaceService::CommitJson(
                               StoreExpectedRevs(
                                   id, expected_workspace_revision,
                                   0).first);
-            res.warnings = cr.warnings;
+            /* Append — res.warnings already holds the parse
+               warnings accumulated above. */
+            res.warnings.insert(res.warnings.end(),
+                                cr.warnings.begin(),
+                                cr.warnings.end());
             if(!cr.ok)
             {
                 res.error = cr.error;
@@ -2578,7 +2592,8 @@ WorkspaceService::Result WorkspaceService::ImportStagedJson(
             studio::ToJson(cand.document).dump(2);
         return CommitCommon(id, cand, retained,
                             expected_workspace_revision,
-                            /*apply_after=*/false, nullptr);
+                            /*apply_after=*/false, nullptr,
+                            /*prior_warnings=*/res.warnings);
     }
 
     /* Flat bundle form: {format, workspace:{...},
@@ -2738,7 +2753,8 @@ WorkspaceService::Result WorkspaceService::ImportStagedJson(
        for an explicit open/apply decision. */
     return CommitCommon(id, cand, original_bytes,
                         expected_workspace_revision,
-                        /*apply_after=*/false, nullptr);
+                        /*apply_after=*/false, nullptr,
+                        /*prior_warnings=*/res.warnings);
 }
 
 nlohmann::json WorkspaceService::InspectPackedBundle(

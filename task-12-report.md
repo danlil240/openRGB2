@@ -50,11 +50,33 @@ recovered document on hash mismatch; `recoveryOffered` is strictly the
 unsaved-draft path. Regression coverage in
 `tests/engine/ipc_workspace_test.cpp` (+87 lines).
 
+**Final-audit follow-ons (same subsystem):**
+
+- *External-change latch ordering* — `ApplySnapshot()`'s stale-echo
+  guard dropped the **whole** snapshot before reading
+  `external_change`/`workspace_dir`. The dev QA transcript caught the
+  symptom (`reload-settled:false`, `rev` stuck at 6 after a recovered
+  reload published a lower revision). The reload-job completion already
+  re-baselines `ws_rev_` to the job's reported truth, but the guard
+  could still freeze the live external compare on any residual
+  drop path (out-of-order push, sha-absent snapshot). The poll's
+  path/external fields — live disk truth, computed at request time —
+  now land *before* the guard, which only gates doc/revision adoption
+  (`src/ui/WorkspaceController.cpp`). Regression: a new section in
+  `tests/ui/ui_workspace_recovery_test.cpp` tampers the active
+  generation, reloads through recovery, and asserts `externalChange`
+  clears and the revision rewinds.
+- *Commit warnings preservation* — every `CommitCommon()` caller
+  overwrote `res.warnings` with `cr.warnings`, silently dropping
+  parse/import/recovery notices accumulated earlier in the same call.
+  `CommitCommon` now takes `prior_warnings` and appends the store's
+  warnings instead of replacing (`src/engine/WorkspaceService.{cpp,h}`).
+
 ## 3. Full suite
 
 ```
 ctest --test-dir build-studio -C Release --output-on-failure
-100% tests passed, 0 tests failed out of 78   (129.84 s)
+100% tests passed, 0 tests failed out of 78   (130.58 s)
 ```
 
 Labels: backend 6, core 8, engine 27, packaging 5, sdk 3, ui 29.
