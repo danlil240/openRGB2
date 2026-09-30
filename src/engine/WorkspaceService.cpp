@@ -2976,11 +2976,30 @@ bool WorkspaceService::DocumentBytes(const std::string& id,
                                      std::string& bytes,
                                      std::string& err) const
 {
-    /* Raw document.json — byte-identical to re-serializing a
-       loaded candidate, but a marker + single file read rather
-       than a full manifest-verify + registry-overlay + parse.
-       Reader-thread metadata stays bounded and cheap; the IPC
-       layer caches per revision on top of this. */
+    /* The PUBLISHED workspace serves its in-memory candidate —
+       after a recovered reload the durable marker still names
+       the corrupt generation until the next commit heals it;
+       reading the raw file then hands clients bytes that fail
+       the manifest hash (observed: UI fetch -> "workspace
+       document failed to parse"). The candidate's
+       deterministic serialization is exactly what the healed
+       marker will point at, so the publish/download/hash trio
+       stays self-consistent through the recovery window. */
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        if(current_.id == id && current_.candidate &&
+           current_.candidate->resolved)
+        {
+            bytes = studio::ToJson(current_.candidate->document)
+                        .dump(2);
+            return true;
+        }
+    }
+    /* Foreign workspaces (and a not-yet-adopted current) read
+       the raw document.json — byte-identical to re-serializing
+       a loaded candidate, but a marker + single file read
+       rather than a full manifest-verify + registry-overlay +
+       parse. The IPC layer caches per revision on top. */
     return store_.ReadActiveDocumentBytes(id, bytes, err);
 }
 

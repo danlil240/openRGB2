@@ -49,11 +49,12 @@ Re-verify an existing tree without re-staging:
 | `openrgb2-ui.exe` + QML | `src/ui/` + `ui/` QML module (this repo) | GPL-2.0-or-later | package root + `qml/` |
 | `openrgb2-ctl.exe` | `tools/engine_ctl/` (this repo) | GPL-2.0-or-later | package root |
 | `backend\OpenRGB.exe` + payload | `vendor/OpenRGB/` — the pinned `lianli-wireless` fork | GPL-2.0-or-later (OpenRGB upstream) | `backend/` |
-| Qt runtime + QML modules | Qt 6.8.3 via `windeployqt` | LGPL-3.0 / Qt GPL exceptions | root + `backend/` + `qml/`, `platforms/`, … |
+| Qt runtime + QML modules | Qt 6.8.3 via `windeployqt` — **Qt6Quick3D.dll + the `qml\QtQuick3D*` modules are required**: the Studio layout viewport is a Quick3D scene and a missing Quick3D runtime degrades the packaged UI to 2D only (the debug-DLL exclusion pattern must not match `Qt6Quick3D.dll`) | LGPL-3.0 / Qt GPL exceptions | root + `backend/` + `qml/`, `platforms/`, … |
 | MSVC CRT | `Microsoft.VC143.CRT` redist folder | MSVC redist terms | root + `backend/` |
 | Backend non-Qt payloads | `hidapi-hotplug.dll`, `libusb-1.0.dll`, `PawnIOLib.dll`, `*.bin` PawnIO modules, `dxcompiler.dll`/`dxil.dll` | per-file — see `NOTICES.txt` / `licenses/` | `backend/` |
 | Preset library | `src/core/presets/{devices,effects}` | GPL-2.0-or-later | `presets/` |
 | Topology profiles | `profiles/*.json` (committed; no unique IDs) | GPL-2.0-or-later | `profiles/` |
+| Writable user state | created at runtime, never staged | — | `profiles\local\workspaces\` is the engine workspace root inside the package — generations, the active marker, staged transfers, and the preset **library** all live under it; it must stay writable and is intentionally absent from `manifest.json` until first launch |
 | Lifecycle scripts + docs | `packaging/windows/` | GPL-2.0-or-later | `scripts/`, `OpenRGB2.cmd`, `OpenRGB2.vbs`, `INSTALL.md`, `RELEASE.md`, `NOTICES.txt`, `licenses/` |
 | Desktop shortcut icon | `vendor/OpenRGB/qt/OpenRGB.ico` | GPL-2.0-or-later | `OpenRGB2.ico` |
 

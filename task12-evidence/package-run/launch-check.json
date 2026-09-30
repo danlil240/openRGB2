@@ -1,0 +1,25 @@
+{
+  "launched_with_env": {
+    "PATH": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\package\\OpenRGB2-0.1.0-win64;C:\\Windows\\System32;C:\\Windows",
+    "SYSTEMROOT": "C:\\WINDOWS",
+    "QML2_IMPORT_PATH": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\package\\OpenRGB2-0.1.0-win64\\qml",
+    "OPENRGB2_QA": "1",
+    "OPENRGB2_QA_PORT": "5587",
+    "QSG_INFO": "1"
+  },
+  "engine_get": {
+    "managed": true,
+    "id": "qa-desk",
+    "workspace_revision": 1,
+    "generation": 1,
+    "external_change": "none"
+  },
+  "ui_ping_ok": true,
+  "ui_state": {
+    "title": "OpenRGB2",
+    "width": 1929,
+    "height": 958,
+    "visible": true
+  },
+  "note": "engine+UI launched with PATH=<pkg>;System32;Windows only (pkg_launch.py); engine get + QA-socket ping/state prove live connectivity"
+}

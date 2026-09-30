@@ -967,17 +967,22 @@ void WorkspaceController::saveCopy(const QString& name)
     pending_doc_sha_   = Sha256Hex(doc.dump(2));
     pending_save_name_ = name;
     SetSaving(true);
+    /* save_copy asserts the TARGET does not exist — the
+       base revisions the session knows belong to the SOURCE
+       workspace; the store's gate compares against the
+       target marker, so a copy to a fresh name must say 0
+       (an existing id refuses honestly with
+       revision_conflict — a copy never silently
+       overwrites). */
     const int id = SendCommand(
         QStringLiteral("save_copy"),
         QVariantMap({
             { QStringLiteral("id"),   SlugFor(name) },
             { QStringLiteral("name"), name },
             { QStringLiteral("base_revision"),
-              QVariant::fromValue<qulonglong>(
-                  session_.BaseRevision()) },
+              QVariant::fromValue<qulonglong>(0) },
             { QStringLiteral("resource_revision"),
-              QVariant::fromValue<qulonglong>(
-                  session_.ResourceRevision()) },
+              QVariant::fromValue<qulonglong>(0) },
             { QStringLiteral("document"),
               JsonToVariant(doc).toMap() },
         }),

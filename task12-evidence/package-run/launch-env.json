@@ -1,0 +1,36 @@
+{
+  "engine": [
+    "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\package\\OpenRGB2-0.1.0-win64\\openrgb2-engine.exe",
+    "--ipc",
+    "--no-scan",
+    "--no-instance-guard",
+    "--no-power-monitor",
+    "--pipe",
+    "\\\\.\\pipe\\openrgb2-pkg-engine",
+    "--workspace-root",
+    "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\package\\OpenRGB2-0.1.0-win64\\profiles\\local\\workspaces",
+    "--devices-dir",
+    "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\package\\OpenRGB2-0.1.0-win64\\presets\\devices",
+    "--effects-dir",
+    "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\package\\OpenRGB2-0.1.0-win64\\presets\\effects",
+    "--state",
+    "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\package\\OpenRGB2-0.1.0-win64\\profiles\\local\\engine-state.json"
+  ],
+  "ui": [
+    "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\package\\OpenRGB2-0.1.0-win64\\openrgb2-ui.exe",
+    "--pipe",
+    "\\\\.\\pipe\\openrgb2-pkg-engine",
+    "--qa",
+    "5587"
+  ],
+  "env": {
+    "PATH": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\package\\OpenRGB2-0.1.0-win64;C:\\Windows\\System32;C:\\Windows",
+    "SYSTEMROOT": "C:\\WINDOWS",
+    "QML2_IMPORT_PATH": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\package\\OpenRGB2-0.1.0-win64\\qml",
+    "OPENRGB2_QA": "1",
+    "OPENRGB2_QA_PORT": "5587",
+    "QSG_INFO": "1"
+  },
+  "cwd": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\package\\OpenRGB2-0.1.0-win64",
+  "note": "PATH=<pkg>;C:\\Windows\\System32;C:\\Windows \u2014 clean-PATH claim evidence"
+}

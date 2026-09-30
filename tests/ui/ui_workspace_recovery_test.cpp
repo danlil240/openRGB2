@@ -487,8 +487,14 @@ int main(int argc, char** argv)
             return rig.ctl.externalChange().isEmpty(); }, 10000));
         /* The recovered publish adopted — the revision
            rewound to the backup marker's, and the doc the
-           session holds is what the backup carries. */
-        CHECK(rig.ctl.workspaceRevision() < 3);
+           session holds is what the backup carries. The
+           fetch must pull the RECOVERED candidate — a build
+           whose DocumentBytes still read the corrupt
+           marker-selected generation surfaced
+           "workspace document failed to parse" here. */
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.workspaceRevision() < 3; }, 8000));
+        CHECK(rig.ctl.error().isEmpty());
         CHECK(rig.ctl.Session().Working().meta.name == "first");
     }
 

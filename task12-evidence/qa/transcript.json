@@ -23,770 +23,6 @@
   },
   {
     "req": {
-      "op": "click",
-      "sel": "wsActionsButton"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "x": 682.5,
-        "y": -245
-      }
-    }
-  },
-  {
-    "step": "open-ws-actions",
-    "status": "pass",
-    "detail": "{'x': 682.5, 'y': -245}"
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "JSON.stringify({list:workspace.workspaceList,id:workspace.workspaceId})"
-    },
-    "reply": {
-      "ok": true,
-      "result": "{\"list\":[],\"id\":\"qa-desk\"}"
-    }
-  },
-  {
-    "step": "ws-list",
-    "status": "pass",
-    "detail": "{'list': [], 'id': 'qa-desk'}"
-  },
-  {
-    "req": {
-      "op": "shot",
-      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\10-ws-actions.png"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "height": 958,
-        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\10-ws-actions.png",
-        "width": 1929
-      }
-    }
-  },
-  {
-    "step": "shot-ws-actions",
-    "status": "pass",
-    "detail": "10-ws-actions.png"
-  },
-  {
-    "req": {
-      "op": "key",
-      "key": "Escape"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "key": 16777216,
-        "mods": 0
-      }
-    }
-  },
-  {
-    "step": "close-dialog",
-    "status": "pass",
-    "detail": "{'key': 16777216, 'mods': 0}"
-  },
-  {
-    "req": {
-      "op": "ping"
-    },
-    "reply": {
-      "ok": true,
-      "result": "pong"
-    }
-  },
-  {
-    "req": {
-      "op": "click",
-      "sel": "navLayout"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "x": 110,
-        "y": 172
-      }
-    }
-  },
-  {
-    "req": {
-      "op": "set",
-      "sel": "layoutScroll",
-      "prop": "contentY",
-      "value": 0
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "prop": "contentY",
-        "value": 0
-      }
-    }
-  },
-  {
-    "req": {
-      "op": "geom",
-      "sel": "wsActionsButton"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "ancestors": [
-          "QQuickRowLayout(QQuickRowLayout)",
-          "QQuickColumn(QQuickColumn)",
-          "QQuickItem(QQuickItem)",
-          "layoutScroll(QQuickFlickable)",
-          "layoutPage(LayoutPage)",
-          "QQuickStackLayout(QQuickStackLayout)",
-          "QQuickColumnLayout(QQuickColumnLayout)",
-          "QQuickRowLayout(QQuickRowLayout)",
-          "Main(QQuickContentItem)",
-          "QQuickRootItem(QQuickRootItem)"
-        ],
-        "clip": false,
-        "enabled": true,
-        "focus": false,
-        "height": 34,
-        "i": 0,
-        "implicitHeight": 34,
-        "implicitWidth": 105,
-        "name": "wsActionsButton",
-        "rect": [
-          630,
-          138,
-          105,
-          34
-        ],
-        "text": "Workspace…",
-        "type": "AppButton",
-        "visible": true,
-        "width": 105
-      }
-    }
-  },
-  {
-    "step": "scroll-to-wsbtn",
-    "status": "pass",
-    "detail": "True"
-  },
-  {
-    "req": {
-      "op": "click",
-      "sel": "wsActionsButton"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "x": 682.5,
-        "y": 155
-      }
-    }
-  },
-  {
-    "step": "open-ws-actions",
-    "status": "pass",
-    "detail": "{'x': 682.5, 'y': 155}"
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "JSON.stringify({list:workspace.workspaceList,id:workspace.workspaceId})"
-    },
-    "reply": {
-      "ok": true,
-      "result": "{\"list\":[\"qa-desk\"],\"id\":\"qa-desk\"}"
-    }
-  },
-  {
-    "step": "ws-list",
-    "status": "pass",
-    "detail": "{'list': ['qa-desk'], 'id': 'qa-desk'}"
-  },
-  {
-    "req": {
-      "op": "shot",
-      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\10-ws-actions.png"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "height": 958,
-        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\10-ws-actions.png",
-        "width": 1929
-      }
-    }
-  },
-  {
-    "step": "shot-ws-actions",
-    "status": "pass",
-    "detail": "10-ws-actions.png"
-  },
-  {
-    "req": {
-      "op": "key",
-      "key": "Escape"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "key": 16777216,
-        "mods": 0
-      }
-    }
-  },
-  {
-    "step": "close-dialog",
-    "status": "pass",
-    "detail": "{'key': 16777216, 'mods': 0}"
-  },
-  {
-    "req": {
-      "op": "ping"
-    },
-    "reply": {
-      "ok": true,
-      "result": "pong"
-    }
-  },
-  {
-    "step": "tamper-target",
-    "detail": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\run\\workspaces\\qa-desk\\generations\\gen-000006\\document.json"
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": true
-    }
-  },
-  {
-    "step": "ext-change-surfaced",
-    "status": "pass",
-    "detail": "True"
-  },
-  {
-    "req": {
-      "op": "shot",
-      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\11-external-change.png"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "height": 958,
-        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\11-external-change.png",
-        "width": 1929
-      }
-    }
-  },
-  {
-    "step": "shot-ext-change",
-    "status": "pass",
-    "detail": "11-external-change.png"
-  },
-  {
-    "req": {
-      "op": "click",
-      "sel": "wsReloadDisk"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "x": 1848,
-        "y": 72
-      }
-    }
-  },
-  {
-    "step": "ui-reload-disk",
-    "status": "pass",
-    "detail": "{'x': 1848, 'y': 72}"
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "step": "reload-settled",
-    "status": "pass",
-    "detail": "False"
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "JSON.stringify({rev:workspace.workspaceRevision,dirty:workspace.dirty,err:workspace.error})"
-    },
-    "reply": {
-      "ok": true,
-      "result": "{\"rev\":6,\"dirty\":false,\"err\":\"\"}"
-    }
-  },
-  {
-    "step": "after-recovery",
-    "status": "pass",
-    "detail": "{'rev': 6, 'dirty': False, 'err': ''}"
-  },
-  {
-    "req": {
-      "op": "shot",
-      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\12-recovered.png"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "height": 958,
-        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\12-recovered.png",
-        "width": 1929
-      }
-    }
-  },
-  {
-    "step": "shot-recovered",
-    "status": "pass",
-    "detail": "12-recovered.png"
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "effectEdit.addLayer('static')"
-    },
-    "reply": {
-      "ok": true,
-      "result": null
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.save()"
-    },
-    "reply": {
-      "ok": true,
-      "result": null
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.dirty===false"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.dirty===false"
-    },
-    "reply": {
-      "ok": true,
-      "result": true
-    }
-  },
-  {
-    "step": "save-after-recovery",
-    "status": "pass",
-    "detail": "True"
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "JSON.stringify({rev:workspace.workspaceRevision,err:workspace.error,dirty:workspace.dirty})"
-    },
-    "reply": {
-      "ok": true,
-      "result": "{\"rev\":7,\"err\":\"\",\"dirty\":false}"
-    }
-  },
-  {
-    "step": "post-recovery-state",
-    "status": "pass",
-    "detail": "{'rev': 7, 'err': '', 'dirty': False}"
-  },
-  {
-    "req": {
-      "op": "shot",
-      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\13-healed.png"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "height": 958,
-        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\13-healed.png",
-        "width": 1929
-      }
-    }
-  },
-  {
-    "step": "shot-healed",
-    "status": "pass",
-    "detail": "13-healed.png"
-  },
-  {
-    "req": {
-      "op": "ping"
-    },
-    "reply": {
-      "ok": true,
-      "result": "pong"
-    }
-  },
-  {
-    "step": "calibration-status",
-    "status": "pass",
-    "detail": "{\"active\": false, \"ending\": false, \"frames_written\": 0, \"last_shown\": -2, \"led_count\": 0, \"owner\": false, \"owns_group\": false, \"starting\": false, \"zone\": \"\", \"zone_index\": -1}"
-  },
-  {
-    "step": "calibration-begin-refused",
-    "status": "pass",
-    "detail": "{\"code\": 7, \"detail\": \"device_gone\", \"error\": \"unavailable\", \"message\": \"controller 'none' is not in the current topology\", \"_error\": true}"
-  },
-  {
-    "req": {
-      "op": "click",
-      "sel": "navDevices"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "x": 110,
-        "y": 220
-      }
-    }
-  },
-  {
-    "step": "devices-nav",
-    "status": "pass",
-    "detail": "{'x': 110, 'y': 220}"
-  },
-  {
-    "req": {
-      "op": "shot",
-      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\14-devices-empty.png"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "height": 958,
-        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\14-devices-empty.png",
-        "width": 1929
-      }
-    }
-  },
-  {
-    "step": "shot-devices",
-    "status": "pass",
-    "detail": "14-devices-empty.png"
-  },
-  {
-    "req": {
-      "op": "ping"
-    },
-    "reply": {
-      "ok": true,
-      "result": "pong"
-    }
-  },
-  {
-    "req": {
-      "op": "click",
-      "sel": "navLayout"
-    },
-    "reply": {
-      "ok": true,
-      "result": {
-        "x": 110,
-        "y": 172
-      }
-    }
-  },
-  {
-    "req": {
       "op": "eval",
       "code": "if(typeof uiPrefs!=='undefined')uiPrefs.layoutShow3d=true"
     },
@@ -1583,7 +819,7 @@
           "QQuickRootItem(QQuickRootItem)"
         ],
         "clip": false,
-        "enabled": false,
+        "enabled": true,
         "focus": false,
         "height": 34,
         "i": 0,
@@ -1633,13 +869,13 @@
     },
     "reply": {
       "ok": true,
-      "result": "{\"list\":[],\"id\":\"\"}"
+      "result": "{\"list\":[\"qa-desk\"],\"id\":\"qa-desk\"}"
     }
   },
   {
     "step": "ws-list",
     "status": "pass",
-    "detail": "{'list': [], 'id': ''}"
+    "detail": "{'list': ['qa-desk'], 'id': 'qa-desk'}"
   },
   {
     "req": {
@@ -1680,7 +916,7 @@
   },
   {
     "step": "tamper-target",
-    "detail": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\run\\workspaces\\qa-desk\\generations\\gen-000008\\document.json"
+    "detail": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\package\\OpenRGB2-0.1.0-win64\\profiles\\local\\workspaces\\qa-desk\\generations\\gen-000001\\document.json"
   },
   {
     "req": {
@@ -1739,333 +975,13 @@
     },
     "reply": {
       "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
+      "result": true
     }
   },
   {
     "step": "ext-change-surfaced",
     "status": "pass",
-    "detail": "False"
+    "detail": "True"
   },
   {
     "req": {
@@ -2092,15 +1008,17 @@
       "sel": "wsReloadDisk"
     },
     "reply": {
-      "error": "not_found",
-      "message": "no item matches selector",
-      "ok": false
+      "ok": true,
+      "result": {
+        "x": 1848,
+        "y": 72
+      }
     }
   },
   {
     "step": "ui-reload-disk",
-    "status": "fail",
-    "detail": "{'op': 'click', 'sel': 'wsReloadDisk'} -> {'error': 'not_found', 'message': 'no item matches selector', 'ok': False}"
+    "status": "pass",
+    "detail": "{'x': 1848, 'y': 72}"
   },
   {
     "req": {
@@ -2109,13 +1027,373 @@
     },
     "reply": {
       "ok": true,
-      "result": true
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
     }
   },
   {
     "step": "reload-settled",
     "status": "pass",
-    "detail": "True"
+    "detail": "False"
   },
   {
     "req": {
@@ -2193,13 +1471,13 @@
     },
     "reply": {
       "ok": true,
-      "result": "{\"rev\":1,\"err\":\"engine unavailable — the draft stays local\",\"dirty\":false}"
+      "result": "{\"rev\":1,\"err\":\"\",\"dirty\":false}"
     }
   },
   {
     "step": "post-recovery-state",
     "status": "pass",
-    "detail": "{'rev': 1, 'err': 'engine unavailable — the draft stays local', 'dirty': False}"
+    "detail": "{'rev': 1, 'err': '', 'dirty': False}"
   },
   {
     "req": {
@@ -2384,7 +1662,7 @@
         "parent": "viewportLoader",
         "rect": [
           260,
-          370,
+          332,
           1283,
           430
         ],
@@ -2507,7 +1785,7 @@
   {
     "step": "3d-pick",
     "status": "pass",
-    "detail": "(901.5, 649.5, 'kb')"
+    "detail": "(901.5, 611.5, 'kb')"
   },
   {
     "req": {
@@ -2537,14 +1815,14 @@
       "ok": true,
       "result": {
         "x": 283,
-        "y": 345
+        "y": 307
       }
     }
   },
   {
     "step": "view-2d",
     "status": "pass",
-    "detail": "{'x': 283, 'y': 345}"
+    "detail": "{'x': 283, 'y': 307}"
   },
   {
     "req": {
@@ -2584,14 +1862,14 @@
       "ok": true,
       "result": {
         "x": 890.9708969804896,
-        "y": 531.3015852694128
+        "y": 493.3015852694128
       }
     }
   },
   {
     "step": "2d-select-canvasObj_kb",
     "status": "pass",
-    "detail": "{'x': 890.9708969804896, 'y': 531.3015852694128}"
+    "detail": "{'x': 890.9708969804896, 'y': 493.3015852694128}"
   },
   {
     "req": {
@@ -3012,7 +2290,7 @@
         "clip": true,
         "enabled": true,
         "focus": false,
-        "height": 799,
+        "height": 857,
         "i": 0,
         "implicitHeight": 0,
         "implicitWidth": 0,
@@ -3021,7 +2299,7 @@
           220,
           101,
           1709,
-          799
+          857
         ],
         "type": "QQuickFlickable",
         "visible": true,
@@ -3047,7 +2325,7 @@
           220,
           101,
           1709,
-          799
+          857
         ],
         "type": "QQuickFlickable",
         "value": 0,
@@ -3472,6 +2750,16 @@
     },
     "reply": {
       "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.saving===false"
+    },
+    "reply": {
+      "ok": true,
       "result": true
     }
   },
@@ -3487,13 +2775,13 @@
     },
     "reply": {
       "ok": true,
-      "result": "{\"dirty\":true,\"rev\":1}"
+      "result": "{\"dirty\":false,\"rev\":3}"
     }
   },
   {
     "step": "after-save",
     "status": "pass",
-    "detail": "{'dirty': True, 'rev': 1}"
+    "detail": "{'dirty': False, 'rev': 3}"
   },
   {
     "req": {
@@ -3660,7 +2948,7 @@
   },
   {
     "step": "tamper-target",
-    "detail": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\run\\workspaces\\qa-desk\\generations\\gen-000008\\document.json"
+    "detail": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\package\\OpenRGB2-0.1.0-win64\\profiles\\local\\workspaces\\qa-desk\\generations\\gen-000003\\document.json"
   },
   {
     "req": {
@@ -3699,343 +2987,13 @@
     },
     "reply": {
       "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
-    }
-  },
-  {
-    "req": {
-      "op": "eval",
-      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
-    },
-    "reply": {
-      "ok": true,
-      "result": false
+      "result": true
     }
   },
   {
     "step": "ext-change-surfaced",
     "status": "pass",
-    "detail": "False"
+    "detail": "True"
   },
   {
     "req": {
@@ -4062,15 +3020,17 @@
       "sel": "wsReloadDisk"
     },
     "reply": {
-      "error": "not_found",
-      "message": "no item matches selector",
-      "ok": false
+      "ok": true,
+      "result": {
+        "x": 1848,
+        "y": 72
+      }
     }
   },
   {
     "step": "ui-reload-disk",
-    "status": "fail",
-    "detail": "{'op': 'click', 'sel': 'wsReloadDisk'} -> {'error': 'not_found', 'message': 'no item matches selector', 'ok': False}"
+    "status": "pass",
+    "detail": "{'x': 1848, 'y': 72}"
   },
   {
     "req": {
@@ -4079,13 +3039,373 @@
     },
     "reply": {
       "ok": true,
-      "result": true
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
     }
   },
   {
     "step": "reload-settled",
     "status": "pass",
-    "detail": "True"
+    "detail": "False"
   },
   {
     "req": {
@@ -4094,13 +3414,13 @@
     },
     "reply": {
       "ok": true,
-      "result": "{\"rev\":1,\"dirty\":true,\"err\":\"engine unavailable — the draft stays local\"}"
+      "result": "{\"rev\":3,\"dirty\":false,\"err\":\"\"}"
     }
   },
   {
     "step": "after-recovery",
     "status": "pass",
-    "detail": "{'rev': 1, 'dirty': True, 'err': 'engine unavailable — the draft stays local'}"
+    "detail": "{'rev': 3, 'dirty': False, 'err': ''}"
   },
   {
     "req": {
@@ -4173,13 +3493,13 @@
     },
     "reply": {
       "ok": true,
-      "result": "{\"rev\":2,\"err\":\"\",\"dirty\":false}"
+      "result": "{\"rev\":4,\"err\":\"\",\"dirty\":false}"
     }
   },
   {
     "step": "post-recovery-state",
     "status": "pass",
-    "detail": "{'rev': 2, 'err': '', 'dirty': False}"
+    "detail": "{'rev': 4, 'err': '', 'dirty': False}"
   },
   {
     "req": {

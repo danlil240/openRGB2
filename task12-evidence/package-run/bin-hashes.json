@@ -1,0 +1,17 @@
+{
+  "openrgb2-engine.exe": {
+    "build_sha256": "c413d9d186712965ca8c0d4b618fea4f83fb48487f690b603e2e768c88bcd6c0",
+    "packaged_sha256": "c413d9d186712965ca8c0d4b618fea4f83fb48487f690b603e2e768c88bcd6c0",
+    "identical": true
+  },
+  "openrgb2-ui.exe": {
+    "build_sha256": "880a4b528372df8b7e47d301fe99458eb2add0c867efba38ffc26ee130047b1e",
+    "packaged_sha256": "880a4b528372df8b7e47d301fe99458eb2add0c867efba38ffc26ee130047b1e",
+    "identical": true
+  },
+  "openrgb2-ctl.exe": {
+    "build_sha256": "14643dfc6051a3b62e0d2e4ee4ecff6480ce0ecd6145552bd0e26e50094c22c9",
+    "packaged_sha256": "14643dfc6051a3b62e0d2e4ee4ecff6480ce0ecd6145552bd0e26e50094c22c9",
+    "identical": true
+  }
+}

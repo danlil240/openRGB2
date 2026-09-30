@@ -1,0 +1,769 @@
+[
+  {
+    "req": {
+      "op": "ping"
+    },
+    "reply": {
+      "ok": true,
+      "result": "pong"
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "JSON.stringify({id:workspace.workspaceId,ready:workspace.ready})"
+    },
+    "reply": {
+      "ok": true,
+      "result": "{\"id\":\"qa-desk\",\"ready\":true}"
+    }
+  },
+  {
+    "step": "current-ws",
+    "status": "pass",
+    "detail": "{'id': 'qa-desk', 'ready': True}"
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "navLayout"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 110,
+        "y": 172
+      }
+    }
+  },
+  {
+    "step": "nav-layout",
+    "status": "pass",
+    "detail": "{'x': 110, 'y': 172}"
+  },
+  {
+    "req": {
+      "op": "geom",
+      "sel": "wsActionsButton"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "ancestors": [
+          "QQuickRowLayout(QQuickRowLayout)",
+          "QQuickColumn(QQuickColumn)",
+          "QQuickItem(QQuickItem)",
+          "layoutScroll(QQuickFlickable)",
+          "layoutPage(LayoutPage)",
+          "QQuickStackLayout(QQuickStackLayout)",
+          "QQuickColumnLayout(QQuickColumnLayout)",
+          "QQuickRowLayout(QQuickRowLayout)",
+          "Main(QQuickContentItem)",
+          "QQuickRootItem(QQuickRootItem)"
+        ],
+        "clip": false,
+        "enabled": true,
+        "focus": false,
+        "height": 34,
+        "i": 0,
+        "implicitHeight": 34,
+        "implicitWidth": 105,
+        "name": "wsActionsButton",
+        "rect": [
+          630,
+          196,
+          105,
+          34
+        ],
+        "text": "Workspace…",
+        "type": "AppButton",
+        "visible": true,
+        "width": 105
+      }
+    }
+  },
+  {
+    "step": "scroll-to-actions",
+    "status": "pass",
+    "detail": "[630, 196, 105, 34]"
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "wsActionsButton"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 682.5,
+        "y": 213
+      }
+    }
+  },
+  {
+    "step": "open-actions",
+    "status": "pass",
+    "detail": "{'x': 682.5, 'y': 213}"
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "wsCopyName"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 827.5,
+        "y": 490.5
+      }
+    }
+  },
+  {
+    "step": "copyname-focus",
+    "status": "pass",
+    "detail": "{'x': 827.5, 'y': 490.5}"
+  },
+  {
+    "req": {
+      "op": "type",
+      "sel": "wsCopyName",
+      "text": "qa-copy"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "sent": 7,
+        "text": "qa-copy"
+      }
+    }
+  },
+  {
+    "step": "copyname-type",
+    "status": "pass",
+    "detail": "{'sent': 7, 'text': 'qa-copy'}"
+  },
+  {
+    "req": {
+      "op": "shot",
+      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\30-savecopy-typed.png"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "height": 958,
+        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\30-savecopy-typed.png",
+        "width": 1929
+      }
+    }
+  },
+  {
+    "step": "shot-savecopy-typed",
+    "status": "pass",
+    "detail": "{'height': 958, 'path': 'C:\\\\Users\\\\daniel\\\\.codex\\\\worktrees\\\\studio-import\\\\openRGB2\\\\task12-evidence\\\\qa\\\\shots\\\\30-savecopy-typed.png', 'width': 1929}"
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "wsSaveCopy"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 1277,
+        "y": 496
+      }
+    }
+  },
+  {
+    "step": "savecopy-click",
+    "status": "pass",
+    "detail": "{'x': 1277, 'y': 496}"
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.saving===false"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.saving===false"
+    },
+    "reply": {
+      "ok": true,
+      "result": true
+    }
+  },
+  {
+    "step": "savecopy-settled",
+    "status": "pass",
+    "detail": "True"
+  },
+  {
+    "step": "savecopy-list",
+    "status": "pass",
+    "detail": "['qa-copy', 'qa-desk']"
+  },
+  {
+    "step": "copy-present",
+    "status": "pass",
+    "detail": "True"
+  },
+  {
+    "req": {
+      "op": "shot",
+      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\31-savecopy-done.png"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "height": 958,
+        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\31-savecopy-done.png",
+        "width": 1929
+      }
+    }
+  },
+  {
+    "step": "shot-savecopy-done",
+    "status": "pass",
+    "detail": "{'height': 958, 'path': 'C:\\\\Users\\\\daniel\\\\.codex\\\\worktrees\\\\studio-import\\\\openRGB2\\\\task12-evidence\\\\qa\\\\shots\\\\31-savecopy-done.png', 'width': 1929}"
+  },
+  {
+    "req": {
+      "op": "key",
+      "key": "Escape"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "key": 16777216,
+        "mods": 0
+      }
+    }
+  },
+  {
+    "req": {
+      "op": "geom",
+      "sel": "wsBundleButton"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "ancestors": [
+          "QQuickRowLayout(QQuickRowLayout)",
+          "QQuickColumn(QQuickColumn)",
+          "QQuickItem(QQuickItem)",
+          "layoutScroll(QQuickFlickable)",
+          "layoutPage(LayoutPage)",
+          "QQuickStackLayout(QQuickStackLayout)",
+          "QQuickColumnLayout(QQuickColumnLayout)",
+          "QQuickRowLayout(QQuickRowLayout)",
+          "Main(QQuickContentItem)",
+          "QQuickRootItem(QQuickRootItem)"
+        ],
+        "clip": false,
+        "enabled": true,
+        "focus": false,
+        "height": 34,
+        "i": 0,
+        "implicitHeight": 34,
+        "implicitWidth": 132,
+        "name": "wsBundleButton",
+        "rect": [
+          482,
+          196,
+          132,
+          34
+        ],
+        "text": "Import / Export…",
+        "type": "AppButton",
+        "visible": true,
+        "width": 132
+      }
+    }
+  },
+  {
+    "step": "scroll-to-bundle",
+    "status": "pass",
+    "detail": "[482, 196, 132, 34]"
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "wsBundleButton"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 548,
+        "y": 213
+      }
+    }
+  },
+  {
+    "step": "open-bundle-dialog",
+    "status": "pass",
+    "detail": "{'x': 548, 'y': 213}"
+  },
+  {
+    "req": {
+      "op": "type",
+      "sel": "importPathField",
+      "text": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\conflict-bundle.or2studio"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "sent": 100,
+        "text": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\conflict-bundle.or2studio"
+      }
+    }
+  },
+  {
+    "step": "importpath-type",
+    "status": "pass",
+    "detail": "{'sent': 100, 'text': 'C:\\\\Users\\\\daniel\\\\.codex\\\\worktrees\\\\studio-import\\\\openRGB2\\\\task12-evidence\\\\qa\\\\conflict-bundle.or2studio'}"
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "inspectBtn"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 1303,
+        "y": 319
+      }
+    }
+  },
+  {
+    "step": "inspect-click",
+    "status": "pass",
+    "detail": "{'x': 1303, 'y': 319}"
+  },
+  {
+    "req": {
+      "op": "get",
+      "sel": "importSummary",
+      "prop": "text"
+    },
+    "reply": {
+      "error": "not_found",
+      "message": "no item matches selector",
+      "ok": false
+    }
+  },
+  {
+    "req": {
+      "op": "get",
+      "sel": "importSummary",
+      "prop": "text"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "enabled": true,
+        "focus": false,
+        "i": 0,
+        "name": "importSummary",
+        "prop": "text",
+        "rect": [
+          811,
+          348,
+          360,
+          19
+        ],
+        "text": "conflict desk · 1 type(s) · 0 asset(s) · 0 error(s) · 0 warning(s)",
+        "type": "QQuickText",
+        "value": "conflict desk · 1 type(s) · 0 asset(s) · 0 error(s) · 0 warning(s)",
+        "visible": true
+      }
+    }
+  },
+  {
+    "step": "report-ready",
+    "status": "pass",
+    "detail": "True"
+  },
+  {
+    "req": {
+      "op": "get",
+      "sel": "importSummary",
+      "prop": "text"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "enabled": true,
+        "focus": false,
+        "i": 0,
+        "name": "importSummary",
+        "prop": "text",
+        "rect": [
+          811,
+          348,
+          360,
+          19
+        ],
+        "text": "conflict desk · 1 type(s) · 0 asset(s) · 0 error(s) · 0 warning(s)",
+        "type": "QQuickText",
+        "value": "conflict desk · 1 type(s) · 0 asset(s) · 0 error(s) · 0 warning(s)",
+        "visible": true
+      }
+    }
+  },
+  {
+    "step": "summary-text",
+    "status": "pass",
+    "detail": "conflict desk · 1 type(s) · 0 asset(s) · 0 error(s) · 0 warning(s)"
+  },
+  {
+    "req": {
+      "op": "get",
+      "sel": "rename_qa-strip",
+      "prop": "text"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "enabled": true,
+        "focus": false,
+        "i": 0,
+        "name": "rename_qa-strip",
+        "prop": "text",
+        "rect": [
+          1027,
+          399,
+          95,
+          16
+        ],
+        "text": "qa-strip-imported",
+        "type": "TextField",
+        "value": "qa-strip-imported",
+        "visible": true
+      }
+    }
+  },
+  {
+    "step": "conflict-row",
+    "status": "pass",
+    "detail": "qa-strip-imported"
+  },
+  {
+    "req": {
+      "op": "shot",
+      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\32-conflict-report.png"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "height": 958,
+        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\32-conflict-report.png",
+        "width": 1929
+      }
+    }
+  },
+  {
+    "step": "shot-conflict-report",
+    "status": "pass",
+    "detail": "{'height': 958, 'path': 'C:\\\\Users\\\\daniel\\\\.codex\\\\worktrees\\\\studio-import\\\\openRGB2\\\\task12-evidence\\\\qa\\\\shots\\\\32-conflict-report.png', 'width': 1929}"
+  },
+  {
+    "req": {
+      "op": "type",
+      "sel": "rename_qa-strip",
+      "text": "qa-strip-imported-2",
+      "clear": true
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "sent": 19,
+        "text": "qa-strip-imported-2"
+      }
+    }
+  },
+  {
+    "step": "rename-type",
+    "status": "pass",
+    "detail": "{'sent': 19, 'text': 'qa-strip-imported-2'}"
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "confirmImportBtn"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 1304,
+        "y": 674
+      }
+    }
+  },
+  {
+    "step": "confirm-import",
+    "status": "pass",
+    "detail": "{'x': 1304, 'y': 674}"
+  },
+  {
+    "req": {
+      "op": "get",
+      "sel": "importStatus",
+      "prop": "text"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "enabled": true,
+        "focus": false,
+        "i": 0,
+        "name": "importStatus",
+        "prop": "text",
+        "rect": [
+          811,
+          606,
+          61,
+          16
+        ],
+        "text": "Importing…",
+        "type": "QQuickText",
+        "value": "Importing…",
+        "visible": true
+      }
+    }
+  },
+  {
+    "step": "import-finished",
+    "status": "pass",
+    "detail": "Importing…"
+  },
+  {
+    "req": {
+      "op": "shot",
+      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\33-conflict-committed.png"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "height": 958,
+        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\33-conflict-committed.png",
+        "width": 1929
+      }
+    }
+  },
+  {
+    "step": "shot-import-done",
+    "status": "pass",
+    "detail": "{'height': 958, 'path': 'C:\\\\Users\\\\daniel\\\\.codex\\\\worktrees\\\\studio-import\\\\openRGB2\\\\task12-evidence\\\\qa\\\\shots\\\\33-conflict-committed.png', 'width': 1929}"
+  },
+  {
+    "step": "imported-ws-list",
+    "status": "pass",
+    "detail": "['conflict-bundle-or2studio', 'qa-copy', 'qa-desk']"
+  },
+  {
+    "req": {
+      "op": "key",
+      "key": "Escape"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "key": 16777216,
+        "mods": 0
+      }
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.openWorkspace('qa-desk');1"
+    },
+    "reply": {
+      "ok": true,
+      "result": 1
+    }
+  },
+  {
+    "step": "reopen-qa-desk",
+    "status": "pass",
+    "detail": "1"
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.workspaceId==='qa-desk'&&workspace.ready"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.workspaceId==='qa-desk'&&workspace.ready"
+    },
+    "reply": {
+      "ok": true,
+      "result": true
+    }
+  },
+  {
+    "step": "qa-desk-ready",
+    "status": "pass",
+    "detail": "True"
+  },
+  {
+    "step": "engine-settled",
+    "status": "pass",
+    "detail": "{'content_sha256': '447d4bf27bcef54928e05e98087bc659fa11eb4a9a777bf046007523d9fab8e6', 'external_change': 'none', 'generation': 2, 'id': 'qa-desk', 'managed': True, 'name': 'QA Desk', 'resource_revision': 1, 'source_form': 'compact-workspace', 'workspace_dir': 'C:\\\\Users\\\\daniel\\\\.codex\\\\worktrees\\\\studio-import\\\\openRGB2\\\\task12-evidence\\\\package\\\\OpenRGB2-0.1.0-win64\\\\profiles\\\\local\\\\workspaces"
+  },
+  {
+    "step": "tamper-target",
+    "detail": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\package\\OpenRGB2-0.1.0-win64\\profiles\\local\\workspaces\\qa-desk\\generations\\gen-000002\\document.json"
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
+    },
+    "reply": {
+      "ok": true,
+      "result": true
+    }
+  },
+  {
+    "step": "ext-change-visible",
+    "status": "pass",
+    "detail": "True"
+  },
+  {
+    "req": {
+      "op": "shot",
+      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\22-external-change.png"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "height": 958,
+        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\22-external-change.png",
+        "width": 1929
+      }
+    }
+  },
+  {
+    "step": "shot-ext-change-2",
+    "status": "pass",
+    "detail": "{'height': 958, 'path': 'C:\\\\Users\\\\daniel\\\\.codex\\\\worktrees\\\\studio-import\\\\openRGB2\\\\task12-evidence\\\\qa\\\\shots\\\\22-external-change.png', 'width': 1929}"
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "wsReloadDisk"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 1848,
+        "y": 72
+      }
+    }
+  },
+  {
+    "step": "ui-reload-disk",
+    "status": "pass",
+    "detail": "{'x': 1848, 'y': 72}"
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": true
+    }
+  },
+  {
+    "step": "reload-settled-2",
+    "status": "pass",
+    "detail": "True"
+  },
+  {
+    "req": {
+      "op": "shot",
+      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\21-recovered.png"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "height": 958,
+        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\21-recovered.png",
+        "width": 1929
+      }
+    }
+  },
+  {
+    "step": "shot-recovered-2",
+    "status": "pass",
+    "detail": "{'height': 958, 'path': 'C:\\\\Users\\\\daniel\\\\.codex\\\\worktrees\\\\studio-import\\\\openRGB2\\\\task12-evidence\\\\qa\\\\shots\\\\21-recovered.png', 'width': 1929}"
+  }
+]

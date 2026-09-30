@@ -20,6 +20,7 @@ import qa as q  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 SHOTS = os.path.join(HERE, "shots")
 PORT = 5584
+WPIPE = None   # wsctl pipe override (packaged runs)
 LOG = []
 
 os.makedirs(SHOTS, exist_ok=True)
@@ -132,6 +133,9 @@ def main():
     if "--port" in sys.argv:
         global PORT
         PORT = int(sys.argv[sys.argv.index("--port") + 1])
+    if "--pipe" in sys.argv:
+        global WPIPE
+        WPIPE = sys.argv[sys.argv.index("--pipe") + 1]
 
     print(f"== workflow driver, qa port {PORT} ==")
     req(op="ping")
@@ -302,7 +306,7 @@ def main():
         print("-- phase 6: external change + recovery --")
         sys.path.insert(0, HERE)
         from wsctl import Client  # noqa: E402
-        c = Client()
+        c = Client(pipe=WPIPE) if WPIPE else Client()
         g = c.ws({"verb": "get"})
         gen = g.get("generation", 0)
         wsdir = g.get("workspace_dir", "")
@@ -353,7 +357,7 @@ def main():
         print("-- phase 7: calibration + devices --")
         sys.path.insert(0, HERE)
         from wsctl import Client  # noqa: E402
-        c = Client()
+        c = Client(pipe=WPIPE) if WPIPE else Client()
         st = c.ws({"verb": "calibration_status"})
         LOG.append({"step": "calibration-status",
                     "status": "pass" if st.get("active") is False
