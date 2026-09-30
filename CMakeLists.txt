@@ -29,10 +29,29 @@ if(NOT Qt6_FOUND)
         "Required for the engine/UI milestones; the offline tests are Qt-free.")
 endif()
 
+# studio-import Task 8: Qt Quick3D is provisioned for the Layout
+# viewport — an OPTIONAL component. A core/basic-UI development build
+# configures without it (the ui/studio/viewport QML subtree is
+# excluded and the Layout page keeps its 2D canvas); the packaged
+# full-Studio build requires it (packaging asserts the module).
+option(OPENRGB2_WITH_QUICK3D
+    "Include the Quick3D Layout viewport (full Studio package)" ON)
+find_package(Qt6 6.8 QUIET COMPONENTS Quick3D)
+set(OPENRGB2_HAVE_QUICK3D OFF)
+if(OPENRGB2_WITH_QUICK3D AND Qt6Quick3D_FOUND)
+    set(OPENRGB2_HAVE_QUICK3D ON)
+elseif(OPENRGB2_WITH_QUICK3D AND Qt6_FOUND)
+    message(STATUS
+        "Qt6Quick3D not found — building the basic UI without the "
+        "Layout 3D viewport (set OPENRGB2_WITH_QUICK3D=OFF to silence).")
+endif()
+
 enable_testing()
 
 # CTest labels defined by the implementation plan (Milestone 0): core, sdk,
 # engine, ui, backend. Targets are added as their milestones land.
+# Shared Qt-free Studio model core — must precede every consumer.
+add_subdirectory(src/core)
 add_subdirectory(src/engine)
 if(Qt6_FOUND)
     # Milestone 4 — the UI process (OpenRGB2.UI QML module + the

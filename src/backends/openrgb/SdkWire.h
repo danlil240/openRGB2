@@ -130,6 +130,15 @@ struct SdkZone
     uint32_t     leds_min   = 0;
     uint32_t     leds_max   = 0;
     uint32_t     leds_count = 0;
+    /* Zone matrix map (keyboards): row-major cells hold the
+       LED index for that grid position or 0xFFFFFFFF for an
+       empty cell — the encoding RGBController::
+       GetMatrixMapDescriptionData serializes. Empty when the
+       zone reports no matrix. Bounded by the u16 on-wire
+       blob size (<= ~16k cells). */
+    uint32_t              matrix_rows = 0;   /* wire "height" */
+    uint32_t              matrix_cols = 0;   /* wire "width"  */
+    std::vector<uint32_t> matrix_map;
 };
 
 struct SdkController
@@ -145,6 +154,9 @@ struct SdkController
     std::vector<SdkMode>  modes;
     std::vector<SdkZone>  zones;
     uint32_t              num_leds = 0;
+    /* Per-LED names in SDK zone order ("Key: Escape", ...) —
+       what scene preparation resolves key emitters against. */
+    std::vector<std::string> led_names;
     std::vector<uint32_t> colors;    /* 0x00BBGGRR */
 };
 

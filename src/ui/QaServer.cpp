@@ -945,10 +945,15 @@ QJsonObject QaServer::OpKey(const QJsonObject& req)
         return Err(QStringLiteral("no_window"),
                    QStringLiteral("no QQuickWindow"));
     }
+    /* Route through the application-level notify, not a bare
+       sendEvent to the window: the ShortcutOverride pass and
+       the QShortcutMap match live in QGuiApplication::notify —
+       sendEvent would skip window Shortcuts entirely (Ctrl+S,
+       Ctrl+1..5 are the real keyboard-access surface). */
     QKeyEvent press(QEvent::KeyPress, key, mods);
-    QCoreApplication::sendEvent(w, &press);
+    QCoreApplication::instance()->notify(w, &press);
     QKeyEvent release(QEvent::KeyRelease, key, mods);
-    QCoreApplication::sendEvent(w, &release);
+    QCoreApplication::instance()->notify(w, &release);
     QJsonObject r;
     r.insert(QStringLiteral("key"), key);
     r.insert(QStringLiteral("mods"), int(mods));
@@ -1112,11 +1117,25 @@ QJsonObject QaServer::OpEval(const QJsonObject& req)
         return Err(QStringLiteral("no_window"),
                    QStringLiteral("no QQuickWindow"));
     }
-    /* `this` = the root ApplicationWindow; context props
-       (bridge, sceneEdit, layoutCtl, diagCtl, uiPrefs) are
-       visible. Escape hatch — trust boundary is the local
-       user who passed --qa. */
-    QQmlExpression expr(engine_.rootContext(), w, code);
+    /* `this` = the root ApplicationWindow by default; when the
+       request carries "sel", `this` is the resolved item — the
+       QA script can then call item-local test seams like
+       StudioViewport.screenPosOf() for real 3D picking.
+       Context props (bridge, workspace, viewport, uiPrefs) stay
+       visible either way. Escape hatch — trust boundary is the
+       local user who passed --qa. */
+    QObject* scope = w;
+    if(req.contains(QStringLiteral("sel")))
+    {
+        QString err;
+        QQuickItem* it = ResolveOne(req.value("sel"), err);
+        if(!it)
+        {
+            return Err(QStringLiteral("not_found"), err);
+        }
+        scope = it;
+    }
+    QQmlExpression expr(engine_.rootContext(), scope, code);
     bool undefined = false;
     const QVariant v = expr.evaluate(&undefined);
     if(expr.hasError())

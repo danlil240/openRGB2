@@ -9,8 +9,13 @@
 #include "EngineBridge.h"
 #include "JsonVariant.h"
 #include "UiSettings.h"
+#include "WorkspaceController.h"
+
+#include "config/StudioConfig.h"
 
 #include <algorithm>
+#include <cmath>
+#include <set>
 
 namespace openrgb2
 {
@@ -143,6 +148,61 @@ void SceneEditController::OnSceneChanged()
        superseded ours before the echo drained (queued events
        are latest-wins per kind): that IS a remote change and
        the pending correlation is dead. */
+    if(WsMode())
+    {
+        /* Workspace mode: the shared session owns draft
+           state — the applied scene push only drives the
+           new-instance playback default and the scene-scoped
+           param latches. model_ stays dormant. */
+        if(!pending_default_preset_.isEmpty())
+        {
+            if(NormalizePresetId(CurrentPresetId()) !=
+               pending_default_preset_.toStdString())
+            {
+                pending_default_preset_.clear();
+            }
+            else if(DocPresetId(doc) ==
+                    pending_default_preset_.toStdString())
+            {
+                pending_default_preset_.clear();
+                if(RequestedMode() !=
+                   QLatin1String("animation_playback"))
+                {
+                    requestMode(
+                        QStringLiteral("animation_playback"));
+                }
+            }
+        }
+        const std::string sname =
+            JStr(doc, "name").toStdString();
+        if(sname != last_scene_name_)
+        {
+            last_scene_name_ = sname;
+            const bool had_state =
+                param_speed_touched_ || param_reverse_touched_ ||
+                param_color_touched_ || param_speed_ != 100 ||
+                param_reverse_ ||
+                param_color_ != QLatin1String("#FF0000");
+            param_speed_           = 100;
+            param_reverse_         = false;
+            param_color_           = QStringLiteral("#FF0000");
+            param_speed_touched_   = false;
+            param_reverse_touched_ = false;
+            param_color_touched_   = false;
+            RestoreSceneParams(QString::fromStdString(sname));
+            if(had_state || param_speed_touched_ ||
+               param_reverse_touched_ || param_color_touched_ ||
+               param_speed_ != 100 || param_reverse_ ||
+               param_color_ != QLatin1String("#FF0000"))
+            {
+                emit paramsChanged();
+            }
+        }
+        emit sceneChanged();
+        emit groupsChanged();
+        return;
+    }
+
     const quint64 rev =
         scene.value(QStringLiteral("revision")).toULongLong();
     bool own_echo = false;
@@ -338,6 +398,167 @@ void SceneEditController::setUiSettings(UiSettings* prefs)
     ui_settings_ = prefs;
 }
 
+/*---------------------------------------------------------*\
+|||| Shared-workspace adaptation (Task 4)                   ||
+\*---------------------------------------------------------*/
+
+void SceneEditController::setWorkspace(WorkspaceController* ws)
+{
+    ws_ = ws;
+    if(ws_ == nullptr)
+    {
+        return;
+    }
+    /* Draft movement and every surfaced controller flag re-
+       paint the same properties the legacy model used to own
+       — the page never sees which document backs it. */
+    connect(ws_, &WorkspaceController::draftEdited, this,
+            [this] {
+                emit workingChanged();
+                emit groupsChanged();
+                emit presetSupportChanged();
+            });
+    connect(ws_, &WorkspaceController::draftChanged, this,
+            [this] {
+                emit sceneChanged();
+                emit workingChanged();
+                emit groupsChanged();
+                emit presetSupportChanged();
+            });
+    connect(ws_, &WorkspaceController::workspaceChanged, this,
+            [this] {
+                emit sceneChanged();
+                emit groupsChanged();
+            });
+    connect(ws_, &WorkspaceController::dirtyChanged,
+            this, &SceneEditController::dirtyChanged);
+    connect(ws_, &WorkspaceController::conflictChanged,
+            this, &SceneEditController::conflictChanged);
+    connect(ws_, &WorkspaceController::savingChanged,
+            this, &SceneEditController::savingChanged);
+    connect(ws_, &WorkspaceController::errorChanged,
+            this, &SceneEditController::saveErrorChanged);
+}
+
+bool SceneEditController::WsMode() const
+{
+    /* A loaded draft without a capable engine is still the
+       shared draft (recovered local work keeps editing —
+       save() reports the honest unavailable state). */
+    return ws_ != nullptr &&
+           ((ws_->available() && ws_->managed()) ||
+            ws_->Session().HasWorking());
+}
+
+bool SceneEditController::WsCommit(
+    const std::string& label,
+    const std::function<bool(studio::StudioDocument&)>& mut)
+{
+    if(!WsMode() || !ws_->Session().HasWorking())
+    {
+        return false;
+    }
+    if(!ws_->Session().CommitDocEdit(label, mut))
+    {
+        return false;
+    }
+    ws_->NoteDraftEdited();
+    return true;
+}
+
+std::string SceneEditController::CurrentPresetId() const
+{
+    if(WsMode() && ws_->Session().HasWorking())
+    {
+        return ws_->Session().Working().effect.preset;
+    }
+    return model_.PresetId();
+}
+
+std::vector<DeviceGroup> SceneEditController::CompactGroups() const
+{
+    std::vector<DeviceGroup> out;
+    const studio::StudioDocument& w = ws_->Session().Working();
+    /* Everything the compact document can take a color for:
+       root instance ids plus nested instance/entity paths —
+       deduped and ordered for a stable list. */
+    std::set<std::string> ids;
+    for(const auto& kv : w.devices)
+    {
+        ids.insert(kv.first);
+    }
+    for(const auto& kv : w.device_settings)
+    {
+        ids.insert(kv.first);
+    }
+    for(const auto& kv : w.object_colors)
+    {
+        ids.insert(kv.first);
+    }
+    for(const std::string& id : ids)
+    {
+        DeviceGroup g;
+        g.id    = id;
+        g.label = id;
+        const auto sit = w.device_settings.find(id);
+        if(sit != w.device_settings.end())
+        {
+            for(const auto& z : sit->second.zones)
+            {
+                g.verified = g.verified || z.second.verified;
+                if(g.binding.empty() &&
+                   !z.second.binding.empty())
+                {
+                    g.binding = z.second.binding;
+                }
+            }
+        }
+        if(!g.binding.empty())
+        {
+            const auto bit = w.bindings.find(g.binding);
+            if(bit != w.bindings.end())
+            {
+                const studio::DeviceBinding& b = bit->second;
+                g.controller_name = b.controller_name;
+                g.vendor          = b.vendor;
+                g.serial          = b.serial;
+                g.location        = b.location;
+                g.device_type     = b.device_type;
+                g.zone_name       = b.zone_name;
+                g.zone_leds       = b.zone_leds;
+            }
+        }
+        /* emitter_count stays 0 — the compact document has no
+           resolved emitters; that count is engine truth the
+           UI does not fabricate. */
+        out.push_back(std::move(g));
+    }
+    return out;
+}
+
+void SceneEditController::WsApplyTargets()
+{
+    if(!WsMode() || !ws_->Session().HasWorking() ||
+       ws_->Session().Working().effect.layers.empty())
+    {
+        return;
+    }
+    const std::vector<std::string> sel = model_.SelectedGroups();
+    WsCommit("set layer targets",
+             [&sel](studio::StudioDocument& w) {
+                 bool changed = false;
+                 for(studio::EffectLayer& l : w.effect.layers)
+                 {
+                     if(l.targets != sel)
+                     {
+                         l.targets = sel;
+                         changed   = true;
+                     }
+                 }
+                 return changed;
+             });
+}
+
 void SceneEditController::PersistSceneParams()
 {
     if(ui_settings_ == nullptr)
@@ -405,13 +626,53 @@ bool SceneEditController::setPreset(const QString& id)
        naming the preset. Existing/migrated scenes stay
        Live: profile loads (LoadWorking) and remote applies
        never arm the latch. */
-    const std::string prev = NormalizePresetId(model_.PresetId());
-    std::string err;
-    if(!model_.SetPreset(id.toStdString(), err))
+    const std::string prev =
+        NormalizePresetId(CurrentPresetId());
+    if(WsMode())
     {
-        SetSaveError(QString::fromStdString(err),
-                     QStringLiteral("input"));
-        return false;
+        if(id.isEmpty())
+        {
+            SetSaveError(QStringLiteral("empty preset id"),
+                         QStringLiteral("input"));
+            return false;
+        }
+        const std::string nid = id.toStdString();
+        bool replaced = false;
+        /* Same semantics as SceneEditModel::SetPreset: a
+           named preset replaces the inline layer stack and
+           marks the effect playing. */
+        const bool ok = WsCommit("set preset",
+            [&](studio::StudioDocument& w) {
+                replaced = !w.effect.layers.empty();
+                if(w.effect.preset == nid &&
+                   w.effect.layers.empty() &&
+                   w.effect.playing)
+                {
+                    return false;      /* no change */
+                }
+                w.effect.preset = nid;
+                w.effect.layers.clear();
+                w.effect.playing = true;
+                return true;
+            });
+        if(!ok)
+        {
+            SetSaveError(QStringLiteral("no working workspace "
+                                        "document"),
+                         QStringLiteral("input"));
+            return false;
+        }
+        ws_preset_replaced_ = replaced;
+    }
+    else
+    {
+        std::string err;
+        if(!model_.SetPreset(id.toStdString(), err))
+        {
+            SetSaveError(QString::fromStdString(err),
+                         QStringLiteral("input"));
+            return false;
+        }
     }
     PlaybackPresetInfo info;
     const std::string picked =
@@ -432,6 +693,54 @@ bool SceneEditController::setPreset(const QString& id)
 
 bool SceneEditController::setSceneName(const QString& name)
 {
+    if(WsMode())
+    {
+        /* Same name rules as SceneEditModel::SetName —
+           trimmed, non-empty, bounded — but the edit lands on
+           the compact document's meta.name. */
+        std::string trimmed = name.toStdString();
+        const std::size_t b = trimmed.find_first_not_of(" \t\r\n");
+        const std::size_t e = trimmed.find_last_not_of(" \t\r\n");
+        trimmed = (b == std::string::npos)
+                      ? std::string()
+                      : trimmed.substr(b, e - b + 1);
+        if(trimmed.empty() || trimmed.size() > 128)
+        {
+            SetSaveError(QStringLiteral("scene name is empty "
+                                        "or over 128 characters"),
+                         QStringLiteral("input"));
+            return false;
+        }
+        /* A valid name that already IS the draft's name is a
+           success, not a refusal — SetName parity. Returning
+           false here would abort commitPendingEdits() before
+           save() ever runs, leaving the conflict strip's
+           "Keep my draft" (and Lighting's Save) dead exactly
+           when the draft is dirty but the name is untouched. */
+        if(ws_->Session().HasWorking() &&
+           ws_->Session().Working().meta.name == trimmed)
+        {
+            SetSaveError(QString());
+            return true;
+        }
+        if(!WsCommit("rename scene",
+                     [&](studio::StudioDocument& w) {
+                         if(w.meta.name == trimmed)
+                         {
+                             return false;
+                         }
+                         w.meta.name = trimmed;
+                         return true;
+                     }))
+        {
+            SetSaveError(QStringLiteral("no working workspace "
+                                        "document"),
+                         QStringLiteral("input"));
+            return false;
+        }
+        TouchWorking();
+        return true;
+    }
     std::string err;
     if(!model_.SetName(name.toStdString(), err))
     {
@@ -450,6 +759,27 @@ bool SceneEditController::setSceneName(const QString& name)
 
 void SceneEditController::setBrightness(double v)
 {
+    if(WsMode())
+    {
+        if(!std::isfinite(v))
+        {
+            return;
+        }
+        const float c = (float)std::min(1.0, std::max(0.0, v));
+        if(WsCommit("set brightness",
+                    [c](studio::StudioDocument& w) {
+                        if(w.brightness == c)
+                        {
+                            return false;
+                        }
+                        w.brightness = c;
+                        return true;
+                    }))
+        {
+            TouchWorking();
+        }
+        return;
+    }
     if(model_.SetBrightness(v))
     {
         TouchWorking();
@@ -458,6 +788,29 @@ void SceneEditController::setBrightness(double v)
 
 void SceneEditController::setEffectSpeed(double v)
 {
+    if(WsMode())
+    {
+        if(!std::isfinite(v))
+        {
+            return;
+        }
+        /* SceneEditModel::SetEffectSpeed clamps to the same
+           bounds the scene schema enforces. */
+        const float c = (float)std::min(8.0, std::max(0.05, v));
+        if(WsCommit("set effect speed",
+                    [c](studio::StudioDocument& w) {
+                        if(w.effect.speed == c)
+                        {
+                            return false;
+                        }
+                        w.effect.speed = c;
+                        return true;
+                    }))
+        {
+            TouchWorking();
+        }
+        return;
+    }
     if(model_.SetEffectSpeed(v))
     {
         TouchWorking();
@@ -466,6 +819,27 @@ void SceneEditController::setEffectSpeed(double v)
 
 void SceneEditController::setEffectIntensity(double v)
 {
+    if(WsMode())
+    {
+        if(!std::isfinite(v))
+        {
+            return;
+        }
+        const float c = (float)std::min(1.0, std::max(0.0, v));
+        if(WsCommit("set effect intensity",
+                    [c](studio::StudioDocument& w) {
+                        if(w.effect.intensity == c)
+                        {
+                            return false;
+                        }
+                        w.effect.intensity = c;
+                        return true;
+                    }))
+        {
+            TouchWorking();
+        }
+        return;
+    }
     if(model_.SetEffectIntensity(v))
     {
         TouchWorking();
@@ -478,9 +852,19 @@ bool SceneEditController::setGroupColor(const QString& hex)
     if(ids.empty())
     {
         /* "All devices" — every device object in the doc. */
-        for(const DeviceGroup& g : model_.DeviceGroups())
+        if(WsMode())
         {
-            ids.push_back(g.id);
+            for(const DeviceGroup& g : CompactGroups())
+            {
+                ids.push_back(g.id);
+            }
+        }
+        else
+        {
+            for(const DeviceGroup& g : model_.DeviceGroups())
+            {
+                ids.push_back(g.id);
+            }
         }
     }
     if(ids.empty())
@@ -489,6 +873,39 @@ bool SceneEditController::setGroupColor(const QString& hex)
                                     "scene"),
                      QStringLiteral("input"));
         return false;
+    }
+    if(WsMode())
+    {
+        if(!SceneEditModel::IsHexColor(hex.toStdString()))
+        {
+            SetSaveError(QStringLiteral("color must be "
+                                        "\"#RRGGBB\""),
+                         QStringLiteral("input"));
+            return false;
+        }
+        const std::string n = SceneEditModel::NormalizeHexColor(
+            hex.toStdString());
+        const unsigned v = (unsigned)std::stoul(
+            n.substr(1), nullptr, 16);
+        const studio::SceneColor c = studio::MakeSceneColor(
+            (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+        if(!WsCommit("set color",
+                     [&](studio::StudioDocument& w) {
+                         for(const std::string& id : ids)
+                         {
+                             w.object_colors[id] = c;
+                         }
+                         return !ids.empty();
+                     }))
+        {
+            SetSaveError(QStringLiteral("no working workspace "
+                                        "document"),
+                         QStringLiteral("input"));
+            return false;
+        }
+        SetSaveError(QString());
+        TouchWorking();
+        return true;
     }
     bool ok = true;
     std::string err;
@@ -524,6 +941,7 @@ void SceneEditController::toggleGroup(const QString& objectId)
         sel.erase(it);
     }
     model_.SetSelectedGroups(sel);
+    WsApplyTargets();   /* no-op outside workspace mode      */
     emit selectedGroupsChanged();
     emit workingChanged();          /* targets may have moved */
     emit dirtyChanged();
@@ -532,6 +950,7 @@ void SceneEditController::toggleGroup(const QString& objectId)
 void SceneEditController::selectAllGroups()
 {
     model_.SetSelectedGroups({});
+    WsApplyTargets();
     emit selectedGroupsChanged();
     emit workingChanged();
     emit dirtyChanged();
@@ -543,6 +962,31 @@ void SceneEditController::selectAllGroups()
 
 void SceneEditController::save()
 {
+    if(WsMode())
+    {
+        /* Shared-draft save: the workspace commit job carries
+           the compact document; dirty/conflict/rejection
+           handling lives in WorkspaceController. */
+        if(!ws_->Session().HasWorking())
+        {
+            SetSaveError(QStringLiteral("nothing to save"),
+                         QStringLiteral("input"));
+            return;
+        }
+        if(ws_->Session().Working().devices.empty())
+        {
+            /* Same guard as the legacy path — a deviceless
+               commit would freeze output while reporting
+               success. */
+            SetSaveError(QStringLiteral("no device objects in "
+                                        "the scene"),
+                         QStringLiteral("input"));
+            return;
+        }
+        SetSaveError(QString());
+        ws_->save();
+        return;
+    }
     if(saving_)
     {
         return;                 /* one SET_SCENE in flight */
@@ -589,6 +1033,16 @@ void SceneEditController::discardEdits()
     /* Discarding reverts the working copy — the preset pick
        that armed the new-instance default is gone with it. */
     pending_default_preset_.clear();
+    if(WsMode())
+    {
+        /* Back to the engine-accepted baseline — the durable
+           draft record drops with it (the controller owns
+           that bookkeeping). */
+        ws_preset_replaced_ = false;
+        ws_->resetEdits();
+        TouchWorking();
+        return;
+    }
     model_.DiscardEdits();
     /* The failure being surfaced described edits that no
        longer exist — keeping it would claim "your edits are
@@ -600,6 +1054,13 @@ void SceneEditController::discardEdits()
 
 void SceneEditController::reloadFromEngine()
 {
+    if(WsMode())
+    {
+        /* Re-open the managed workspace from disk — the
+           fetched document adopts wholesale. */
+        ws_->reload();
+        return;
+    }
     /* A fresh applied-state pull supersedes the last save's
        failure state — the working copy is about to be
        replaced by whatever the engine reports (BUG-4). */
@@ -632,7 +1093,7 @@ QVariantMap SceneEditController::FilteredParams() const
 {
     QVariantMap params;
     PlaybackPresetInfo info;
-    if(!PlaybackPresetFromName(model_.PresetId(), info))
+    if(!PlaybackPresetFromName(CurrentPresetId(), info))
     {
         return params;      /* no uploaded preset selected */
     }
@@ -711,7 +1172,7 @@ int SceneEditController::sendPlaybackParams(int speed, bool reverse,
        the UI has nothing honest to seed them with. */
     PlaybackPresetInfo info;
     const bool is_playback =
-        PlaybackPresetFromName(model_.PresetId(), info);
+        PlaybackPresetFromName(CurrentPresetId(), info);
 
     QVariantMap params;
     if(is_playback && info.speed)
@@ -797,6 +1258,24 @@ void SceneEditController::noteParamTouched(const QString& field)
 
 bool SceneEditController::saveProfile(const QString& name)
 {
+    if(WsMode())
+    {
+        if(!ws_->Session().HasWorking())
+        {
+            SetSaveError(QStringLiteral("no workspace document "
+                                        "to save"),
+                         QStringLiteral("input"));
+            return false;
+        }
+        /* The library stores the compact workspace document —
+           loading it back stages a draft; importing it lands
+           it on the engine as its own workspace. */
+        const QString trimmed = name.trimmed();
+        nlohmann::json doc =
+            studio::ToJson(ws_->Session().Working());
+        doc["name"] = trimmed.toStdString();
+        return library_.saveProfile(trimmed, JObj(doc));
+    }
     if(!model_.HasWorking())
     {
         SetSaveError(QStringLiteral("no scene document to save"),
@@ -827,6 +1306,31 @@ bool SceneEditController::loadProfile(const QString& name)
        for migrated profiles), never the new-instance
        animation default. */
     pending_default_preset_.clear();
+    if(WsMode())
+    {
+        /* Only compact workspace documents can become the
+           shared draft — a stored legacy scene doc is refused
+           honestly (the engine migrates it at import time). */
+        studio::StudioDocument d;
+        std::vector<std::string> errs;
+        if(!studio::FromJson(VariantToJson(doc), d, &errs))
+        {
+            SetSaveError(QStringLiteral("profile '%1' is a "
+                                        "legacy scene document — "
+                                        "import it into a "
+                                        "workspace instead")
+                             .arg(name),
+                         QStringLiteral("input"));
+            return false;
+        }
+        ws_->Session().StageWorking(
+            d, "load profile " + name.toStdString());
+        ws_->NoteDraftEdited();
+        ws_preset_replaced_ = false;
+        SetSaveError(QString());
+        TouchWorking();
+        return true;
+    }
     model_.LoadWorking(VariantToJson(doc));
     SetSaveError(QString());
     emit dirtyChanged();
@@ -839,41 +1343,92 @@ bool SceneEditController::deleteProfile(const QString& name)
     return library_.removeProfile(name);
 }
 
+int SceneEditController::importProfilesToWorkspaces()
+{
+    if(ws_ == nullptr || !ws_->available())
+    {
+        SetSaveError(QStringLiteral("workspaces are not "
+                                    "available on this engine"),
+                     QStringLiteral("input"));
+        return 0;
+    }
+    return ws_->importProfiles(&library_);
+}
+
 /*---------------------------------------------------------*\
 ||| Accessors                                                ||
 \*---------------------------------------------------------*/
 
 bool SceneEditController::hasScene() const
 {
+    if(WsMode())
+    {
+        return ws_->Session().HasBaseline();
+    }
     return model_.HasBaseline();
 }
 
 bool SceneEditController::hasWorking() const
 {
+    if(WsMode())
+    {
+        return ws_->Session().HasWorking();
+    }
     return model_.HasWorking();
 }
 
-bool SceneEditController::dirty() const    { return model_.Dirty(); }
-bool SceneEditController::conflict() const { return model_.Conflict(); }
+bool SceneEditController::dirty() const
+{
+    return WsMode() ? ws_->dirty() : model_.Dirty();
+}
+bool SceneEditController::conflict() const
+{
+    return WsMode() ? ws_->conflict() : model_.Conflict();
+}
 bool SceneEditController::presetReplacedLayers() const
 {
-    return model_.PresetReplacedLayers();
+    return WsMode() ? ws_preset_replaced_
+                    : model_.PresetReplacedLayers();
 }
-bool    SceneEditController::saving() const   { return saving_; }
-QString SceneEditController::saveError() const { return save_error_; }
+bool    SceneEditController::saving() const
+{
+    return WsMode() ? ws_->saving() : saving_;
+}
+QString SceneEditController::saveError() const
+{
+    /* In workspace mode engine-side failures surface through
+       the workspace controller; a local refusal (input) still
+       wins while it is fresh. */
+    if(WsMode() && save_error_.isEmpty())
+    {
+        return ws_->error();
+    }
+    return save_error_;
+}
 QString SceneEditController::saveErrorSource() const
 {
+    if(WsMode() && save_error_.isEmpty())
+    {
+        return ws_->errorSource();
+    }
     return save_error_source_;
 }
 
 QString SceneEditController::sceneName() const
 {
+    if(WsMode())
+    {
+        return ws_->Session().HasWorking()
+            ? QString::fromStdString(
+                  ws_->Session().Working().meta.name)
+            : QString();
+    }
     return JStr(model_.Working(), "name");
 }
 
 QString SceneEditController::presetId() const
 {
-    return QString::fromStdString(model_.PresetId());
+    return QString::fromStdString(CurrentPresetId());
 }
 
 namespace
@@ -889,11 +1444,23 @@ double JNum(const nlohmann::json& j, const char* key, double def)
 
 double SceneEditController::brightness() const
 {
+    if(WsMode())
+    {
+        return ws_->Session().HasWorking()
+            ? (double)ws_->Session().Working().brightness
+            : 1.0;
+    }
     return JNum(model_.Working(), "brightness", 1.0);
 }
 
 double SceneEditController::effectSpeed() const
 {
+    if(WsMode())
+    {
+        return ws_->Session().HasWorking()
+            ? (double)ws_->Session().Working().effect.speed
+            : 1.0;
+    }
     const nlohmann::json& w = model_.Working();
     if(w.is_object() && w.contains("effect") &&
        w["effect"].is_object())
@@ -905,6 +1472,12 @@ double SceneEditController::effectSpeed() const
 
 double SceneEditController::effectIntensity() const
 {
+    if(WsMode())
+    {
+        return ws_->Session().HasWorking()
+            ? (double)ws_->Session().Working().effect.intensity
+            : 1.0;
+    }
     const nlohmann::json& w = model_.Working();
     if(w.is_object() && w.contains("effect") &&
        w["effect"].is_object())
@@ -916,6 +1489,30 @@ double SceneEditController::effectIntensity() const
 
 QVariantMap SceneEditController::workingDocument() const
 {
+    if(WsMode())
+    {
+        /* Scene-shaped PROJECTION of the compact draft — the
+           page reads name/brightness/effect.layers/
+           object_colors, so it sees the same fields it always
+           did without ever learning the workspace schema. */
+        if(!ws_->Session().HasWorking())
+        {
+            return QVariantMap();
+        }
+        const nlohmann::json j =
+            studio::ToJson(ws_->Session().Working());
+        nlohmann::json out = nlohmann::json::object();
+        out["name"]       = j.value("name", std::string());
+        out["brightness"] = j.value(
+            "output", nlohmann::json::object())
+                .value("brightness", 1.0);
+        out["effect"]        = j.value("effects",
+                                       nlohmann::json::object());
+        out["object_colors"] = j.value(
+            "colors", nlohmann::json::object())
+                .value("objects", nlohmann::json::object());
+        return JObj(out);
+    }
     return JObj(model_.Working());
 }
 
@@ -1071,7 +1668,9 @@ QVariantMap SceneEditController::ResolveGroupHints(
 QVariantList SceneEditController::deviceGroups()
 {
     QVariantList out;
-    for(const DeviceGroup& g : model_.DeviceGroups())
+    const std::vector<DeviceGroup> groups =
+        WsMode() ? CompactGroups() : model_.DeviceGroups();
+    for(const DeviceGroup& g : groups)
     {
         QVariantMap m;
         m.insert(QStringLiteral("id"),
@@ -1109,6 +1708,11 @@ QStringList SceneEditController::selectedGroups() const
 
 bool SceneEditController::groupsTargetable() const
 {
+    if(WsMode())
+    {
+        return ws_->Session().HasWorking() &&
+               !ws_->Session().Working().effect.layers.empty();
+    }
     return model_.GroupsTargetable();
 }
 
@@ -1139,7 +1743,7 @@ QVariantMap SceneEditController::presetSupport()
     QVariantMap out;
     PlaybackPresetInfo info;
     const bool pb =
-        PlaybackPresetFromName(model_.PresetId(), info);
+        PlaybackPresetFromName(CurrentPresetId(), info);
     out.insert(QStringLiteral("playback"),  pb);
     out.insert(QStringLiteral("speed"),     pb && info.speed);
     out.insert(QStringLiteral("direction"), pb && info.direction);

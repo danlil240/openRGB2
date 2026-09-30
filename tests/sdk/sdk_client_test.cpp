@@ -211,6 +211,58 @@ static void TestEnumeration()
     CHECK(d.LedCount() == 10);
 }
 
+static FakeController Keyboard()
+{
+    FakeController c;
+    c.name     = "Corsair K95";
+    c.vendor   = "Corsair";
+    c.serial   = "K1";
+    c.location = "hid:k1";
+    FakeMode direct; direct.name = "Direct";
+    c.modes = { direct };
+    FakeZone kb;
+    kb.name          = "Keyboard";
+    kb.type          = 2;
+    kb.leds_min      = 6;
+    kb.leds_max      = 6;
+    kb.leds_count    = 6;
+    kb.matrix_rows   = 2;
+    kb.matrix_cols   = 3;
+    kb.matrix_map    = { 0, 1, 2, 3, 0xFFFFFFFFu, 5 };
+    c.zones = { kb };
+    const char* names[] = { "Key: Escape", "Key: A", "Key: S",
+                            "Key: D", "Key: F", "Key: G" };
+    for(const char* n : names)
+    {
+        c.led_names.push_back(n);
+        c.colors.push_back(0);
+    }
+    return c;
+}
+
+static void TestEnumerationMatrixAndLedNames()
+{
+    FakeSdkServer server;
+    server.controllers = { Keyboard() };
+
+    auto client = MakeClient(server);
+    CHECK(client->Connect());
+
+    DeviceSnapshot k;
+    CHECK(client->Snapshot(
+        DeviceKey{ "Corsair:Corsair K95", "K1", "hid:k1", "" },
+        k));
+    /* Matrix geometry + map survive the wire into the zone
+       snapshot; LED names land on the device snapshot. */
+    CHECK(k.zones.size() == 1);
+    CHECK(k.zones[0].matrix_rows == 2);
+    CHECK(k.zones[0].matrix_cols == 3);
+    CHECK(k.zones[0].matrix_map.size() == 6);
+    CHECK(k.zones[0].matrix_map[4] == 0xFFFFFFFFu);
+    CHECK(k.led_names.size() == 6);
+    CHECK(k.led_names[0] == "Key: Escape");
+}
+
 /*---------------------------------------------------------*\
 ||| submitLatest: ONE complete-controller UPDATELEDS        ||
 ||| packet — never three zone uploads                       ||
@@ -423,6 +475,7 @@ int main()
     TestUnsupportedVersionRejected();
     TestUnreachableBackend();
     TestEnumeration();
+    TestEnumerationMatrixAndLedNames();
     TestCompleteControllerWrite();
     TestSubmitValidation();
     TestModeSelection();

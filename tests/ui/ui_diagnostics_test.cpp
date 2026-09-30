@@ -624,7 +624,10 @@ int main(int argc, char** argv)
                         { "id", "audio" },
                         { "enabled", true },
                         { "running", true },
-                        { "status", "listening" } }) }) } });
+                        /* Real sources embed the id in the status
+                           string ("audio: listening") — the journal
+                           detail joins those strings verbatim. */
+                        { "status", "audio: listening" } }) }) } });
         s.srv.SendMsg(MsgType::Event, 0,
             nlohmann::json::object({
                 { "kind", "reactive" },

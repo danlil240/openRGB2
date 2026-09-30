@@ -1,0 +1,442 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// WorkspaceImportDialog — Task 9 portable-workspace popup.
+// Reads a bundle through workspace.readLocalFile, stages the
+// bounded inspect job (the engine unpacks under a scratch
+// root and runs PresetBundle::InspectBundle — nothing lands),
+// shows the report with per-conflict rename fields, then
+// confirmImport applies it non-automatically. The export row
+// drives the same packed-bundle surface the other way.
+
+import QtQuick
+import QtQuick.Controls.Basic
+import QtQuick.Layouts
+import OpenRGB2.UI.theme
+import OpenRGB2.UI.components
+
+Popup {
+    id: dialog
+    objectName: "workspaceImportDialog"
+
+    property var ctlOverride: null
+    function ctl() {
+        if (ctlOverride !== null)
+            return ctlOverride
+        try { return workspace } catch (e) { return null }
+    }
+
+    width: 560; height: 600
+    modal: true
+    closePolicy: Popup.CloseOnEscape
+    padding: 0
+    background: Rectangle {
+        color: Theme.surface
+        radius: Theme.radiusM
+        border.color: Theme.borderStrong
+    }
+
+    /* "idle" | "inspecting" | "report" | "committing" |
+       "done" | "exporting"                                    */
+    property string phase: "idle"
+    property var    report: null
+    property string status: ""
+    property var    renameMap: ({})
+
+    function reset() {
+        phase = "idle"
+        report = null
+        status = ""
+        renameMap = ({})
+    }
+
+    onOpened: reset()
+
+    function readAndInspect() {
+        var c = ctl()
+        if (c === null) { status = qsTr("workspace unavailable"); return }
+        if (phase !== "idle" && phase !== "report") return
+        var r = c.readLocalFile(pathField.text.trim())
+        if (r.ok !== true) {
+            status = String(r.error !== undefined ? r.error
+                                                  : qsTr("read failed"))
+            return
+        }
+        var name = pathField.text.trim()
+        name = name.substring(Math.max(name.lastIndexOf("/"),
+                                       name.lastIndexOf("\\")) + 1)
+        phase = "inspecting"
+        status = qsTr("Inspecting bundle…")
+        /* readLocalFile returns base64 text — inspectImport
+           decodes it before the bounded upload. */
+        c.inspectImport(name, r.base64)
+    }
+
+    /* The confirm button's real work — engine report contract:
+       {valid, types[], conflicts[] (keyed `id`), assets[],
+       warnings[], errors[], has_workspace}. */
+    function confirm() {
+        var c = ctl()
+        if (c === null || report === null || phase === "committing")
+            return
+        var mode = ""
+        if (report.has_workspace === false)
+            mode = "preset_import"      /* types-only bundle */
+        else if (overwriteBox.checked)
+            mode = "current"          /* replace my layout */
+        phase = "committing"
+        status = qsTr("Importing…")
+        c.confirmImport(collectChoices(), mode)
+    }
+
+    function doExport() {
+        var c = ctl()
+        /* "done" is quiescent too — a successful import must
+           not leave the export path dead until reopen. */
+        if (c === null || (phase !== "idle" && phase !== "done")) return
+        phase = "exporting"
+        status = qsTr("Exporting…")
+        /* void — the outcome lands in onExportReady or the
+           controller's error signal; never read a return. */
+        c.exportBundle()
+    }
+
+    /* Conflict rows rebuild this map — {conflict_id: import_id},
+       keyed on the engine report's `id` field. */
+    function collectChoices() {
+        var out = {}
+        var keys = Object.keys(renameMap)
+        for (var i = 0; i < keys.length; i++)
+            out[keys[i]] = renameMap[keys[i]]
+        return out
+    }
+
+    Connections {
+        target: {
+            var c = dialog.ctl()
+            return (c !== null && c.objectName !== undefined) ? c : null
+        }
+        function onImportInspectionReady(rep) {
+            /* Engine report: {valid, types, conflicts, assets,
+               warnings, errors} — `valid` is the gate. */
+            if (rep.valid !== true) {
+                dialog.phase = "idle"
+                var errs = rep.errors !== undefined ? rep.errors : []
+                dialog.status = errs.length
+                    ? String(errs[0])
+                    : qsTr("inspect failed")
+                return
+            }
+            dialog.report = rep
+            var seeds = {}
+            var confs = rep.conflicts !== undefined ? rep.conflicts : []
+            for (var i = 0; i < confs.length; i++)
+                seeds[confs[i].id] =
+                    confs[i].suggested_id !== undefined
+                        ? confs[i].suggested_id : confs[i].id
+            dialog.renameMap = seeds
+            dialog.phase = "report"
+            dialog.status = ""
+        }
+        /* importFinished(name, ok, error) — positional args. */
+        function onImportFinished(name, ok, error) {
+            dialog.phase = ok === true ? "done" : "report"
+            dialog.status = ok === true
+                ? qsTr("Imported '%1' — not applied until you reload")
+                    .arg(String(name))
+                : String(error !== undefined && error !== ""
+                         ? error : qsTr("import failed"))
+        }
+        function onExportReady(name, bytesBase64) {
+            var r = dialog.ctl().writeLocalFile(
+                exportPathField.text.trim(), bytesBase64)
+            dialog.status = r.ok === true
+                ? qsTr("Wrote %1").arg(exportPathField.text.trim())
+                : String(r.error !== undefined ? r.error
+                                              : qsTr("write failed"))
+            dialog.phase = "idle"
+        }
+        /* An export/inspect failure surfaces through the shared
+           error property — unlatch the busy phase so the dialog
+           is never stuck "exporting". */
+        function onErrorChanged() {
+            var c = dialog.ctl()
+            var e = (c !== null && c.error !== undefined)
+                ? String(c.error) : ""
+            if (e === "")
+                return
+            if (dialog.phase === "exporting") {
+                dialog.phase = "idle"
+                dialog.status = e
+            } else if (dialog.phase === "committing") {
+                dialog.phase = "report"
+                dialog.status = e
+            }
+        }
+    }
+
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: Theme.spaceL
+        spacing: Theme.spaceM
+
+        Text {
+            text: qsTr("PORTABLE WORKSPACE")
+            color: Theme.textSecondary
+            font.pixelSize: Theme.fontSizeSmall
+            font.letterSpacing: 1.5
+        }
+
+        /*---- import: pick + inspect ----*/
+        Text {
+            text: qsTr("IMPORT")
+            color: Theme.textDisabled
+            font.pixelSize: Theme.fontSizeSmall
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spaceS
+            TextField {
+                id: pathField
+                objectName: "importPathField"
+                Layout.fillWidth: true
+                placeholderText: qsTr("path to .or2studio bundle")
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontSizeBody
+                enabled: dialog.phase === "idle" || dialog.phase === "report"
+                background: Rectangle {
+                    color: Theme.bg; radius: Theme.radiusS
+                    border.color: pathField.activeFocus ? Theme.accent
+                                                        : Theme.borderStrong
+                }
+            }
+            AppButton {
+                objectName: "inspectBtn"
+                text: qsTr("Inspect")
+                enabled: (dialog.phase === "idle" || dialog.phase === "report")
+                         && pathField.text.trim() !== ""
+                onClicked: dialog.readAndInspect()
+            }
+        }
+
+        /*---- report ----*/
+        ColumnLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            visible: dialog.phase === "report" && dialog.report !== null
+            spacing: Theme.spaceS
+
+            Text {
+                objectName: "importSummary"
+                Layout.fillWidth: true
+                text: {
+                    var r = dialog.report
+                    if (r === null) return ""
+                    var ws = r.workspace !== undefined ? r.workspace : {}
+                    var types = r.types !== undefined ? r.types : []
+                    var assets = r.assets !== undefined ? r.assets : []
+                    var errs = r.errors !== undefined ? r.errors : []
+                    var warns = r.warnings !== undefined ? r.warnings : []
+                    return qsTr("%1 · %2 type(s) · %3 asset(s) · %4 error(s) · %5 warning(s)")
+                        .arg(ws.name !== undefined ? ws.name : qsTr("workspace"))
+                        .arg(types.length).arg(assets.length)
+                        .arg(errs.length).arg(warns.length)
+                }
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontSizeBody
+                wrapMode: Text.WordWrap
+            }
+
+            Flickable {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                contentHeight: reportCol.implicitHeight
+                ColumnLayout {
+                    id: reportCol
+                    width: parent.width
+                    spacing: Theme.spaceS
+
+                    Repeater {
+                        model: dialog.report !== null
+                            ? (dialog.report.errors !== undefined
+                               ? dialog.report.errors : []) : []
+                        Text {
+                            text: "· " + modelData
+                            color: Theme.bad
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                    }
+                    Repeater {
+                        model: dialog.report !== null
+                            ? (dialog.report.warnings !== undefined
+                               ? dialog.report.warnings : []) : []
+                        Text {
+                            text: "· " + modelData
+                            color: Theme.warn
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                    }
+                    Text {
+                        visible: dialog.report !== null
+                            && dialog.report.conflicts !== undefined
+                            && dialog.report.conflicts.length > 0
+                        text: qsTr("TYPE CONFLICTS — rename before import")
+                        color: Theme.textDisabled
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+                    Repeater {
+                        id: conflictRepeater
+                        objectName: "conflictRepeater"
+                        model: dialog.report !== null
+                            ? (dialog.report.conflicts !== undefined
+                               ? dialog.report.conflicts : []) : []
+                        delegate: RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spaceS
+                            Text {
+                                /* Engine conflict rows:
+                                   {id, local_name, bundled_name,
+                                   suggested_id}. */
+                                text: modelData.id +
+                                      "  (" +
+                                      (modelData.local_name !== undefined
+                                       ? modelData.local_name : "?") +
+                                      " ≠ " +
+                                      (modelData.bundled_name !== undefined
+                                       ? modelData.bundled_name : "?") +
+                                      ")"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                                Layout.preferredWidth: 190
+                                elide: Text.ElideRight
+                            }
+                            Text {
+                                text: "→"
+                                color: Theme.textDisabled
+                            }
+                            TextField {
+                                objectName: "rename_" + modelData.id
+                                Layout.fillWidth: true
+                                text: modelData.suggested_id !== undefined
+                                    ? modelData.suggested_id
+                                    : modelData.id
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeSmall
+                                onTextChanged: {
+                                    var m = dialog.renameMap
+                                    m[modelData.id] = text.trim()
+                                    dialog.renameMap = m
+                                }
+                                background: Rectangle {
+                                    color: Theme.bg; radius: Theme.radiusS
+                                    border.color: Theme.borderStrong
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.spaceS
+                CheckBox {
+                    id: overwriteBox
+                    objectName: "overwriteBox"
+                    /* Commits the imported document onto the
+                       ACTIVE workspace (gated on its live
+                       revisions; still never applied until a
+                       reload). Hidden for types-only bundles —
+                       there is no layout to replace. */
+                    visible: dialog.report === null
+                             || dialog.report.has_workspace !== false
+                    text: qsTr("replace my layout")
+                    checked: false
+                }
+                Item { Layout.fillWidth: true }
+                AppButton {
+                    objectName: "confirmImportBtn"
+                    text: dialog.report !== null
+                             && dialog.report.has_workspace === false
+                          ? qsTr("Import types")
+                          : qsTr("Import")
+                    enabled: dialog.report !== null
+                             && (dialog.report.errors === undefined
+                                 || dialog.report.errors.length === 0)
+                    onClicked: dialog.confirm()
+                }
+            }
+        }
+
+        Item {
+            Layout.fillHeight: true
+            visible: !(dialog.phase === "report" && dialog.report !== null)
+        }
+
+        Text {
+            objectName: "importStatus"
+            Layout.fillWidth: true
+            visible: dialog.status !== ""
+            text: dialog.status
+            color: Theme.textSecondary
+            font.pixelSize: Theme.fontSizeSmall
+            wrapMode: Text.WordWrap
+        }
+        BusyIndicator {
+            visible: dialog.phase === "inspecting"
+                     || dialog.phase === "committing"
+                     || dialog.phase === "exporting"
+            running: visible
+        }
+
+        /*---- export ----*/
+        Text {
+            text: qsTr("EXPORT")
+            color: Theme.textDisabled
+            font.pixelSize: Theme.fontSizeSmall
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spaceS
+            TextField {
+                id: exportPathField
+                objectName: "exportPathField"
+                Layout.fillWidth: true
+                placeholderText: qsTr("destination path (.or2studio)")
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontSizeBody
+                enabled: dialog.phase === "idle"
+                background: Rectangle {
+                    color: Theme.bg; radius: Theme.radiusS
+                    border.color: exportPathField.activeFocus
+                                  ? Theme.accent : Theme.borderStrong
+                }
+            }
+            AppButton {
+                objectName: "exportBtn"
+                text: qsTr("Export")
+                enabled: dialog.phase === "idle"
+                         && exportPathField.text.trim() !== ""
+                onClicked: dialog.doExport()
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            Item { Layout.fillWidth: true }
+            AppButton {
+                text: qsTr("Close")
+                onClicked: {
+                    var c = dialog.ctl()
+                    if (c !== null && dialog.phase !== "idle")
+                        c.cancelImport()
+                    dialog.close()
+                }
+            }
+        }
+    }
+}

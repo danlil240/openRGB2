@@ -38,6 +38,12 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include <functional>
+#include <string>
+#include <vector>
+
+namespace studio { struct StudioDocument; }
+
 namespace openrgb2
 {
 namespace ui
@@ -45,6 +51,7 @@ namespace ui
 
 class EngineBridge;
 class UiSettings;
+class WorkspaceController;
 
 class SceneEditController : public QObject
 {
@@ -131,6 +138,16 @@ public:
        Without it the session-scoped latches behave exactly
        as before. */
     void setUiSettings(UiSettings* prefs);
+    /* studio-import Task 4: attach the shared workspace
+       controller. When the engine manages a workspace
+       (studio_workspace_v1 + a managed id, or a recovered
+       local draft already staged), every edit below writes
+       the ONE shared StudioDocument draft — dirty/conflict/
+       saving/recovery/undo state proxies the workspace
+       controller so Lighting and Layout read the same truth.
+       Without an attached controller (or on a legacy engine)
+       the model_/SET_SCENE path is kept verbatim. */
+    void setWorkspace(WorkspaceController* ws);
 
     /*---- scene edits (pending until save) ------------------*/
     Q_INVOKABLE bool setPreset(const QString& id);
@@ -173,9 +190,18 @@ public:
     Q_INVOKABLE bool saveProfile(const QString& name);
     /* Stages the stored document as pending edits — Save
        applies it through SET_SCENE (engine validates +
-       migrates; the UI never parses scene fields). */
+       migrates; the UI never parses scene fields). In
+       workspace mode the stored document must be a compact
+       workspace document; legacy scene documents are refused
+       honestly — import them into a workspace instead. */
     Q_INVOKABLE bool loadProfile(const QString& name);
     Q_INVOKABLE bool deleteProfile(const QString& name);
+    /* Explicit migrate-on-import: every library entry becomes
+       its own managed workspace through the workspace
+       controller's bounded upload path. Originals and names
+       are retained; nothing auto-applies. Returns the count
+       queued (0 when workspaces are unavailable). */
+    Q_INVOKABLE int  importProfilesToWorkspaces();
 
     /*---- state ----------------------------------------------*/
     bool        hasScene() const;
@@ -247,10 +273,39 @@ private:
     void        PersistSceneParams();
     void        RestoreSceneParams(const QString& sceneName);
 
+    /*---- shared-workspace adaptation (Task 4) ---------------
+       WsMode() is the single gate: attached controller AND
+       (capable+managed engine OR a local draft already
+       loaded). In workspace mode the compact StudioDocument
+       in ws_->Session() is the working copy; model_ is left
+       dormant. */
+    bool        WsMode() const;
+    /* Route one compact-doc mutation through the shared
+       session — one undo record, then the controller stages
+       the durable draft record. False = refused/no working
+       doc/no change. */
+    bool        WsCommit(const std::string& label,
+                         const std::function<bool(
+                             studio::StudioDocument&)>& mut);
+    /* effect.preset of whichever document is the working
+       copy (compact in workspace mode, scene json else). */
+    std::string CurrentPresetId() const;
+    /* Colorable groups derived from the compact document:
+       device-instance ids plus every deeper path the draft
+       carries in device_settings / object_colors, joined with
+       the doc's own bindings (never fabricated). */
+    std::vector<DeviceGroup> CompactGroups() const;
+    /* Selection -> authored layer targets (inline stacks
+       only — named presets resolve engine-side). */
+    void        WsApplyTargets();
+
     EngineBridge*   bridge_;
     SceneEditModel  model_;
     ProfileLibrary  library_;
     UiSettings*     ui_settings_ = nullptr;
+    WorkspaceController* ws_    = nullptr;
+    /* presetReplacedLayers equivalent for workspace mode. */
+    bool            ws_preset_replaced_ = false;
 
     int             pending_save_id_ = 0;
     bool            saving_          = false;

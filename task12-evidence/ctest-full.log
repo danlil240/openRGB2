@@ -1,0 +1,170 @@
+Internal ctest changing into directory: C:/Users/daniel/.codex/worktrees/studio-import/openRGB2/build-studio
+Test project C:/Users/daniel/.codex/worktrees/studio-import/openRGB2/build-studio
+      Start  1: studio_scene_test
+ 1/78 Test  #1: studio_scene_test ................   Passed    0.02 sec
+      Start  2: studio_config_test
+ 2/78 Test  #2: studio_config_test ...............   Passed    0.03 sec
+      Start  3: device_preset_test
+ 3/78 Test  #3: device_preset_test ...............   Passed    0.29 sec
+      Start  4: studio_editor_test
+ 4/78 Test  #4: studio_editor_test ...............   Passed    0.01 sec
+      Start  5: effect_json_test
+ 5/78 Test  #5: effect_json_test .................   Passed    0.07 sec
+      Start  6: workspace_candidate_test
+ 6/78 Test  #6: workspace_candidate_test .........   Passed    0.03 sec
+      Start  7: playback_test
+ 7/78 Test  #7: playback_test ....................   Passed    1.77 sec
+      Start  8: key_translate_test
+ 8/78 Test  #8: key_translate_test ...............   Passed    0.01 sec
+      Start  9: lianli_protocol_test
+ 9/78 Test  #9: lianli_protocol_test .............   Passed    0.15 sec
+      Start 10: lianli_playback_test
+10/78 Test #10: lianli_playback_test .............   Passed    0.27 sec
+      Start 11: service_pending_test
+11/78 Test #11: service_pending_test .............   Passed    0.01 sec
+      Start 12: lianli_diagnostics_test
+12/78 Test #12: lianli_diagnostics_test ..........   Passed    0.18 sec
+      Start 13: bench_sdk_wire_test
+13/78 Test #13: bench_sdk_wire_test ..............   Passed    0.01 sec
+      Start 14: skew_stats_test
+14/78 Test #14: skew_stats_test ..................   Passed    0.01 sec
+      Start 15: engine_types_test
+15/78 Test #15: engine_types_test ................   Passed    0.04 sec
+      Start 16: frame_sink_test
+16/78 Test #16: frame_sink_test ..................   Passed    0.04 sec
+      Start 17: scene_worker_test
+17/78 Test #17: scene_worker_test ................   Passed    0.66 sec
+      Start 18: delivery_pipeline_test
+18/78 Test #18: delivery_pipeline_test ...........   Passed    0.53 sec
+      Start 19: device_mapping_test
+19/78 Test #19: device_mapping_test ..............   Passed    0.06 sec
+      Start 20: playback_mode_test
+20/78 Test #20: playback_mode_test ...............   Passed    0.82 sec
+      Start 21: power_lifecycle_test
+21/78 Test #21: power_lifecycle_test .............   Passed    0.36 sec
+      Start 22: shutdown_test
+22/78 Test #22: shutdown_test ....................   Passed    0.04 sec
+      Start 23: profile_store_test
+23/78 Test #23: profile_store_test ...............   Passed    0.19 sec
+      Start 24: workspace_store_test
+24/78 Test #24: workspace_store_test .............   Passed    0.72 sec
+      Start 25: workspace_bundle_test
+25/78 Test #25: workspace_bundle_test ............   Passed    0.48 sec
+      Start 26: ownership_scan_test
+26/78 Test #26: ownership_scan_test ..............   Passed    0.07 sec
+      Start 27: reactive_inputs_test
+27/78 Test #27: reactive_inputs_test .............   Passed    0.36 sec
+      Start 28: studio_scene_preparation_test
+28/78 Test #28: studio_scene_preparation_test ....   Passed    0.05 sec
+      Start 29: preview_session_test
+29/78 Test #29: preview_session_test .............   Passed    2.29 sec
+      Start 30: ipc_reactive_test
+30/78 Test #30: ipc_reactive_test ................   Passed    0.04 sec
+      Start 31: e2e_fake_backend_test
+31/78 Test #31: e2e_fake_backend_test ............   Passed    0.14 sec
+      Start 32: e2e_mode_qual_test
+32/78 Test #32: e2e_mode_qual_test ...............   Passed    2.23 sec
+      Start 33: e2e_lifecycle_test
+33/78 Test #33: e2e_lifecycle_test ...............   Passed    7.54 sec
+      Start 34: e2e_studio_workspace_test
+34/78 Test #34: e2e_studio_workspace_test ........   Passed    4.24 sec
+      Start 35: e2e_responsiveness_test
+35/78 Test #35: e2e_responsiveness_test ..........   Passed   13.95 sec
+      Start 36: e2e_noninterference_test
+36/78 Test #36: e2e_noninterference_test .........   Passed    5.21 sec
+      Start 37: calibration_session_test
+37/78 Test #37: calibration_session_test .........   Passed    0.48 sec
+      Start 38: ipc_protocol_test
+38/78 Test #38: ipc_protocol_test ................   Passed    0.13 sec
+      Start 39: ipc_engine_service_test
+39/78 Test #39: ipc_engine_service_test ..........   Passed    0.08 sec
+      Start 40: ipc_server_test
+40/78 Test #40: ipc_server_test ..................   Passed    2.13 sec
+      Start 41: ipc_workspace_test
+41/78 Test #41: ipc_workspace_test ...............   Passed    1.18 sec
+      Start 42: sdk_wire_test
+42/78 Test #42: sdk_wire_test ....................   Passed    0.04 sec
+      Start 43: sdk_client_test
+43/78 Test #43: sdk_client_test ..................   Passed    0.04 sec
+      Start 44: sdk_reconnect_test
+44/78 Test #44: sdk_reconnect_test ...............   Passed    0.04 sec
+      Start 45: ui_wire_client_test
+45/78 Test #45: ui_wire_client_test ..............   Passed   10.63 sec
+      Start 46: ui_bridge_test
+46/78 Test #46: ui_bridge_test ...................   Passed    2.97 sec
+      Start 47: ui_startup_task_test
+47/78 Test #47: ui_startup_task_test .............   Passed    0.95 sec
+      Start 48: ui_scene_edit_test
+48/78 Test #48: ui_scene_edit_test ...............   Passed    0.04 sec
+      Start 49: ui_scene_bridge_test
+49/78 Test #49: ui_scene_bridge_test .............   Passed    1.48 sec
+      Start 50: ui_playback_test
+50/78 Test #50: ui_playback_test .................   Passed    2.79 sec
+      Start 51: ui_layout_test
+51/78 Test #51: ui_layout_test ...................   Passed    1.14 sec
+      Start 52: ui_reactive_test
+52/78 Test #52: ui_reactive_test .................   Passed    1.09 sec
+      Start 53: ui_diagnostics_test
+53/78 Test #53: ui_diagnostics_test ..............   Passed    1.20 sec
+      Start 54: ui_hardening_test
+54/78 Test #54: ui_hardening_test ................   Passed    5.66 sec
+      Start 55: ui_workspace_test
+55/78 Test #55: ui_workspace_test ................   Passed   20.62 sec
+      Start 56: ui_studio_preview_test
+56/78 Test #56: ui_studio_preview_test ...........   Passed    6.94 sec
+      Start 57: qml_smoke_test
+57/78 Test #57: qml_smoke_test ...................   Passed    0.25 sec
+      Start 58: qml_focused_save_test
+58/78 Test #58: qml_focused_save_test ............   Passed    1.23 sec
+      Start 59: qml_workspace_save_test
+59/78 Test #59: qml_workspace_save_test ..........   Passed    1.32 sec
+      Start 60: qml_diagnostics_test
+60/78 Test #60: qml_diagnostics_test .............   Passed    0.12 sec
+      Start 61: qml_hardening_test_scale1_00
+61/78 Test #61: qml_hardening_test_scale1_00 .....   Passed    1.31 sec
+      Start 62: qml_hardening_test_scale1_25
+62/78 Test #62: qml_hardening_test_scale1_25 .....   Passed    1.42 sec
+      Start 63: qml_hardening_test_scale1_50
+63/78 Test #63: qml_hardening_test_scale1_50 .....   Passed    1.30 sec
+      Start 64: qml_hardening_test_scale2_00
+64/78 Test #64: qml_hardening_test_scale2_00 .....   Passed    1.32 sec
+      Start 65: ui_studio_objects_test
+65/78 Test #65: ui_studio_objects_test ...........   Passed    0.16 sec
+      Start 66: ui_studio_effects_test
+66/78 Test #66: ui_studio_effects_test ...........   Passed    0.16 sec
+      Start 67: ui_studio_presets_test
+67/78 Test #67: ui_studio_presets_test ...........   Passed    0.16 sec
+      Start 68: ui_workspace_import_test
+68/78 Test #68: ui_workspace_import_test .........   Passed    0.29 sec
+      Start 69: ui_studio_calibration_test
+69/78 Test #69: ui_studio_calibration_test .......   Passed    0.21 sec
+      Start 70: ui_workspace_recovery_test
+70/78 Test #70: ui_workspace_recovery_test .......   Passed    1.98 sec
+      Start 71: qml_studio_viewport_test
+71/78 Test #71: qml_studio_viewport_test .........   Passed    0.29 sec
+      Start 72: qml_studio_qml
+72/78 Test #72: qml_studio_qml ...................   Passed    1.36 sec
+      Start 73: ui_qa_harness_test
+73/78 Test #73: ui_qa_harness_test ...............   Passed    0.28 sec
+      Start 74: package_startup_task_test
+74/78 Test #74: package_startup_task_test ........   Passed    1.34 sec
+      Start 75: package_launcher_test
+75/78 Test #75: package_launcher_test ............   Passed    1.04 sec
+      Start 76: package_gui_launcher_test
+76/78 Test #76: package_gui_launcher_test ........   Passed    4.21 sec
+      Start 77: package_desktop_shortcut_test
+77/78 Test #77: package_desktop_shortcut_test ....   Passed    1.69 sec
+      Start 78: package_lifecycle_test
+78/78 Test #78: package_lifecycle_test ...........   Passed    8.08 sec
+
+100% tests passed, 0 tests failed out of 78
+
+Label Time Summary:
+backend      =   0.61 sec*proc (6 tests)
+core         =   2.23 sec*proc (8 tests)
+engine       =  44.07 sec*proc (27 tests)
+packaging    =  16.36 sec*proc (5 tests)
+sdk          =   0.12 sec*proc (3 tests)
+ui           =  68.65 sec*proc (29 tests)
+
+Total Test time (real) = 132.13 sec

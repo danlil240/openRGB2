@@ -285,12 +285,16 @@ bool OpenRgbClient::EnumerateLocked(std::string& err)
         for(const SdkZone& z : c.zones)
         {
             ZoneSnapshot zs;
-            zs.name      = z.name;
-            zs.led_count = z.leds_count;
-            zs.leds_min  = z.leds_min;
-            zs.leds_max  = z.leds_max;
+            zs.name        = z.name;
+            zs.led_count   = z.leds_count;
+            zs.leds_min    = z.leds_min;
+            zs.leds_max    = z.leds_max;
+            zs.matrix_rows = z.matrix_rows;
+            zs.matrix_cols = z.matrix_cols;
+            zs.matrix_map  = z.matrix_map;
             rec.snap.zones.push_back(std::move(zs));
         }
+        rec.snap.led_names = c.led_names;
         /* Last-enumerated device colors — the device mapper seeds
            complete-controller frames from them so unmapped LEDs
            keep their state (plan section 4). */
@@ -469,7 +473,13 @@ bool OpenRgbClient::RefreshStatus()
                 for(size_t z = 0; z < c.zones.size(); ++z)
                 {
                     if(c.zones[z].leds_count !=
-                       entry.second.snap.zones[z].led_count)
+                       entry.second.snap.zones[z].led_count ||
+                       c.zones[z].matrix_rows !=
+                       entry.second.snap.zones[z].matrix_rows ||
+                       c.zones[z].matrix_cols !=
+                       entry.second.snap.zones[z].matrix_cols ||
+                       c.zones[z].matrix_map !=
+                       entry.second.snap.zones[z].matrix_map)
                     {
                         structural = true;
                         break;

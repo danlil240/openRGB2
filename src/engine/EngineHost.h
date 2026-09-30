@@ -47,6 +47,7 @@
 
 #pragma once
 
+#include "CalibrationSession.h"
 #include "DeliveryPipeline.h"
 #include "DeviceMapper.h"
 #include "Engine.h"
@@ -57,6 +58,7 @@
 #include "ProfileStore.h"
 #include "ReactiveInputs.h"
 #include "SingleInstance.h"
+#include "WorkspaceService.h"
 
 #include "EngineService.h"
 #include "IpcServer.h"
@@ -150,6 +152,14 @@ struct EngineHostOptions
     std::string backend_exe;
     bool        power_monitor   = true;
 
+    /* Task 2 (studio-import): the managed workspace root —
+       immutable workspace generations + the versioned resource
+       library live here, separate from engine-state.json.
+       Empty = the development default
+       (WorkspaceStore::DefaultRoot(), profiles/local/workspaces);
+       packaged launchers pass a writable app-data dir. */
+    std::string workspace_root;
+
     /* Task 4.6 reactive inputs (audio/screen/key). True wires
        the ReactiveInputs manager against the platform
        sources; the manager itself is cheap — capture only
@@ -217,6 +227,9 @@ public:
     DeviceMapper&            GetMapper()     { return mapper_; }
     DeliveryPipeline*        GetPipeline()   { return pipeline_.get(); }
     ipc::EngineService*      GetService()    { return service_.get(); }
+    /* Task 2 (studio-import): the workspace commit surface —
+       the ONLY component that commits accepted generations. */
+    WorkspaceService*        GetWorkspaces() { return workspaces_.get(); }
     sdk::OpenRgbClient*      GetSdk()        { return sdk_.get(); }
     PowerLifecycle*          GetLifecycle()  { return lifecycle_.get(); }
     ReactiveInputs*          GetReactive()   { return reactive_.get(); }
@@ -234,6 +247,7 @@ public:
 private:
     PlaybackController::Deps   BuildPlaybackDeps();
     PowerLifecycle::Deps       BuildLifecycleDeps();
+    CalibrationSession::Deps   BuildCalibrationDeps();
     bool StartIpc();
     bool ApplyStartupScene(std::string& err);
     void ScanOwners();
@@ -281,6 +295,20 @@ private:
     std::unique_ptr<PowerLifecycle>          lifecycle_;
     std::unique_ptr<ReactiveInputs>          reactive_;
     platform::WinPowerMonitor                power_monitor_;
+    /* studio-import Task 11: the engine-owned physical LED
+       calibration session (calibration_* workspace verbs).
+       Declared AFTER the deps it calls (pipeline_, sdk_,
+       playback_, lifecycle_) and BEFORE service_ — teardown
+       order is service_ first (its raw pointer dep stays
+       valid through ~EngineService), then this session's
+       Stop() can still release its lane/playback claims. */
+    std::unique_ptr<CalibrationSession>      calibration_;
+    /* Declaration order matters: members destroy in reverse.
+       workspaces_ is declared FIRST so service_ (which holds a
+       raw WorkspaceService* dep and clears the job-event hook
+       capturing `this` in ~EngineService) dies before it — the
+       hook clear can never touch freed state. */
+    std::unique_ptr<WorkspaceService>        workspaces_;
     std::unique_ptr<ipc::EngineService>      service_;
     std::unique_ptr<ipc::IpcServer>          ipc_server_;
     std::unique_ptr<ipc::NamedPipeListener>  cmd_listener_;

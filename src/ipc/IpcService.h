@@ -98,12 +98,49 @@ public:
     virtual IpcReply Dispatch(MsgType type,
                               const nlohmann::json& body) = 0;
 
+    /* Session-scoped dispatch (studio-import Task 3): the
+       session layer routes every request through here with the
+       server-assigned session id so session-bound surfaces
+       (workspace transfers/jobs) can bind resources to the
+       caller. The default forwards to Dispatch() — services
+       without session-bound state override nothing. */
+    virtual IpcReply DispatchSession(uint64_t session_id,
+                                     MsgType type,
+                                     const nlohmann::json& body)
+    {
+        (void)session_id;
+        return Dispatch(type, body);
+    }
+
+    /* Session teardown hook — called exactly once when a
+       session dies (any cause, any channel kind). Services
+       use it to cancel session-bound state (queued workspace
+       jobs, staged transfers). The default is a no-op. Must
+       be non-blocking and must not throw. */
+    virtual void OnSessionEnd(uint64_t session_id)
+    {
+        (void)session_id;
+    }
+
     /* Initial-state snapshot for a freshly SUBSCRIBEd kind —
        the UI should not need a second request to paint
        current state. Return false when the kind cannot
        produce a snapshot (subscriber gets none). */
     virtual bool SnapshotEvent(const std::string& kind,
                                nlohmann::json& out) = 0;
+
+    /* Session-aware variant (studio-import Task 7): kinds
+       whose snapshot is session-bound (the "preview" feed —
+       each session owns at most one draft preview) override
+       this. The default forwards to SnapshotEvent so
+       session-neutral services override nothing. */
+    virtual bool SnapshotEventFor(uint64_t session_id,
+                                  const std::string& kind,
+                                  nlohmann::json& out)
+    {
+        (void)session_id;
+        return SnapshotEvent(kind, out);
+    }
 };
 
 } /* namespace ipc */

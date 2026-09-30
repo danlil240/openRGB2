@@ -32,7 +32,10 @@
 
 #include "IpcServer.h"
 #include "IpcService.h"
+#include "WorkspaceCommands.h"
+#include "WorkspaceTransfer.h"
 
+#include "CalibrationSession.h"
 #include "DeliveryPipeline.h"
 #include "DeviceMapper.h"
 #include "Engine.h"
@@ -40,6 +43,8 @@
 #include "PlaybackController.h"
 #include "PowerLifecycle.h"
 #include "ReactiveInputs.h"
+#include "StudioScenePreparation.h"
+#include "WorkspaceService.h"
 
 #include "effects/Presets.h"
 #include "scene/SceneTypes.h"
@@ -62,6 +67,26 @@ struct EngineServiceOptions
        must stay fluid: ~30 Hz cap (~25 Hz delivered on the
        owner loop's 20 ms fast tick). */
     uint32_t frame_status_min_interval_ms = 33;
+
+    /* studio-import Task 3: workspace transfer bounds — the
+       defaults are the plan-§3.3 limits; the offline suite
+       injects shorter expiries/smaller caps. Only consulted
+       when Deps::workspace is wired. */
+    WorkspaceTransfer::Options transfers;
+
+    /* studio-import Task 7: the session-bound draft preview
+       (plan 3.4). One PreviewSession per IPC session up to
+       this bound; publishing capped at min_interval_ms and
+       chunked below the 1 MiB body cap; above the display
+       budget a reduced, clearly-labelled frame goes out. */
+    struct PreviewOptions
+    {
+        size_t   max_sessions        = 2;
+        uint32_t min_interval_ms     = 33;      /* ~30 Hz  */
+        size_t   chunk_bytes         = 768u * 1024u;
+        size_t   display_budget_leds = 4096;
+    };
+    PreviewOptions preview;
 };
 
 class EngineService final : public IIpcService
@@ -88,6 +113,13 @@ public:
            classified from the applied scene, and scene
            applies restore the persisted selection. */
         PlaybackController* playback = nullptr;
+
+        /* studio-import Task 11: the engine-owned physical
+           calibration session — the calibration_begin/show/
+           end/status WORKSPACE verbs bind client session +
+           opaque token to it. Nullptr -> those verbs answer
+           Unavailable honestly. */
+        CalibrationSession* calibration = nullptr;
 
         /* Playback capability source — fallback when no
            controller is wired (tests, bare engine): the
@@ -156,17 +188,41 @@ public:
            field is an honest null (no scan wired), never a
            fabricated "no conflicts". */
         std::function<nlohmann::json()> ownership;
+
+        /* studio-import Task 3: the managed-workspace commit
+           surface (engine side). When set, the WORKSPACE_COMMAND
+           verb space is live, WELCOME advertises
+           "studio_workspace_v1", session-bound transfers and
+           jobs exist, and — once a workspace is managed —
+           lossy legacy scene mutations (SET_SCENE, the layout
+           edit verbs) are refused with bad_request +
+           "workspace_required". Nullptr -> the verb space
+           answers Unavailable honestly and no capability is
+           advertised. */
+        WorkspaceService* workspace = nullptr;
     };
 
     explicit EngineService(Engine& engine);
     EngineService(Engine& engine, Deps deps,
                   EngineServiceOptions options = EngineServiceOptions{});
+    /* Clears the workspace job-event hook (it captures this)
+       before member teardown. */
+    ~EngineService() override;
 
     EngineService(const EngineService&)            = delete;
     EngineService& operator=(const EngineService&) = delete;
 
     /* Event fanout — wire to IpcServer::Emit. */
     void SetEventSink(std::function<void(const IpcEvent&)> sink);
+
+    /* Targeted fanout for session-bound events (Task 7's
+       "preview" feed): wire to IpcServer::EmitTo. The key is
+       the per-kind coalescing slot — "status" or
+       "frame/<seq>/<chunk>". */
+    void SetSessionEventSink(
+        std::function<void(uint64_t session_id,
+                           const IpcEvent& ev,
+                           const std::string& coalesce_key)> sink);
 
     /* Post-construction wiring for deps_.server_stats (the
        server exists after the service). */
@@ -176,12 +232,23 @@ public:
     /* The ONE scene-apply path shared by --scene and
        SET_SCENE: resolves the persisted effect stack (inline
        layers, else the named preset through the registry —
-       unknown preset names are rejected), submits to the
-       worker at the next revision, and re-binds the mapper.
-       Emits the "scene" event. */
+       unknown preset names are rejected), prepares the shared
+       runtime scene (hardware-dependent matrix geometry + key
+       positions), submits to the worker at the next revision,
+       and re-binds the mapper. Emits the "scene" event. */
     bool     ApplySceneDocument(
             std::shared_ptr<const studio::SceneDocument> doc,
             std::string& err);
+
+    /* Task 6 workspace apply: the committed candidate drives
+       StudioScenePreparation — runtime layers resolve through
+       the CANDIDATE's own effect-registry snapshot and take the
+       persisted inputs.decay_pct ripple scaling; matrix_map
+       objects expand against the LIVE snapshots. Emits the
+       "scene" event. Unknown preset names stay non-fatal here
+       (candidate parse already warned). */
+    bool     ApplyWorkspaceCandidate(const WorkspaceCandidate& cand,
+                                     std::string& err);
     uint64_t SceneRevision() const;
     std::shared_ptr<const studio::SceneDocument> Scene() const;
 
@@ -207,12 +274,31 @@ public:
        calls this (enable/disable, pause transitions). */
     void EmitReactive();
 
+    /* Task 11: emits the session-targeted "calibration"
+       event carrying the session's status — the
+       CalibrationSession::Deps::changed hook calls this. */
+    void EmitCalibrationStatus();
+
     /*---- IIpcService ---------------------------------------*/
     nlohmann::json OnWelcome() override;
     IpcReply       Dispatch(MsgType type,
                             const nlohmann::json& body) override;
+    /* Session-bound dispatch: WORKSPACE_COMMAND verbs bind
+       jobs/transfers to the calling session. */
+    IpcReply       DispatchSession(uint64_t session_id,
+                                   MsgType type,
+                                   const nlohmann::json& body) override;
+    /* Session teardown: queued workspace jobs + staged
+       transfers of the dead session are cancelled — and its
+       draft preview released (plan 3.4). */
+    void           OnSessionEnd(uint64_t session_id) override;
     bool           SnapshotEvent(const std::string& kind,
                                  nlohmann::json& out) override;
+    /* Session-bound snapshot: the "preview" kind reports THIS
+       session's preview state, not a global one. */
+    bool           SnapshotEventFor(uint64_t session_id,
+                                    const std::string& kind,
+                                    nlohmann::json& out) override;
 
     /* Read-only aggregate snapshot — the diagnostics channel's
        single verb and the Diagnostics event payload share
@@ -226,6 +312,11 @@ private:
     Deps                deps_;
     EngineServiceOptions options_;
 
+    /* studio-import Task 3: the WORKSPACE_COMMAND verb
+       surface + session-bound bounded transfers — exists iff
+       deps_.workspace is wired. */
+    std::unique_ptr<WorkspaceCommands> ws_commands_;
+
     mutable std::mutex  mutex_;
     std::shared_ptr<const studio::SceneDocument> scene_;
     uint64_t            scene_revision_  = 0;
@@ -233,6 +324,10 @@ private:
     TimePoint           started_;
 
     std::function<void(const IpcEvent&)> event_sink_;
+    /* Task 7 targeted feed — preview chunks/statuses go to
+       the OWNING session only. */
+    std::function<void(uint64_t, const IpcEvent&,
+                       const std::string&)> session_sink_;
 
     /* PollEvents diffing state. */
     std::string         last_connection_sig_;
@@ -262,9 +357,23 @@ private:
     IpcReply       HandleReactiveCommand(const std::string& verb,
                                          const nlohmann::json& body);
     IpcReply       HandleIdentify(const nlohmann::json& body);
+    /* studio-import Task 3 gate: HandleLayoutMutate refuses
+       lossy legacy edits while a managed workspace is active
+       (detail "workspace_required") and forwards to the impl. */
     IpcReply       HandleLayoutMutate(const std::string& verb,
                                       const nlohmann::json& body);
+    IpcReply       HandleLayoutMutateImpl(const std::string& verb,
+                                          const nlohmann::json& body);
+    /* The shared tail of both apply paths: validation, the
+       revision bump, worker submission, mapper re-bind, stored
+       scene, playback restore, and the scene event — all keyed
+       off the PREPARED runtime state. */
+    bool           ApplyPreparedScene(const PreparedStudioScene& prepared,
+                                      std::string& err);
     std::vector<DeviceSnapshot> LayoutSnapshots() const;
+    /* studio-import Task 3: true once a managed workspace is
+       active — the lossy legacy mutation gate (plan 3.3). */
+    bool           WorkspaceManaged() const;
     nlohmann::json SceneJsonLocked() const;
     nlohmann::json PlaybackJson() const;
     nlohmann::json PowerJson() const;

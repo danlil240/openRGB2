@@ -17,7 +17,13 @@
 #include "QaServer.h"
 #include "SceneEditController.h"
 #include "StartupTaskController.h"
+#include "StudioViewportModel.h"
 #include "UiSettings.h"
+#include "WorkspaceController.h"
+#include "studio/EffectEditorController.h"
+#include "studio/ObjectEditorController.h"
+#include "studio/DevicePresetController.h"
+#include "studio/CalibrationController.h"
 
 #include <QApplication>
 #include <QCryptographicHash>
@@ -214,12 +220,62 @@ int main(int argc, char** argv)
     {
         bridge.setPipeName(pipe);
     }
+    /* The shared workspace draft (studio-import Task 4): when
+       the engine advertises studio_workspace_v1 and manages a
+       workspace, both editing pages adapt to this ONE draft —
+       Lighting and Layout share dirty/conflict/undo state and
+       the durable crash-recovery record. On a legacy engine
+       the controller reports unavailable and both pages keep
+       their SET_SCENE / LAYOUT_COMMAND paths. */
+    openrgb2::ui::WorkspaceController workspace_ctl(&bridge);
     /* The Lighting view's scene-edit session — owns the working
        document, the save flow, and the named-scene library. */
     openrgb2::ui::SceneEditController scene_edit(&bridge);
     /* The Layout view's edit session — arrangement ops ride
        LAYOUT_COMMAND, undo/redo reverts via SET_SCENE. */
     openrgb2::ui::LayoutController layout_ctl(&bridge);
+    scene_edit.setWorkspace(&workspace_ctl);
+    layout_ctl.setWorkspace(&workspace_ctl);
+    /* studio-import Task 5: the scene/object editor — selection,
+       transform gestures, hierarchy ops, painting and the device
+       library ALL edit the same shared draft through the
+       session's own EditorController (never a private document
+       or undo stack). */
+    openrgb2::ui::ObjectEditorController object_ctl(
+        &bridge, &workspace_ctl);
+    /* studio-import Task 6: the effect-layer editor — stack,
+       palette, personal-look shelf and persisted input
+       settings all edit the same shared draft through the
+       session's EditorController (never a private document
+       or undo stack). */
+    openrgb2::ui::EffectEditorController effect_ctl(
+        &bridge, &workspace_ctl);
+    /* studio-import Task 9: device-TYPE authoring — variant/
+       assembly creation, the preset editor's
+       validate/preview/save/delete, all through the shared
+       draft + the engine's bounded resource jobs (never a
+       private document or a direct file write). */
+    openrgb2::ui::DevicePresetController preset_ctl(
+        &bridge, &workspace_ctl, &object_ctl);
+    /* studio-import Task 11: the physical LED-calibration
+       wizard's engine bridge — WORKSPACE_COMMAND
+       calibration_* verbs behind an opaque session token;
+       the engine owns every hardware write. */
+    openrgb2::ui::CalibrationController calib_ctl(&bridge);
+    /* studio-import Task 7: the bounded draft preview — the
+       UNSAVED workspace draft evaluated engine-side and
+       pushed back over the session-bound "preview" event
+       feed. Distinct from frame_status (transport-accepted
+       output): draft colors never claim physical delivery. */
+    openrgb2::ui::StudioViewportModel viewport_model(
+        &bridge, &workspace_ctl);
+    /* Normal close flushes the debounced draft record so a
+       crash-free exit still preserves unsaved work. */
+    QObject::connect(&app, &QCoreApplication::aboutToQuit,
+                     &workspace_ctl,
+                     [&workspace_ctl] {
+                         workspace_ctl.FlushDrafts();
+                     });
     /* The Devices & Diagnostics view's read-only surface —
        derived rate/ownership/conflict views over the bridge
        stores plus the redacted export bundle (Task 4.7). */
@@ -240,12 +296,37 @@ int main(int argc, char** argv)
                                              &scene_edit);
     engine.rootContext()->setContextProperty(QStringLiteral("layoutCtl"),
                                              &layout_ctl);
+    engine.rootContext()->setContextProperty(QStringLiteral("workspace"),
+                                             &workspace_ctl);
+    engine.rootContext()->setContextProperty(QStringLiteral("objectCtl"),
+                                             &object_ctl);
+    engine.rootContext()->setContextProperty(QStringLiteral("effectEdit"),
+                                             &effect_ctl);
+    engine.rootContext()->setContextProperty(QStringLiteral("presetCtl"),
+                                             &preset_ctl);
+    engine.rootContext()->setContextProperty(QStringLiteral("calibCtl"),
+                                             &calib_ctl);
+    engine.rootContext()->setContextProperty(QStringLiteral("viewport"),
+                                             &viewport_model);
     engine.rootContext()->setContextProperty(QStringLiteral("diagCtl"),
                                              &diag_ctl);
     engine.rootContext()->setContextProperty(QStringLiteral("uiPrefs"),
                                              &ui_prefs);
     engine.rootContext()->setContextProperty(
         QStringLiteral("startupTask"), &startup_task);
+    /* studio-import Task 8: the Layout 3D viewport's capability
+       gate — the Quick3D subtree is only compiled into the module
+       in the full-Studio build; basic builds read false and keep
+       the 2D canvas (the page's Loader also fails honestly if the
+       runtime module is missing). */
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("quick3dAvailable"),
+#ifdef OPENRGB2_WITH_QUICK3D
+        true
+#else
+        false
+#endif
+    );
     engine.rootContext()->setContextProperty(
         QStringLiteral("trayAvailable"), tray_available);
     engine.rootContext()->setContextProperty(

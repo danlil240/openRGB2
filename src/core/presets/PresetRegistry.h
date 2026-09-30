@@ -55,9 +55,23 @@ public:
     bool Add(const DevicePreset& p,
              std::vector<std::string>* errors = nullptr);
 
+    /* Drop the FILE-layer entry for `id` (a packaged default
+       stays resolvable underneath). No dependency re-validation
+       — the caller owns the in-use/dependents check (deleting
+       could only strand other types, never corrupt them).
+       Returns true when an entry existed. */
+    bool RemoveFile(const std::string& id);
+
     /* File-layer type first, then the packaged default. */
     const DevicePreset* Find(const std::string& id) const;
     bool                Contains(const std::string& id) const { return Find(id) != nullptr; }
+    /* Layer membership queries — the delete path distinguishes a
+       removable file override from a packaged default (which has
+       nothing on disk) and a deletion that would reveal one. */
+    bool                HasFile(const std::string& id) const
+        { return types.count(id) != 0; }
+    bool                HasDefault(const std::string& id) const
+        { return defaults.count(id) != 0; }
 
     std::vector<std::string> Ids() const;      /* all resolvable ids */
     size_t FileCount() const { return types.size(); }

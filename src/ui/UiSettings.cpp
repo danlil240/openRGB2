@@ -180,6 +180,103 @@ void UiSettings::clear()
 }
 
 /*---------------------------------------------------------*\
+||| 3D viewport shell prefs (studio-import Task 8)         ||
+\*---------------------------------------------------------*/
+
+QString UiSettings::viewportQuality() const
+{
+    const QString q = const_cast<UiSettings*>(this)->Ensure()
+        ->value(QStringLiteral("ui/viewportQuality"),
+                QStringLiteral("balanced")).toString();
+    return (q == QLatin1String("low") || q == QLatin1String("high"))
+           ? q : QStringLiteral("balanced");
+}
+
+void UiSettings::setViewportQuality(const QString& q)
+{
+    if(q != QLatin1String("low") && q != QLatin1String("balanced")
+       && q != QLatin1String("high"))
+    {
+        return;
+    }
+    if(q == viewportQuality())
+    {
+        return;
+    }
+    Ensure()->setValue(QStringLiteral("ui/viewportQuality"), q);
+    emit prefsChanged();
+}
+
+bool UiSettings::viewportBloom() const
+{
+    return const_cast<UiSettings*>(this)->Ensure()
+        ->value(QStringLiteral("ui/viewportBloom"), true).toBool();
+}
+
+void UiSettings::setViewportBloom(bool on)
+{
+    if(on == viewportBloom())
+    {
+        return;
+    }
+    Ensure()->setValue(QStringLiteral("ui/viewportBloom"), on);
+    emit prefsChanged();
+}
+
+bool UiSettings::viewportReducedMotion() const
+{
+    return const_cast<UiSettings*>(this)->Ensure()
+        ->value(QStringLiteral("ui/viewportReducedMotion"), false)
+        .toBool();
+}
+
+void UiSettings::setViewportReducedMotion(bool on)
+{
+    if(on == viewportReducedMotion())
+    {
+        return;
+    }
+    Ensure()->setValue(QStringLiteral("ui/viewportReducedMotion"),
+                       on);
+    emit prefsChanged();
+}
+
+bool UiSettings::viewportCaseGhost() const
+{
+    return const_cast<UiSettings*>(this)->Ensure()
+        ->value(QStringLiteral("ui/viewportCaseGhost"), false)
+        .toBool();
+}
+
+void UiSettings::setViewportCaseGhost(bool on)
+{
+    if(on == viewportCaseGhost())
+    {
+        return;
+    }
+    Ensure()->setValue(QStringLiteral("ui/viewportCaseGhost"), on);
+    emit prefsChanged();
+}
+
+bool UiSettings::layoutShow3d() const
+{
+    /* The 2D overview stays the DEFAULT — the 3D viewport is an
+       opt-in the user picks once and the shell remembers. */
+    return const_cast<UiSettings*>(this)->Ensure()
+        ->value(QStringLiteral("ui/layoutShow3d"), false).toBool();
+}
+
+void UiSettings::setLayoutShow3d(bool on)
+{
+    if(on == layoutShow3d())
+    {
+        return;
+    }
+    Ensure()->setValue(QStringLiteral("ui/layoutShow3d"), on);
+    emit prefsChanged();
+}
+
+/*---------------------------------------------------------*\
 |||| Per-scene uploaded-preset params                        ||
 \*---------------------------------------------------------*/
 

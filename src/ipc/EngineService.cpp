@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <set>
 #include <sstream>
 
 namespace openrgb2
@@ -303,6 +304,89 @@ EngineService::EngineService(Engine& engine, Deps deps,
         engine_.Worker().SetIdleFrameHook(
             [m] { return m->IdentifyActive(); });
     }
+
+    /* studio-import Task 3: the managed-workspace verb space.
+       The command layer exists only while the dep is wired —
+       WELCOME advertises "studio_workspace_v1" exactly when
+       this is non-null. */
+    if(deps_.workspace)
+    {
+        ws_commands_ = std::make_unique<WorkspaceCommands>(
+            deps_.workspace, options_.transfers);
+        /* Completion events are emitted OFF the workspace job
+           mutex (the worker calls this after the record is
+           stored) — a slow subscriber never stalls workspace
+           work, and the bounded event queue still applies. */
+        deps_.workspace->SetJobEventHook(
+            [this](const WorkspaceService::JobStatus& st)
+            {
+                Emit(event_kind::kWorkspace,
+                     JobStatusToJson(st));
+            });
+
+        /* studio-import Task 7: the session-bound draft
+           preview. Topology reads share the layout seam's
+           provider; input is a Snapshot() consume — never a
+           source start; the scene epoch is the worker's own
+           clock so drafts animate on the output timeline.
+           Delivery is targeted through SetSessionEventSink —
+           wire it BEFORE preview_begin or frames go nowhere
+           (the verbs then answer Unavailable honestly via the
+           empty deps.emit check). */
+        WorkspaceCommands::PreviewDeps pd;
+        pd.snapshots  = deps_.snapshots;
+        pd.power      = deps_.power;
+        pd.reactive   = deps_.reactive;
+        pd.scene_epoch =
+            [this]() { return engine_.Worker().Epoch(); };
+        pd.emit =
+            [this](uint64_t sid, const IpcEvent& ev,
+                   const std::string& key)
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if(session_sink_)
+                {
+                    session_sink_(sid, ev, key);
+                }
+            };
+        pd.max_sessions        = options_.preview.max_sessions;
+        pd.min_interval_ms     = options_.preview.min_interval_ms;
+        pd.chunk_bytes         = options_.preview.chunk_bytes;
+        pd.display_budget_leds =
+            options_.preview.display_budget_leds;
+        ws_commands_->SetPreviewDeps(std::move(pd));
+
+        /* studio-import Task 11: the physical calibration
+           session — the calibration_* verbs bind client
+           session + opaque token to the engine-owned
+           CalibrationSession. Its status pushes share the
+           session-targeted emitter the preview feed uses —
+           the owning client sees state flips; nobody else
+           sees the token. */
+        WorkspaceCommands::CalibrationDeps cd;
+        cd.session = deps_.calibration;
+        cd.emit =
+            [this](uint64_t sid, const IpcEvent& ev,
+                   const std::string& key)
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if(session_sink_)
+                {
+                    session_sink_(sid, ev, key);
+                }
+            };
+        ws_commands_->SetCalibrationDeps(std::move(cd));
+    }
+}
+
+EngineService::~EngineService()
+{
+    /* The event hook captures `this` — clear it before the
+       workspace service outlives us into its own teardown. */
+    if(deps_.workspace)
+    {
+        deps_.workspace->SetJobEventHook(nullptr);
+    }
 }
 
 void EngineService::SetEventSink(
@@ -310,6 +394,14 @@ void EngineService::SetEventSink(
 {
     std::lock_guard<std::mutex> lock(mutex_);
     event_sink_ = std::move(sink);
+}
+
+void EngineService::SetSessionEventSink(
+    std::function<void(uint64_t, const IpcEvent&,
+                       const std::string&)> sink)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    session_sink_ = std::move(sink);
 }
 
 void EngineService::SetServerStatsProvider(
@@ -360,6 +452,65 @@ bool EngineService::ApplySceneDocument(
         }
     }
 
+    /* Graph + LED-address validation run inside
+       ApplyPreparedScene — on the PREPARED document, so
+       matrix-expanded emitter addresses are checked against
+       the persisted zone size as well (Task 6). */
+
+    /* The persisted preset name is validated HERE (the IPC/CLI
+       boundary): a playback-preset name (Spectrum Cycle /
+       Rainbow Wave / Breathing) is also valid — it has no
+       registry layer stack; live fallback renders the
+       document's base colors while Animation playback drives
+       the real preset (Task 3.6). The actual layer build runs
+       inside PrepareStudioScene below. */
+    if(doc->effect.layers.empty() && !doc->effect.preset.empty() &&
+       !studio::FindPreset(doc->effect.preset) &&
+       !IsPlaybackPresetName(doc->effect.preset))
+    {
+        err = "unknown preset '" + doc->effect.preset + "'";
+        return false;
+    }
+
+    /* SET_SCENE / --scene expanded documents carry no workspace
+       inputs — synthesize the minimal candidate preparation
+       needs: the global effect registry resolves named presets
+       (same contract as before) and decay defaults to 100 (a
+       1.0 multiplier). Authored fields stay untouched. */
+    WorkspaceCandidate cand;
+    cand.resolved         = doc;
+    cand.effect_registry  = studio::EffectLooks();
+    cand.document.inputs.decay_pct = 100;
+    return ApplyWorkspaceCandidate(cand, err);
+}
+
+bool EngineService::ApplyWorkspaceCandidate(const WorkspaceCandidate& cand,
+                                            std::string& err)
+{
+    /* Task 6 shared preparation: matrix emitters + key
+       positions expand against the LIVE snapshots; runtime
+       layers resolve through the candidate's own registry
+       snapshot and take the persisted decay scaling on a
+       copy — authored workspace data is never mutated. */
+    PreparedStudioScene prepared;
+    if(!PrepareStudioScene(cand, LayoutSnapshots(), prepared, err))
+    {
+        return false;
+    }
+    return ApplyPreparedScene(prepared, err);
+}
+
+bool EngineService::ApplyPreparedScene(const PreparedStudioScene& prepared,
+                                       std::string& err)
+{
+    const std::shared_ptr<const studio::SceneDocument>& doc =
+        prepared.doc;
+    if(!doc)
+    {
+        err = "null scene document";
+        return false;
+    }
+
     /* Structural rules the SceneJson parser enforces are
        re-checked HERE because the layout mutation verbs edit
        the applied document directly — they never re-enter
@@ -391,7 +542,9 @@ bool EngineService::ApplySceneDocument(
        report, plan section 5): expanded documents bypass
        workspace resolution, so out-of-range LED addresses are
        rejected HERE — the last boundary before the scene is
-       applied and stored. */
+       applied and stored. Task 6: the check runs on the
+       PREPARED document, so matrix-expanded emitter addresses
+       are validated against the persisted zone size too. */
     {
         std::vector<std::string> errs;
         if(!ValidateSceneLedAddresses(*doc, &errs))
@@ -406,42 +559,18 @@ bool EngineService::ApplySceneDocument(
         }
     }
 
-    /* Resolve the effect stack the persisted document intends:
-       the inline layer stack when present, otherwise the named
-       preset through the effect-look registry (same contract
-       as the --scene CLI path). A playback-preset name
-       (Spectrum Cycle / Rainbow Wave / Breathing) is also
-       valid: it has no registry layer stack — live fallback
-       renders the document's base colors while Animation
-       playback drives the real preset (Task 3.6). */
-    std::vector<studio::EffectLayer> layers = doc->effect.layers;
-    if(layers.empty() && !doc->effect.preset.empty())
-    {
-        if(!studio::FindPreset(doc->effect.preset) &&
-           !IsPlaybackPresetName(doc->effect.preset))
-        {
-            err = "unknown preset '" + doc->effect.preset + "'";
-            return false;
-        }
-        if(studio::FindPreset(doc->effect.preset))
-        {
-            layers = studio::BuildPreset(doc->effect.preset,
-                                         doc->effect.seed);
-            studio::ApplyGlobalParams(layers, doc->effect.speed,
-                                      doc->effect.intensity);
-        }
-    }
-
     uint64_t revision;
     {
         /* The whole apply is serialized: revision, worker
            submission, mapper re-bind, and the stored document
            move together — two concurrent SET_SCENEs can't
-           interleave a stale document over a newer revision. */
+           interleave a stale document over a newer revision.
+           The worker receives the PREPARED scene atomically:
+           document, runtime layers, and the key-position
+           lookup never tear across revisions. */
         std::lock_guard<std::mutex> lock(mutex_);
         revision = ++scene_revision_;
-        engine_.Worker().SubmitScene(doc, std::move(layers),
-                                     revision);
+        engine_.Worker().SubmitPreparedScene(prepared, revision);
         if(deps_.mapper)
         {
             deps_.mapper->SetScene(doc);
@@ -507,6 +636,11 @@ nlohmann::json EngineService::SceneJsonLocked() const
     }
     out["applied_revision"] = engine_.Worker().AppliedRevision();
     out["playing"]          = engine_.Worker().HasScene();
+    /* studio-import Task 3: SCENE replies tell old clients the
+       managed workspace state — the gate rule lives here, not
+       in guesswork. */
+    out["workspace"] = nlohmann::json::object(
+        {{ "managed", WorkspaceManaged() }});
     return out;
 }
 
@@ -768,6 +902,18 @@ void EngineService::EmitReactive()
     Emit(event_kind::kReactive, ReactiveJson());
 }
 
+void EngineService::EmitCalibrationStatus()
+{
+    /* Task 11: the calibration session's changed hook —
+       session-targeted status through the commands layer
+       (the owner gets the token-carrying body; the push
+       replaces queued copies on the "status" slot). */
+    if(ws_commands_)
+    {
+        ws_commands_->EmitCalibrationStatus();
+    }
+}
+
 nlohmann::json EngineService::OwnershipJson() const
 {
     /* Task 4.7: no provider wired -> honest null (the IPC
@@ -861,10 +1007,20 @@ nlohmann::json EngineService::DiagnosticsJson(TimePoint now) const
 
 nlohmann::json EngineService::OnWelcome()
 {
+    nlohmann::json caps = nlohmann::json::array();
+    if(ws_commands_)
+    {
+        /* studio-import Task 3: managed-workspace jobs,
+           revisions, and bounded transfers (plan 3.3). A client
+           that doesn't see it falls back to the legacy surface
+           unchanged. */
+        caps.push_back("studio_workspace_v1");
+    }
     return nlohmann::json::object({
-        { "engine",    "openrgb2-engine" },
-        { "running",   engine_.Running() },
-        { "state",     StateJson()       },
+        { "engine",       "openrgb2-engine" },
+        { "running",      engine_.Running() },
+        { "capabilities", caps              },
+        { "state",        StateJson()       },
     });
 }
 
@@ -901,7 +1057,88 @@ bool EngineService::SnapshotEvent(const std::string& kind,
         out = ReactiveJson();
         return true;
     }
+    if(kind == event_kind::kWorkspace)
+    {
+        /* The initial snapshot is the `get` reply — metadata
+           only; document/type/look content rides transfers. */
+        out = ws_commands_ ? ws_commands_->SnapshotJson()
+                           : nlohmann::json::object(
+                                 {{ "managed", false }});
+        return true;
+    }
     return false;
+}
+
+bool EngineService::SnapshotEventFor(uint64_t session_id,
+                                     const std::string& kind,
+                                     nlohmann::json& out)
+{
+    if(kind == event_kind::kPreview)
+    {
+        /* Session-bound: "preview" reports THIS session's
+           preview state — a status record, never another
+           session's frames and never a global broadcast. */
+        out = ws_commands_
+                  ? ws_commands_->PreviewStatusJson(session_id)
+                  : nlohmann::json::object({
+                        { "type",   "status" },
+                        { "active", false    },
+                        { "paused", false    },
+                    });
+        return true;
+    }
+    if(kind == event_kind::kCalibration)
+    {
+        /* Task 11: session-bound — this session's own
+           calibration view; the token is only reported to
+           the session that owns the session. */
+        out = ws_commands_
+                  ? ws_commands_->CalibrationStatusJson(session_id)
+                  : nlohmann::json::object({
+                        { "active",   false },
+                        { "starting", false },
+                        { "ending",   false },
+                    });
+        return true;
+    }
+    return SnapshotEvent(kind, out);
+}
+
+bool EngineService::WorkspaceManaged() const
+{
+    return deps_.workspace != nullptr &&
+           deps_.workspace->ManagedActive();
+}
+
+IpcReply EngineService::DispatchSession(uint64_t session_id,
+                                        MsgType type,
+                                        const nlohmann::json& body)
+{
+    if(type == MsgType::WorkspaceCommand)
+    {
+        if(!ws_commands_)
+        {
+            return IpcReply::Fail(ErrCode::Unavailable,
+                "the studio_workspace_v1 capability is not "
+                "present on this server — use the legacy "
+                "surface");
+        }
+        return ws_commands_->Handle(session_id, body);
+    }
+    return Dispatch(type, body);
+}
+
+void EngineService::OnSessionEnd(uint64_t session_id)
+{
+    /* Session-bound workspace state dies with the session:
+       queued jobs and staged transfers are cancelled. A commit
+       already past the durable marker is never rolled back —
+       the reconnecting client reconciles by revision/content
+       hash. */
+    if(ws_commands_)
+    {
+        ws_commands_->OnSessionEnd(session_id);
+    }
 }
 
 IpcReply EngineService::Dispatch(MsgType type,
@@ -909,6 +1146,13 @@ IpcReply EngineService::Dispatch(MsgType type,
 {
     switch(type)
     {
+    /* A WorkspaceCommand arriving through the non-session
+       dispatch path (direct service calls in harnesses) binds
+       to session 0 — the jobs/transfers still work, scoped to
+       a virtual session that never disconnects. */
+    case MsgType::WorkspaceCommand:
+        return DispatchSession(0, type, body);
+
     case MsgType::GetSnapshots:
         return IpcReply::Success(MsgType::Snapshots,
                                  SnapshotsJson());
@@ -919,6 +1163,22 @@ IpcReply EngineService::Dispatch(MsgType type,
 
     case MsgType::SetScene:
     {
+        /* studio-import Task 3: once a managed workspace is
+           active, the lossy legacy scene path is refused — the
+           workspace is the authoring surface (plan 3.3). The
+           gate is honest: reads (GET_SCENE), identify, and
+           telemetry stay available; only document mutations
+           are refused. */
+        if(WorkspaceManaged())
+        {
+            IpcReply r = IpcReply::Fail(ErrCode::BadRequest,
+                "a managed workspace is active — edit it through "
+                "WORKSPACE_COMMAND (base_revision + "
+                "resource_revision), not the lossy legacy "
+                "scene path");
+            r.body["detail"] = "workspace_required";
+            return r;
+        }
         if(!body.is_object() || !body.contains("document")
            || !body["document"].is_object())
         {
@@ -1147,14 +1407,41 @@ IpcReply EngineService::Dispatch(MsgType type,
     case MsgType::GetPresets:
     {
         nlohmann::json presets = nlohmann::json::array();
+        std::set<std::string> seen;
         for(const studio::PresetInfo& p : studio::PresetList())
         {
+            seen.insert(p.id);
             presets.push_back(nlohmann::json::object({
                 { "id",          p.id          },
                 { "name",        p.name        },
                 { "description", p.description },
                 { "needs",       p.needs       },
             }));
+        }
+        /* Personal looks landed by resource_install live in the
+           managed workspace library — the global look registry
+           never re-scans it, so merge the effective registry's
+           file-supplied entries (sorted tail, like the catalog).
+           Resolution goes through the same registry, so an id
+           listed here always resolves. */
+        if(deps_.workspace)
+        {
+            const auto looks =
+                deps_.workspace->Store().EffectiveEffectRegistry()
+                    .List({});
+            for(const studio::EffectRegistry::EffectInfo& i : looks)
+            {
+                if(!i.from_file || seen.count(i.id))
+                {
+                    continue;
+                }
+                presets.push_back(nlohmann::json::object({
+                    { "id",          i.id          },
+                    { "name",        i.name        },
+                    { "description", i.description },
+                    { "needs",       i.needs       },
+                }));
+            }
         }
         return IpcReply::Success(MsgType::Presets,
             nlohmann::json::object({{ "presets", presets }}));
@@ -1470,11 +1757,19 @@ IpcReply EngineService::HandleIdentify(const nlohmann::json& body)
     /* An uploaded loop owns the wireless group — identification
        frames would only be suppressed at the lane, so the
        honest answer is Unavailable (Task 3.6: one producer
-       per group). */
+       per group). A physical calibration session owns the
+       controller's lane the same way (Task 11). */
     if(deps_.playback && deps_.playback->OwnsGroup(key))
     {
         return IpcReply::Fail(ErrCode::Unavailable,
             "an uploaded animation loop owns '" + snap->name +
+            "' — identification frames are suppressed while "
+            "it is active");
+    }
+    if(deps_.calibration && deps_.calibration->OwnsGroup(key))
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "a calibration session owns '" + snap->name +
             "' — identification frames are suppressed while "
             "it is active");
     }
@@ -1528,6 +1823,26 @@ IpcReply EngineService::HandleIdentify(const nlohmann::json& body)
 }
 
 IpcReply EngineService::HandleLayoutMutate(
+    const std::string& verb, const nlohmann::json& body)
+{
+    /* studio-import Task 3: layout mutation verbs are lossy
+       legacy edits — with a managed workspace active they are
+       refused so a raw edit can never bypass the generation
+       history. `identify` is NOT a mutation and stays live
+       (it is handled before this gate). */
+    if(WorkspaceManaged())
+    {
+        IpcReply r = IpcReply::Fail(ErrCode::BadRequest,
+            "a managed workspace is active — layout changes go "
+            "through WORKSPACE_COMMAND commit, not the legacy "
+            "mutation path");
+        r.body["detail"] = "workspace_required";
+        return r;
+    }
+    return HandleLayoutMutateImpl(verb, body);
+}
+
+IpcReply EngineService::HandleLayoutMutateImpl(
     const std::string& verb, const nlohmann::json& body)
 {
     if(!body.is_object() ||
@@ -2304,6 +2619,15 @@ void EngineService::PollEvents(TimePoint now)
         Emit(ev.kind, ev.data);
     }
 
+    /* Idle workspace transfers expire on the owner tick too —
+       the lazy sweep inside each WORKSPACE_COMMAND is the
+       primary expiry path; this keeps a truly abandoned
+       upload from waiting for the next command. */
+    if(ws_commands_)
+    {
+        ws_commands_->SweepExpired();
+    }
+
     /* frame_status emits last — the same ordering it had as
        the final entry of the pending batch. */
     PollFrameStatus(now);
@@ -2338,6 +2662,13 @@ void EngineService::PollFrameStatus(TimePoint now)
                so the burst coalesces into the next push. */
             last_stats_sig_.clear();
         }
+    }
+
+    /* Task 7 draft previews ride the same fast tick; the
+       per-session 30 Hz cap lives inside PollPreviews. */
+    if(ws_commands_)
+    {
+        ws_commands_->PollPreviews(now);
     }
 }
 

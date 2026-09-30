@@ -1,0 +1,156 @@
+[
+  {
+    "req": {
+      "op": "click",
+      "sel": "wsActionsButton"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 682.5,
+        "y": 213
+      }
+    }
+  },
+  {
+    "step": "open-actions",
+    "status": "pass",
+    "detail": "{'ok': True, 'result': {'x': 682.5, 'y': 213}}"
+  },
+  {
+    "req": {
+      "op": "shot",
+      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\30-savecopy-field.png"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "height": 941,
+        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\30-savecopy-field.png",
+        "width": 1584
+      }
+    }
+  },
+  {
+    "step": "shot-savecopy-field",
+    "status": "pass",
+    "detail": "{'ok': True, 'result': {'height': 941, 'path': 'C:\\\\Users\\\\daniel\\\\.codex\\\\worktrees\\\\studio-import\\\\openRGB2\\\\task12-evidence\\\\qa\\\\shots\\\\30-savecopy-field.png', 'width': 1584}}"
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "wsCopyName"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 654.5,
+        "y": 521.5
+      }
+    }
+  },
+  {
+    "step": "click-copyname",
+    "status": "pass",
+    "detail": "{'ok': True, 'result': {'x': 654.5, 'y': 521.5}}"
+  },
+  {
+    "req": {
+      "op": "type",
+      "sel": "wsCopyName",
+      "text": "qa-copy"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "sent": 7,
+        "text": "qa-copy"
+      }
+    }
+  },
+  {
+    "step": "type-copyname",
+    "status": "pass",
+    "detail": "{'ok': True, 'result': {'sent': 7, 'text': 'qa-copy'}}"
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "JSON.stringify({v:(function(){var w=null;function wk(it){if(!it)return null;var cs=it.childItems?it.childItems():[];for(var i=0;i<cs.length;i++){if(cs[i].objectName===\"wsCopyName\")return cs[i];var r=wk(cs[i]);if(r)return r;}return null;}var m=objectCtl?objectCtl:null;return \"x\"})()})"
+    },
+    "reply": {
+      "ok": true,
+      "result": "{\"v\":\"x\"}"
+    }
+  },
+  {
+    "step": "copyname-value",
+    "status": "pass",
+    "detail": "{'v': 'x'}"
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "wsSaveCopy"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 1104,
+        "y": 527
+      }
+    }
+  },
+  {
+    "step": "click-savecopy",
+    "status": "pass",
+    "detail": "{'ok': True, 'result': {'x': 1104, 'y': 527}}"
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "JSON.stringify({list:workspace.workspaceList})"
+    },
+    "reply": {
+      "ok": true,
+      "result": "{\"list\":[\"qa-desk\"]}"
+    }
+  },
+  {
+    "step": "copy-committed",
+    "status": "pass",
+    "detail": "{'list': ['qa-desk']}"
+  },
+  {
+    "req": {
+      "op": "shot",
+      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\31-savecopy-done.png"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "height": 941,
+        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\31-savecopy-done.png",
+        "width": 1584
+      }
+    }
+  },
+  {
+    "step": "shot-savecopy-done",
+    "status": "pass",
+    "detail": "{'ok': True, 'result': {'height': 941, 'path': 'C:\\\\Users\\\\daniel\\\\.codex\\\\worktrees\\\\studio-import\\\\openRGB2\\\\task12-evidence\\\\qa\\\\shots\\\\31-savecopy-done.png', 'width': 1584}}"
+  },
+  {
+    "req": {
+      "op": "key",
+      "key": "Escape"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "key": 16777216,
+        "mods": 0
+      }
+    }
+  }
+]

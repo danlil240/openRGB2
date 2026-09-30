@@ -633,6 +633,78 @@ PowerLifecycle::Deps EngineHost::BuildLifecycleDeps()
     return ldeps;
 }
 
+/* studio-import Task 11 — physical LED calibration. The
+   session reuses the SAME injected seams the playback
+   controller owns (lane suppression primitives, the
+   transport-bypassing direct submit, SetCustomMode): the
+   single-producer rule is enforced by construction — there
+   is no second hardware path to write through. The "changed"
+   hook publishes the session-bound "calibration" IPC event
+   through the service's targeted emitter. */
+CalibrationSession::Deps EngineHost::BuildCalibrationDeps()
+{
+    CalibrationSession::Deps d;
+    d.snapshots =
+        [this]() -> std::vector<DeviceSnapshot>
+        {
+            return sdk_ ? sdk_->Snapshots()
+                        : std::vector<DeviceSnapshot>{};
+        };
+    d.playback       = playback_.get();
+    d.set_suppressed =
+        [this](const DeviceKey& k, bool s, const std::string& r)
+        { pipeline_->SetSuppressed(k, s, r); };
+    d.is_suppressed  =
+        [this](const DeviceKey& k)
+        { return pipeline_->IsSuppressed(k); };
+    d.drop_pending   =
+        [this](const DeviceKey& k)
+        { return pipeline_->DropPending(k); };
+    d.reset_delivered =
+        [this](const DeviceKey& k)
+        { pipeline_->ResetDeliveredState(k); };
+    d.wait_idle      =
+        [this](const DeviceKey& k, Clock::duration t)
+        { return pipeline_->WaitIdle(k, t); };
+    d.direct_submit  =
+        [this](const RgbFrame& f)
+        {
+            return sdk_
+                ? sdk_->SubmitLatest(f)
+                : SubmitResult::Reject(
+                      "no SDK transport configured");
+        };
+    d.set_custom_mode =
+        [this](const DeviceKey& k, std::string& derr)
+        {
+            if(!sdk_)
+            {
+                derr = "no SDK transport configured";
+                return false;
+            }
+            if(!sdk_->SetCustomMode(k))
+            {
+                derr = sdk_->LastError();
+                return false;
+            }
+            return true;
+        };
+    d.output_paused =
+        [this]() { return pipeline_->OutputPaused(); };
+    d.log =
+        [this](const std::string& line)
+        { Log("calibration: " + line); };
+    d.changed =
+        [this]
+        {
+            if(service_)
+            {
+                service_->EmitCalibrationStatus();
+            }
+        };
+    return d;
+}
+
 /*---------------------------------------------------------*\
 || Startup                                                  ||
 \*---------------------------------------------------------*/
@@ -873,6 +945,14 @@ bool EngineHost::Start(std::string& err)
     lifecycle_ = std::make_unique<PowerLifecycle>(
         BuildLifecycleDeps());
 
+    /* Task 11: the physical LED-calibration session — built
+       after playback_ + lifecycle_ exist (it coordinates
+       with both). Its worker is the session's only hardware
+       writer; the calibration_* WORKSPACE verbs bind to it
+       via ipc_deps.calibration below. */
+    calibration_ = std::make_unique<CalibrationSession>(
+        BuildCalibrationDeps());
+
     /* The Windows event source: a dedicated thread + message-
        only window carrying the display-state and suspend/resume
        registrations (Qt-free adaptation of the preserved
@@ -924,6 +1004,39 @@ bool EngineHost::Start(std::string& err)
             opts_.effects_dir, nullptr);
     }
 
+    /* Task 2 (studio-import): the managed workspace store +
+       commit service. Its publish seam is the same scene-apply
+       path --scene and SET_SCENE use; its libraries are the
+       packaged types/looks plus the managed root's own
+       library layer (types the workspace actually uses are
+       snapshotted per generation regardless). The store is
+       purely file state — constructing it never touches
+       output. Built BEFORE the IPC service so the
+       WORKSPACE_COMMAND surface can bind to it. */
+    {
+        WorkspaceService::Deps wdeps;
+        wdeps.devices = BuildDeviceRegistry(
+            opts_.devices_dir,
+            [this](const std::string& l) { Log(l); });
+        wdeps.effects = studio::EffectLooks();
+        /* apply_scene references service_ lazily — the lambda
+           fires only from a workspace job, long after the
+           service exists. */
+        wdeps.apply_scene =
+            [this](std::shared_ptr<const WorkspaceCandidate> cand,
+                   std::string& aerr) -> bool
+            {
+                return service_ && cand &&
+                       service_->ApplyWorkspaceCandidate(*cand,
+                                                         aerr);
+            };
+        workspaces_ = std::make_unique<WorkspaceService>(
+            opts_.workspace_root.empty()
+                ? WorkspaceStore::DefaultRoot()
+                : opts_.workspace_root,
+            std::move(wdeps));
+    }
+
     /* The IPC service owns the scene-apply path (Task 3.5): the
        --scene CLI and SET_SCENE both go through
        ApplySceneDocument, so a UI-applied scene and a
@@ -935,6 +1048,11 @@ bool EngineHost::Start(std::string& err)
         ipc_deps.sdk      = sdk_.get();
         ipc_deps.playback = playback_.get();
         ipc_deps.power    = lifecycle_.get();
+        /* Task 11: the physical calibration session — the
+           calibration_* WORKSPACE verbs bind their opaque
+           session tokens to it. nullptr keeps the verbs
+           answering Unavailable honestly. */
+        ipc_deps.calibration = calibration_.get();
         /* Task 4.6: the REACTIVE_COMMAND surface — nullptr is
            legal; the service then reports available=false
            honestly rather than fabricating toggles. */
@@ -1041,6 +1159,11 @@ bool EngineHost::Start(std::string& err)
                         serr);
                 }
             };
+        /* studio-import Task 3: binding the workspace service
+           makes the WORKSPACE_COMMAND verb surface exist —
+           WELCOME advertises "studio_workspace_v1" exactly
+           then. */
+        ipc_deps.workspace = workspaces_.get();
         service_ = std::make_unique<ipc::EngineService>(
             engine_, std::move(ipc_deps));
     }
@@ -1077,6 +1200,12 @@ bool EngineHost::StartIpc()
     ipc_server_ = std::make_unique<ipc::IpcServer>(*service_);
     service_->SetEventSink(
         [this](const ipc::IpcEvent& ev) { ipc_server_->Emit(ev); });
+    /* Task 7: the session-bound draft preview feed — targeted
+       delivery to the owning session, never a broadcast. */
+    service_->SetSessionEventSink(
+        [this](uint64_t sid, const ipc::IpcEvent& ev,
+               const std::string& key)
+        { ipc_server_->EmitTo(sid, ev, key); });
     service_->SetServerStatsProvider(
         [this]() { return ipc_server_->Stats(); });
 
@@ -1118,17 +1247,20 @@ bool EngineHost::ApplyStartupScene(std::string& err)
 {
     if(!opts_.scene_path.empty())
     {
-        /* Task 3.8: --scene resolves through the profile/
-           workspace layer — expanded scene JSON, a compact
-           studio.json workspace, or a legacy host-settings
-           blob all land on the same SceneDocument. */
+        /* Task 2: --scene loads through the canonical workspace
+           candidate — expanded scene JSON, a compact studio.json
+           workspace, a v1/v2 expanded workspace, or a legacy
+           host-settings blob all land on the same resolved
+           SceneDocument while the compact authoring form survives
+           for the workspace layer. */
         const studio::PresetRegistry device_registry =
             BuildDeviceRegistry(opts_.devices_dir,
                 [this](const std::string& l) { Log(l); });
-        std::shared_ptr<studio::SceneDocument> doc;
+        WorkspaceCandidate cand;
         std::vector<std::string> warnings;
-        if(!LoadSceneDocument(opts_.scene_path, device_registry,
-                              doc, err, &warnings))
+        if(!LoadWorkspaceCandidate(opts_.scene_path, device_registry,
+                                   studio::EffectLooks(),
+                                   cand, err, &warnings))
         {
             return false;
         }
@@ -1136,7 +1268,10 @@ bool EngineHost::ApplyStartupScene(std::string& err)
         {
             Log(opts_.scene_path + ": " + w);
         }
-        if(!service_->ApplySceneDocument(doc, err))
+        Log(opts_.scene_path + ": loaded " +
+            WorkspaceSourceFormName(cand.source_form) +
+            (cand.migrated ? " (migrated)" : ""));
+        if(!service_->ApplyWorkspaceCandidate(cand, err))
         {
             err = "scene apply failed: " + err;
             return false;
@@ -1279,6 +1414,14 @@ void EngineHost::PollOnce()
     /* Playback maintenance: acknowledgement polling, clock
        sampling, topology re-resolution. */
     playback_->Poll(Clock::now());
+    /* Task 11: calibration maintenance — output-pause ends,
+       inactivity timeout, topology re-validation. Runs AFTER
+       playback's poll so a released hold and a revalidated
+       restore never interleave inside one tick. */
+    if(calibration_)
+    {
+        calibration_->Poll(Clock::now());
+    }
 
     if(sdk_)
     {
@@ -1317,8 +1460,10 @@ void EngineHost::PollOnce()
             }
             /* An uploaded loop owns this group — asserting
                Direct mode here would stomp it (Task 3.6:
-               one producer per wireless group). */
-            if(playback_->OwnsGroup(key))
+               one producer per wireless group). A calibration
+               session owns it the same way (Task 11). */
+            if(playback_->OwnsGroup(key) ||
+               (calibration_ && calibration_->OwnsGroup(key)))
             {
                 continue;
             }
@@ -1524,6 +1669,14 @@ const OrderlyShutdown::Result& EngineHost::Stop()
                  std::chrono::milliseconds(2000),
                  [this]
                  { if(ipc_server_) ipc_server_->Stop(); });
+    /* Workspace job worker joins BEFORE frame production and
+       the IPC service stop — an in-flight commit's apply_scene
+       seam reaches service_ + engine_, so no workspace job may
+       still be running when those destruct. */
+    shutdown.Add("workspace-jobs",
+                 std::chrono::milliseconds(2000),
+                 [this]
+                 { if(workspaces_) workspaces_->Shutdown(); });
     shutdown.Add("scene-worker",
                  std::chrono::milliseconds(2000),
                  [this] { engine_.Stop(); });

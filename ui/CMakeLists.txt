@@ -31,6 +31,32 @@ if(COMMAND qt_policy)
     qt_policy(SET QTP0004 NEW)
 endif()
 
+# studio-import Task 8: the Quick3D viewport subtree
+# (studio/viewport/) ships only in the full-Studio build —
+# OPENRGB2_HAVE_QUICK3D is set by the root CMakeLists when the
+# component is provisioned and the opt-out is off. The subtree is
+# QML-only (no C++ Quick3D linkage); Layout's 2D canvas stays the
+# fallback in basic builds. The PUBLIC definition exposes the gate
+# to the openrgb2-ui entry point (main.cpp) and tests.
+set(_viewport_qml)
+if(OPENRGB2_HAVE_QUICK3D)
+    set(_viewport_qml
+        studio/viewport/StudioViewport.qml
+        studio/viewport/editor/CameraController.qml
+        studio/viewport/editor/SelectionController.qml
+        studio/viewport/editor/TransformGizmo.qml
+        studio/viewport/devices/Case.qml
+        studio/viewport/devices/Fan.qml
+        studio/viewport/devices/Gpu.qml
+        studio/viewport/devices/Keyboard.qml
+        studio/viewport/devices/Monitor.qml
+        studio/viewport/devices/Mouse.qml
+        studio/viewport/devices/Ram.qml
+        studio/viewport/devices/SelectionFrame.qml
+        studio/viewport/devices/Strip.qml
+        studio/viewport/materials/StudioEnvironment.qml)
+endif()
+
 qt_add_qml_module(openrgb2_ui
     URI OpenRGB2.UI
     VERSION 1.0
@@ -56,6 +82,19 @@ qt_add_qml_module(openrgb2_ui
         pages/LayoutPage.qml
         pages/LightingPage.qml
         pages/SettingsPage.qml
+        studio/DeviceLibrary.qml
+        studio/DevicePresetEditor.qml
+        studio/LedCalibrator.qml
+        studio/DeviceTree.qml
+        studio/TransformInspector.qml
+        studio/WorkspaceImportDialog.qml
+        studio/WorkspaceActionsDialog.qml
+        studio/EffectEditor.qml
+        studio/EffectInspector.qml
+        studio/LayerStack.qml
+        studio/LookShelf.qml
+        studio/PaletteEditor.qml
+        ${_viewport_qml}
     SOURCES
         ${CMAKE_SOURCE_DIR}/src/ui/EngineBridge.h
         ${CMAKE_SOURCE_DIR}/src/ui/EngineBridge.cpp
@@ -78,8 +117,36 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/UiSettings.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/StartupTaskController.h
         ${CMAKE_SOURCE_DIR}/src/ui/StartupTaskController.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceEditSession.h
+        ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceEditSession.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceDraftStore.h
+        ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceDraftStore.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceController.h
+        ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceController.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/StudioViewportModel.h
+        ${CMAKE_SOURCE_DIR}/src/ui/StudioViewportModel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/SceneObjectModel.h
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/SceneObjectModel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/PresetListModel.h
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/PresetListModel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/ObjectEditorController.h
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/ObjectEditorController.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/EffectLayerModel.h
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/EffectLayerModel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/EffectEditorController.h
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/EffectEditorController.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/DevicePresetController.h
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/DevicePresetController.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/CalibrationController.h
+        ${CMAKE_SOURCE_DIR}/src/ui/studio/CalibrationController.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/QaServer.h
         ${CMAKE_SOURCE_DIR}/src/ui/QaServer.cpp)
+
+if(OPENRGB2_HAVE_QUICK3D)
+    # QML-only usage — no C++ Quick3D linkage needed; the definition
+    # exposes the gate to main.cpp (quick3dAvailable) and tests.
+    target_compile_definitions(openrgb2_ui PUBLIC OPENRGB2_WITH_QUICK3D)
+endif()
 
 set_target_properties(openrgb2_ui PROPERTIES AUTOMOC ON)
 
@@ -99,6 +166,12 @@ target_link_libraries(openrgb2_ui PUBLIC
     Qt6::Gui
     Qt6::Qml
     Qt6::Quick
+    # studio-import Task 4: the shared workspace draft edits
+    # the Qt-free compact model (StudioDocument +
+    # EditorController). PUBLIC so the entry-point target sees
+    # WorkspaceEditSession.h's includes. Still no engine/SDK/
+    # controller boundary — the core target carries neither.
+    openrgb2_studio_core
 PRIVATE
     Qt6::Network
     openrgb2_ipc_wire)

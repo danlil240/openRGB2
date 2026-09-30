@@ -203,6 +203,161 @@ static void TestControllerDataRoundTrip()
     CHECK(c.colors[0] == 0x00010203u);
 }
 
+static FakeController KeyboardFixture()
+{
+    FakeController c;
+    c.name        = "Corsair K95";
+    c.vendor      = "Corsair";
+    c.serial      = "K1";
+    c.location    = "hid:k1";
+    c.active_mode = 0;
+
+    FakeMode direct; direct.name = "Direct"; direct.speed = 50;
+    c.modes = { direct };
+
+    FakeZone kb;
+    kb.name          = "Keyboard";
+    kb.type          = 2;               /* ZONE_TYPE_MATRIX */
+    kb.leds_min      = 6;
+    kb.leds_max      = 6;
+    kb.leds_count    = 6;
+    kb.matrix_rows   = 2;
+    kb.matrix_cols   = 3;
+    kb.matrix_map    = { 0, 1, 2,
+                         3, 0xFFFFFFFFu, 5 };   /* one empty cell */
+    c.zones = { kb };
+
+    const char* names[] = { "Key: Escape", "Key: A", "Key: S",
+                            "Key: D", "Key: F", "Key: G" };
+    for(const char* n : names)
+    {
+        c.led_names.push_back(n);
+        c.colors.push_back(0x00000000);
+    }
+    return c;
+}
+
+static void TestControllerMatrixRoundTrip()
+{
+    const FakeController fc = KeyboardFixture();
+    const std::vector<uint8_t> body =
+        FakeSdkServer::BuildControllerBody(fc);
+
+    SdkController c;
+    CHECK(ParseControllerData(body.data(), body.size(), 4, c));
+    CHECK(c.zones.size() == 1);
+    CHECK(c.zones[0].name == "Keyboard");
+    CHECK(c.zones[0].matrix_rows == 2);
+    CHECK(c.zones[0].matrix_cols == 3);
+    CHECK(c.zones[0].matrix_map.size() == 6);
+    CHECK(c.zones[0].matrix_map[0] == 0);
+    CHECK(c.zones[0].matrix_map[4] == 0xFFFFFFFFu);  /* empty cell */
+    /* Controller LED names land on the controller struct. */
+    CHECK(c.led_names.size() == 6);
+    CHECK(c.led_names[0] == "Key: Escape");
+    CHECK(c.led_names[5] == "Key: G");
+}
+
+static void TestControllerNoMatrixRoundTrip()
+{
+    /* A zone with no matrix parses to an empty map. */
+    const std::vector<uint8_t> body =
+        FakeSdkServer::BuildControllerBody(WirelessFixture());
+    SdkController c;
+    CHECK(ParseControllerData(body.data(), body.size(), 4, c));
+    CHECK(c.zones.size() == 3);
+    CHECK(c.zones[0].matrix_map.empty());
+    CHECK(c.zones[0].matrix_rows == 0);
+    CHECK(c.zones[0].matrix_cols == 0);
+    CHECK(c.led_names.size() == 120);
+    CHECK(c.led_names[119] == "LED 119");
+}
+
+/* Offset of the zone matrix-map-size field inside a body
+   built from KeyboardFixture: u32 size, u32 type, six strings,
+   u16 num_modes, u32 active_mode, then modes, u16 num_zones,
+   then zone: string + 4 u32s -> the u16 that follows. */
+static size_t MatrixSizeOffset(const std::vector<uint8_t>& body)
+{
+    size_t off = 8;
+    for(int i = 0; i < 6; ++i)
+    {
+        uint16_t slen = 0;
+        memcpy(&slen, body.data() + off, 2);
+        off += 2 + slen;
+    }
+    uint16_t num_modes = 0;
+    memcpy(&num_modes, body.data() + off, 2);
+    off += 2 + 4;                              /* count + active */
+    for(uint16_t i = 0; i < num_modes; ++i)
+    {
+        uint16_t slen = 0;
+        memcpy(&slen, body.data() + off, 2);
+        off += 2 + slen;                       /* mode name */
+        off += 12 * 4;                         /* 12 u32 fields */
+        uint16_t ncolors = 0;
+        memcpy(&ncolors, body.data() + off, 2);
+        off += 2 + 4ull * ncolors;             /* colors */
+    }
+    uint16_t num_zones = 0;
+    memcpy(&num_zones, body.data() + off, 2);
+    off += 2;
+    /* First zone: name + 4 u32 fields -> matrix size field. */
+    uint16_t zlen = 0;
+    memcpy(&zlen, body.data() + off, 2);
+    off += 2 + zlen + 4 * 4;
+    return off;
+}
+
+static void TestControllerMatrixMalformed()
+{
+    const std::vector<uint8_t> good =
+        FakeSdkServer::BuildControllerBody(KeyboardFixture());
+    const size_t moff = MatrixSizeOffset(good);
+
+    /* matrix_map_size nonzero but smaller than the 8-byte
+       header -> reject. */
+    {
+        std::vector<uint8_t> b = good;
+        const uint16_t bad = 4;
+        memcpy(b.data() + moff, &bad, 2);
+        SdkController c;
+        CHECK(!ParseControllerData(b.data(), b.size(), 4, c));
+    }
+    /* Declared cell count larger than the serialized blob:
+       bump rows without adding cells -> reject. */
+    {
+        std::vector<uint8_t> b = good;
+        const uint32_t huge = 1000;
+        memcpy(b.data() + moff + 2, &huge, 4);
+        SdkController c;
+        CHECK(!ParseControllerData(b.data(), b.size(), 4, c));
+    }
+    /* Zero-dimension matrix serialized as a non-empty blob
+       -> reject. */
+    {
+        std::vector<uint8_t> b = good;
+        const uint16_t sz = 8;
+        memcpy(b.data() + moff, &sz, 2);
+        const uint32_t zero = 0;
+        memcpy(b.data() + moff + 2, &zero, 4);   /* rows = 0 */
+        /* blob says 8 bytes but zone body still carries the
+           old cells; shrink the size field leaves garbage
+           trailing -> must reject either way */
+        SdkController c;
+        CHECK(!ParseControllerData(b.data(), b.size(), 4, c));
+    }
+    /* Truncated mid-matrix: every strict prefix must fail —
+       reuse the exhaustive prefix sweep on the keyboard body. */
+    for(size_t len = MatrixSizeOffset(good);
+        len < good.size() && len < MatrixSizeOffset(good) + 64;
+        ++len)
+    {
+        SdkController c;
+        CHECK(!ParseControllerData(good.data(), len, 4, c));
+    }
+}
+
 static void TestControllerDataTruncations()
 {
     const std::vector<uint8_t> body =
@@ -327,6 +482,9 @@ int main()
     TestParserOversizedBody();
     TestParserTruncatedWaits();
     TestControllerDataRoundTrip();
+    TestControllerMatrixRoundTrip();
+    TestControllerNoMatrixRoundTrip();
+    TestControllerMatrixMalformed();
     TestControllerDataTruncations();
     TestControllerDataMalformedCounts();
     TestBuilders();

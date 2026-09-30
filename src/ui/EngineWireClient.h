@@ -114,12 +114,25 @@ public:
     bool SendRequest(ipc::MsgType type, const nlohmann::json& body,
                      uint32_t& id_out, std::string& err);
 
+    /* Convenience for the managed-workspace verb space
+       (studio-import Task 3): WORKSPACE_COMMAND {verb, ...args}.
+       args must be a JSON object — its members merge beside the
+       verb. Same guarantees/refusals as SendRequest. */
+    bool SendWorkspaceCommand(const std::string& verb,
+                              const nlohmann::json& args,
+                              uint32_t& id_out, std::string& err);
+
     /* Ends the session promptly: closes the channel so the read
        loop exits without waiting out its deadline. */
     void Stop();
 
     bool     Live() const;
     uint16_t NegotiatedVersion() const;
+    /* WELCOME-advertised capabilities captured at handshake
+       (e.g. "studio_workspace_v1"). Absent verbs must fall back
+       to the legacy surface; the set clears when the session
+       ends so a stale capability is never consulted. */
+    bool     HasCapability(const std::string& name) const;
     /* Requests refused by the bounded outbound queue plus frames
        still queued when a session ended — honest loss, never
        silent. */
@@ -148,6 +161,11 @@ private:
     std::condition_variable               out_cv_;
     std::deque<std::vector<uint8_t>>      out_queue_;
     std::thread                           writer_;
+
+    /* Written on the Run() thread at WELCOME, read from any
+       thread — its own mutex; cleared in finish(). */
+    mutable std::mutex                    caps_mu_;
+    std::vector<std::string>              capabilities_;
 };
 
 } /* namespace ui */

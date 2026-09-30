@@ -584,6 +584,23 @@ if($missing.Count -gt 0) {
 if(-not (Test-Path (Join-Path $OutDir "qml"))) {
     Fail "qml/ module directory missing -- windeployqt -qmldir did not run?"
 }
+# Task 8 viewport: a Quick3D build must deploy BOTH the runtime DLL
+# and the qml\QtQuick3D module tree -- a half-deployed Quick3D fails
+# the Layout page's viewport Loader at runtime. When the staging kit
+# carries Quick3D (QtDir\bin\Qt6Quick3D.dll) it is required outright:
+# the full-Studio package must include it.
+$q3dDll = Test-Path (Join-Path $OutDir "Qt6Quick3D.dll")
+$q3dQml = Test-Path (Join-Path $OutDir "qml\QtQuick3D")
+if(Test-Path (Join-Path $QtDir "bin\Qt6Quick3D.dll")) {
+    if(-not $q3dDll) {
+        Fail "Qt6Quick3D.dll missing -- windeployqt did not pick up the viewport's QtQuick3D import"
+    }
+    if(-not $q3dQml) {
+        Fail "qml\QtQuick3D module tree missing -- the 3D viewport cannot load"
+    }
+} elseif($q3dDll -xor $q3dQml) {
+    Fail "Quick3D half-deployed (Qt6Quick3D.dll=$q3dDll qml\QtQuick3D=$q3dQml)"
+}
 if((Get-ChildItem (Join-Path $OutDir "presets\devices") -Filter *.json).Count -eq 0) {
     Fail "presets/devices is empty"
 }
@@ -631,7 +648,9 @@ $forbidden += $all | Where-Object {
 # 5. Debug Qt runtime DLLs. Qt debug builds are '<module>d.dll'
 #    (Qt6Cored.dll). A RELEASE Qt module whose name ends in 'd'
 #    would false-positive -- allowlist such names here if ever staged.
-$qtReleaseNamesEndingInD = @()   # e.g. @('Qt6Xyzd.dll') for a release DLL
+# Quick3D is a RELEASE module whose name legitimately ends in 'd'
+# (the Studio viewport needs it — it is REQUIRED, not forbidden).
+$qtReleaseNamesEndingInD = @('Qt6Quick3D.dll')
 $forbidden += $all | Where-Object {
     -not $_.PSIsContainer -and
     $_.Name -match '^Qt6\w*d\.dll$' -and

@@ -30,6 +30,20 @@ engine_suite(shutdown_test)
 # bindings, last-known-good, durable PlaybackMode, scene loader.
 engine_suite(profile_store_test)
 
+# Studio-import Task 2 — managed workspace store: immutable
+# generations, atomic active-generation marker, last-valid
+# recovery, resource snapshots, revision-checked service.
+engine_suite(workspace_store_test)
+
+# Studio-import Task 9 — the portable bundle: PresetBundle
+# export/inspect/apply on disk (transitive closure, sanitize,
+# conflict remaps + nested cascade, never-overwrite), the
+# store's single-resource install/remove gates, and the packed
+# wire form through a real WorkspaceService with lambdas for
+# the staged-transfer surface (inline look materialization,
+# hostile-path refusal, no auto-apply).
+engine_suite(workspace_bundle_test)
+
 # Task 3.9 — ownership: competing-owner classifier, managed-config
 # sole-writer check, single-instance guard, listener-PID lookup.
 engine_suite(ownership_scan_test)
@@ -39,6 +53,31 @@ engine_suite(ownership_scan_test)
 # end at the LED level, params/display bounds, persist/restore,
 # and the honest live-only playback reason for reactive scenes.
 engine_suite(reactive_inputs_test)
+
+# Studio-import Task 6 — shared prepared scene: matrix emitter
+# expansion against matched bindings, the runtime layer copy
+# (global params + ripple decay, authored data untouched), and
+# the VK->world key-position lookup the worker/preview share.
+engine_suite(studio_scene_preparation_test)
+
+# Studio-import Task 7 — the bounded draft preview: deterministic
+# equivalence with the worker's evaluated colors (mapper
+# brightness parity), unbound-object rendering, latest-wins
+# candidate replacement, hidden/display-off pause, the two-
+# session bound, disconnect release, chunked publishing under
+# the IPC cap, and preview NEVER touching the output path or
+# starting a capture source.
+add_executable(preview_session_test preview_session_test.cpp)
+target_link_libraries(preview_session_test PRIVATE
+    openrgb2_engine
+    openrgb2_ipc)
+target_include_directories(preview_session_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(preview_session_test PRIVATE NDEBUG)
+add_test(NAME preview_session_test COMMAND preview_session_test)
+set_tests_properties(preview_session_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Task 4.9-parallel IPC surface for the same task: REACTIVE_COMMAND
 # verb bounds, honest Unavailable paths, STATE/DIAGNOSTICS surface,
@@ -99,6 +138,28 @@ set_tests_properties(e2e_lifecycle_test PROPERTIES
     LABELS engine
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Studio-import Task 12 — the complete imported workflow over the
+# REAL EngineHost composition + REAL named pipes against the
+# in-process fake backend: legacy import (sanitized, never
+# auto-applied, extracted type lands in the managed library),
+# authored edit + revision-checked save with a personal-look
+# dependency, packed-bundle inspect/commit (custom device type),
+# repeated UI attach with preview disposal across a dead channel,
+# engine restart (authored data + resolved scene + managed library
+# survive), export/reimport round-trip, and the passive
+# external-change report on the polled get.
+add_executable(e2e_studio_workspace_test e2e_studio_workspace_test.cpp)
+target_link_libraries(e2e_studio_workspace_test PRIVATE
+    openrgb2_host
+    openrgb2_ipc)
+target_include_directories(e2e_studio_workspace_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(e2e_studio_workspace_test PRIVATE NDEBUG)
+add_test(NAME e2e_studio_workspace_test COMMAND e2e_studio_workspace_test)
+set_tests_properties(e2e_studio_workspace_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Plan section 6 acceptance measurement — "UI responsiveness:
 # p95 local control response below 100 ms during full output".
 # Real EngineHost composition + REAL named pipes + a SUBSCRIBE
@@ -135,6 +196,15 @@ set_tests_properties(e2e_noninterference_test PROPERTIES
     LABELS engine
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Studio-import Task 11 — the engine-owned physical LED-
+# calibration session: begin/show/end sequencing, lane +
+# output-hold claims, latest-only LED writes, cancellation
+# during the pending start, topology/pause/timeout endings,
+# wired-vs-wireless ownership, and honest failures — all
+# against a real DeliveryPipeline + PlaybackController with
+# injected fakes.
+engine_suite(calibration_session_test)
+
 # Task 3.5 — IPC layer. ipc_server_test additionally needs the
 # named-pipe transport + ACL APIs.
 engine_suite(ipc_protocol_test)
@@ -162,3 +232,20 @@ target_link_libraries(ipc_engine_service_test PRIVATE openrgb2_ipc)
 # EngineHost::OwnershipJson serializer as the provider — a
 # scripted body would ship a field-name typo green.
 target_link_libraries(ipc_engine_service_test PRIVATE openrgb2_host)
+
+# Studio-import Task 3 — WORKSPACE_COMMAND: capability
+# negotiation, session-bound bounded transfers, revision-checked
+# async jobs, disconnect/cancel discipline, and the managed-
+# workspace legacy-mutation gate — all over the REAL EngineService
+# + WorkspaceService + IpcServer on in-process channels.
+add_executable(ipc_workspace_test ipc_workspace_test.cpp)
+target_link_libraries(ipc_workspace_test PRIVATE
+    openrgb2_engine
+    openrgb2_ipc)
+target_include_directories(ipc_workspace_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(ipc_workspace_test PRIVATE NDEBUG)
+add_test(NAME ipc_workspace_test COMMAND ipc_workspace_test)
+set_tests_properties(ipc_workspace_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})

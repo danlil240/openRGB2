@@ -22,7 +22,9 @@ target_link_libraries(openrgb2_ipc_wire PUBLIC Threads::Threads)
 add_library(openrgb2_ipc STATIC
     IpcServer.cpp
     NamedPipe.cpp
-    EngineService.cpp)
+    EngineService.cpp
+    WorkspaceTransfer.cpp
+    WorkspaceCommands.cpp)
 
 target_include_directories(openrgb2_ipc PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR})

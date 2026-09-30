@@ -192,10 +192,46 @@ namespace
             return false;
         }
 
+        /* Matrix map blob: u16 byte size, then u32 height,
+           u32 width, height*width u32 cells — serialized by
+           RGBController::GetMatrixMapDescriptionData. An
+           empty map serializes size 0. Any non-empty blob
+           must be exactly 8 + rows*cols*4 bytes; malformed
+           geometry rejects the whole zone. */
         uint16_t matrix_map_size = 0;
-        if(!c.U16(matrix_map_size) || !c.Skip(matrix_map_size))
+        if(!c.U16(matrix_map_size))
         {
             return false;
+        }
+        if(matrix_map_size > 0)
+        {
+            if(matrix_map_size < 8 || c.left < matrix_map_size)
+            {
+                return false;
+            }
+            uint32_t rows = 0, cols = 0;
+            if(!c.U32(rows) || !c.U32(cols))
+            {
+                return false;
+            }
+            const uint64_t cells = uint64_t(rows) * uint64_t(cols);
+            if(rows == 0 || cols == 0 ||
+               matrix_map_size != 8 + cells * 4)
+            {
+                return false;
+            }
+            out.matrix_rows = rows;
+            out.matrix_cols = cols;
+            out.matrix_map.reserve((size_t)cells);
+            for(uint64_t i = 0; i < cells; ++i)
+            {
+                uint32_t cell = 0;
+                if(!c.U32(cell))
+                {
+                    return false;
+                }
+                out.matrix_map.push_back(cell);
+            }
         }
 
         if(version >= 4)
@@ -280,6 +316,7 @@ bool ParseControllerData(const uint8_t* data, size_t len, uint32_t version,
         {
             return false;
         }
+        out.led_names.push_back(std::move(led_name));
     }
     out.num_leds = num_leds;
 

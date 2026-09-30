@@ -16,6 +16,7 @@ import QtQuick.Layouts
 import QtQuick.Controls
 import OpenRGB2.UI.theme
 import OpenRGB2.UI.components
+import OpenRGB2.UI.studio
 
 Item {
     id: root
@@ -23,11 +24,66 @@ Item {
 
     readonly property bool ctlUp:
         typeof layoutCtl !== "undefined"
+    /* studio-import Task 5: the scene/object editor surfaces
+       (hierarchy tree, device library, transform inspector) mount
+       below the canvas whenever the shared-draft session is up —
+       objectCtl is absent in legacy/no-workspace contexts, and
+       `ready` is false while no workspace draft is loaded. */
+    readonly property bool studioUp:
+        typeof objectCtl !== "undefined" && objectCtl.ready
     readonly property bool engineUp:
         typeof bridge !== "undefined" && bridge.connected
+    /* A recovered local draft has no engine baseline
+       (hasScene) and may exist with NO engine at all —
+       workspace.ready is the honest "a draft is staged" gate
+       for that case; the managed/applied paths keep
+       hasScene + engineUp. */
     readonly property bool editable:
-        root.ctlUp && root.engineUp && layoutCtl.hasScene
-        && !layoutCtl.busy
+        root.ctlUp && !layoutCtl.busy
+        && ((root.engineUp && layoutCtl.hasScene)
+            || (typeof workspace !== "undefined"
+                && workspace.ready))
+
+    /* studio-import Task 7: the unsaved-draft preview feed —
+       engine-evaluated colors for objects the draft carries,
+       distinctly labelled and never confused with delivered
+       output (frame_status). */
+    readonly property bool previewUp:
+        typeof viewport !== "undefined" && viewport.previewActive
+
+    /* studio-import Task 8: the optional Quick3D viewport. The
+       studio/viewport subtree only compiles into the module in
+       the full-Studio build (main.cpp's quick3dAvailable); a
+       failed Loader degrades honestly — the 2D canvas below is
+       the always-available path and stays the default until the
+       user toggles (the choice persists in uiPrefs). */
+    readonly property bool quick3dUp:
+        typeof quick3dAvailable !== "undefined"
+        && quick3dAvailable === true
+    /* stays a binding — uiPrefs.layoutShow3d holds the user's
+       intent, quick3dUp gates display (fix round 1: assigning
+       this would have killed the binding). */
+    readonly property bool show3d:
+        (typeof uiPrefs !== "undefined" ? uiPrefs.layoutShow3d : false)
+        && quick3dUp
+    /* The loaded viewport item (null in 2D mode / on load
+       failure) — panels read editorCam/editorCtl off it. */
+    property var viewport3d: null
+    property bool viewportLoadFailed: false
+
+    function setShow3d(on) {
+        if(typeof uiPrefs !== "undefined")
+            uiPrefs.layoutShow3d = on;
+    }
+
+    function draftColorsFor(id) {
+        if(!root.previewUp) return [];
+        const objs = viewport.objects || [];
+        for(let i = 0; i < objs.length; ++i)
+            if(objs[i].id === id)
+                return objs[i].colors || [];
+        return [];
+    }
 
     /* items() / linkPairs() feed the canvas — both recompute
        whenever layoutCtl re-emits itemsChanged (its property
@@ -50,10 +106,13 @@ Item {
         for(var i = 0; i < its.length; ++i) {
             var o = its[i];
             byId[o.id] = o;
-            minX = Math.min(minX, o.x - o.w / 2);
-            maxX = Math.max(maxX, o.x + o.w / 2);
-            minZ = Math.min(minZ, o.z - o.d / 2);
-            maxZ = Math.max(maxZ, o.z + o.d / 2);
+            /* Footprints center at (x+ox, z+oz) — Task 5 world-
+               space items carry ox/oz (0 on legacy rows). */
+            var fx = o.x + (o.ox || 0), fz = o.z + (o.oz || 0);
+            minX = Math.min(minX, fx - o.w / 2);
+            maxX = Math.max(maxX, fx + o.w / 2);
+            minZ = Math.min(minZ, fz - o.d / 2);
+            maxZ = Math.max(maxZ, fz + o.d / 2);
         }
         if(its.length === 0 || minX > maxX) {
             view = ({ "s": 200, "ox": 20, "oz": 20,
@@ -86,6 +145,17 @@ Item {
             });
         }
         linkPairs = pairs;
+    }
+
+    /* Desk meters under the canvas' center — the device
+       library's button-add targets this point; the drop handler
+       maps exact pixels the same way. */
+    function canvasCenter() {
+        var px = canvasRect.width / 2;
+        var pz = canvasRect.height / 2;
+        return ({ "x": view.minX + (px - view.ox) / view.s,
+                  "y": 0,
+                  "z": view.minZ + (pz - view.oz) / view.s });
     }
 
     function stateTone(o) {
@@ -135,11 +205,38 @@ Item {
         target: root.ctlUp ? layoutCtl : null
         function onItemsChanged() { root.refreshItems(); }
     }
+
+    /* Task 8 fix round 1: reconcile the two selection surfaces —
+       the 3D viewport selects through objectCtl while the 2D
+       canvas, SELECTION card and LED views read layoutCtl.
+       Mirror the primary instance both ways (guarded against
+       ping-pong; each select() also early-outs on no change). */
+    property bool selSyncing: false
+    Connections {
+        target: root.studioUp ? objectCtl : null
+        function onSelectionChanged() {
+            if (root.selSyncing) return
+            root.selSyncing = true
+            const ids = objectCtl.selectedInstances
+            layoutCtl.select(ids.length ? ids[ids.length - 1] : "")
+            root.selSyncing = false
+        }
+    }
+    Connections {
+        target: root.studioUp ? layoutCtl : null
+        function onSelectedChanged() {
+            if (root.selSyncing) return
+            root.selSyncing = true
+            objectCtl.select(layoutCtl.selectedId)
+            root.selSyncing = false
+        }
+    }
     Component.onCompleted: refreshItems()
     onWidthChanged: computeView()
     onHeightChanged: computeView()
 
     Flickable {
+        objectName: "layoutScroll"
         anchors.fill: parent
         contentHeight: col.implicitHeight
         clip: true
@@ -222,6 +319,28 @@ Item {
                              && !layoutCtl.busy
                     onClicked: layoutCtl.addAllDevices()
                 }
+                AppButton {
+                    objectName: "wsBundleButton"
+                    /* Task 9: portable workspace bundle — inspect
+                       + conflict-resolve an import, or stage the
+                       export download. Enabled whenever a managed
+                       draft exists; the dialog reports engine
+                       refusals itself. */
+                    text: qsTr("Import / Export…")
+                    enabled: typeof workspace !== "undefined"
+                             && workspace.ready
+                    onClicked: bundleDlg.open()
+                }
+                AppButton {
+                    objectName: "wsActionsButton"
+                    /* Task 10: the remaining workspace file
+                       actions — open/save-copy/reload/restore
+                       backup/reset/open folder. */
+                    text: qsTr("Workspace…")
+                    enabled: typeof workspace !== "undefined"
+                             && workspace.managed
+                    onClicked: wsActionsDlg.open()
+                }
                 Text {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignRight
@@ -279,17 +398,224 @@ Item {
                        the next card covers it. */
                     Item {
                         width: parent.width
-                        height: 430 + Theme.spaceS
+                        height: viewBar.implicitHeight + Theme.spaceS
+                                + 430 + Theme.spaceS
                                 + canvasHint.implicitHeight
+                                + (draftPreviewStatus.visible
+                                   ? draftPreviewStatus.implicitHeight
+                                     + Theme.spaceXS : 0)
+
+                        /* studio-import Task 8: the 2D/3D view
+                           toggle + the 3D-only render controls.
+                           Hidden entirely without Quick3D — the 2D
+                           canvas never degrades. */
+                        Row {
+                            id: viewBar
+                            objectName: "viewBar"
+                            visible: root.quick3dUp
+                            height: visible ? implicitHeight : 0
+                            spacing: Theme.spaceS
+                            AppButton {
+                                objectName: "view2dButton"
+                                text: qsTr("2D")
+                                checkable: true
+                                checked: !root.show3d
+                                onClicked: root.setShow3d(false)
+                            }
+                            AppButton {
+                                objectName: "view3dButton"
+                                text: qsTr("3D")
+                                checkable: true
+                                checked: root.show3d
+                                onClicked: root.setShow3d(true)
+                            }
+                            /* Render quality tier — persisted as
+                               meta.render.quality on the draft
+                               (workspace.renderQuality) with the
+                               UiSettings shell fallback; routed
+                               through the viewport's setter. */
+                            AppComboBox {
+                                id: qualityPick
+                                objectName: "viewportQualityPick"
+                                Accessible.name:
+                                    qsTr("3D render quality")
+                                visible: root.show3d
+                                width: 130
+                                model: ["low", "balanced", "high"]
+                                currentIndex: root.viewport3d
+                                    ? Math.max(0, model.indexOf(
+                                          root.viewport3d.qualityTier))
+                                    : 1
+                                onActivated: function(i) {
+                                    if(root.viewport3d)
+                                        root.viewport3d.setQualityTier(
+                                            model[i]);
+                                }
+                            }
+                            /* Case-shell ghosting — a display-only
+                               shell pref (UiSettings), never a
+                               document edit; the shell stays
+                               non-pickable either way. */
+                            AppCheckBox {
+                                objectName: "viewportGhostCheck"
+                                text: qsTr("ghost case")
+                                visible: root.show3d
+                                checked: typeof uiPrefs !== "undefined"
+                                         && uiPrefs.viewportCaseGhost
+                                onToggled: {
+                                    if(typeof uiPrefs !== "undefined")
+                                        uiPrefs.viewportCaseGhost =
+                                            checked;
+                                }
+                            }
+                            /* Bloom — meta.render.bloom on the
+                               draft with the UiSettings fallback;
+                               display-only, never delivered to
+                               hardware. */
+                            AppCheckBox {
+                                objectName: "viewportBloomCheck"
+                                text: qsTr("bloom")
+                                visible: root.show3d
+                                checked: {
+                                    if(root.studioUp
+                                       && typeof workspace
+                                          !== "undefined"
+                                       && workspace.ready)
+                                        return workspace.renderBloom;
+                                    return typeof uiPrefs
+                                           !== "undefined"
+                                           && uiPrefs.viewportBloom;
+                                }
+                                onToggled: {
+                                    if(root.studioUp
+                                       && typeof workspace
+                                          !== "undefined"
+                                       && workspace.ready)
+                                        workspace.renderBloom = checked;
+                                    if(typeof uiPrefs !== "undefined")
+                                        uiPrefs.viewportBloom = checked;
+                                }
+                            }
+                            /* Reduced motion — meta.ui.reduced_motion
+                               on the draft (display-only temporal-AA
+                               gate) with the UiSettings fallback;
+                               same write-through shape as bloom. */
+                            AppCheckBox {
+                                objectName: "viewportMotionCheck"
+                                text: qsTr("reduced motion")
+                                visible: root.show3d
+                                checked: {
+                                    if(root.studioUp
+                                       && typeof workspace
+                                          !== "undefined"
+                                       && workspace.ready)
+                                        return workspace.reducedMotion;
+                                    return typeof uiPrefs
+                                           !== "undefined"
+                                           && uiPrefs.viewportReducedMotion;
+                                }
+                                onToggled: {
+                                    if(root.studioUp
+                                       && typeof workspace
+                                          !== "undefined"
+                                       && workspace.ready)
+                                        workspace.reducedMotion = checked;
+                                    if(typeof uiPrefs !== "undefined")
+                                        uiPrefs.viewportReducedMotion =
+                                            checked;
+                                }
+                            }
+                        }
+
+                        /* studio-import Task 8: the Quick3D
+                           viewport, lazily created — every
+                           collaborator is wired EXPLICITLY (the
+                           shared objectCtl/workspace/viewport
+                           context surfaces), never a global inside
+                           the subtree. A load failure keeps the
+                           page on the 2D path with an honest
+                           message. */
+                        Loader {
+                            id: viewportLoader
+                            objectName: "viewportLoader"
+                            anchors {
+                                left: parent.left
+                                right: parent.right
+                                top: viewBar.bottom
+                                topMargin: Theme.spaceS
+                            }
+                            height: 430
+                            clip: true
+                            active: root.quick3dUp && root.show3d
+                            source: Qt.resolvedUrl(
+                                "../studio/viewport/StudioViewport.qml")
+                            visible: status === Loader.Ready
+                            onStatusChanged: {
+                                if(status === Loader.Error)
+                                    root.viewportLoadFailed = true;
+                            }
+                            onLoaded: {
+                                item.objectCtl =
+                                    (typeof objectCtl !== "undefined")
+                                    ? objectCtl : null;
+                                item.workspaceCtl =
+                                    (typeof workspace !== "undefined")
+                                    ? workspace : null;
+                                item.viewport =
+                                    (typeof viewport !== "undefined")
+                                    ? viewport : null;
+                                item.prefs =
+                                    (typeof uiPrefs !== "undefined")
+                                    ? uiPrefs : null;
+                                item.focusPeer = transformInspector;
+                                item.focusPeer2 = deviceTree;
+                                item.focusPeer3 = deviceLibrary;
+                                /* LIVE = the transport-accepted
+                                   frame_status feed — draft preview
+                                   colors are labelled separately,
+                                   never hardware output. */
+                                item.outputLive = Qt.binding(
+                                    function() {
+                                        if(!root.engineUp)
+                                            return false;
+                                        const ag =
+                                            bridge.frameStatus.aggregate;
+                                        return !!(ag
+                                                  && ag.mean_interval_s
+                                                     > 0);
+                                    });
+                                root.viewport3d = item;
+                            }
+                            onActiveChanged: {
+                                if(!active)
+                                    root.viewport3d = null;
+                            }
+                        }
+                        Text {
+                            anchors.fill: viewportLoader
+                            visible: root.show3d
+                                     && (root.viewportLoadFailed
+                                         || viewportLoader.status
+                                            === Loader.Error)
+                            text: qsTr("3D viewport unavailable — Quick3D did not load. The 2D view stays fully functional.")
+                            color: Theme.warn
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
 
                         Rectangle {
                             id: canvasRect
                             anchors {
                                 left: parent.left
                                 right: parent.right
-                                top: parent.top
+                                top: viewBar.bottom
+                                topMargin: Theme.spaceS
                             }
                             height: 430
+                            visible: !root.show3d
+                                     || root.viewport3d === null
                             radius: Theme.radiusM
                             color: Theme.bg
                             border.width: 1
@@ -376,13 +702,24 @@ Item {
                                              && o.kind !== "group"
                                     width: Math.max(10, o.w * view.s)
                                     height: Math.max(10, o.d * view.s)
+                                    /* Task 5: workspace rows carry
+                                       a world-space footprint —
+                                       (ox,oz) is its center offset
+                                       from the instance origin and
+                                       the box is already world-
+                                       aligned, so it must not take
+                                       the authored ry again. */
                                     x: view.ox
-                                       + (o.x - view.minX) * view.s
+                                       + (o.x + (o.ox || 0)
+                                          - view.minX) * view.s
                                        - width / 2
                                     y: view.oz
-                                       + (o.z - view.minZ) * view.s
+                                       + (o.z + (o.oz || 0)
+                                          - view.minZ) * view.s
                                        - height / 2
-                                    rotation: o.ry
+                                    rotation: (o.ox !== undefined
+                                               && o.w > 0)
+                                              ? 0 : o.ry
 
                                     Rectangle {
                                         anchors.fill: parent
@@ -437,13 +774,49 @@ Item {
                                                 font.pixelSize: 9
                                             }
                                         }
+                                        /* Task 7: the draft's
+                                           evaluated colors under the
+                                           object — unsaved preview
+                                           data, labelled at the page
+                                           level; never presented as
+                                           delivered output. */
+                                        FrameStrip {
+                                            anchors {
+                                                left: parent.left
+                                                right: parent.right
+                                                bottom: parent.bottom
+                                                margins: 2
+                                            }
+                                            visible: root.previewUp
+                                            colors:
+                                                root.draftColorsFor(
+                                                    d.o.id)
+                                            maxSwatches: 12
+                                        }
                                     }
                                     MouseArea {
                                         anchors.fill: parent
                                         enabled: root.editable
                                         property real grabX: 0
                                         property real grabY: 0
+                                        /* Task 5 fix: the inspector's
+                                           Paint tool turns clicks into
+                                           paintObject(paintColor) and
+                                           drags stay inert so a paint
+                                           stroke can't move geometry. */
+                                        readonly property bool paintMode:
+                                            root.studioUp
+                                            && objectCtl.tool === 2
+                                        cursorShape: paintMode
+                                                     ? Qt.CrossCursor
+                                                     : Qt.ArrowCursor
                                         onPressed: function(m) {
+                                            if(paintMode) {
+                                                objectCtl.paintObject(
+                                                    d.o.id,
+                                                    objectCtl.paintColor);
+                                                return;
+                                            }
                                             grabX = m.x;
                                             grabY = m.y;
                                             d.dragging = true;
@@ -466,14 +839,29 @@ Item {
                                         onReleased: {
                                             if(!d.dragging) return;
                                             d.dragging = false;
+                                            /* The rect centers on the
+                                               footprint (origin + ox/oz)
+                                               — the move target is the
+                                               ORIGIN, so subtract the
+                                               offset back out. */
                                             var nx = (d.x + d.width / 2
                                                       - view.ox)
                                                      / view.s
-                                                     + view.minX;
+                                                     + view.minX
+                                                     - (d.o.ox || 0);
                                             var nz = (d.y + d.height / 2
                                                       - view.oz)
                                                      / view.s
-                                                     + view.minZ;
+                                                     + view.minZ
+                                                     - (d.o.oz || 0);
+                                            /* snapEnabled quantizes the
+                                               commit to the 10mm grid
+                                               (objectCtl.snapMeters is
+                                               the pass-through when off). */
+                                            if(root.studioUp) {
+                                                nx = objectCtl.snapMeters(nx);
+                                                nz = objectCtl.snapMeters(nz);
+                                            }
                                             /* commit the meters —
                                                the engine's scene
                                                event repaints   */
@@ -483,17 +871,62 @@ Item {
                                                refused, snap back */
                                             d.x = Qt.binding(function() {
                                                 return view.ox
-                                                    + (d.o.x - view.minX)
+                                                    + (d.o.x + (d.o.ox || 0)
+                                                       - view.minX)
                                                     * view.s
                                                     - d.width / 2; });
                                             d.y = Qt.binding(function() {
                                                 return view.oz
-                                                    + (d.o.z - view.minZ)
+                                                    + (d.o.z + (d.o.oz || 0)
+                                                       - view.minZ)
                                                     * view.s
                                                     - d.height / 2; });
                                         }
-                                        onClicked: layoutCtl.select(d.o.id)
+                                        /* Paint already landed on
+                                           press — don't select on
+                                           release. */
+                                        onClicked: if(!paintMode)
+                                            layoutCtl.select(d.o.id)
                                     }
+                                }
+                            }
+
+                            /* Device-library drag target — rows
+                               drag "studio-device-type" with the
+                               type id on drag.source.dropTypeId
+                               (mimeData string is the fallback);
+                               the pixel maps to desk meters and
+                               the add commits through the shared
+                               session — one undo record. */
+                            DropArea {
+                                anchors.fill: parent
+                                keys: ["studio-device-type"]
+                                onDropped: function(drop) {
+                                    if(!root.studioUp) {
+                                        drop.accepted = false;
+                                        return;
+                                    }
+                                    var tid = "";
+                                    if(drop.source
+                                       && drop.source.dropTypeId
+                                              !== undefined)
+                                        tid = drop.source.dropTypeId;
+                                    else
+                                        tid = drop.getDataAsString(
+                                                  "studio-device-type");
+                                    if(tid === "") {
+                                        drop.accepted = false;
+                                        return;
+                                    }
+                                    var x = view.minX
+                                        + (drop.x - view.ox)
+                                          / view.s;
+                                    var z = view.minZ
+                                        + (drop.y - view.oz)
+                                          / view.s;
+                                    objectCtl.addDeviceInstance(
+                                        tid, x, 0, z);
+                                    drop.accept(Qt.CopyAction);
                                 }
                             }
 
@@ -535,7 +968,25 @@ Item {
                             anchors.top: canvasRect.bottom
                             anchors.topMargin: Theme.spaceS
                             width: parent.width
-                            text: qsTr("Top view, meters. Drag objects to arrange — or Tab to an object and nudge with the arrow keys (Shift for fine steps). Edits apply immediately and are undoable (Ctrl+Z / Ctrl+Shift+Z). Linked copies (LINK) share their source's output.")
+                            text: root.show3d
+                                  ? qsTr("3D view. Click selects · drag orbits · Ctrl+drag moves/rotates · Shift+drag marquee · MMB/Space pans · wheel zooms · W/E/P tools · F/Home frame · Esc cancels. Edits are undoable (Ctrl+Z / Ctrl+Shift+Z). Emitter dots show the unsaved draft preview — not delivered output.")
+                                  : qsTr("Top view, meters. Drag objects to arrange — or Tab to an object and nudge with the arrow keys (Shift for fine steps). Edits apply immediately and are undoable (Ctrl+Z / Ctrl+Shift+Z). Linked copies (LINK) share their source's output.")
+                            color: Theme.textDisabled
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                        }
+                        /* Draft-preview status — the honest label
+                           (unsaved / paused / reduced) so colors on
+                           objects are never mistaken for hardware
+                           output. */
+                        Text {
+                            id: draftPreviewStatus
+                            objectName: "draftPreviewStatus"
+                            anchors.top: canvasHint.bottom
+                            anchors.topMargin: Theme.spaceXS
+                            width: parent.width
+                            visible: root.previewUp
+                            text: root.previewUp ? viewport.label : ""
                             color: Theme.textDisabled
                             font.pixelSize: Theme.fontSizeSmall
                             wrapMode: Text.WordWrap
@@ -1013,6 +1464,48 @@ Item {
                                             Layout.preferredWidth: 90
                                             elide: Text.ElideRight
                                         }
+                                        /* Paint tool: per-emitter
+                                           target — the row's `object`
+                                           + `local` index name the
+                                           emitter inside its resolved
+                                           object. */
+                                        Rectangle {
+                                            id: emitPaint
+                                            objectName: "emitPaint_"
+                                                        + modelData.index
+                                            visible: root.studioUp
+                                                     && objectCtl.tool
+                                                        === 2
+                                            Layout.preferredWidth: 16
+                                            Layout.preferredHeight: 16
+                                            Layout.alignment:
+                                                Qt.AlignVCenter
+                                            radius: Theme.radiusS
+                                            color: root.studioUp
+                                                   ? objectCtl.paintColor
+                                                   : "transparent"
+                                            border.width: 1
+                                            border.color:
+                                                Theme.borderStrong
+                                            ToolTip.visible:
+                                                emitPaintMa.containsMouse
+                                            ToolTip.text:
+                                                qsTr("Paint this emitter")
+                                            ToolTip.delay: 400
+                                            MouseArea {
+                                                id: emitPaintMa
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                onClicked:
+                                                    objectCtl.paintEmitter(
+                                                        modelData.object,
+                                                        modelData.local
+                                                        !== undefined
+                                                        ? modelData.local
+                                                        : modelData.index,
+                                                        objectCtl.paintColor)
+                                            }
+                                        }
                                         TextField {
                                             id: addrField
                                             objectName: "ledAddr_" + modelData.index
@@ -1083,6 +1576,89 @@ Item {
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            /*---- Scene objects (studio-import Task 5) ---------*/
+            /* One card carrying the adapted Desktop Lighting
+               Studio surfaces against the shared workspace
+               draft: the hierarchy tree owns selection and
+               structural ops, the transform inspector owns
+               numeric edits, the library adds instances —
+               everything commits through objectCtl → the one
+               WorkspaceEditSession, so undo groups these edits
+               with the canvas drags above. Hidden (not
+               disabled) until a draft is staged — the legacy
+               canvas + binding cards keep working offline. */
+            Card {
+                title: qsTr("SCENE OBJECTS")
+                width: parent.width - 2 * col.padding
+                visible: root.studioUp
+                height: visible ? implicitHeight : 0
+
+                Column {
+                    width: parent.width
+                    spacing: Theme.spaceM
+
+                    Row {
+                        width: parent.width
+                        spacing: Theme.spaceL
+
+                        DeviceTree {
+                            id: deviceTree
+                            objectName: "deviceTreePanel"
+                            width: 320
+                            height: 430
+                        }
+                        DeviceLibrary {
+                            id: deviceLibrary
+                            objectName: "deviceLibraryPanel"
+                            width: 340
+                            height: 430
+                            /* Task 8: while the 3D viewport is
+                               active the library's button-add
+                               targets the desk plane through the
+                               viewport camera (its editorCam
+                               answers planeHitPoint); the 2D
+                               canvas keeps canvasCenter(). */
+                            sceneView: root.viewport3d
+                                       ? root.viewport3d : root
+                            /* Task 9: the row edit button and the
+                               header ✚ dispatch onto the preset
+                               editor popup hosted below. */
+                            onEditRequested: function(typeId) {
+                                presetEditor.openFor(typeId)
+                            }
+                            onNewRequested: presetEditor.openNew()
+                        }
+                        TransformInspector {
+                            id: transformInspector
+                            objectName: "transformInspectorPanel"
+                            /* `ctl` feeds tool/plane/snap reads — the
+                               ObjectEditorController answers. Task 8:
+                               `cam` unhides the camera preset chips
+                               while the 3D viewport is live. */
+                            ctl: root.studioUp ? objectCtl : null
+                            cam: root.viewport3d
+                                 ? root.viewport3d.editorCam : null
+                        }
+                    }
+
+                    /* The object editor's status line — refusals
+                       (locked chains, unknown types, gesture rejects)
+                       are visible where they happened instead of
+                       only living on a C++ signal. */
+                    Text {
+                        objectName: "objectStatus"
+                        visible: root.studioUp
+                                 && objectCtl.statusText !== ""
+                        width: parent.width
+                        text: root.studioUp ? objectCtl.statusText : ""
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                        elide: Text.ElideRight
                     }
                 }
             }
@@ -1319,5 +1895,22 @@ Item {
                 }
             }
         }
+    }
+
+    /* Task 9 popups — the device-type editor (from the library's
+       edit / new seams) and the portable-workspace bundle dialog
+       (from the toolbar button). Both take their controller from
+       the context object; nothing here holds workspace state. */
+    DevicePresetEditor {
+        id: presetEditor
+        anchors.centerIn: parent
+    }
+    WorkspaceImportDialog {
+        id: bundleDlg
+        anchors.centerIn: parent
+    }
+    WorkspaceActionsDialog {
+        id: wsActionsDlg
+        anchors.centerIn: parent
     }
 }

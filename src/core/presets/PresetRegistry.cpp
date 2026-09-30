@@ -355,6 +355,11 @@ bool PresetRegistry::Add(const DevicePreset& p,
     return true;
 }
 
+bool PresetRegistry::RemoveFile(const std::string& id)
+{
+    return types.erase(id) != 0;
+}
+
 bool PresetRegistry::ValidateDependencies(std::vector<std::string>* errors)
 {
     bool ok = true;

@@ -71,6 +71,29 @@ class UiSettings : public QObject
     Q_PROPERTY(QString storageLocation READ storageLocation
                    NOTIFY prefsChanged)
 
+    /*---- studio-import Task 8: 3D viewport shell prefs --------
+       App-level defaults for the Layout viewport. When a
+       workspace draft is loaded its document meta (camera,
+       render tier, bloom, reduced motion) wins — these are
+       the fallbacks for the no-draft case and the user's
+       shell-level intent. */
+    Q_PROPERTY(QString viewportQuality READ viewportQuality
+                   WRITE setViewportQuality NOTIFY prefsChanged)
+    Q_PROPERTY(bool viewportBloom READ viewportBloom
+                   WRITE setViewportBloom NOTIFY prefsChanged)
+    Q_PROPERTY(bool viewportReducedMotion READ viewportReducedMotion
+                   WRITE setViewportReducedMotion
+                   NOTIFY prefsChanged)
+    /* Display-only case-shell ghosting (the container becomes
+       near-invisible so interior hardware stays readable). */
+    Q_PROPERTY(bool viewportCaseGhost READ viewportCaseGhost
+                   WRITE setViewportCaseGhost NOTIFY prefsChanged)
+    /* The Layout view's 2D/3D toggle — the 2D overview stays
+       available either way; this just remembers which the user
+       left open. */
+    Q_PROPERTY(bool layoutShow3d READ layoutShow3d
+                   WRITE setLayoutShow3d NOTIFY prefsChanged)
+
 public:
     explicit UiSettings(QObject* parent = nullptr);
     ~UiSettings() override;
@@ -92,6 +115,18 @@ public:
     double   paletteVal() const;
     void     setPaletteVal(double v);
     QString  storageLocation() const;
+
+    /*---- 3D viewport shell prefs (Task 8) ----------------------*/
+    QString  viewportQuality() const;        /* low|balanced|high */
+    void     setViewportQuality(const QString& q);
+    bool     viewportBloom() const;
+    void     setViewportBloom(bool on);
+    bool     viewportReducedMotion() const;
+    void     setViewportReducedMotion(bool on);
+    bool     viewportCaseGhost() const;
+    void     setViewportCaseGhost(bool on);
+    bool     layoutShow3d() const;
+    void     setLayoutShow3d(bool on);
 
     /* Drop every stored preference — the next launch reads
        defaults. Engine state is untouched (it was never

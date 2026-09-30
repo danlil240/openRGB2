@@ -224,6 +224,10 @@ void EngineBridge::ApplyWelcome(const nlohmann::json& welcome)
     {
     server_info_ = JsonToVariant(welcome).toMap();
     emit serverInfoChanged();
+    /* The wire captured the WELCOME capability set — a UI bound
+       to hasWorkspace falls back to the legacy scene verbs when
+       "studio_workspace_v1" is absent. */
+    setHasWorkspace(wire_.HasCapability("studio_workspace_v1"));
     setConnectionState("connected");
     setRetryInMs(0);
     setLastError(QString());
@@ -335,6 +339,15 @@ void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
     {
         reactive_ = JsonToVariant(data).toMap();
         emit reactiveChanged();
+    }
+    else if(kind == ipc::event_kind::kWorkspace)
+    {
+        /* Initial snapshot = `get` metadata; terminal job
+           results = the job status record — both stored
+           verbatim; WorkspaceController correlates by
+           job_id/revision. */
+        workspace_ = JsonToVariant(data).toMap();
+        emit workspaceChanged();
     }
     RecomputeDegraded();
 
@@ -460,6 +473,9 @@ void EngineBridge::ApplySessionEnd(EngineWireClient::EndReason reason,
         why += ": " + QString::fromStdString(detail);
     }
     setLastError(why);
+    /* The wire cleared its capability set — the flag follows so
+       a reconnecting UI never briefly believes an old engine. */
+    setHasWorkspace(false);
     emit engineLost(why);
     /* While running_ the worker retries with backoff; the
        stores stay populated (stale-but-labelled, never erased
@@ -529,6 +545,16 @@ void EngineBridge::setRetryInMs(int ms)
     }
     retry_in_ms_ = ms;
     emit retryInMsChanged();
+}
+
+void EngineBridge::setHasWorkspace(bool h)
+{
+    if(has_workspace_ == h)
+    {
+        return;
+    }
+    has_workspace_ = h;
+    emit hasWorkspaceChanged();
 }
 
 /*---------------------------------------------------------*\
@@ -614,6 +640,18 @@ int EngineBridge::reactiveCommand(const QString& verb,
     }
     b["verb"] = verb.toStdString();
     return Issue(ipc::MsgType::ReactiveCommand, b);
+}
+
+int EngineBridge::workspaceCommand(const QString& verb,
+                                   const QVariantMap& args)
+{
+    nlohmann::json b = VariantToJson(args);
+    if(!b.is_object())
+    {
+        b = nlohmann::json::object();
+    }
+    b["verb"] = verb.toStdString();
+    return Issue(ipc::MsgType::WorkspaceCommand, b);
 }
 
 /*---------------------------------------------------------*\
@@ -789,6 +827,8 @@ QVariantList EngineBridge::presets() const        { return presets_; }
 QVariantMap EngineBridge::diagnostics() const     { return diagnostics_; }
 QVariantMap EngineBridge::stateReport() const     { return state_report_; }
 QVariantMap EngineBridge::reactive() const        { return reactive_; }
+bool        EngineBridge::hasWorkspace() const    { return has_workspace_; }
+QVariantMap EngineBridge::workspace() const       { return workspace_; }
 
 void EngineBridge::setPipeName(const QString& name)
 {

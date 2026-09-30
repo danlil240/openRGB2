@@ -75,9 +75,19 @@ The first message a client sends MUST be `HELLO` (type `0x0001`,
   "channel": "command" | "diagnostics",
   "max_body_bytes": 1048576,
   "engine": "openrgb2-engine", "running": true,
+  "capabilities": ["studio_workspace_v1"],
   "state": { "... GET_STATE body ..." }
 }
 ```
+
+`capabilities` is a string array of optional feature surfaces. Absent
+capability → the client falls back to the legacy verb set; sending a
+verb belonging to an unadvertised surface gets `ERROR(unavailable)`.
+Defined values:
+
+| capability | surface |
+| --- | --- |
+| `studio_workspace_v1` | `WORKSPACE_COMMAND` (managed workspace jobs, revisions, transfers — §5) |
 
 After the handshake every message's header `version` MUST equal
 `negotiated_version`. A mismatched message gets `ERROR(version_mismatch)`;
@@ -148,6 +158,7 @@ Request → reply. `request_id` echoes.
 | 0x010B | GET_PRESETS | `{}` | PRESETS |
 | 0x010C | QUIT | `{}` or `{stop_backend:true}` | OK `{shutting_down:true, ordered:true, stop_backend:bool, backend?}` / ERROR |
 | 0x010D | REACTIVE_COMMAND | `{verb, ...args}` | OK `<reactive body>` / ERROR |
+| 0x010E | WORKSPACE_COMMAND | `{verb, ...args}` | OK `<verb body>` / ERROR |
 | 0x0300 | DIAG_GET | `{}` | DIAGNOSTICS (valid on both pipes) |
 
 Reply types: WELCOME 0x8001, OK 0x8002, ERROR 0x8003, SNAPSHOTS 0x8100,
@@ -494,6 +505,160 @@ capability path as every other unsupported scene.
 `backend_counters` is `null` until the backend's own read-only counters
 pipe lands (a separate plan item — engine-side aggregate view only).
 
+**WORKSPACE_COMMAND** (`0x010E`, requires `studio_workspace_v1`) —
+the managed-workspace surface. Body `{verb:<string>, ...args}`; every
+reply is `OK <verb body>` or `ERROR` with a stable machine `detail`
+token alongside the human `message`. Handlers only validate, enqueue,
+or read snapshots — every file-touching operation is a job on the
+workspace service's single bounded worker.
+
+Revisions are uint64 counters: `workspace_revision` moves on durable
+commit, `resource_revision` on resource-set change. Candidate verbs
+(`commit`, `save_copy`, `import_commit`) carry `base_revision` and
+`resource_revision`; a stale value fails the job with
+`detail:"revision_conflict"` — never silently wins. While a managed
+workspace is active the lossy legacy DOCUMENT mutations (`SET_SCENE`,
+`LAYOUT_COMMAND` set_*) are refused (`ERROR bad_request`,
+`detail:"workspace_required"`); playback-mode changes, reads, and
+telemetry stay live — the plan only gates document mutation.
+
+| verb | body | reply |
+| --- | --- | --- |
+| `get` | `{id?}` | `{managed,id?,workspace_revision,resource_revision,generation?,name?,content_sha256?,source_form?,workspace_root,workspace_dir?,external_change,external_detail?}` — `id` reads the durable marker of a non-current workspace. For the CURRENT workspace the reply also carries the managed paths and the passive external-change compare (Task 10): `external_change` is `"none"` \| `"modified"` \| `"deleted"` — REPORT ONLY, the engine never reloads or applies on detection, and a byte-identical rewrite reproduces the same signature (same-content suppression, re-baselined at every adopt/commit) |
+| `list` | `{offset?,limit?}` (limit ≤256) | `{workspaces:[id...],total,offset,limit,active}` |
+| `catalog` | `{kind:devices|effects|workspaces,offset?,limit?}` | `{kind,entries:[...],total,offset,limit,more,next_offset}` — pages are additionally byte-budgeted (~768 KiB serialized); `more:true` + `next_offset` continue the walk, and `next_offset` always advances so a malformed stream can't stall. `effects` entries carry `document_text` (authored field-order byte stream); an oversized lone entry degrades to `document_omitted:true` (document_text dropped) then `description_omitted:true` (bounded description) instead of failing the page |
+| `validate`/`commit`/`save_copy`/`import_inspect`/`import_commit`/`export`/`reload`/`restore_backup`/`resource_install`/`resource_remove` | `{staged?|document?, base_revision?, resource_revision?, id?, name?, ...}` | `OK {accepted:true,job_id}` or `OK {accepted:false,detail:"busy"}` (bounded queue full); `staged` is a finished upload token owned by this session |
+| `resource_get` | `{kind:device_type|effect, id:<preset id>}` | `{kind,id,found,document?,from_file?,packaged_default?}` — synchronous read of the effective resource (file-layer override over the packaged default); `found:false` when no layer resolves |
+| `job_status` | `{job_id}` | job status record (below) |
+| `job_cancel` | `{job_id}` | `{cancelled:true,job_id}` / ERROR |
+| `transfer_begin` | `{direction:"upload",kind,length,sha256}` / `{direction:"download",kind,id}` | upload: `{transfer_id,max_chunk_bytes}`; download: `{transfer_id,length,sha256,max_chunk_bytes}` — client-supplied paths are never accepted; staging is server-named inside the managed root |
+| `transfer_chunk` | `{transfer_id,offset,data:<base64>}` (upload) / `{transfer_id,offset,max_bytes?}` (download) | upload: `{offset,received}`; download: `{offset,data:<base64>,eof}` — ordered, ≤192 KiB decoded per chunk |
+| `transfer_finish` | `{transfer_id}` | `{finished:true,staged?,bytes?}` — upload verifies declared length + SHA-256 before minting the `staged` token |
+| `transfer_cancel` | `{transfer_id}` | `{cancelled:true}` |
+| `preview_begin` | `{document?|staged?, draft_revision?, visible?}` | `OK {active:true,draft_revision,rate_hz}` — begins (or re-begins) this session's draft preview; `document` is the same compact v3 authoring document `commit` accepts and `staged` a finished upload token owned by this session. Errors: `bad_request`+`invalid_document` (parse/resolve failure), `bad_request`+`bad_request` (no document/staged), `busy`+`preview_limit` (global session cap reached) |
+| `preview_update` | `{document?|staged?, draft_revision?, visible?}` | `OK {active:true,draft_revision}` — latest-wins candidate replacement and/or visibility on this session's preview; `ERROR bad_request`+`no_preview` when none is active |
+| `preview_end` | `{}` | `OK {active:false}` — idempotent; ends this session's preview |
+| `calibration_begin` | `{controller:<DeviceKey>, zone:<string>}` | `OK <calibration status>` — takes the single engine calibration lease for one zone; `pending:true` while wireless groups drain/switch to direct mode. Errors: `busy`, `invalid_zone`, `device_gone`, `output_paused`, `unavailable` (no session wired) |
+| `calibration_show` | `{token:<string>, led:<int>}` | `OK <calibration status>` — latest-only per-LED show; `led:-1` blacks the zone. Errors: `starting`, `no_session`, `bad_token`, `out_of_range` |
+| `calibration_end` | `{token?:<string>}` | `OK <calibration status>` — ends the session; restore drains asynchronously on the engine worker |
+| `calibration_status` | `{}` | `OK <calibration status>` — poll equivalent of the `calibration` EVENT |
+
+Task-9 verb details — the portable-bundle and resource surface:
+
+- `export` `{id?}` stages a packed bundle for download on the
+  requesting session; the job result carries
+  `{transfer_id,bytes,sha256,types_written,assets_copied,warnings[]}`
+  — read the bundle through `transfer_chunk`/`transfer_finish` like
+  any staged download.
+- `import_inspect` consumes a `staged` upload (usually the packed
+  `openrgb2-bundle-files` v1 map: `files` keys restricted to
+  `studio.json`, `presets/devices/<id>.device.json`,
+  `presets/effects/<id>.effect.json`, `assets/<rel>`; encodings
+  `utf8`/`base64`; bounded by 4 MiB per JSON, 16 MiB per asset,
+  64 MiB total, ≤512 entries). The result is
+  `{valid,types:[{id,name,status}],conflicts:[{id,local_name,
+  bundled_name,suggested_id}],assets[],warnings[],errors[],
+  has_workspace,workspace:{name}}` — nothing is written.
+- `import_commit` `{staged,id,name,base_revision,
+  resource_revision,choices?,mode?}` replays the same staged
+  upload: `choices` maps `{conflict_id: import_as_id}` (every
+  conflicting same-id type needs one, else
+  `detail:"conflict_choice_required"`); `mode:"preset_import"`
+  installs resources only and skips the document commit (the form
+  a `has_workspace:false` bundle requires). Otherwise the remapped
+  document commits onto `id` — never applied.
+- `resource_install` `{kind:device_type|effect, id, device_type?|
+  effect?, replace?}` validates-then-installs ONE resource into the
+  managed library (collision-safe suffix unless `replace:true`);
+  result `{landed_id,reused,replaced?}`.
+- `resource_remove` `{kind,id,resource_id}` deletes a file-layer
+  entry — packaged defaults, in-use ids, and child-referenced ids
+  refuse honestly (`detail:"in_use"`); deleting an override reverts
+  to the packaged default (`result.reverted_to_default`).
+
+Task-10 verb details — file actions + external-change recovery:
+
+- `reload` `{id?, base_revision?, resource_revision?}` re-opens the
+  durable workspace state. When the caller passes its last-seen
+  revisions they are re-checked against the marker at job time —
+  a moved workspace refuses `revision_conflict` instead of
+  silently adopting. Omitting them (or passing a foreign `id`)
+  asks the engine to read on its own truth.
+- `restore_backup` `{id?, base_revision, resource_revision}` loads
+  the generation the marker BACKUP (`active.lkg`) names and
+  commits it forward as a NEW immutable generation — never a
+  write-in-place repoint; the restored candidate applies through
+  the normal post-commit seam (explicit user action). No marker
+  backup or an unusable generation fails honestly.
+- `external_change` on `get` is a passive fingerprint of the
+  active generation's tracked files (both markers, the pointed
+  generation's document/manifest/original, and a resources
+  name:size stamp): `"modified"` for replaced/corrupt bytes,
+  `"deleted"` when a tracked file vanished, `"none"` when the
+  scan reproduces the baseline. The UI polls it; detection never
+  auto-loads, never saves, and never touches `apply_scene` — the
+  notice is the whole mechanism and the user picks reload vs.
+  keep-draft explicitly.
+
+The preview verbs drive the bounded draft-preview feed (Task 7,
+plan §3.4): ONE `PreviewSession` per IPC session, at most two
+concurrent sessions engine-wide (configurable bound). The candidate
+is parsed through the SAME `ParseWorkspaceCandidate` path a commit
+uses, prepared by the shared `PrepareStudioScene` (runtime layers +
+key positions + matrix expansion against the live topology), and
+evaluated by the same `EffectEngine` at the same scene-clock epoch —
+draft colors are the bytes output WOULD carry after the document's
+brightness scale. The preview owns no `IFrameSink`, SDK reference,
+output lane, or capture source: it consumes a `ReactiveInputs`
+snapshot read-only and never writes a device frame or starts an
+input. A hidden view (`visible:false`) or a display-off event pauses
+sampling and publishing without ending the session.
+
+Task-11 verb details — physical single-LED calibration:
+
+- `calibration_begin` takes the engine's ONE calibration lease
+  (`CalibrationSession`) for `{controller, zone}`; uploaded
+  playback is held (`PlaybackController` output hold) and any
+  owned wireless group switches to direct/custom mode while the
+  target zone is darkened — all on the engine worker. The reply's
+  `token` is session-bound lease material the owner must quote on
+  `calibration_show`; a second client gets `busy`.
+- `calibration_show` writes ONE LED index (`led:-1` blacks the
+  zone); writes are coalesced latest-only by the engine — a
+  faster client cannot queue stale frames.
+- `calibration_end` releases the lease; the worker drains the
+  calibration lane and restores hardware by revalidating and
+  replaying the CURRENT playback intent — never a saved frame.
+- Status body (all four verbs' reply + the `calibration` EVENT):
+  `{active, starting, ending, owner, zone, zone_index,
+  led_count, last_shown, owns_group, frames_written}` and, for
+  the owning session only, `{controller, controller_name,
+  generation, token, message?}`; `begin` additionally carries
+  `pending`. A non-owner sees `owner:true` with every owner
+  field blanked — token and per-LED progress never leak.
+  Calibration EVENTs are session-targeted (only the recorded
+  owner gets them, emitted on every status change and once more
+  after release). Session teardown ends the session like
+  `calibration_end`.
+
+Job status record (`job_status` reply and terminal `workspace` EVENT
+`data`):
+
+```json
+{ "found": true, "job_id": 1, "session_id": 1, "verb": "commit",
+  "state": "queued|running|succeeded|failed|cancelled",
+  "committed": false, "applied": false, "recovered": false,
+  "generation": 0, "workspace_revision": 0, "resource_revision": 0,
+  "result": {}, "error": "?", "detail": "revision_conflict" }
+```
+
+Jobs and transfers are session-bound: session teardown cancels queued
+jobs and staged transfers; a commit already past the durable marker
+stays durable (the reconnecting client reconciles by
+revision/content_sha256). Document/type/look content moves ONLY
+through transfers — the 1 MiB envelope bound is never expanded to fit
+a scene or a binary asset.
+
 ## 6. Diagnostics channel (read-only by construction)
 
 `\\.\pipe\openrgb2-engine-diag` speaks the SAME framing and HELLO/WELCOME
@@ -523,11 +688,48 @@ matches the corresponding pull body:
 | `connection` | `sdk` object | SDK link state change |
 | `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |
 | `frame_status` | `{aggregate, controllers:[{key,sequence,colors,stats}]}` | ≤ ~30 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses |
+| `workspace` | `get` body (initial snapshot) / job status record (terminal job event) | SUBSCRIBE initial push; a workspace job reaching a terminal state |
+| `preview` | `{type:"status"\|"frame", ...}` (below) | ≤ 30 Hz, **session-targeted** — delivered only to the session that owns the preview, never broadcast |
+| `calibration` | `<calibration status>` body (WORKSPACE_COMMAND `calibration_*` reply shape) | **session-targeted** — delivered only to the session holding the calibration lease, on every status change and once more after release |
+
+The `preview` feed is the draft-preview push channel (Task 7). It is
+session-bound: `EmitTo` delivers only to the owning session, the
+SUBSCRIBE initial snapshot reports `{type:"status",active:false}`
+for a session without a preview, and session teardown destroys the
+session's preview. Two record types:
+
+- `status`: `{type:"status", active, paused, reason?, error?,
+  draft_revision?, sequence?}` — sent on begin/end, on pause/
+  resume transitions (`reason:"hidden"` when the UI hid the surface,
+  `"display_off"` on a power-lifecycle display-off), and once when a
+  draft fails to prepare (`error` describes it honestly).
+- `frame`: `{type:"frame", sequence, draft_revision, scene_time_s,
+  chunk, chunks, objects:[...], reduced, emitter_total,
+  emitter_sent, object_total}` — one evaluated draft frame split
+  into `chunks` pieces so every EVENT stays well below the 1 MiB
+  body cap. `objects` entries carry `{id, kind, x,y,z,rx,ry,rz,
+  w,h,d, bound, verified, emitter_total, colors:["#RRGGBB"],
+  indices?}`; `colors` are evaluated draft colors (brightness
+  applied — output parity, NOT transport-accepted measurements).
+  When the scene exceeds the display budget, `reduced:true` and
+  each object carries the sampled `indices` — a sparse result is
+  never presented as complete. Reassembly is strict: a client paints
+  a frame only when all `chunks` of one `sequence` arrive intact;
+  stale or partial sequences are dropped. Latest-wins coalescing in
+  the per-session queue keys on `frame/<sequence>/<chunk>`, so a
+  superseded frame never eats a newer chunk of the same slot.
+
+Draft-preview `colors` and `frame_status` `colors` answer different
+questions — what the unsaved draft evaluates to vs. what transport
+accepted for delivery — and are never interchangeable physical
+measurements.
 
 An `events` field that is neither `"all"` nor an array of strings, or any
 unknown kind name → `bad_request` (subscription unchanged). Queue overflow
 drops the oldest queued event (counted in `ipc.events_dropped`); a queued
-event of a kind is replaced by a newer one rather than appended.
+event of a kind is replaced by a newer one rather than appended (for
+`preview`, replacement additionally partitions on the coalesce key:
+`status` for status records, `frame/<sequence>/<chunk>` for chunks).
 
 ## 8. Notes for implementers
 

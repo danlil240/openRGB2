@@ -14,6 +14,7 @@ import QtQuick.Layouts
 import QtQuick.Controls
 import OpenRGB2.UI.theme
 import OpenRGB2.UI.components
+import OpenRGB2.UI.studio
 
 Item {
     id: root
@@ -173,6 +174,7 @@ Item {
         spacing: 0
 
         Flickable {
+            objectName: "lightingScroll"
             Layout.fillWidth: true
             Layout.fillHeight: true
             contentHeight: col.implicitHeight
@@ -1289,6 +1291,29 @@ Item {
                     }
                 }
 
+                /*---- Effect layers (studio-import Task 6) ------
+                   The advanced section: ordered layer stack,
+                   inspector, palette/gradient editing and the
+                   personal-look shelf — all edits land in the
+                   shared workspace draft as one undo record
+                   each. Workspace-mode only (a legacy engine
+                   has no draft); the card hides rather than
+                   fabricating controls. Live-effects only —
+                   an uploaded loop keeps its own controls. */
+                Card {
+                    id: effectCard
+                    title: qsTr("EFFECT LAYERS")
+                    objectName: "effectCard"
+                    width: parent.width - 2 * col.padding
+                    visible: typeof effectEdit !== "undefined"
+                             && effectEdit.ready
+
+                    EffectEditor {
+                        width: parent.width
+                        animationSelected: root.animationRequested
+                    }
+                }
+
                 /*---- Reactive inputs (Task 4.6) -----------------
                    Enable/disable + honest status for each engine
                    reactive input. Every toggle is real wire
@@ -1403,11 +1428,22 @@ Item {
                                         objectName: inputId + "Check"
                                         text: modelData.label
                                         enabled: inputRow.usable
-                                        onClicked:
+                                        onClicked: {
                                             bridge.reactiveCommand(
                                                 "set_enabled",
                                                 { "input": inputId,
                                                   "enabled": inputCheck.checked })
+                                            /* Persist the authored
+                                               source choice into the
+                                               draft (Task 6 parity —
+                                               the workspace restores
+                                               it on commit). */
+                                            if(typeof effectEdit !== "undefined"
+                                               && effectEdit.ready)
+                                                effectEdit.setInputEnabled(
+                                                    inputId,
+                                                    inputCheck.checked)
+                                        }
                                         Binding {
                                             target: inputCheck
                                             property: "checked"
@@ -1472,6 +1508,18 @@ Item {
                                         from: 25; to: 200; stepSize: 1
                                         enabled: inputRow.usable
                                         onMoved: sensTimer.restart()
+                                        /* Persist the authored
+                                           value into the draft on
+                                           RELEASE only — one undo
+                                           record per drag, not one
+                                           per 150 ms timer tick. */
+                                        onPressedChanged: {
+                                            if(!pressed
+                                               && typeof effectEdit !== "undefined"
+                                               && effectEdit.ready)
+                                                effectEdit.setInputSensitivity(
+                                                    Math.round(value))
+                                        }
                                         Binding {
                                             target: sensSlider
                                             property: "value"
@@ -1490,6 +1538,9 @@ Item {
                                     Timer {
                                         id: sensTimer
                                         interval: 150
+                                        /* Live wire updates only —
+                                           the draft persist lands
+                                           once on slider release. */
                                         onTriggered:
                                             bridge.reactiveCommand(
                                                 "set_params",
@@ -1520,11 +1571,15 @@ Item {
                                         enabled: inputRow.usable && count > 0
                                         model: reactiveCard.reactiveDisplays
                                         textRole: "name"
-                                        onActivated: index =>
+                                        onActivated: index => {
                                             bridge.reactiveCommand(
                                                 "set_params",
                                                 { "input": "screen",
                                                   "screen_index": index })
+                                            if(typeof effectEdit !== "undefined"
+                                               && effectEdit.ready)
+                                                effectEdit.setInputScreenIndex(index)
+                                        }
                                         Binding {
                                             target: dispCombo
                                             property: "currentIndex"
@@ -1540,6 +1595,53 @@ Item {
                                         font.pixelSize: Theme.fontSizeSmall
                                     }
                                 }
+                            }
+                        }
+
+                        /* Ripple decay (Task 6): the AUTHORED
+                           inputs.decay_pct — 50..300, default
+                           100, applied engine-side to runtime
+                           ripple-layer density copies only. A
+                           workspace-draft field, so the control
+                           exists only when the shared draft is
+                           editable; the drag commits one record
+                           on release. */
+                        RowLayout {
+                            visible: typeof effectEdit !== "undefined"
+                                     && effectEdit.ready
+                            width: parent.width
+                            spacing: Theme.spaceL
+                            Text {
+                                text: qsTr("Ripple decay")
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeBody
+                                Layout.preferredWidth: 110
+                            }
+                            AppSlider {
+                                id: decaySlider
+                                objectName: "rippleDecay"
+                                Accessible.name: qsTr("ripple decay")
+                                Layout.fillWidth: true
+                                from: 50; to: 300; stepSize: 5
+                                onPressedChanged: {
+                                    if(!pressed
+                                       && typeof effectEdit !== "undefined"
+                                       && effectEdit.ready)
+                                        effectEdit.setDecayPct(
+                                            Math.round(value))
+                                }
+                                Binding {
+                                    target: decaySlider
+                                    property: "value"
+                                    value: typeof effectEdit !== "undefined"
+                                           && effectEdit.ready
+                                           ? effectEdit.decayPct : 100
+                                }
+                            }
+                            Text {
+                                text: Math.round(decaySlider.value) + "%"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeBody
                             }
                         }
 
@@ -1579,13 +1681,78 @@ Item {
                     }
                 }
 
-                /*---- Preview ------------------------------------
-                   Same colors as output: frame_status carries
-                   the last transport-accepted frame per
-                   controller (protocol §7). Rate labelled
-                   separately from measured output rates. */
+                /*---- Draft preview (Task 7) ----------------------
+                   The UNSAVED workspace draft, evaluated
+                   engine-side and pushed back on the
+                   session-bound "preview" feed — distinct
+                   from the applied-output strip below:
+                   these colors were NEVER delivered to
+                   hardware. */
                 Card {
-                    title: qsTr("PREVIEW")
+                    title: qsTr("DRAFT PREVIEW — UNSAVED")
+                    objectName: "draftPreviewCard"
+                    width: parent.width - 2 * col.padding
+                    visible: typeof viewport !== "undefined"
+
+                    Column {
+                        width: parent.width
+                        spacing: Theme.spaceM
+
+                        Repeater {
+                            model: (typeof viewport !== "undefined"
+                                    && viewport.previewActive)
+                                   ? (viewport.objects || []) : []
+                            Column {
+                                spacing: Theme.spaceXS
+                                Text {
+                                    text: modelData.id +
+                                          (modelData.kind === "linked"
+                                           ? " (linked)" :
+                                           (!modelData.bound
+                                            ? " (unbound)" : ""))
+                                    color: Theme.textSecondary
+                                    font.pixelSize: Theme.fontSizeSmall
+                                }
+                                FrameStrip {
+                                    objectName: "draftStrip"
+                                    colors: modelData.colors || []
+                                }
+                            }
+                        }
+
+                        Text {
+                            visible: typeof viewport !== "undefined"
+                            text: (typeof viewport !== "undefined"
+                                   ? viewport.label : "")
+                                  + (typeof viewport !== "undefined"
+                                     && viewport.lastError !== ""
+                                     ? " — " + viewport.lastError : "")
+                            color: Theme.textDisabled
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                            width: parent.width
+                        }
+
+                        EmptyState {
+                            objectName: "draftPreviewEmpty"
+                            anchors.horizontalCenter:
+                                parent.horizontalCenter
+                            visible: typeof viewport === "undefined"
+                                     || !viewport.previewActive
+                            title: qsTr("No draft preview")
+                            detail: qsTr("Edits to the shared workspace draft preview here before Save applies them to lights.")
+                        }
+                    }
+                }
+
+                /*---- Applied output --------------------------------
+                   frame_status carries the last TRANSPORT-ACCEPTED
+                   frame per controller (protocol §7) — output that
+                   actually passed the writer, never draft colors.
+                   Rate labelled separately from measured output
+                   rates. */
+                Card {
+                    title: qsTr("APPLIED OUTPUT")
                     width: parent.width - 2 * col.padding
 
                     Column {
@@ -1612,7 +1779,7 @@ Item {
 
                         Text {
                             visible: root.engineUp
-                            text: qsTr("preview ≈ %1 updates/s — engine frame_status event cadence (≤ ~30 Hz), not the output rate")
+                            text: qsTr("applied output ≈ %1 updates/s — engine frame_status event cadence (≤ ~30 Hz), not the output rate")
                                 .arg(root.previewFps.toFixed(1))
                             color: Theme.textDisabled
                             font.pixelSize: Theme.fontSizeSmall
@@ -1628,7 +1795,7 @@ Item {
                                      || bridge.frameStatus.controllers.length === 0
                             title: qsTr("No frame data")
                             detail: root.engineUp
-                                    ? qsTr("The preview fills in when the engine delivers frames.")
+                                    ? qsTr("The applied-output strip fills in when the engine delivers frames.")
                                     : qsTr("Engine not connected — nothing is being driven.")
                         }
                     }
@@ -1741,6 +1908,24 @@ Item {
                             font.pixelSize: Theme.fontSizeSmall
                             wrapMode: Text.WordWrap
                             width: parent.width
+                        }
+
+                        /* studio-import Task 4: with a managed
+                           workspace, the stored entries migrate
+                           ONLY on this explicit click — each
+                           becomes its own workspace through the
+                           engine's bounded import path.
+                           Originals and names are retained;
+                           nothing is auto-applied. */
+                        AppButton {
+                            objectName: "importProfiles"
+                            width: parent.width
+                            visible: root.editorUp
+                                     && typeof workspace !== "undefined"
+                                     && workspace.managed
+                                     && sceneEdit.profiles.length > 0
+                            text: qsTr("Import all profiles into workspaces")
+                            onClicked: sceneEdit.importProfilesToWorkspaces()
                         }
 
                         Text {
