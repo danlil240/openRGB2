@@ -102,6 +102,7 @@ without closing:
 | --- | --- |
 | Bad/missing magic | resync: server scans forward for the next magic (bounded); the next valid message is still answered. Unrecoverable garbage past the scan bound → connection closed. |
 | `body_len` > max | `ERROR(too_large)`; the body is skipped by resync; connection survives. |
+| Serialized **reply** body > max | `ERROR(too_large)` replaces the reply (same code on the error path itself); connection survives. |
 | Truncated message / peer close mid-message | session ends (deadline or close); server unaffected. |
 | Version ≠ negotiated | `ERROR(version_mismatch)`; connection survives. |
 | Unknown type code | `ERROR(unknown_command)`; connection survives. |
@@ -245,14 +246,46 @@ the same preset/timeline. Reply `applied:false/pending:true` means the
 mode change was accepted and serialized; `status.mode` follows when the
 backend reports it.
 
-**DELIVERY_STATS** — `{available, aggregate, pending, controllers:[{key,
-stats, pending, colors, budget_ms}]}`; per-controller form adds
+Applying a scene (SET_SCENE or a workspace apply) also restores the
+persisted per-scene playback selection under the NEW document's
+capabilities. If that restore is rejected — e.g. the recorded
+`animation_playback` selection but no wireless group is connected any
+more — the scene apply itself still succeeds (the retained old effect
+is the honest hardware state, so the commit is a warning, not a
+failure): the rejection reason persists in PLAYBACK's `detail` field
+until a later transition succeeds, and a `playback` event is emitted at
+apply time so subscribers see it immediately rather than on the next
+diff poll.
+
+**DELIVERY_STATS** — `{available, aggregate, pending, wireless,
+map_stats, controllers:[{key, stats, pending, colors, budget_ms,
+delivered, wireless, suppressed, owned}]}`; per-controller form adds
 `{controller, found, stats}`. `stats` =
 `{submitted,replaced_pending,rejected,transport_completed,suppressed,
 transport_rejected,last_interval_s,min_interval_s,max_interval_s,
 mean_interval_s,interval_count,provenance}`.
 `transport_completed` means *accepted by the transport* — never
-"displayed" (plan section 4).
+"displayed" (plan section 4). Every registered lane produces a
+`controllers` row, including lanes that have never delivered — the row
+says so with `delivered:false`, zeroed counters, and empty `colors`
+(a "bound but never delivered" controller is a visible row, not an
+absent one). Per-row `wireless` marks the Lian Li wireless group lane,
+`suppressed`/`owned` flag lanes held by an uploaded playback loop.
+
+`wireless` is the wireless lane's OWN summary — `null` when no wireless
+lane exists, else `{key, stats, suppressed, pending, owned}` with `stats`
+the per-lane counter set above. The pipeline-wide `aggregate` mixes
+every wired lane and must never be read as the wireless rate (a
+"wireless performance" consumer uses `wireless.stats`, and reports
+unmeasured while `interval_count` is 0).
+
+`map_stats` (`null` when no device mapper is wired) is the last
+scene→frame mapping pass:
+`{objects_total, objects_bound, objects_writable, objects_emitted,
+skipped_unverified_or_unresolved, frames_emitted, frames_dropped}` —
+the observability surface for scenes whose bound objects resolve but
+emit nothing (`objects_bound` > `objects_emitted`), which delivery
+counters alone cannot distinguish from "nothing submitted".
 
 **STATE** — `{engine:{running,scene_clock_hz,scene_sequence}, scene:{...},
 sdk:{...}, playback:{...}, power:{...}, reactive:{...}, ownership:{...}|null,
@@ -491,7 +524,9 @@ capability path as every other unsupported scene.
 { "engine":   {"running":true,"scene_clock_hz":60,"scene_sequence":N,"uptime_s":F},
   "scene":    {"loaded":..., "revision":N, "applied_revision":N, "playing":B, ...},
   "playback": {"requested_mode":..., "capabilities":..., "status":{...}},
-  "delivery": {"available":..., "aggregate":{...}, "pending":N, "controllers":[...]},
+  "delivery": {"available":..., "aggregate":{...}, "pending":N,
+               "wireless":{...}|null, "map_stats":{...}|null,
+               "controllers":[...]},
   "sdk":      {"state":..., "protocol_version":N, "reconnect_attempt":N, ...},
   "power":    {"display_on":B, "suspended":B, "output_paused":B, ...},
   "reactive": {"available":B, "capture_paused":B, "inputs":[...], "displays":[...]},
@@ -698,7 +733,7 @@ matches the corresponding pull body:
 | `playback` | PLAYBACK body | requested-mode or applied-status change |
 | `connection` | `sdk` object | SDK link state change |
 | `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |
-| `frame_status` | `{aggregate, controllers:[{key,sequence,colors,stats}]}` | ≤ ~30 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses |
+| `frame_status` | `{aggregate, wireless, controllers:[{key,delivered,lane,wireless,suppressed,owned,pending,sequence,colors,stats}]}` | ≤ ~30 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses. `wireless` is the wireless lane's own `{key,stats,suppressed,pending,owned}` summary (`null` when no wireless lane exists — the `aggregate` mixes wired lanes and is never a wireless measure). Every enumerated controller produces a `controllers` row: a lane that never delivered reports `delivered:false` + zeroed `stats` + empty `colors` (`lane:false` when the pipeline has no lane for it) — a "bound but never delivered" controller is a visible row, not an absent one |
 | `workspace` | `get` body (initial snapshot) / job status record (terminal job event) | SUBSCRIBE initial push; a workspace job reaching a terminal state |
 | `preview` | `{type:"status"\|"frame", ...}` (below) | ≤ 30 Hz, **session-targeted** — delivered only to the session that owns the preview, never broadcast |
 | `calibration` | `<calibration status>` body (WORKSPACE_COMMAND `calibration_*` reply shape) | **session-targeted** — delivered only to the session holding the calibration lease, on every status change and once more after release |
