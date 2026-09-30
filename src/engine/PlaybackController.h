@@ -218,9 +218,20 @@ public:
     /* Scene-apply hook (Task 3.6 persistence): re-evaluates
        capabilities against the NEW document and re-applies
        the scene's persisted selection (or Live when it never
-       had one / no longer qualifies). */
-    void   OnSceneApplied(
+       had one / no longer qualifies). Returns the same
+       Result Request() produces — a rejected re-apply (the
+       persisted preset lost its capability, the backend
+       doesn't offer the mode, ...) is surfaced, never
+       silently dropped. The result is also retained for
+       LastApplyResult() so consumers that only observe the
+       controller can still read it. */
+    Result OnSceneApplied(
         std::shared_ptr<const studio::SceneDocument> doc);
+
+    /* The Result of the most recent OnSceneApplied call
+       (accepted=false + reason when the persisted selection
+       was rejected). Empty reason before the first apply. */
+    Result LastApplyResult() const;
 
     /* Scene-clock hook (worker frame callback): while an
        acknowledged uploaded loop is Playing, produce the
@@ -371,7 +382,6 @@ public:
     size_t RestoreSceneModes(const std::vector<PersistedSceneMode>& modes);
 
     /* Test introspection. */
-    const PlaybackClockSync& ClockSync() const;
     size_t                   PersistedScenes() const;
 
 private:
@@ -490,6 +500,11 @@ private:
     std::deque<std::string>      scene_lru_; /* front=oldest */
     std::string        scene_key_;
     bool               modes_dirty_    = false;
+
+    /* The last OnSceneApplied Result — the scene-apply path
+       shares RequestImpl's rejection surface, so its outcome
+       is retained here for LastApplyResult(). */
+    Result             last_apply_result_;
 };
 
 } /* namespace openrgb2 */

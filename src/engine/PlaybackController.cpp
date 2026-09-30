@@ -301,6 +301,10 @@ PlaybackController::Result PlaybackController::RequestImpl(
     Result        r;
     const TimePoint now = deps_.now();
     DeviceSnapshot    wireless;
+    /* F01: wireless_key_ is mutex_-guarded state — every
+       unlocked dep call below uses this snapshot, never the
+       member itself. */
+    DeviceKey         owned_key;
     bool              to_animation = false;
     bool              to_live      = false;
     bool              control_only_req = false;
@@ -318,6 +322,7 @@ PlaybackController::Result PlaybackController::RequestImpl(
                while one is in flight is rejected, never
                silently queued. */
             r.reason = "a playback transition is already in progress";
+            status_detail_ = r.reason;
             return r;
         }
         if(doc)
@@ -331,17 +336,20 @@ PlaybackController::Result PlaybackController::RequestImpl(
             if(!caps.caps.animation_playback)
             {
                 r.reason = caps.reason;
+                status_detail_ = r.reason;
                 return r;
             }
             if(!deps_.select_mode || !deps_.set_suppressed ||
                !deps_.snapshots)
             {
                 r.reason = "no backend transport configured";
+                status_detail_ = r.reason;
                 return r;
             }
             if(!FindWireless(wireless))
             {
                 r.reason = "no Lian Li wireless group is connected";
+                status_detail_ = r.reason;
                 return r;
             }
             sdk_name = PlaybackPresetSdkName(caps.preset);
@@ -358,6 +366,7 @@ PlaybackController::Result PlaybackController::RequestImpl(
             {
                 r.reason = "the backend does not offer mode '" +
                            sdk_name + "' on the wireless group";
+                status_detail_ = r.reason;
                 return r;
             }
             want_preset = caps.preset;
@@ -385,6 +394,7 @@ PlaybackController::Result PlaybackController::RequestImpl(
                failure, the explicit lane-restore recovery
                path (playback_mode_test TestFailedRestore). */
             r.reason = caps.reason;
+            status_detail_ = r.reason;
             return r;
         }
 
@@ -405,10 +415,16 @@ PlaybackController::Result PlaybackController::RequestImpl(
             applied_mode_ == PlaybackMode::LiveEffects &&
             upload_ == UploadState::None &&
             !suppressed_ && !has_wireless_;
+        /* Identical applied state INCLUDES the preset identity
+           (F03): a preset->preset change with equal speed/
+           reverse/color/control is NOT a no-op — the backend
+           still runs the old mode until select_mode lands the
+           new one. Mirrors the control_only check below. */
         const bool anim_is_same =
             mode == PlaybackMode::AnimationPlayback &&
             applied_mode_ == PlaybackMode::AnimationPlayback &&
             upload_ == UploadState::Active &&
+            caps.preset == preset_ &&
             same_params && control == control_;
         /* force_restore (Task 3.7 RevalidateAndRestore) skips
            the idempotent no-op: it runs only after the backend's
@@ -500,6 +516,10 @@ PlaybackController::Result PlaybackController::RequestImpl(
                    set and cleared together with upload state. */
                 to_live      = (mode == PlaybackMode::LiveEffects &&
                                 has_wireless_);
+                /* Snapshot the owned-group key under the lock —
+                   the blocking dep calls below run unlocked and
+                   must never read wireless_key_ directly. */
+                owned_key    = wireless_key_;
                 requested_mode_    = mode;
                 requested_control_ =
                     to_animation ? control : PlaybackControl::Playing;
@@ -610,14 +630,14 @@ PlaybackController::Result PlaybackController::RequestImpl(
                it). */
             if(deps_.drop_pending)
             {
-                deps_.drop_pending(wireless_key_);
+                deps_.drop_pending(owned_key);
             }
             if(deps_.wait_idle)
             {
-                deps_.wait_idle(wireless_key_, cfg_.drain_timeout);
+                deps_.wait_idle(owned_key, cfg_.drain_timeout);
             }
             if(deps_.set_custom_mode &&
-               !deps_.set_custom_mode(wireless_key_, io_err))
+               !deps_.set_custom_mode(owned_key, io_err))
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 transition_      = false;
@@ -641,6 +661,12 @@ PlaybackController::Result PlaybackController::RequestImpl(
 
         if(to_animation)
         {
+            /* A genuine preset change (animation -> animation on
+               a different preset) is a preset-identity
+               transition too — compare BEFORE preset_ is
+               overwritten so preset_revision tracks identity
+               on ack (F03). */
+            const bool preset_changed = (want_preset != preset_);
             has_wireless_   = true;
             wireless_key_   = wireless.key;
             wireless_gen_   = wireless.topology_generation;
@@ -653,7 +679,8 @@ PlaybackController::Result PlaybackController::RequestImpl(
             expect_         = BuildExpect(sdk_name.c_str(),
                                           want_preset, params);
             pending_param_rev_ = next_rev_;
-            if(applied_mode_ != PlaybackMode::AnimationPlayback)
+            if(applied_mode_ != PlaybackMode::AnimationPlayback ||
+               preset_changed)
             {
                 pending_preset_rev_ = next_rev_;
             }
@@ -707,11 +734,11 @@ PlaybackController::Result PlaybackController::RequestImpl(
            flow again. */
         if(deps_.reset_delivered)
         {
-            deps_.reset_delivered(wireless_key_);
+            deps_.reset_delivered(owned_key);
         }
         if(deps_.set_suppressed)
         {
-            deps_.set_suppressed(wireless_key_, false, "");
+            deps_.set_suppressed(owned_key, false, "");
         }
     }
     FlushPersisted();
@@ -723,12 +750,16 @@ PlaybackController::Result PlaybackController::RequestImpl(
 || Scene persistence                                        ||
 \*---------------------------------------------------------*/
 
-void PlaybackController::OnSceneApplied(
+PlaybackController::Result PlaybackController::OnSceneApplied(
     std::shared_ptr<const studio::SceneDocument> doc)
 {
     if(!doc)
     {
-        return;
+        Result r;
+        r.reason = "no scene document";
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_apply_result_ = r;
+        return r;
     }
     PerScene   choice;
     const std::string key = SceneKey(*doc);
@@ -753,8 +784,24 @@ void PlaybackController::OnSceneApplied(
     {
         choice.mode = PlaybackMode::LiveEffects;
     }
-    RequestImpl(choice.mode, PlaybackControl::Playing,
-                choice.params, doc);
+    /* The Result is surfaced, never dropped (F03): a rejected
+       re-apply (persisted preset no longer qualifies, the
+       backend refuses the mode, a transition is in flight)
+       reaches the caller and LastApplyResult(). */
+    const Result r = RequestImpl(choice.mode,
+                                 PlaybackControl::Playing,
+                                 choice.params, doc);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_apply_result_ = r;
+    }
+    return r;
+}
+
+PlaybackController::Result PlaybackController::LastApplyResult() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return last_apply_result_;
 }
 
 /*---------------------------------------------------------*\
@@ -1058,7 +1105,12 @@ void PlaybackController::Poll(TimePoint now)
         if(suppressed_ && has_wireless_ && deps_.set_suppressed)
         {
             /* A lane recreated by a topology change loses its
-               suppression flag — re-assert it (idempotent). */
+               suppression flag — re-assert it (idempotent).
+               This runs under the lock deliberately: the dep is
+               a non-blocking flag set on the lane, and checking
+               suppressed_/has_wireless_ then calling unlocked
+               would reopen a check/act race against a
+               concurrent Request releasing the lane. */
             deps_.set_suppressed(wireless_key_, true, kOwnReason);
         }
 
@@ -1212,11 +1264,19 @@ void PlaybackController::Poll(TimePoint now)
 
     /*---- Topology re-resolution ----------------------------*/
     {
-        bool lost = false;
+        bool      lost = false;
+        DeviceKey rescan_key;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             lost = has_wireless_ &&
                    upload_ != UploadState::None;
+            if(lost)
+            {
+                /* F01: snapshot the owned key under the lock —
+                   the enumeration compare below runs unlocked
+                   and must never read wireless_key_ itself. */
+                rescan_key = wireless_key_;
+            }
         }
         if(lost)
         {
@@ -1226,7 +1286,7 @@ void PlaybackController::Poll(TimePoint now)
             {
                 for(const DeviceSnapshot& s : deps_.snapshots())
                 {
-                    if(s.key == wireless_key_ &&
+                    if(s.key == rescan_key &&
                        s.connection == ConnectionState::Connected)
                     {
                         snap  = s;
@@ -1595,11 +1655,6 @@ bool PlaybackController::PlaybackOwnsWired() const
     std::lock_guard<std::mutex> lock(mutex_);
     return applied_mode_ == PlaybackMode::AnimationPlayback &&
            upload_       == UploadState::Active;
-}
-
-const PlaybackClockSync& PlaybackController::ClockSync() const
-{
-    return clock_;
 }
 
 size_t PlaybackController::PersistedScenes() const

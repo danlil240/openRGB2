@@ -1038,6 +1038,143 @@ static void TestLiveRefusal()
     CHECK(!r.pending);
 }
 
+/*---------------------------------------------------------*\
+||| T12: F03 — a preset A->B change with identical speed/   ||
+|||      reverse/color/control is a REAL select, not an     ||
+|||      idempotent no-op; preset_revision advances on ack; ||
+|||      same-preset+same-params stays a true no-op         ||
+\*---------------------------------------------------------*/
+
+static void TestPresetSwitch()
+{
+    Harness h;
+    const DeviceSnapshot ws = WirelessSnap();
+    h.backend.snaps = { ws };
+    h.pipeline.RegisterDevice(ws);
+    h.backend.report.name  = "Direct";
+    h.backend.report.valid = true;
+
+    /* Preset A uploaded and acknowledged. */
+    h.scene = MakeScene("a", "spectrum_cycle");
+    PlaybackParams params;      /* speed 100, fwd, red */
+    PlaybackController::Result r =
+        h.ctl->Request(PlaybackMode::AnimationPlayback,
+                       PlaybackControl::Playing, params);
+    CHECK(r.accepted && r.pending);
+    CHECK(h.backend.selects.size() == 1);
+    CHECK(h.backend.selects[0] == "Spectrum Cycle");
+    h.ReportPending();
+    h.Poll();
+    CHECK(h.ctl->Status().mode == PlaybackMode::AnimationPlayback);
+    CHECK(h.ctl->Status().upload == UploadState::Active);
+    CHECK(h.ctl->Status().preset_revision == 1);
+
+    /* Preset A -> B with IDENTICAL params: the dedupe must
+       compare preset identity — this issues a real
+       select_mode and stays pending for the ack (F03). */
+    h.scene = MakeScene("b", "breathing");
+    r = h.ctl->Request(PlaybackMode::AnimationPlayback,
+                       PlaybackControl::Playing, params);
+    CHECK(r.accepted);
+    CHECK(r.pending);
+    CHECK(h.backend.selects.size() == 2);
+    CHECK(h.backend.selects[1] == "Breathing");
+
+    /* Applied state still reports the OLD revision until the
+       backend acknowledges the new mode. */
+    CHECK(h.ctl->Status().upload == UploadState::Uploading);
+    CHECK(h.ctl->Status().preset_revision == 1);
+
+    /* The ack lands: preset_revision tracks the identity
+       change (F03 revision fix). */
+    h.ReportPending();
+    h.Poll();
+    CHECK(h.ctl->Status().mode == PlaybackMode::AnimationPlayback);
+    CHECK(h.ctl->Status().upload == UploadState::Active);
+    CHECK(h.ctl->Status().preset_revision == 2);
+    CHECK(h.ctl->Status().parameter_revision == 2);
+
+    /* Same preset + same params IS the true no-op: accepted,
+       not pending, and no new select goes out. */
+    const size_t nsel = h.backend.selects.size();
+    r = h.ctl->Request(PlaybackMode::AnimationPlayback,
+                       PlaybackControl::Playing, params);
+    CHECK(r.accepted);
+    CHECK(!r.pending);
+    CHECK(h.backend.selects.size() == nsel);
+    CHECK(h.ctl->Status().preset_revision == 2);
+
+    /* The scene-apply path returns the request Result — a
+       rejection can no longer be silently dropped (F03).
+       Scene "freshlive" never persisted a selection -> its
+       default Live replay is refused on this preset-only
+       document while the upload owns the group. */
+    h.scene = MakeScene("freshlive", "spectrum_cycle");
+    const PlaybackController::Result ar =
+        h.ctl->OnSceneApplied(h.scene);
+    CHECK(!ar.accepted);
+    CHECK(!ar.reason.empty());
+    /* ...and the retained copy exposes it to consumers that
+       never saw the return value. */
+    CHECK(h.ctl->LastApplyResult().accepted == ar.accepted);
+    CHECK(h.ctl->LastApplyResult().reason == ar.reason);
+    /* The refusal changed nothing — the upload still owns
+       the group. */
+    CHECK(h.ctl->Status().mode == PlaybackMode::AnimationPlayback);
+    CHECK(h.ctl->Status().upload == UploadState::Active);
+    CHECK(h.pipeline.IsSuppressed(ws.key));
+
+    /* A qualifying re-apply returns an accepted Result. */
+    const PlaybackController::Result ar2 =
+        h.ctl->OnSceneApplied(MakeScene("b", "breathing"));
+    CHECK(ar2.accepted);
+    CHECK(h.ctl->LastApplyResult().accepted);
+}
+
+/*---------------------------------------------------------*\
+||| T13: F03 — early request rejections land in Detail()   ||
+|||      so playback status reports the honest reason      ||
+\*---------------------------------------------------------*/
+
+static void TestRejectionDetail()
+{
+    Harness h;
+    const DeviceSnapshot ws = WirelessSnap();
+    h.pipeline.RegisterDevice(ws);
+    PlaybackParams params;
+
+    /* Backend does not offer the preset's uploaded mode. */
+    DeviceSnapshot cut = ws;
+    cut.modes = { "Direct" };
+    h.backend.snaps = { cut };
+    h.scene = MakeScene("rainbow", "rainbow_wave");
+    PlaybackController::Result r =
+        h.ctl->Request(PlaybackMode::AnimationPlayback,
+                       PlaybackControl::Playing, params);
+    CHECK(!r.accepted);
+    CHECK(!r.reason.empty());
+    CHECK(h.ctl->Detail() == r.reason);
+
+    /* Capability refusal (not an uploaded preset) also lands
+       in Detail(). */
+    h.backend.snaps = { ws };
+    h.scene = MakeScene("plain", "not_a_real_preset");
+    r = h.ctl->Request(PlaybackMode::AnimationPlayback,
+                       PlaybackControl::Playing, params);
+    CHECK(!r.accepted);
+    CHECK(!r.reason.empty());
+    CHECK(h.ctl->Detail() == r.reason);
+
+    /* No wireless group connected. */
+    h.scene = MakeScene("rainbow", "rainbow_wave");
+    h.backend.snaps = { WiredSnap() };
+    r = h.ctl->Request(PlaybackMode::AnimationPlayback,
+                       PlaybackControl::Playing, params);
+    CHECK(!r.accepted);
+    CHECK(!r.reason.empty());
+    CHECK(h.ctl->Detail() == r.reason);
+}
+
 int main()
 {
     TestLifecycle();
@@ -1051,6 +1188,8 @@ int main()
     TestSamplerBound();
     TestSceneStoreBound();
     TestLiveRefusal();
+    TestPresetSwitch();
+    TestRejectionDetail();
 
     std::printf("playback_test: %d checks, %d failures\n",
                 checks, failures);

@@ -407,6 +407,14 @@ std::vector<RgbColor> PlaybackFrameSampler::Sample(
     }
 
     const std::vector<uint8_t>& rgb = *loop;
+    /* Bounds check: the cached buffer must hold a full
+       led_count * frame_count * 3 loop — a short render
+       (unexpected renderer output) must never be indexed
+       past its end. */
+    if(rgb.size() < (size_t)led_count * (size_t)frame_count * 3)
+    {
+        return empty;
+    }
     double p = phase - std::floor(phase);
     if(p < 0.0)
     {
