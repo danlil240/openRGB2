@@ -474,6 +474,19 @@ bool EngineService::ApplySceneDocument(
        matrix-expanded emitter addresses are checked against
        the persisted zone size as well (Task 6). */
 
+    /* Effect ids resolve against the EFFECTIVE registry — the
+       packaged look library plus the personal looks landed
+       under the managed root's library/effects by
+       resource_install. That library is root-level file state,
+       not open-workspace state: it is readable here even before
+       the startup workspace re-adoption runs, so a last-scene
+       snapshot referencing a user-saved look restores instead
+       of degrading to "unknown preset". */
+    const studio::EffectRegistry effreg =
+        deps_.workspace
+            ? deps_.workspace->Store().EffectiveEffectRegistry()
+            : studio::EffectLooks();
+
     /* The persisted preset name is validated HERE (the IPC/CLI
        boundary): a playback-preset name (Spectrum Cycle /
        Rainbow Wave / Breathing) is also valid — it has no
@@ -482,6 +495,7 @@ bool EngineService::ApplySceneDocument(
        the real preset (Task 3.6). The actual layer build runs
        inside PrepareStudioScene below. */
     if(doc->effect.layers.empty() && !doc->effect.preset.empty() &&
+       !effreg.Contains(doc->effect.preset) &&
        !studio::FindPreset(doc->effect.preset) &&
        !IsPlaybackPresetName(doc->effect.preset))
     {
@@ -491,12 +505,13 @@ bool EngineService::ApplySceneDocument(
 
     /* SET_SCENE / --scene expanded documents carry no workspace
        inputs — synthesize the minimal candidate preparation
-       needs: the global effect registry resolves named presets
-       (same contract as before) and decay defaults to 100 (a
+       needs: the effective effect registry resolves named
+       presets AND personal looks (same contract as before, plus
+       the managed library layer) and decay defaults to 100 (a
        1.0 multiplier). Authored fields stay untouched. */
     WorkspaceCandidate cand;
     cand.resolved         = doc;
-    cand.effect_registry  = studio::EffectLooks();
+    cand.effect_registry  = effreg;
     cand.document.inputs.decay_pct = 100;
     return ApplyWorkspaceCandidate(cand, err);
 }
