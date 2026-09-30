@@ -87,6 +87,14 @@ struct EngineState
        inputs; a source that fails to start stays disabled
        and reports honestly rather than lying enabled. */
     std::vector<ReactiveInputs::PersistedInput> reactive;
+    /* The workspace the engine last managed (opened/committed/
+       adopted through WorkspaceService). Start() re-opens it
+       AFTER the scene restore — adoption only, never a scene
+       re-apply — so a restart keeps the managed context and
+       its revision truth instead of booting unmanaged. Empty
+       means "nothing managed" (fresh profile or a workspace
+       that never adopted). */
+    std::string                              active_workspace;
     nlohmann::json                           extensions;
 };
 

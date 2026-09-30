@@ -98,6 +98,13 @@ public:
            reconciles by workspace revision / content hash. */
         uint64_t    session_id = 0;
         std::string verb;
+        /* The workspace id the job targets (the body's `id`,
+           or the resolved current id for verbs that may omit
+           it — reload/restore_backup/export). Consumers scope
+           revision movement to THEIR managed workspace: a job
+           a foreign client ran on another id never bumps the
+           current one's counters. */
+        std::string workspace_id;
         JobState    state      = JobState::Queued;
         bool        committed = false;
         bool        applied   = false;
@@ -132,6 +139,15 @@ public:
         std::function<bool(
             std::shared_ptr<const WorkspaceCandidate>,
             std::string&)> apply_scene;
+        /* Active-workspace notification — invoked OFF the
+           service mutex on the adopting thread whenever
+           current_.id CHANGES (Open/adopt/commit; there is no
+           close path, so the id is only ever replaced, and a
+           failed open leaves the previous value untouched).
+           EngineHost persists it so a restart re-adopts the
+           last managed workspace; nullptr is legal. */
+        std::function<void(const std::string& id)>
+            active_workspace_changed;
         /* Pending-job bound across ALL clients (plan 3.3: at
            most eight). */
         uint32_t max_pending_jobs = 8;
@@ -444,8 +460,17 @@ private:
        the field copy: the worker never stores I/O under it,
        so readers contend on microseconds, not commits. */
     void                PublishLocked();
+    /* Drains the pending active-workspace notification AFTER
+       the commit mutex is released — the callback persists
+       through EngineHost and must never run inside the commit
+       boundary (same discipline as apply_scene). Callers hold
+       no lock. */
+    void                FlushActiveNotify();
     mutable std::mutex  snap_mutex_;
     PublishedState      snap_;
+    /* Set under mutex_ whenever current_.id adopts a different
+       id; drained by FlushActiveNotify() post-lock. */
+    bool                active_notify_ = false;
 };
 
 const char*        JobStateName(WorkspaceService::JobState s);

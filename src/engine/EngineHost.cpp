@@ -1030,6 +1030,33 @@ bool EngineHost::Start(std::string& err)
                        service_->ApplyWorkspaceCandidate(*cand,
                                                          aerr);
             };
+        /* The managed workspace is durable engine state: every
+           adoption (open/commit/import) persists the id so a
+           restart re-adopts it below — engine restart must not
+           strand the managed context (the UI reports
+           managed:false against a live connection and every
+           revision-gated write refuses). Runs off the service
+           mutex on the adopting thread; the profile write is
+           bounded like every other state_mutex_ persist. */
+        wdeps.active_workspace_changed =
+            [this](const std::string& id)
+            {
+                if(!profile_)
+                {
+                    return;
+                }
+                std::lock_guard<std::mutex> g(state_mutex_);
+                if(engine_state_.active_workspace == id)
+                {
+                    return;   /* unchanged — never rewrite */
+                }
+                engine_state_.active_workspace = id;
+                std::string serr;
+                if(!profile_->Save(engine_state_, serr))
+                {
+                    Log("profile save failed: " + serr);
+                }
+            };
         workspaces_ = std::make_unique<WorkspaceService>(
             opts_.workspace_root.empty()
                 ? WorkspaceStore::DefaultRoot()
@@ -1178,6 +1205,38 @@ bool EngineHost::Start(std::string& err)
     if(!ApplyStartupScene(err))
     {
         return false;
+    }
+
+    /* Re-adopt the last managed workspace — the scene restore
+       above already decided what physical output shows;
+       Open() only re-adopts the workspace's generation and
+       revision truth, it NEVER applies a scene, so the
+       restored/--scene output stays the applied truth. A
+       workspace whose directory vanished is reported and the
+       engine continues unmanaged — a stale pointer is never
+       a startup failure. The guard leaves a client-driven
+       adopt alone if one raced ahead (IPC listeners are
+       already up). */
+    if(workspaces_ && !engine_state_.active_workspace.empty() &&
+       !workspaces_->ManagedActive())
+    {
+        const std::string wsid = engine_state_.active_workspace;
+        const WorkspaceService::Result wr = workspaces_->Open(wsid);
+        if(wr.ok)
+        {
+            Log("re-adopted managed workspace '" + wsid +
+                "' from " + opts_.state_path);
+            for(const std::string& w : wr.warnings)
+            {
+                Log("workspace '" + wsid + "': " + w);
+            }
+        }
+        else
+        {
+            Log("managed workspace '" + wsid +
+                "' could not be re-adopted (" + wr.error +
+                ") — starting unmanaged");
+        }
     }
 
     if(!engine_.Start())
