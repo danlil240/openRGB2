@@ -718,6 +718,10 @@ void EffectEditorController::ApplyEffectsCatalog(
 
 void EffectEditorController::RequestEffectsCatalog()
 {
+    /* Attempt count is recorded even when the wire refuses —
+       the offline suite asserts the save-completion path
+       re-requested the catalog. */
+    ++catalog_requests_;
     if(bridge_ == nullptr || !bridge_->connected())
     {
         return;
@@ -831,7 +835,12 @@ void EffectEditorController::OnEventReceived(const QString& kind,
         return;
     }
     const QString state = data.value("state").toString();
-    if(state != QLatin1String("completed") &&
+    /* The engine's terminal name is "succeeded"
+       (JobStateName) — "completed" is the legacy alias
+       DevicePresetController accepts too. */
+    const bool ok_state = state == QLatin1String("succeeded") ||
+                          state == QLatin1String("completed");
+    if(!ok_state &&
        state != QLatin1String("failed") &&
        state != QLatin1String("cancelled"))
     {
@@ -843,7 +852,7 @@ void EffectEditorController::OnEventReceived(const QString& kind,
 
     QVariantMap res;
     res["id"] = pending_save_id_;
-    if(state != QLatin1String("completed"))
+    if(!ok_state)
     {
         res["ok"]     = false;
         res["errors"] = QStringList{
