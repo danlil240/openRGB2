@@ -231,8 +231,11 @@ public:
 
     /* The ONE scene-apply path shared by --scene and
        SET_SCENE: resolves the persisted effect stack (inline
-       layers, else the named preset through the registry —
-       unknown preset names are rejected), prepares the shared
+       layers, else the named preset through the effective
+       registry — packaged looks plus the managed root's
+       library/effects, so user-installed looks resolve even
+       before a workspace is adopted; genuinely unknown preset
+       names are still rejected), prepares the shared
        runtime scene (hardware-dependent matrix geometry + key
        positions), submits to the worker at the next revision,
        and re-binds the mapper. Emits the "scene" event. */

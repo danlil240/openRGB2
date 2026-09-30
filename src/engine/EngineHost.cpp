@@ -1315,10 +1315,19 @@ bool EngineHost::ApplyStartupScene(std::string& err)
         const studio::PresetRegistry device_registry =
             BuildDeviceRegistry(opts_.devices_dir,
                 [this](const std::string& l) { Log(l); });
+        /* A --scene file may legitimately name a personal look —
+           resolve against the effective registry (packaged looks
+           + the managed root's library/effects), the same set
+           ApplySceneDocument validates against. Root-level file
+           state needs no open workspace. */
+        const studio::EffectRegistry effect_registry =
+            workspaces_
+                ? workspaces_->Store().EffectiveEffectRegistry()
+                : studio::EffectLooks();
         WorkspaceCandidate cand;
         std::vector<std::string> warnings;
         if(!LoadWorkspaceCandidate(opts_.scene_path, device_registry,
-                                   studio::EffectLooks(),
+                                   effect_registry,
                                    cand, err, &warnings))
         {
             return false;

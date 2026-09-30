@@ -821,7 +821,16 @@ int main()
         (tmp / "engine-state.json").generic_string();
     opts.sdk_reprobe          = std::chrono::milliseconds(300);
     opts.sdk_topology_poll    = std::chrono::milliseconds(300);
-    opts.log = [](const std::string&) {};
+    /* Engine log lines are captured (not printed) so restart
+       phases can assert on the restore decision — e.g. that a
+       last-scene snapshot referencing a personal look was NOT
+       dropped as "unknown preset". */
+    std::mutex                log_mx;
+    std::vector<std::string>  log_lines;
+    opts.log = [&](const std::string& line) {
+        std::lock_guard<std::mutex> lk(log_mx);
+        log_lines.push_back(line);
+    };
 
     std::vector<json> events;
 
@@ -1019,6 +1028,14 @@ int main()
     }
     edited["effects"]["preset"]  = "mylook";
     edited["effects"]["playing"] = true;
+    /* The scene references the personal look BY NAME only —
+       authored layers cleared. The persisted last-scene
+       snapshot then carries "mylook" with an empty layer
+       stack, so the Phase-E restart exercises the path that
+       previously degraded to "unknown preset" (the fix resolves
+       effect ids through the managed library layer, not just
+       the packaged looks). */
+    edited["effects"]["layers"]  = json::array();
 
     json save = ui1.RunJob(json::object({
         { "verb",              "commit"        },
@@ -1261,6 +1278,28 @@ int main()
     UiClient ui3;
     CHECK(ui3.Connect(cmd_pipe));
     CHECK(HasCaps(ui3.Hello()));
+
+    /* Regression (last-scene restore of a personal look): the
+       snapshot carries effect.preset "mylook" with NO inline
+       layers. The restore must resolve the id through the
+       managed library — before the fix it logged
+       "apply failed (unknown preset 'mylook')" and booted
+       with no scene. Assert the log line AND the outcome. */
+    {
+        std::lock_guard<std::mutex> lk(log_mx);
+        bool restored = false, apply_failed = false;
+        for(const std::string& l : log_lines)
+        {
+            restored |= l.find(
+                "restored last applied scene 'legacy desk'")
+                != std::string::npos;
+            apply_failed |= l.find("last-scene restore: apply "
+                                   "failed")
+                != std::string::npos;
+        }
+        CHECK(restored);
+        CHECK(!apply_failed);
+    }
 
     /* The restart RE-ADOPTED the last managed workspace — no
        client had to re-open it; revisions survive verbatim.
