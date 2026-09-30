@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <memory>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -257,6 +258,40 @@ static void TestReentrantInputProvider()
        slot would be overridden the same way. */
 }
 
+/* Hardening (QA session follow-up): an exception escaping
+   Evaluate or the frame callback would propagate out of the
+   worker's Run loop and std::terminate the process. Step must
+   contain it — log, drop the tick's output, keep ticking. */
+static void TestStepFaultIsContained()
+{
+    SceneWorker worker;
+    auto doc = WaveDoc();
+    worker.SubmitScene(doc, WaveLayers());
+    std::atomic<int> log_lines{ 0 };
+    worker.SetLogger([&log_lines](const std::string&)
+                     { ++log_lines; });
+
+    std::atomic<int> calls{ 0 };
+    worker.SetFrameCallback([&calls](const EvaluatedFrame&)
+    {
+        ++calls;
+        if(calls == 1)
+        {
+            throw std::runtime_error("delivery blew up");
+        }
+    });
+
+    const TimePoint epoch = Clock::now();
+    worker.SetEpoch(epoch);
+    CHECK(worker.Step(epoch));       /* throws inside — contained */
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(16)));
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(32)));
+    CHECK(calls == 3);               /* callback kept firing      */
+    CHECK(worker.Sequence() == 3);
+    CHECK(log_lines.load() >= 1);
+    CHECK(worker.HasScene());
+}
+
 static void TestWorkerThread()
 {
     SceneWorker worker;
@@ -396,6 +431,7 @@ int main()
     TestNoScene();
     TestInputSlot();
     TestReentrantInputProvider();
+    TestStepFaultIsContained();
     TestNextDeadline();
     TestFutureEpochWorker();
     TestWorkerThread();

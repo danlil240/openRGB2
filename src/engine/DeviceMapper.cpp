@@ -56,8 +56,13 @@ void DeviceMapper::SetScene(
     std::lock_guard<std::mutex> lock(mutex_);
     doc_ = std::move(doc);
     /* The new scene may carry different bindings — resolution
-       re-runs on the next SyncDevices. */
+       re-runs on the next SyncDevices, which also re-arms the
+       one-line apply summary and the auto-verify grants. */
     resolved_.clear();
+    bound_objects_    = 0;
+    writable_objects_ = 0;
+    stats_            = MapStats{};
+    summary_pending_  = doc_ != nullptr;
 }
 
 std::shared_ptr<const studio::SceneDocument> DeviceMapper::Scene() const
@@ -127,6 +132,48 @@ void DeviceMapper::SyncDevices(
         }
     }
 
+    /* AUTO-VERIFY ON RESOLVE (QA F04, decided semantics):
+       bound Device objects whose binding resolved are
+       writable — resolution against live hardware IS the
+       verification grant; the stored document's authored
+       `verified` bit is never mutated. Unresolved bindings
+       stay unwritable. The apply summary is one line per
+       scene apply plus one per count change (a controller
+       arriving later can resolve more bindings without a
+       new apply). */
+    bound_objects_    = 0;
+    writable_objects_ = 0;
+    if(doc_)
+    {
+        for(const studio::SceneObject& obj : doc_->objects)
+        {
+            if(obj.kind != studio::ObjectKind::Device ||
+               obj.binding.empty())
+            {
+                continue;
+            }
+            ++bound_objects_;
+            const auto rit = resolved_.find(obj.binding);
+            if(rit != resolved_.end() &&
+               rit->second.status == studio::BindingStatus::Resolved)
+            {
+                ++writable_objects_;
+            }
+        }
+        if(summary_pending_ ||
+           bound_objects_    != logged_bound_ ||
+           writable_objects_ != logged_writable_)
+        {
+            summary_pending_ = false;
+            logged_bound_    = bound_objects_;
+            logged_writable_ = writable_objects_;
+            Log("scene apply: " + std::to_string(bound_objects_) +
+                " bound device objects, " +
+                std::to_string(writable_objects_) +
+                " writable (resolved bindings auto-verify)");
+        }
+    }
+
     /* Drop emitted state for controllers absent from this
        enumeration — it can never seed a frame again. The
        same rule covers a pending identification overlay: a
@@ -166,11 +213,13 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
        document order is preserved per zone so overlapping
        mapped addresses resolve by deterministic document
        precedence (last write wins). */
+    stats_ = MapStats{};
     std::map<DeviceKey, std::vector<std::pair<uint32_t, RgbColor>>>
         writes;
     for(const studio::SceneObject& obj : doc_->objects)
     {
-        if(obj.kind != studio::ObjectKind::Device || !obj.verified ||
+        ++stats_.objects_total;
+        if(obj.kind != studio::ObjectKind::Device ||
            obj.binding.empty())
         {
             continue;      /* Linked copies share their source
@@ -178,14 +227,22 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
                               render-only (address == -1) and
                               never multiply LED counts. */
         }
+        ++stats_.objects_bound;
         const auto rit = resolved_.find(obj.binding);
         if(rit == resolved_.end() ||
            rit->second.status != studio::BindingStatus::Resolved)
         {
+            /* F04: the authored `verified` bit does NOT gate
+               output — a binding resolved against live
+               hardware auto-verifies the object (runtime
+               grant, see SyncDevices); an unresolved binding
+               stays unwritable regardless of the flag. */
+            ++stats_.skipped_unverified_or_unresolved;
             continue;
         }
         const ZonePlacement& zone = rit->second.zone;
         auto&            queue = writes[zone.controller];
+        bool             wrote = false;
         for(size_t e = 0; e < obj.emitters.size(); ++e)
         {
             const int addr = obj.emitters[e].address;
@@ -203,6 +260,11 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
             queue.emplace_back(zone.start_idx + (uint32_t)addr,
                                ScaleColor(FromSceneColor(c),
                                           doc_->brightness));
+            wrote = true;
+        }
+        if(wrote)
+        {
+            ++stats_.objects_emitted;
         }
     }
 
@@ -212,6 +274,7 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
         const auto            sit  = snapshots_.find(key);
         if(sit == snapshots_.end())
         {
+            ++stats_.frames_dropped;
             continue;
         }
         const DeviceSnapshot& snap = sit->second;
@@ -220,6 +283,7 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
             /* Stop obsolete frames on disconnect (plan
                section 6) — the binding stays resolved for
                the device's return. */
+            ++stats_.frames_dropped;
             continue;
         }
 
@@ -259,6 +323,8 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
         st.colors                 = std::move(colors);
         out.push_back(std::move(frame));
     }
+    stats_.objects_writable = writable_objects_;
+    stats_.frames_emitted   = (uint64_t)out.size();
     } /* doc_ */
 
     /* Identification overlays run with or without a scene —
@@ -525,6 +591,25 @@ std::vector<DeviceKey> DeviceMapper::BoundControllers() const
     std::sort(keys.begin(), keys.end());
     keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
     return keys;
+}
+
+MapStats DeviceMapper::LastMapStats() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return stats_;
+}
+
+void DeviceMapper::SetLogger(EngineLogFn log)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    log_ = std::move(log);
+}
+
+void DeviceMapper::Log(const std::string& line) const
+{
+    /* Callers hold mutex_ — the sink must never re-enter the
+       mapper (documented on SetLogger). */
+    EmitEngineLog(log_, line);
 }
 
 } /* namespace openrgb2 */

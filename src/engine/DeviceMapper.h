@@ -42,6 +42,7 @@
 
 #pragma once
 
+#include "EngineLog.h"
 #include "EngineTypes.h"
 #include "SceneWorker.h" /* EvaluatedFrame */
 
@@ -87,6 +88,38 @@ struct ZonePlacement
     std::string reason;               /* resolver note          */
 };
 
+/*---------------------------------------------------------*\
+||| MapStats — per-map observability (QA F04). A snapshot   |
+||| of the MOST RECENT MapFrame() scene pass, reset on      |
+||| every call. Serialized into diagnostics by the host.    |
+|||                                                           |
+|||   objects_total    — objects in the applied document    |
+|||   objects_bound    — Device objects carrying a binding  |
+|||   objects_writable — bound objects whose binding        |
+|||      resolved against the latest SyncDevices snapshots  |
+|||      (the auto-verify-on-resolve grant — see SetScene)  |
+|||   objects_emitted  — objects that contributed >= 1 LED  |
+|||      write to a controller frame                        |
+|||   skipped_unverified_or_unresolved — bound Device       |
+|||      objects skipped because their binding did not      |
+|||      resolve (no writes, no matter the authored flag)   |
+|||   frames_emitted   — scene RgbFrames produced for       |
+|||      controllers (identify-overlay frames excluded)     |
+|||   frames_dropped   — assembled writes dropped because   |
+|||      the target controller left the topology or         |
+|||      reports Disconnected                               |
+|\*---------------------------------------------------------*/
+struct MapStats
+{
+    uint64_t objects_total    = 0;
+    uint64_t objects_bound    = 0;
+    uint64_t objects_writable = 0;
+    uint64_t objects_emitted  = 0;
+    uint64_t skipped_unverified_or_unresolved = 0;
+    uint64_t frames_emitted   = 0;
+    uint64_t frames_dropped   = 0;
+};
+
 class DeviceMapper
 {
 public:
@@ -97,7 +130,17 @@ public:
 
     /* The scene document supplies the persisted bindings
        (doc->bindings) and the object/emitter layout. Shared
-       immutable like the worker's scene slot; nullptr clears. */
+       immutable like the worker's scene slot; nullptr clears.
+
+       AUTO-VERIFY ON RESOLVE (QA F04, decided semantics):
+       the document's authored `verified` bit is NOT the output
+       gate — a bound Device object becomes writable the moment
+       its binding resolves against live snapshots, because
+       resolution itself is the hardware confirmation ("a zone
+       that resolved to real hardware is verified"). Unresolved
+       bindings stay unwritable. The grant is mapper-side
+       runtime state: the applied document object and the
+       stored workspace document are never mutated. */
     void                                        SetScene(
         std::shared_ptr<const studio::SceneDocument> doc);
     std::shared_ptr<const studio::SceneDocument> Scene() const;
@@ -105,7 +148,10 @@ public:
     /* Re-resolve every persisted binding against the current
        snapshots. Call on every enumeration/topology change —
        resolution results hold DeviceKeys + zone indexes only,
-       never controller-list indices. */
+       never controller-list indices. Emits a one-line apply
+       summary ("N bound device objects, M writable") on scene
+       apply and whenever the resolved bound/writable counts
+       change. */
     void SyncDevices(const std::vector<DeviceSnapshot>& snapshots);
 
     /* Assemble complete-controller frames from one evaluated
@@ -119,7 +165,14 @@ public:
        sequence; sample_time passes through. Controllers
        whose snapshot reports Disconnected are skipped
        (obsolete frames stop on disconnect, plan section 6).
-       No scene / no bindings -> empty. */
+       No scene / no bindings -> empty.
+
+       Writability gate (F04): kind==Device + non-empty
+       binding + binding Resolved — `verified` is granted by
+       resolution itself (auto-verify on resolve), so an
+       authored-unverified object whose binding resolves DOES
+       emit; a `verified` object whose binding does NOT
+       resolve stays unwritable. */
     std::vector<RgbFrame> MapFrame(const EvaluatedFrame& eval);
 
     /*---- LED identification (Task 4.4, LAYOUT_COMMAND      --*\
@@ -178,6 +231,16 @@ public:
                                       ZonePlacement& out) const;
     std::vector<DeviceKey>  BoundControllers() const;
 
+    /* Diagnostics (F04): the most recent MapFrame() pass
+       counters — see MapStats. */
+    MapStats                LastMapStats() const;
+
+    /* Optional log sink (EngineLogFn); defaults to stderr with
+       the "openrgb2-engine:" prefix. The sink is invoked with
+       the mapper's mutex held — it must never re-enter the
+       mapper. */
+    void                    SetLogger(EngineLogFn log);
+
 private:
     struct Resolution
     {
@@ -208,6 +271,7 @@ private:
 
     void ApplyIdentify(std::vector<RgbFrame>& out,
                        TimePoint sample_time);
+    void Log(const std::string& line) const;   /* under mutex_ */
 
     mutable std::mutex                              mutex_;
     std::shared_ptr<const studio::SceneDocument>    doc_;
@@ -215,6 +279,19 @@ private:
     std::map<std::string, Resolution>               resolved_;
     std::map<DeviceKey, Emitted>                    emitted_;
     std::map<DeviceKey, Identify>                   identify_;
+
+    /* Auto-verify runtime state + observability (F04):
+       bound/writable object counts from the latest
+       resolution pass, the last logged pair (one apply-
+       summary line per scene apply and per count change),
+       and the most recent MapFrame() counters. */
+    uint64_t            bound_objects_    = 0;
+    uint64_t            writable_objects_ = 0;
+    bool                summary_pending_  = false;
+    uint64_t            logged_bound_     = 0;
+    uint64_t            logged_writable_  = 0;
+    MapStats            stats_;
+    EngineLogFn         log_;
 };
 
 } /* namespace openrgb2 */

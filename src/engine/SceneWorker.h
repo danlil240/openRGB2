@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include "EngineLog.h"
 #include "EngineTypes.h"
 #include "StudioScenePreparation.h"
 
@@ -141,8 +142,19 @@ public:
        threaded loop calls this with Clock::now() after waking;
        tests call it directly with synthetic times.
        Single-caller: do not invoke Step concurrently (the worker
-       thread owns it while Running()). */
+       thread owns it while Running()).
+
+       Fault containment: an exception escaping Evaluate or the
+       frame callback would terminate the worker thread
+       (std::terminate on the Run loop). Step catches, logs via
+       the installed sink (throttled — first failures + a
+       periodic count), and the tick still counts as produced. */
     bool     Step(TimePoint now);
+
+    /* Optional log sink (EngineLogFn) for worker-internal
+       diagnostics — evaluation/callback faults above. Defaults
+       to stderr with the "openrgb2-engine:" prefix. */
+    void     SetLogger(EngineLogFn log);
 
     /* Starts/stops the dedicated 60 Hz worker thread. Start()
        returns false when already running. Stop() is synchronous. */
@@ -169,6 +181,8 @@ private:
     };
 
     void Run();
+    void NoteStepFailure(const std::string& msg);
+    void Log(const std::string& line);
 
     mutable std::mutex      mutex_;
     std::condition_variable cv_;
@@ -190,6 +204,10 @@ private:
     FrameCallback         callback_;
     IdleFrameHook         idle_frame_hook_;
     InputProvider         input_provider_;
+    EngineLogFn           log_;
+    /* Worker-thread-only counter (Step is single-caller) —
+       throttles the per-fault log line. */
+    uint64_t              step_failures_ = 0;
 };
 
 } /* namespace openrgb2 */

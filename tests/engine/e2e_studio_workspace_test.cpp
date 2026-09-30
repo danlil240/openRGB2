@@ -11,8 +11,12 @@
 //      managed workspace (sanitized: no verified ownership, no
 //      armed inputs, no live_on_startup), its extracted custom
 //      device type lands in the managed library, and a reload job
-//      adopts + resolves it — verified-cleared, so NOTHING reaches
-//      the wire (an import can never arm output).
+//      adopts + resolves it. The stored document stays
+//      verified-cleared (an import can never AUTHOR verified
+//      state); but since the F04 fix, a binding that resolves
+//      against live hardware auto-verifies at apply — frames DO
+//      reach the wire once the user explicitly opens the
+//      workspace (an import is still never auto-applied).
 //   B. author + save — the UI-side edit path: document download,
 //      personal-look install (resource_install kind:"effect"),
 //      object move + re-verify + look selection, revision-checked
@@ -935,8 +939,16 @@ int main()
     }
 
     /* Adopt + apply (the UI "open"): the sanitized import
-       resolves and publishes — but nothing may reach the wire,
-       because no zone is verified yet. */
+       resolves and publishes. The STORED document keeps
+       verified:false — an import never authors verified state.
+       CHANGED CONTRACT (F04, auto-verify on resolve): writability
+       is no longer gated by the authored bit — a binding that
+       resolves against live hardware is treated as verified at
+       apply time, so the opened scene DOES drive output. The
+       pre-fix assertion (zero UpdateLEDs for unverified-only
+       docs) is intentionally replaced: unverified now means
+       "unwritable until its binding resolves", not "never
+       written". */
     json open1 = ui1.RunJob(json::object({
         { "verb", "reload" }, { "id", "desk-legacy" } }));
     CHECK(open1.value("state", "") == "succeeded");
@@ -946,12 +958,14 @@ int main()
         CHECK(sc.value("name", "") == "legacy desk");
         const json sd = sc.value("document", json::object());
         CHECK(sd.is_object());
+        /* authored/persisted verified state stays cleared */
         CHECK(VerifiedObjects(sd) == 0);
-        /* An unverified-only scene writes nothing — bounded
-           observation window, no writes on either dev. */
+        /* ...but resolved bindings auto-verify at apply: frames
+           DO reach the fake backend for both bound fans. */
         const uint64_t w0 = server.CountEvents(sdk::kPktUpdateLEDs);
-        h1.PumpFor(700);
-        CHECK(server.CountEvents(sdk::kPktUpdateLEDs) == w0);
+        CHECK(h1.WaitFor([&]{
+            return server.CountEvents(sdk::kPktUpdateLEDs) > w0;
+        }, 10000));
     }
 
     /*======================================================*\

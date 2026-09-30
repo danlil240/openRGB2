@@ -928,6 +928,130 @@ static void TestDisconnectedAndUnboundSkipped()
     CHECK(FrameFor(frames2, mouse.key) == nullptr);
 }
 
+/* F04 — auto-verify on resolve: the authored `verified` bit
+   does NOT gate output. A binding resolved against live
+   hardware makes the object writable (runtime grant — the
+   stored document is never mutated); an unresolved binding
+   stays unwritable regardless of the flag. */
+static studio::SceneObject UnverifiedObj(const std::string& id,
+                                         const std::string& binding,
+                                         int count)
+{
+    studio::SceneObject o = DevObj(id, binding, 0, count);
+    o.verified = false;
+    return o;
+}
+
+static void TestAutoVerifyOnResolve()
+{
+    std::vector<std::string> logs;
+
+    auto doc = std::make_shared<studio::SceneDocument>();
+    doc->brightness = 1.0f;
+    doc->bindings = {
+        Binding("b-h1", "X870E", "", "", "ARGB_V2_1", 8),
+        /* Nothing in the fake topology matches this. */
+        Binding("b-gone", "No Such Controller", "", "",
+                "Zone", 8),
+    };
+    doc->objects = {
+        UnverifiedObj("o-h1",   "b-h1",   8),  /* resolves   */
+        UnverifiedObj("o-gone", "b-gone", 8),  /* unresolved */
+        DevObj("o-vx",          "b-gone", 0, 8),  /* authored
+                                                  verified but
+                                                  unresolved —
+                                                  still dark */
+    };
+
+    DeviceMapper mapper;
+    mapper.SetLogger([&logs](const std::string& l)
+                     { logs.push_back(l); });
+    mapper.SetScene(doc);
+    const DeviceSnapshot mb = Motherboard();
+    mapper.SyncDevices({ mb });
+
+    /* One apply-summary line: "3 bound device objects,
+       1 writable". */
+    CHECK(logs.size() == 1);
+    CHECK(!logs.empty() &&
+          logs[0].find("3 bound device objects") !=
+              std::string::npos &&
+          logs[0].find("1 writable") != std::string::npos);
+
+    const EvaluatedFrame eval = EvalAll(*doc, {
+        { "o-h1",   SC(10, 20, 30) },
+        { "o-gone", SC(9, 9, 9) },
+        { "o-vx",   SC(9, 9, 9) },
+    });
+    const std::vector<RgbFrame> frames = mapper.MapFrame(eval);
+
+    /* The resolved-but-authored-unverified object emits. */
+    const RgbFrame* f = FrameFor(frames, mb.key);
+    CHECK(f != nullptr);
+    CHECK(AllEqual(f->colors, 0, 8, RGB(10, 20, 30)));
+    /* The unresolved bindings emitted nothing — exactly one
+       frame total, and the (9,9,9) color landed nowhere. */
+    CHECK(frames.size() == 1);
+    CHECK(!AllEqual(f->colors, 0, f->colors.size(), RGB(9, 9, 9)));
+
+    /* The stored document is untouched — the grant is runtime
+       mapper state, not a document mutation. */
+    CHECK(!doc->objects[0].verified);
+    CHECK(!doc->objects[1].verified);
+    CHECK(doc->objects[2].verified);            /* o-vx authored true */
+
+    /* LastMapStats accounts the pass. */
+    const MapStats st = mapper.LastMapStats();
+    CHECK(st.objects_total == 3);
+    CHECK(st.objects_bound == 3);
+    CHECK(st.objects_writable == 1);
+    CHECK(st.objects_emitted == 1);
+    CHECK(st.skipped_unverified_or_unresolved == 2);
+    CHECK(st.frames_emitted == 1);
+    CHECK(st.frames_dropped == 0);
+
+    /* An unresolved-only doc produces zero frames. */
+    auto doc2 = std::make_shared<studio::SceneDocument>();
+    doc2->bindings = { Binding("b-gone", "No Such Controller",
+                               "", "", "Zone", 8) };
+    doc2->objects  = { UnverifiedObj("o-gone", "b-gone", 8) };
+    DeviceMapper mapper2;
+    mapper2.SetScene(doc2);
+    mapper2.SyncDevices({ mb });
+    CHECK(mapper2.MapFrame(EvalAll(*doc2, {
+        { "o-gone", SC(1, 1, 1) } })).empty());
+    CHECK(mapper2.LastMapStats().frames_emitted == 0);
+    CHECK(mapper2.LastMapStats().skipped_unverified_or_unresolved == 1);
+}
+
+/* F04 regression: brightness 0 produces a BLACK frame, not no
+   frame — the lights must go dark, never hold the old colors. */
+static void TestZeroBrightnessEmitsBlackFrame()
+{
+    auto doc = std::make_shared<studio::SceneDocument>();
+    doc->brightness = 0.0f;
+    doc->bindings = {
+        Binding("b-h1", "X870E", "", "", "ARGB_V2_1", 8),
+    };
+    doc->objects = { UnverifiedObj("o-h1", "b-h1", 8) };
+
+    DeviceMapper mapper;
+    mapper.SetScene(doc);
+    const DeviceSnapshot mb = Motherboard();
+    mapper.SyncDevices({ mb });
+
+    const EvaluatedFrame eval = EvalAll(*doc, {
+        { "o-h1", SC(200, 100, 50) },
+    });
+    const std::vector<RgbFrame> frames = mapper.MapFrame(eval);
+    const RgbFrame* f = FrameFor(frames, mb.key);
+    CHECK(f != nullptr);                        /* frame emitted */
+    CHECK(f->colors.size() == 34);
+    CHECK(AllEqual(f->colors, 0, 8, RGB(0, 0, 0))); /* bound = black */
+    CHECK(f->colors[32] == kEnumerated);        /* unmapped kept */
+    CHECK(mapper.LastMapStats().frames_emitted == 1);
+}
+
 /* Scene brightness scales mapped writes; preserved colors
    are untouched (they are already device-space). */
 static void TestBrightnessScalesMappedOnly()
@@ -966,6 +1090,8 @@ int main()
     TestAugmentedIdentityImposterRejected();
     TestSequencesAndSampleTime();
     TestDisconnectedAndUnboundSkipped();
+    TestAutoVerifyOnResolve();
+    TestZeroBrightnessEmitsBlackFrame();
     TestBrightnessScalesMappedOnly();
 
     std::printf("%d checks, %d failures\n", checks, failures);

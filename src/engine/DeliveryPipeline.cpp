@@ -512,7 +512,8 @@ bool DeliveryPipeline::OutputPaused() const
 }
 
 bool DeliveryPipeline::DeliverOne(Lane& lane, RgbFrame frame,
-                                  bool reliable, TimePoint now)
+                                  bool reliable, TimePoint now,
+                                  std::optional<TimePoint> completed_at)
 {
     /* The caller popped this frame and charged in_flight —
        every exit path clears it (and wakes WaitIdle). */
@@ -570,8 +571,21 @@ bool DeliveryPipeline::DeliverOne(Lane& lane, RgbFrame frame,
         ++aggregate_.transport_rejected;
         return true;
     }
-    lane.stats.RecordTransportCompletion(now);
-    aggregate_.RecordTransportCompletion(now);
+    /* F13: completion is stamped AFTER the transport call,
+       inside this locked section — concurrent lane threads
+       record in lock order, so the stamps can never arrive
+       out-of-order (a lane parked mid-send used to record its
+       pre-send `now` after faster lanes' later stamps, which
+       drove the aggregate min_interval_s negative). A caller-
+       injected stamp (DrainDue's synthetic clock — legitimately
+       TimePoint{} at the synthetic epoch) is used verbatim —
+       DeliveryStats itself floors non-positive intervals as
+       the second line of defence. `now` stays the send-start
+       pacing reference for the budget. */
+    const TimePoint completed = completed_at ? *completed_at
+                                             : Clock::now();
+    lane.stats.RecordTransportCompletion(completed);
+    aggregate_.RecordTransportCompletion(completed);
     lane.has_sent      = true;
     lane.last_send     = now;
     /* A synthetic sequence is outside the live namespace —
@@ -640,7 +654,12 @@ size_t DeliveryPipeline::DrainDue(const DeviceKey& controller,
     {
         return 0;
     }
-    return DeliverOne(*lane, std::move(frame), reliable, now) ? 1 : 0;
+    /* The caller's `now` doubles as the completion stamp:
+       synchronous drains are single-caller, so an injected
+       synthetic clock stays fully deterministic (the Delivery-
+       Stats interval floor still guards mixed concurrency). */
+    return DeliverOne(*lane, std::move(frame), reliable, now, now)
+           ? 1 : 0;
 }
 
 size_t DeliveryPipeline::DrainAllDue(TimePoint now)
@@ -814,6 +833,10 @@ void DeliveryPipeline::LaneRun(Lane* lane)
                 lane->cv.wait(lock);
             }
         }
+        /* `now` = send-start (pacing reference); the completion
+           stamp defaults to post-send Clock::now() taken inside
+           the stats lock — F13: pre-send stamps recorded after
+           a faster lane's completions went negative. */
         DeliverOne(*lane, std::move(frame), reliable, Clock::now());
     }
 }
