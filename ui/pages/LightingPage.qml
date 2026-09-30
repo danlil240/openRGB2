@@ -146,6 +146,7 @@ Item {
         spacing: 0
 
         Flickable {
+            objectName: "lightingScroll"
             Layout.fillWidth: true
             Layout.fillHeight: true
             contentHeight: col.implicitHeight

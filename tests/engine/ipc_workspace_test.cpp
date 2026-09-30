@@ -681,6 +681,93 @@ int main()
         CHECK(st.value("detail", "") == "revision_conflict");
     }
 
+    /*---- generation recovery keeps the workspace writable ---*/
+    {
+        /* Task 12 qualification found a durable wedge: a
+           corrupted ACTIVE generation makes Open() adopt the
+           marker-backup generation, so the published revision
+           steps BACK while the durable marker keeps pointing at
+           the corrupt one. Every subsequent commit then failed
+           revision_conflict forever — the marker gate saw the
+           corrupt revision, the client only knew the recovered
+           one. The service now translates the gate for the
+           owner of the recovered state; this test pins it. */
+        Rig rig(g_tmp / "wreck");
+        rig.Start();
+        TestClient c;
+        Welcome(c, *rig.server);
+
+        /* Two commits -> gen-000001 (rev1) + gen-000002
+           (rev2); the marker backup now points at gen1. */
+        json r1 = WsCall(c, seq, json::object({
+            { "verb",              "commit"             },
+            { "id",                "wrec"               },
+            { "base_revision",     0                    },
+            { "resource_revision", 0                    },
+            { "document",          WorkspaceDoc("r1")   },
+        }));
+        json s1 = WaitJob(c, seq, r1["job_id"].get<uint64_t>());
+        CHECK(s1.value("state", "") == "succeeded");
+        const json g1 = WsCall(c, seq, json::object(
+            {{ "verb", "get" }}));
+        const uint64_t res1 =
+            g1.value("resource_revision", 0ull);
+        json r2 = WsCall(c, seq, json::object({
+            { "verb",              "commit"             },
+            { "id",                "wrec"               },
+            { "base_revision",     1                    },
+            { "resource_revision", res1                 },
+            { "document",          WorkspaceDoc("r2")   },
+        }));
+        json s2 = WaitJob(c, seq, r2["job_id"].get<uint64_t>());
+        CHECK(s2.value("state", "") == "succeeded");
+
+        /* Corrupt the ACTIVE generation on disk — the marker
+           still names gen-000002 but its manifest hash no
+           longer verifies. */
+        const fs::path wsdir =
+            (g_tmp / "wreck") / "wrec";
+        const fs::path gdoc = wsdir / "generations" /
+                              "gen-000002" / "document.json";
+        std::ofstream(gdoc, std::ios::binary | std::ios::trunc)
+            << "{ tampered }";
+
+        /* reload -> Recovered: the published revision steps
+           back to the last-valid generation's (rev 1). */
+        json rr = WsCall(c, seq, json::object({
+            { "verb", "reload" }, { "id", "wrec" },
+        }));
+        const json srr = WaitJob(c, seq,
+                                 rr["job_id"].get<uint64_t>());
+        CHECK(srr.value("state", "") == "succeeded");
+        const json gr = WsCall(c, seq, json::object(
+            {{ "verb", "get" }}));
+        CHECK(gr.value("managed", false) == true);
+        CHECK(gr.value("workspace_revision", 0ull) == 1);
+        CHECK(gr.value("name", "") == "r1");
+
+        /* THE REGRESSION: a commit by a client holding the
+           recovered revision must land — before the fix this
+           failed revision_conflict forever because the marker
+           still carried revision 2. */
+        json r3 = WsCall(c, seq, json::object({
+            { "verb",              "commit"             },
+            { "id",                "wrec"               },
+            { "base_revision",     gr["workspace_revision"] },
+            { "resource_revision", gr["resource_revision"] },
+            { "document",          WorkspaceDoc("r3")   },
+        }));
+        CHECK(r3.value("accepted", true) ||
+              r3.contains("job_id"));
+        const json s3 = WaitJob(c, seq, r3["job_id"].get<uint64_t>());
+        CHECK(s3.value("state", "") == "succeeded");
+        CHECK(s3.value("committed", false));
+        const json g3 = WsCall(c, seq, json::object(
+            {{ "verb", "get" }}));
+        CHECK(g3.value("workspace_revision", 0ull) == 3);
+        CHECK(g3.value("name", "") == "r3");
+    }
+
     /*---- path traversal / absolute ids ----------------------*/
     {
         Rig rig(g_tmp / "paths");

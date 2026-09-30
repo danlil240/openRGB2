@@ -1,0 +1,5 @@
+openrgb2-engine: device-type registry loaded 0 types from presets\devices
+openrgb2-engine: command pipe unavailable: CreateNamedPipe \.pipeopenrgb2-pkg-engine: The filename, directory name, or volume label syntax is incorrect. (continuing without command IPC)
+openrgb2-engine: diagnostics pipe unavailable: CreateNamedPipe \.pipeopenrgb2-pkg-engine-diag: The filename, directory name, or volume label syntax is incorrect. (continuing)
+openrgb2-engine: running (60 Hz scene clock, no UI required)
+openrgb2-engine: running — Ctrl+C to stop

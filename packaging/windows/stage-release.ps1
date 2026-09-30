@@ -242,9 +242,10 @@ if(-not $VerifyOnly) {
                     [StringComparison]::OrdinalIgnoreCase) }
             catch { $false }
         })
+        $lockIds = @($locking | ForEach-Object { $_.Id })
         $locking += @(Get-Process -Name "openrgb2-engine","openrgb2-ui",
                       "openrgb2-ctl","OpenRGB" -ErrorAction SilentlyContinue |
-            Where-Object { $locking.Id -notcontains $_.Id })
+            Where-Object { $lockIds -notcontains $_.Id })
         if($locking.Count -gt 0) {
             Fail ("staged binaries are still running (" +
                   (($locking | ForEach-Object { "$($_.ProcessName)#$($_.Id)" }) -join ', ') +
@@ -647,7 +648,9 @@ $forbidden += $all | Where-Object {
 # 5. Debug Qt runtime DLLs. Qt debug builds are '<module>d.dll'
 #    (Qt6Cored.dll). A RELEASE Qt module whose name ends in 'd'
 #    would false-positive -- allowlist such names here if ever staged.
-$qtReleaseNamesEndingInD = @()   # e.g. @('Qt6Xyzd.dll') for a release DLL
+# Quick3D is a RELEASE module whose name legitimately ends in 'd'
+# (the Studio viewport needs it — it is REQUIRED, not forbidden).
+$qtReleaseNamesEndingInD = @('Qt6Quick3D.dll')
 $forbidden += $all | Where-Object {
     -not $_.PSIsContainer -and
     $_.Name -match '^Qt6\w*d\.dll$' -and

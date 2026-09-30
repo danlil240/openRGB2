@@ -42,9 +42,10 @@ void Usage(const char* argv0)
     std::fprintf(stderr,
         "usage: %s [--scene <file>] [--effects-dir <dir>]\n"
         "          [--devices-dir <dir>] [--state <file>]\n"
+        "          [--workspace-root <dir>] [--pipe <name>]\n"
         "          [--sdk [host:port]] [--ipc | --no-ipc]\n"
         "          [--backend-config <dir>] [--no-scan]\n"
-        "          [--no-instance-guard]\n"
+        "          [--no-instance-guard] [--no-power-monitor]\n"
         "\n"
         "  Runs the lighting engine until SIGINT/SIGTERM. No UI is\n"
         "  required or expected. Without --scene the engine idles at\n"
@@ -73,14 +74,24 @@ void Usage(const char* argv0)
         "  (--no-scan disables). Only one engine may own the\n"
         "  managed configuration: a second instance refuses to\n"
         "  start (--no-instance-guard opts out, for tests).\n"
+        "  --no-power-monitor disables the display/system power\n"
+        "  monitor (tests and isolated QA instances on headless\n"
+        "  or remote sessions where the OS reports display-off).\n"
         "  --state sets the durable engine profile (default\n"
         "  profiles/local/engine-state.json — gitignored user state\n"
         "  holding per-scene playback selections and resolved\n"
         "  binding identities; atomic writes + last-known-good).\n"
+        "  --workspace-root sets the managed workspace store\n"
+        "  (default profiles/local/workspaces, relative to the\n"
+        "  working directory); packaged launchers pass a writable\n"
+        "  app-data root explicitly.\n"
         "  IPC is on by default: the command pipe %s and the\n"
         "  read-only diagnostics pipe %s (restricted to the\n"
         "  creating user; see docs/ipc-protocol.md). --no-ipc\n"
-        "  runs headless with no pipes.\n",
+        "  runs headless with no pipes. --pipe <name> overrides\n"
+        "  the command pipe (the diagnostics pipe follows as\n"
+        "  <name>-diag) for isolated instances — the matching\n"
+        "  UI flag is openrgb2-ui --pipe.\n",
         argv0, openrgb2::ipc::kCommandPipeName,
         openrgb2::ipc::kDiagnosticsPipeName);
 }
@@ -111,6 +122,16 @@ int main(int argc, char** argv)
         else if((arg == "--state") && i + 1 < argc)
         {
             opts.state_path = argv[++i];
+        }
+        else if((arg == "--workspace-root") && i + 1 < argc)
+        {
+            opts.workspace_root = argv[++i];
+        }
+        else if((arg == "--pipe") && i + 1 < argc)
+        {
+            opts.command_pipe_name     = argv[++i];
+            opts.diagnostics_pipe_name =
+                opts.command_pipe_name + "-diag";
         }
         else if((arg == "--backend-config") && i + 1 < argc)
         {
@@ -143,6 +164,10 @@ int main(int argc, char** argv)
         else if(arg == "--no-instance-guard")
         {
             opts.single_instance = false;
+        }
+        else if(arg == "--no-power-monitor")
+        {
+            opts.power_monitor = false;
         }
         else if(arg == "--help" || arg == "-h")
         {

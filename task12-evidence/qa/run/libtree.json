@@ -1,0 +1,2522 @@
+{
+  "ok": true,
+  "result": {
+    "count": 171,
+    "items": [
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 0,
+        "name": "libList",
+        "rect": [
+          608,
+          496,
+          316,
+          177
+        ],
+        "type": "QQuickListView",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 1,
+        "name": "",
+        "rect": [
+          852,
+          1000,
+          26,
+          22
+        ],
+        "text": "✕",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 2,
+        "name": "",
+        "rect": [
+          852,
+          1000,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 3,
+        "name": "",
+        "rect": [
+          859,
+          1003,
+          12,
+          16
+        ],
+        "text": "✕",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 4,
+        "name": "",
+        "rect": [
+          818,
+          1000,
+          26,
+          22
+        ],
+        "text": "✎",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 5,
+        "name": "",
+        "rect": [
+          818,
+          1000,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 6,
+        "name": "",
+        "rect": [
+          825,
+          1003,
+          12,
+          16
+        ],
+        "text": "✎",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 7,
+        "name": "",
+        "rect": [
+          784,
+          1012,
+          26,
+          22
+        ],
+        "text": "+",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 8,
+        "name": "",
+        "rect": [
+          784,
+          1012,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 9,
+        "name": "",
+        "rect": [
+          793,
+          1015,
+          8,
+          16
+        ],
+        "text": "+",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 10,
+        "name": "",
+        "rect": [
+          784,
+          988,
+          26,
+          22
+        ],
+        "text": "☆",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 11,
+        "name": "",
+        "rect": [
+          784,
+          988,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 12,
+        "name": "",
+        "rect": [
+          791,
+          991,
+          12,
+          16
+        ],
+        "text": "☆",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 13,
+        "name": "",
+        "rect": [
+          658,
+          1021,
+          16,
+          16
+        ],
+        "text": "file",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 14,
+        "name": "",
+        "rect": [
+          658,
+          1004,
+          116,
+          16
+        ],
+        "text": "furniture · 620×360×20 mm · 0 LEDs",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 15,
+        "name": "",
+        "rect": [
+          658,
+          984,
+          50,
+          19
+        ],
+        "text": "Monitor",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 16,
+        "name": "",
+        "rect": [
+          628,
+          999,
+          9,
+          24
+        ],
+        "text": "F",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 17,
+        "name": "",
+        "rect": [
+          608,
+          982,
+          316,
+          54
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 18,
+        "name": "",
+        "rect": [
+          852,
+          946,
+          26,
+          22
+        ],
+        "text": "✕",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 19,
+        "name": "",
+        "rect": [
+          852,
+          946,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 20,
+        "name": "",
+        "rect": [
+          859,
+          949,
+          12,
+          16
+        ],
+        "text": "✕",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 21,
+        "name": "",
+        "rect": [
+          818,
+          946,
+          26,
+          22
+        ],
+        "text": "✎",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 22,
+        "name": "",
+        "rect": [
+          818,
+          946,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 23,
+        "name": "",
+        "rect": [
+          825,
+          949,
+          12,
+          16
+        ],
+        "text": "✎",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 24,
+        "name": "",
+        "rect": [
+          784,
+          958,
+          26,
+          22
+        ],
+        "text": "+",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 25,
+        "name": "",
+        "rect": [
+          784,
+          958,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 26,
+        "name": "",
+        "rect": [
+          793,
+          961,
+          8,
+          16
+        ],
+        "text": "+",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 27,
+        "name": "",
+        "rect": [
+          784,
+          934,
+          26,
+          22
+        ],
+        "text": "☆",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 28,
+        "name": "",
+        "rect": [
+          784,
+          934,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 29,
+        "name": "",
+        "rect": [
+          791,
+          937,
+          12,
+          16
+        ],
+        "text": "☆",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 30,
+        "name": "",
+        "rect": [
+          658,
+          967,
+          16,
+          16
+        ],
+        "text": "file",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 31,
+        "name": "",
+        "rect": [
+          658,
+          950,
+          116,
+          16
+        ],
+        "text": "fan · 0×0×0 mm · 40 LEDs",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 32,
+        "name": "",
+        "rect": [
+          658,
+          930,
+          115,
+          19
+        ],
+        "text": "Lian Li SL Wireless fan — 40 LEDs",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 33,
+        "name": "",
+        "rect": [
+          628,
+          945,
+          9,
+          24
+        ],
+        "text": "F",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 34,
+        "name": "",
+        "rect": [
+          608,
+          928,
+          316,
+          54
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 35,
+        "name": "",
+        "rect": [
+          852,
+          892,
+          26,
+          22
+        ],
+        "text": "✕",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 36,
+        "name": "",
+        "rect": [
+          852,
+          892,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 37,
+        "name": "",
+        "rect": [
+          859,
+          895,
+          12,
+          16
+        ],
+        "text": "✕",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 38,
+        "name": "",
+        "rect": [
+          818,
+          892,
+          26,
+          22
+        ],
+        "text": "✎",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 39,
+        "name": "",
+        "rect": [
+          818,
+          892,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 40,
+        "name": "",
+        "rect": [
+          825,
+          895,
+          12,
+          16
+        ],
+        "text": "✎",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 41,
+        "name": "",
+        "rect": [
+          784,
+          904,
+          26,
+          22
+        ],
+        "text": "+",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 42,
+        "name": "",
+        "rect": [
+          784,
+          904,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 43,
+        "name": "",
+        "rect": [
+          793,
+          907,
+          8,
+          16
+        ],
+        "text": "+",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 44,
+        "name": "",
+        "rect": [
+          784,
+          880,
+          26,
+          22
+        ],
+        "text": "☆",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 45,
+        "name": "",
+        "rect": [
+          784,
+          880,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 46,
+        "name": "",
+        "rect": [
+          791,
+          883,
+          12,
+          16
+        ],
+        "text": "☆",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 47,
+        "name": "",
+        "rect": [
+          658,
+          913,
+          16,
+          16
+        ],
+        "text": "file",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 48,
+        "name": "",
+        "rect": [
+          658,
+          896,
+          116,
+          16
+        ],
+        "text": "gpu · 300×50×130 mm · 0 LEDs",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 49,
+        "name": "",
+        "rect": [
+          658,
+          876,
+          116,
+          19
+        ],
+        "text": "Graphics card (decor)",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 50,
+        "name": "",
+        "rect": [
+          626,
+          891,
+          13,
+          24
+        ],
+        "text": "G",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 51,
+        "name": "",
+        "rect": [
+          608,
+          874,
+          316,
+          54
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 52,
+        "name": "",
+        "rect": [
+          852,
+          838,
+          26,
+          22
+        ],
+        "text": "✕",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 53,
+        "name": "",
+        "rect": [
+          852,
+          838,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 54,
+        "name": "",
+        "rect": [
+          859,
+          841,
+          12,
+          16
+        ],
+        "text": "✕",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 55,
+        "name": "",
+        "rect": [
+          818,
+          838,
+          26,
+          22
+        ],
+        "text": "✎",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 56,
+        "name": "",
+        "rect": [
+          818,
+          838,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 57,
+        "name": "",
+        "rect": [
+          825,
+          841,
+          12,
+          16
+        ],
+        "text": "✎",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 58,
+        "name": "",
+        "rect": [
+          784,
+          850,
+          26,
+          22
+        ],
+        "text": "+",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 59,
+        "name": "",
+        "rect": [
+          784,
+          850,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 60,
+        "name": "",
+        "rect": [
+          793,
+          853,
+          8,
+          16
+        ],
+        "text": "+",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 61,
+        "name": "",
+        "rect": [
+          784,
+          826,
+          26,
+          22
+        ],
+        "text": "☆",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 62,
+        "name": "",
+        "rect": [
+          784,
+          826,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 63,
+        "name": "",
+        "rect": [
+          791,
+          829,
+          12,
+          16
+        ],
+        "text": "☆",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 64,
+        "name": "",
+        "rect": [
+          658,
+          859,
+          16,
+          16
+        ],
+        "text": "file",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 65,
+        "name": "",
+        "rect": [
+          658,
+          842,
+          114,
+          16
+        ],
+        "text": "gpu · 0×0×0 mm · 4 LEDs",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 66,
+        "name": "",
+        "rect": [
+          658,
+          822,
+          115,
+          19
+        ],
+        "text": "GPU side logo — 4 LEDs",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 67,
+        "name": "",
+        "rect": [
+          626,
+          837,
+          13,
+          24
+        ],
+        "text": "G",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 68,
+        "name": "",
+        "rect": [
+          608,
+          820,
+          316,
+          54
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 69,
+        "name": "",
+        "rect": [
+          852,
+          784,
+          26,
+          22
+        ],
+        "text": "✕",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 70,
+        "name": "",
+        "rect": [
+          852,
+          784,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 71,
+        "name": "",
+        "rect": [
+          859,
+          787,
+          12,
+          16
+        ],
+        "text": "✕",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 72,
+        "name": "",
+        "rect": [
+          818,
+          784,
+          26,
+          22
+        ],
+        "text": "✎",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 73,
+        "name": "",
+        "rect": [
+          818,
+          784,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 74,
+        "name": "",
+        "rect": [
+          825,
+          787,
+          12,
+          16
+        ],
+        "text": "✎",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 75,
+        "name": "",
+        "rect": [
+          784,
+          796,
+          26,
+          22
+        ],
+        "text": "+",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 76,
+        "name": "",
+        "rect": [
+          784,
+          796,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 77,
+        "name": "",
+        "rect": [
+          793,
+          799,
+          8,
+          16
+        ],
+        "text": "+",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 78,
+        "name": "",
+        "rect": [
+          784,
+          772,
+          26,
+          22
+        ],
+        "text": "☆",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 79,
+        "name": "",
+        "rect": [
+          784,
+          772,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 80,
+        "name": "",
+        "rect": [
+          791,
+          775,
+          12,
+          16
+        ],
+        "text": "☆",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 81,
+        "name": "",
+        "rect": [
+          658,
+          805,
+          16,
+          16
+        ],
+        "text": "file",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 82,
+        "name": "",
+        "rect": [
+          658,
+          788,
+          114,
+          16
+        ],
+        "text": "gpu · 0×0×0 mm · 8 LEDs",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 83,
+        "name": "",
+        "rect": [
+          658,
+          768,
+          109,
+          19
+        ],
+        "text": "GPU fan — 8 LEDs, downward",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 84,
+        "name": "",
+        "rect": [
+          626,
+          783,
+          13,
+          24
+        ],
+        "text": "G",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 85,
+        "name": "",
+        "rect": [
+          608,
+          766,
+          316,
+          54
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 86,
+        "name": "",
+        "rect": [
+          852,
+          730,
+          26,
+          22
+        ],
+        "text": "✕",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 87,
+        "name": "",
+        "rect": [
+          852,
+          730,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 88,
+        "name": "",
+        "rect": [
+          859,
+          733,
+          12,
+          16
+        ],
+        "text": "✕",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 89,
+        "name": "",
+        "rect": [
+          818,
+          730,
+          26,
+          22
+        ],
+        "text": "✎",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 90,
+        "name": "",
+        "rect": [
+          818,
+          730,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 91,
+        "name": "",
+        "rect": [
+          825,
+          733,
+          12,
+          16
+        ],
+        "text": "✎",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 92,
+        "name": "",
+        "rect": [
+          784,
+          742,
+          26,
+          22
+        ],
+        "text": "+",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 93,
+        "name": "",
+        "rect": [
+          784,
+          742,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 94,
+        "name": "",
+        "rect": [
+          793,
+          745,
+          8,
+          16
+        ],
+        "text": "+",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 95,
+        "name": "",
+        "rect": [
+          784,
+          718,
+          26,
+          22
+        ],
+        "text": "☆",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 96,
+        "name": "",
+        "rect": [
+          784,
+          718,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 97,
+        "name": "",
+        "rect": [
+          791,
+          721,
+          12,
+          16
+        ],
+        "text": "☆",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 98,
+        "name": "",
+        "rect": [
+          658,
+          751,
+          16,
+          16
+        ],
+        "text": "file",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 99,
+        "name": "",
+        "rect": [
+          658,
+          734,
+          114,
+          16
+        ],
+        "text": "mouse · 66×45×117 mm · 13 LEDs",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 100,
+        "name": "",
+        "rect": [
+          658,
+          714,
+          111,
+          19
+        ],
+        "text": "Gaming mouse (wheel/logo/strip)",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 101,
+        "name": "",
+        "rect": [
+          624,
+          729,
+          17,
+          24
+        ],
+        "text": "M",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 102,
+        "name": "",
+        "rect": [
+          608,
+          712,
+          316,
+          54
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 103,
+        "name": "",
+        "rect": [
+          852,
+          676,
+          26,
+          22
+        ],
+        "text": "✕",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 104,
+        "name": "",
+        "rect": [
+          852,
+          676,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 105,
+        "name": "",
+        "rect": [
+          859,
+          679,
+          12,
+          16
+        ],
+        "text": "✕",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 106,
+        "name": "",
+        "rect": [
+          818,
+          676,
+          26,
+          22
+        ],
+        "text": "✎",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 107,
+        "name": "",
+        "rect": [
+          818,
+          676,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 108,
+        "name": "",
+        "rect": [
+          825,
+          679,
+          12,
+          16
+        ],
+        "text": "✎",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 109,
+        "name": "",
+        "rect": [
+          784,
+          688,
+          26,
+          22
+        ],
+        "text": "+",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 110,
+        "name": "",
+        "rect": [
+          784,
+          688,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 111,
+        "name": "",
+        "rect": [
+          793,
+          691,
+          8,
+          16
+        ],
+        "text": "+",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 112,
+        "name": "",
+        "rect": [
+          784,
+          664,
+          26,
+          22
+        ],
+        "text": "☆",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 113,
+        "name": "",
+        "rect": [
+          784,
+          664,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 114,
+        "name": "",
+        "rect": [
+          791,
+          667,
+          12,
+          16
+        ],
+        "text": "☆",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 115,
+        "name": "",
+        "rect": [
+          658,
+          697,
+          16,
+          16
+        ],
+        "text": "file",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 116,
+        "name": "",
+        "rect": [
+          658,
+          680,
+          114,
+          16
+        ],
+        "text": "keyboard · 0×0×0 mm · 0 LEDs",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 117,
+        "name": "",
+        "rect": [
+          658,
+          660,
+          112,
+          19
+        ],
+        "text": "Full-size keyboard (zone matrix)",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 118,
+        "name": "",
+        "rect": [
+          627,
+          675,
+          12.234375,
+          24
+        ],
+        "text": "K",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 119,
+        "name": "",
+        "rect": [
+          608,
+          658,
+          316,
+          54
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 120,
+        "name": "",
+        "rect": [
+          852,
+          622,
+          26,
+          22
+        ],
+        "text": "✕",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 121,
+        "name": "",
+        "rect": [
+          852,
+          622,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 122,
+        "name": "",
+        "rect": [
+          859,
+          625,
+          12,
+          16
+        ],
+        "text": "✕",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 123,
+        "name": "",
+        "rect": [
+          818,
+          622,
+          26,
+          22
+        ],
+        "text": "✎",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 124,
+        "name": "",
+        "rect": [
+          818,
+          622,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 125,
+        "name": "",
+        "rect": [
+          825,
+          625,
+          12,
+          16
+        ],
+        "text": "✎",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 126,
+        "name": "",
+        "rect": [
+          784,
+          634,
+          26,
+          22
+        ],
+        "text": "+",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 127,
+        "name": "",
+        "rect": [
+          784,
+          634,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 128,
+        "name": "",
+        "rect": [
+          793,
+          637,
+          8,
+          16
+        ],
+        "text": "+",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 129,
+        "name": "",
+        "rect": [
+          784,
+          610,
+          26,
+          22
+        ],
+        "text": "☆",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 130,
+        "name": "",
+        "rect": [
+          784,
+          610,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 131,
+        "name": "",
+        "rect": [
+          791,
+          613,
+          12,
+          16
+        ],
+        "text": "☆",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 132,
+        "name": "",
+        "rect": [
+          658,
+          643,
+          16,
+          16
+        ],
+        "text": "file",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 133,
+        "name": "",
+        "rect": [
+          658,
+          626,
+          116,
+          16
+        ],
+        "text": "furniture · 1400×40×750 mm · 0 LEDs",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 134,
+        "name": "",
+        "rect": [
+          658,
+          606,
+          77,
+          19
+        ],
+        "text": "Desk surface",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 135,
+        "name": "",
+        "rect": [
+          628,
+          621,
+          9,
+          24
+        ],
+        "text": "F",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 136,
+        "name": "",
+        "rect": [
+          608,
+          604,
+          316,
+          54
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 137,
+        "name": "",
+        "rect": [
+          852,
+          568,
+          26,
+          22
+        ],
+        "text": "✕",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 138,
+        "name": "",
+        "rect": [
+          852,
+          568,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 139,
+        "name": "",
+        "rect": [
+          859,
+          571,
+          12,
+          16
+        ],
+        "text": "✕",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 140,
+        "name": "",
+        "rect": [
+          818,
+          568,
+          26,
+          22
+        ],
+        "text": "✎",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 141,
+        "name": "",
+        "rect": [
+          818,
+          568,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 142,
+        "name": "",
+        "rect": [
+          825,
+          571,
+          12,
+          16
+        ],
+        "text": "✎",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 143,
+        "name": "",
+        "rect": [
+          784,
+          580,
+          26,
+          22
+        ],
+        "text": "+",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 144,
+        "name": "",
+        "rect": [
+          784,
+          580,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 145,
+        "name": "",
+        "rect": [
+          793,
+          583,
+          8,
+          16
+        ],
+        "text": "+",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 146,
+        "name": "",
+        "rect": [
+          784,
+          556,
+          26,
+          22
+        ],
+        "text": "☆",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 147,
+        "name": "",
+        "rect": [
+          784,
+          556,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 148,
+        "name": "",
+        "rect": [
+          791,
+          559,
+          12,
+          16
+        ],
+        "text": "☆",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 149,
+        "name": "",
+        "rect": [
+          658,
+          589,
+          16,
+          16
+        ],
+        "text": "file",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 150,
+        "name": "",
+        "rect": [
+          658,
+          572,
+          117,
+          16
+        ],
+        "text": "cooler · 0×0×0 mm · 8 LEDs",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 151,
+        "name": "",
+        "rect": [
+          658,
+          552,
+          115,
+          19
+        ],
+        "text": "Cooler pump cap — 8 LEDs",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 152,
+        "name": "",
+        "rect": [
+          627,
+          567,
+          11,
+          24
+        ],
+        "text": "C",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 153,
+        "name": "",
+        "rect": [
+          608,
+          550,
+          316,
+          54
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 154,
+        "name": "",
+        "rect": [
+          852,
+          514,
+          26,
+          22
+        ],
+        "text": "✕",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 155,
+        "name": "",
+        "rect": [
+          852,
+          514,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 156,
+        "name": "",
+        "rect": [
+          859,
+          517,
+          12,
+          16
+        ],
+        "text": "✕",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 157,
+        "name": "",
+        "rect": [
+          818,
+          514,
+          26,
+          22
+        ],
+        "text": "✎",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 158,
+        "name": "",
+        "rect": [
+          818,
+          514,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 159,
+        "name": "",
+        "rect": [
+          825,
+          517,
+          12,
+          16
+        ],
+        "text": "✎",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 160,
+        "name": "",
+        "rect": [
+          784,
+          526,
+          26,
+          22
+        ],
+        "text": "+",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 161,
+        "name": "",
+        "rect": [
+          784,
+          526,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 162,
+        "name": "",
+        "rect": [
+          793,
+          529,
+          8,
+          16
+        ],
+        "text": "+",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 163,
+        "name": "",
+        "rect": [
+          784,
+          502,
+          26,
+          22
+        ],
+        "text": "☆",
+        "type": "IconBtn",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 164,
+        "name": "",
+        "rect": [
+          784,
+          502,
+          26,
+          22
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 165,
+        "name": "",
+        "rect": [
+          791,
+          505,
+          12,
+          16
+        ],
+        "text": "☆",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 166,
+        "name": "",
+        "rect": [
+          658,
+          535,
+          16,
+          16
+        ],
+        "text": "file",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 167,
+        "name": "",
+        "rect": [
+          658,
+          518,
+          116,
+          16
+        ],
+        "text": "fan · 0×0×0 mm · 8 LEDs",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 168,
+        "name": "",
+        "rect": [
+          658,
+          498,
+          115,
+          19
+        ],
+        "text": "120 mm RGB fan — 8 LEDs",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 169,
+        "name": "",
+        "rect": [
+          628,
+          513,
+          9,
+          24
+        ],
+        "text": "F",
+        "type": "QQuickText",
+        "visible": true
+      },
+      {
+        "enabled": true,
+        "focus": false,
+        "i": 170,
+        "name": "",
+        "rect": [
+          608,
+          496,
+          316,
+          54
+        ],
+        "type": "QQuickMouseArea",
+        "visible": true
+      }
+    ]
+  }
+}

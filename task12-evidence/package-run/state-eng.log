@@ -1,0 +1,11 @@
+openrgb2-engine: ownership CONFLICT: Logitech G Hub / Options (pid 6308, lghub_updater.exe) — competing RGB owner (Logitech peripherals)
+openrgb2-engine: ownership CONFLICT: Logitech G Hub / Options (pid 6412, logioptionsplus_updater.exe) — competing RGB owner (Logitech peripherals)
+openrgb2-engine: ownership CONFLICT: Logitech G Hub / Options (pid 10984, logioptionsplus_agent.exe) — competing RGB owner (Logitech peripherals)
+openrgb2-engine: ownership notice: FanControl (pid 10652, FanControl.exe) — cooling owner — expected; must keep running untouched
+openrgb2-engine: ownership CONFLICT: Logitech G Hub / Options (pid 35664, lghub_system_tray.exe) — competing RGB owner (Logitech peripherals)
+openrgb2-engine: ownership CONFLICT: Logitech G Hub / Options (pid 11248, lghub_agent.exe) — competing RGB owner (Logitech peripherals)
+openrgb2-engine: ownership CONFLICT: Logitech G Hub / Options (pid 19656, logioptionsplus_appbroker.exe) — competing RGB owner (Logitech peripherals)
+openrgb2-engine: managed-config: sole scene writer verified: no enabled or loadable plugins in the managed backend configuration or the backend's exe-dir plugins folder
+openrgb2-engine: device-type registry loaded 13 types from C:\Users\daniel\.codex\worktrees\studio-import\openRGB2\task12-evidence\package\OpenRGB2-0.1.0-win64\presets\devices
+openrgb2-engine: running (60 Hz scene clock, no UI required)
+openrgb2-engine: running — Ctrl+C to stop

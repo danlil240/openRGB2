@@ -1,0 +1,201 @@
+{
+  "$schema": "schemas/studio.schema.json",
+  "bindings": {},
+  "camera": {
+    "distance": 1.2100000381469727,
+    "pitch_deg": -38.0,
+    "projection": "orthographic",
+    "span": 6.0,
+    "target": {
+      "x": -0.6032922267913818,
+      "y": 0.09321922063827515,
+      "z": 0.1178002804517746
+    },
+    "view": "desk",
+    "yaw_deg": 0.0
+  },
+  "colors": {
+    "emitters": {},
+    "objects": {}
+  },
+  "controls": {
+    "middle_drag": "pan",
+    "move_snap_m": 0.009999999776482582,
+    "rotate_snap_deg": 15.0
+  },
+  "device_settings": {},
+  "devices": {
+    "desk": {
+      "rx": 0.0,
+      "ry": 0.0,
+      "rz": 0.0,
+      "type": "desk",
+      "x": -0.6032922267913818,
+      "y": 0.019999999552965164,
+      "z": -0.0015230178833007813
+    },
+    "kb": {
+      "rx": 0.0,
+      "ry": 0.0,
+      "rz": 0.0,
+      "type": "keyboard-104",
+      "x": -0.25,
+      "y": 0.0,
+      "z": 0.0
+    },
+    "strip1": {
+      "rx": 0.0,
+      "ry": 0.0,
+      "rz": 0.0,
+      "type": "qa-strip",
+      "x": 0.0,
+      "y": 0.10000000149011612,
+      "z": 0.20000000298023224
+    }
+  },
+  "effects": {
+    "intensity": 1.0,
+    "layers": [
+      {
+        "blend": "replace",
+        "density": 1.0,
+        "direction": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "enabled": true,
+        "opacity": 1.0,
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "palette": [
+          {
+            "color": "#FF2020",
+            "pos": 0.0
+          },
+          {
+            "color": "#30FF30",
+            "pos": 0.5
+          },
+          {
+            "color": "#FFE020",
+            "pos": 0.9800000190734863
+          },
+          {
+            "color": "#FFE020",
+            "pos": 1.0
+          }
+        ],
+        "path": [],
+        "phase": 0.0,
+        "primitive": "wave",
+        "scale": 0.5,
+        "seed": 0,
+        "source": "",
+        "space": "world",
+        "speed": 0.4000000059604645,
+        "targets": []
+      },
+      {
+        "blend": "replace",
+        "density": 1.0,
+        "direction": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "enabled": true,
+        "opacity": 1.0,
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "palette": [
+          {
+            "color": "#FFFFFF",
+            "pos": 0.0
+          },
+          {
+            "color": "#2878FF",
+            "pos": 0.5
+          }
+        ],
+        "path": [],
+        "phase": 0.0,
+        "primitive": "static",
+        "scale": 0.5,
+        "seed": 0,
+        "source": "",
+        "space": "world",
+        "speed": 1.0,
+        "targets": []
+      },
+      {
+        "blend": "replace",
+        "density": 1.0,
+        "direction": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "enabled": true,
+        "opacity": 1.0,
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "palette": [
+          {
+            "color": "#FFFFFF",
+            "pos": 0.0
+          },
+          {
+            "color": "#2878FF",
+            "pos": 0.5
+          }
+        ],
+        "path": [],
+        "phase": 0.0,
+        "primitive": "static",
+        "scale": 0.5,
+        "seed": 0,
+        "source": "",
+        "space": "world",
+        "speed": 1.0,
+        "targets": []
+      }
+    ],
+    "playing": false,
+    "preset": "",
+    "seed": 1,
+    "speed": 1.0
+  },
+  "extensions": {},
+  "inputs": {
+    "audio": false,
+    "decay_pct": 100,
+    "keys": false,
+    "screen": false,
+    "screen_index": 0,
+    "sens_pct": 100
+  },
+  "name": "qa desk",
+  "output": {
+    "brightness": 1.0,
+    "live_on_startup": false
+  },
+  "render": {
+    "bloom": true,
+    "quality": "balanced"
+  },
+  "schema_version": 3,
+  "ui": {
+    "reduced_motion": false,
+    "theme": "graphite"
+  }
+}

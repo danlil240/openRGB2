@@ -1,0 +1,766 @@
+[
+  {
+    "req": {
+      "op": "ping"
+    },
+    "reply": {
+      "ok": true,
+      "result": "pong"
+    }
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "navLayout"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 110,
+        "y": 172
+      }
+    }
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "wsActionsButton"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 682.5,
+        "y": -245
+      }
+    }
+  },
+  {
+    "step": "open-ws-actions",
+    "status": "pass",
+    "detail": "{'x': 682.5, 'y': -245}"
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "JSON.stringify({list:workspace.workspaceList,id:workspace.workspaceId})"
+    },
+    "reply": {
+      "ok": true,
+      "result": "{\"list\":[],\"id\":\"qa-desk\"}"
+    }
+  },
+  {
+    "step": "ws-list",
+    "status": "pass",
+    "detail": "{'list': [], 'id': 'qa-desk'}"
+  },
+  {
+    "req": {
+      "op": "shot",
+      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\10-ws-actions.png"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "height": 958,
+        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\10-ws-actions.png",
+        "width": 1929
+      }
+    }
+  },
+  {
+    "step": "shot-ws-actions",
+    "status": "pass",
+    "detail": "10-ws-actions.png"
+  },
+  {
+    "req": {
+      "op": "key",
+      "key": "Escape"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "key": 16777216,
+        "mods": 0
+      }
+    }
+  },
+  {
+    "step": "close-dialog",
+    "status": "pass",
+    "detail": "{'key': 16777216, 'mods': 0}"
+  },
+  {
+    "req": {
+      "op": "ping"
+    },
+    "reply": {
+      "ok": true,
+      "result": "pong"
+    }
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "navLayout"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 110,
+        "y": 172
+      }
+    }
+  },
+  {
+    "req": {
+      "op": "set",
+      "sel": "layoutScroll",
+      "prop": "contentY",
+      "value": 0
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "prop": "contentY",
+        "value": 0
+      }
+    }
+  },
+  {
+    "req": {
+      "op": "geom",
+      "sel": "wsActionsButton"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "ancestors": [
+          "QQuickRowLayout(QQuickRowLayout)",
+          "QQuickColumn(QQuickColumn)",
+          "QQuickItem(QQuickItem)",
+          "layoutScroll(QQuickFlickable)",
+          "layoutPage(LayoutPage)",
+          "QQuickStackLayout(QQuickStackLayout)",
+          "QQuickColumnLayout(QQuickColumnLayout)",
+          "QQuickRowLayout(QQuickRowLayout)",
+          "Main(QQuickContentItem)",
+          "QQuickRootItem(QQuickRootItem)"
+        ],
+        "clip": false,
+        "enabled": true,
+        "focus": false,
+        "height": 34,
+        "i": 0,
+        "implicitHeight": 34,
+        "implicitWidth": 105,
+        "name": "wsActionsButton",
+        "rect": [
+          630,
+          138,
+          105,
+          34
+        ],
+        "text": "Workspace…",
+        "type": "AppButton",
+        "visible": true,
+        "width": 105
+      }
+    }
+  },
+  {
+    "step": "scroll-to-wsbtn",
+    "status": "pass",
+    "detail": "True"
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "wsActionsButton"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 682.5,
+        "y": 155
+      }
+    }
+  },
+  {
+    "step": "open-ws-actions",
+    "status": "pass",
+    "detail": "{'x': 682.5, 'y': 155}"
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "JSON.stringify({list:workspace.workspaceList,id:workspace.workspaceId})"
+    },
+    "reply": {
+      "ok": true,
+      "result": "{\"list\":[\"qa-desk\"],\"id\":\"qa-desk\"}"
+    }
+  },
+  {
+    "step": "ws-list",
+    "status": "pass",
+    "detail": "{'list': ['qa-desk'], 'id': 'qa-desk'}"
+  },
+  {
+    "req": {
+      "op": "shot",
+      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\10-ws-actions.png"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "height": 958,
+        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\10-ws-actions.png",
+        "width": 1929
+      }
+    }
+  },
+  {
+    "step": "shot-ws-actions",
+    "status": "pass",
+    "detail": "10-ws-actions.png"
+  },
+  {
+    "req": {
+      "op": "key",
+      "key": "Escape"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "key": 16777216,
+        "mods": 0
+      }
+    }
+  },
+  {
+    "step": "close-dialog",
+    "status": "pass",
+    "detail": "{'key': 16777216, 'mods': 0}"
+  },
+  {
+    "req": {
+      "op": "ping"
+    },
+    "reply": {
+      "ok": true,
+      "result": "pong"
+    }
+  },
+  {
+    "step": "tamper-target",
+    "detail": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\run\\workspaces\\qa-desk\\generations\\gen-000006\\document.json"
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange==='modified'||workspace.externalChange==='deleted'"
+    },
+    "reply": {
+      "ok": true,
+      "result": true
+    }
+  },
+  {
+    "step": "ext-change-surfaced",
+    "status": "pass",
+    "detail": "True"
+  },
+  {
+    "req": {
+      "op": "shot",
+      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\11-external-change.png"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "height": 958,
+        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\11-external-change.png",
+        "width": 1929
+      }
+    }
+  },
+  {
+    "step": "shot-ext-change",
+    "status": "pass",
+    "detail": "11-external-change.png"
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "wsReloadDisk"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 1848,
+        "y": 72
+      }
+    }
+  },
+  {
+    "step": "ui-reload-disk",
+    "status": "pass",
+    "detail": "{'x': 1848, 'y': 72}"
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.externalChange===''||workspace.externalChange===undefined"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "step": "reload-settled",
+    "status": "pass",
+    "detail": "False"
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "JSON.stringify({rev:workspace.workspaceRevision,dirty:workspace.dirty,err:workspace.error})"
+    },
+    "reply": {
+      "ok": true,
+      "result": "{\"rev\":6,\"dirty\":false,\"err\":\"\"}"
+    }
+  },
+  {
+    "step": "after-recovery",
+    "status": "pass",
+    "detail": "{'rev': 6, 'dirty': False, 'err': ''}"
+  },
+  {
+    "req": {
+      "op": "shot",
+      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\12-recovered.png"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "height": 958,
+        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\12-recovered.png",
+        "width": 1929
+      }
+    }
+  },
+  {
+    "step": "shot-recovered",
+    "status": "pass",
+    "detail": "12-recovered.png"
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "effectEdit.addLayer('static')"
+    },
+    "reply": {
+      "ok": true,
+      "result": null
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.save()"
+    },
+    "reply": {
+      "ok": true,
+      "result": null
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.dirty===false"
+    },
+    "reply": {
+      "ok": true,
+      "result": false
+    }
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "workspace.dirty===false"
+    },
+    "reply": {
+      "ok": true,
+      "result": true
+    }
+  },
+  {
+    "step": "save-after-recovery",
+    "status": "pass",
+    "detail": "True"
+  },
+  {
+    "req": {
+      "op": "eval",
+      "code": "JSON.stringify({rev:workspace.workspaceRevision,err:workspace.error,dirty:workspace.dirty})"
+    },
+    "reply": {
+      "ok": true,
+      "result": "{\"rev\":7,\"err\":\"\",\"dirty\":false}"
+    }
+  },
+  {
+    "step": "post-recovery-state",
+    "status": "pass",
+    "detail": "{'rev': 7, 'err': '', 'dirty': False}"
+  },
+  {
+    "req": {
+      "op": "shot",
+      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\13-healed.png"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "height": 958,
+        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\13-healed.png",
+        "width": 1929
+      }
+    }
+  },
+  {
+    "step": "shot-healed",
+    "status": "pass",
+    "detail": "13-healed.png"
+  },
+  {
+    "req": {
+      "op": "ping"
+    },
+    "reply": {
+      "ok": true,
+      "result": "pong"
+    }
+  },
+  {
+    "step": "calibration-status",
+    "status": "pass",
+    "detail": "{\"active\": false, \"ending\": false, \"frames_written\": 0, \"last_shown\": -2, \"led_count\": 0, \"owner\": false, \"owns_group\": false, \"starting\": false, \"zone\": \"\", \"zone_index\": -1}"
+  },
+  {
+    "step": "calibration-begin-refused",
+    "status": "pass",
+    "detail": "{\"code\": 7, \"detail\": \"device_gone\", \"error\": \"unavailable\", \"message\": \"controller 'none' is not in the current topology\", \"_error\": true}"
+  },
+  {
+    "req": {
+      "op": "click",
+      "sel": "navDevices"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "x": 110,
+        "y": 220
+      }
+    }
+  },
+  {
+    "step": "devices-nav",
+    "status": "pass",
+    "detail": "{'x': 110, 'y': 220}"
+  },
+  {
+    "req": {
+      "op": "shot",
+      "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\14-devices-empty.png"
+    },
+    "reply": {
+      "ok": true,
+      "result": {
+        "height": 958,
+        "path": "C:\\Users\\daniel\\.codex\\worktrees\\studio-import\\openRGB2\\task12-evidence\\qa\\shots\\14-devices-empty.png",
+        "width": 1929
+      }
+    }
+  },
+  {
+    "step": "shot-devices",
+    "status": "pass",
+    "detail": "14-devices-empty.png"
+  }
+]

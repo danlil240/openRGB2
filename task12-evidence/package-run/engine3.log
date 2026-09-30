@@ -1,0 +1,5 @@
+openrgb2-engine: device-type registry loaded 13 types from C:\Users\daniel\.codex\worktrees\studio-import\openRGB2\task12-evidence\package\OpenRGB2-0.1.0-win64\presets\devices
+openrgb2-engine: command pipe unavailable: CreateNamedPipe \.\pipe\openrgb2-pkg-engine: The filename, directory name, or volume label syntax is incorrect. (continuing without command IPC)
+openrgb2-engine: diagnostics pipe unavailable: CreateNamedPipe \.\pipe\openrgb2-pkg-engine-diag: The filename, directory name, or volume label syntax is incorrect. (continuing)
+openrgb2-engine: running (60 Hz scene clock, no UI required)
+openrgb2-engine: running — Ctrl+C to stop

@@ -1,0 +1,34 @@
+{
+  "bindings": {},
+  "kind": "openrgb2-engine-state",
+  "reactive": [
+    {
+      "enabled": false,
+      "input": "audio",
+      "screen_index": 0,
+      "sensitivity": 1.0
+    },
+    {
+      "enabled": false,
+      "input": "screen",
+      "screen_index": 0,
+      "sensitivity": 1.0
+    },
+    {
+      "enabled": false,
+      "input": "key",
+      "screen_index": 0,
+      "sensitivity": 1.0
+    }
+  ],
+  "scenes": [
+    {
+      "color": "#FF0000",
+      "mode": "live_effects",
+      "reverse": false,
+      "scene": "name:qa desk",
+      "speed": 100
+    }
+  ],
+  "schema_version": 1
+}

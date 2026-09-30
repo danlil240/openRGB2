@@ -236,6 +236,7 @@ Item {
     onHeightChanged: computeView()
 
     Flickable {
+        objectName: "layoutScroll"
         anchors.fill: parent
         contentHeight: col.implicitHeight
         clip: true

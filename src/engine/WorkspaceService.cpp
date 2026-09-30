@@ -553,6 +553,8 @@ WorkspaceService::Result WorkspaceService::Open(const std::string& id)
     current_.workspace_revision = lr.workspace_revision;
     current_.resource_revision  = lr.resource_revision;
     current_.generation         = lr.generation;
+    current_.recovered          =
+        lr.status == WorkspaceStore::LoadStatus::Recovered;
     /* Re-baseline the external-change signature at every
        adopt — files the service itself just selected are the
        new truth, never a "change" (Task 10). */
@@ -563,6 +565,37 @@ WorkspaceService::Result WorkspaceService::Open(const std::string& id)
     res.workspace_revision = lr.workspace_revision;
     res.resource_revision  = lr.resource_revision;
     return res;
+}
+
+std::pair<uint64_t, uint64_t>
+WorkspaceService::StoreExpectedRevs(const std::string& id,
+                                    uint64_t ws_rev,
+                                    uint64_t res_rev)
+{
+    /* After a generation recovery the published revisions name
+       the last-valid generation while the durable marker still
+       points at the corrupt one — their revisions legitimately
+       differ. A caller whose expectations equal the PUBLISHED
+       revisions owns the live state; translate to the real
+       marker's. Any other base is a genuinely stale writer the
+       store gate still rejects. */
+    if(current_.id == id && current_.recovered)
+    {
+        const WorkspaceStore::Revisions mk =
+            store_.LoadRevisions(id);
+        if(mk.exists && mk.error.empty())
+        {
+            if(ws_rev == current_.workspace_revision)
+            {
+                ws_rev = mk.workspace_revision;
+            }
+            if(res_rev == current_.resource_revision)
+            {
+                res_rev = mk.resource_revision;
+            }
+        }
+    }
+    return {ws_rev, res_rev};
 }
 
 WorkspaceService::Result WorkspaceService::CommitCommon(
@@ -588,8 +621,22 @@ WorkspaceService::Result WorkspaceService::CommitCommon(
         return res;
     }
 
+    /* The durable gate expects the MARKER revision; after a
+       recovery that differs from the published revision the
+       client legitimately holds — translate, and say so. */
+    uint64_t store_expected_rev =
+        StoreExpectedRevs(id, expected_rev, 0).first;
+    if(store_expected_rev != expected_rev)
+    {
+        res.warnings.push_back(
+            "commit after generation recovery: durable marker "
+            "re-based from revision " +
+            std::to_string(store_expected_rev));
+    }
+
     const WorkspaceStore::CommitResult cr =
-        store_.Commit(id, cand, original_bytes, expected_rev);
+        store_.Commit(id, cand, original_bytes,
+                      store_expected_rev);
     res.warnings = cr.warnings;
     if(!cr.ok)
     {
@@ -611,6 +658,8 @@ WorkspaceService::Result WorkspaceService::CommitCommon(
     current_.workspace_revision = cr.workspace_revision;
     current_.resource_revision  = cr.resource_revision;
     current_.generation         = cr.generation;
+    current_.recovered          = false;   /* marker healed by
+                                              this commit */
     /* Our own commit is the new baseline — the files the
        store just wrote are never an external "change". */
     current_.external_sig      = store_.ExternalScan(id).signature;
@@ -754,8 +803,19 @@ WorkspaceService::Result WorkspaceService::RestoreBackup(
             res.detail = "bad_request";
             return res;
         }
-        if(rev.workspace_revision != expected_workspace_revision ||
-           rev.resource_revision  != expected_resource_revision)
+        /* Recovery translation — same as CommitJson: the
+           caller legitimately holds the PUBLISHED (recovered)
+           revisions while the marker still names the corrupt
+           generation. */
+        const bool recovered_base =
+            current_.id == id && current_.recovered &&
+            expected_workspace_revision ==
+                current_.workspace_revision &&
+            expected_resource_revision ==
+                current_.resource_revision;
+        if(!recovered_base &&
+           (rev.workspace_revision != expected_workspace_revision ||
+            rev.resource_revision  != expected_resource_revision))
         {
             res.error = "stale revision: expected {" +
                 std::to_string(expected_workspace_revision) + "," +
@@ -1655,8 +1715,11 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
             WorkspaceStore::ResourceInstallResult ir;
             {
                 std::lock_guard<std::mutex> g(mutex_);
+                const auto exp =
+                    StoreExpectedRevs(id, base_rev, res_rev);
                 ir = store_.InstallDeviceTypeResource(
-                    id, preset, allow_replace, base_rev, res_rev);
+                    id, preset, allow_replace,
+                    exp.first, exp.second);
                 if(ir.ok && id == current_.id)
                 {
                     current_.resource_revision =
@@ -1710,8 +1773,11 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
         WorkspaceStore::ResourceInstallResult ir;
         {
             std::lock_guard<std::mutex> g(mutex_);
+            const auto exp =
+                StoreExpectedRevs(id, base_rev, res_rev);
             ir = store_.InstallEffectResource(id, fx,
-                                              base_rev, res_rev);
+                                              exp.first,
+                                              exp.second);
             if(ir.ok && id == current_.id)
             {
                 /* Keep the published snapshot coherent — a
@@ -1762,8 +1828,10 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
         WorkspaceStore::ResourceRemoveResult rr;
         {
             std::lock_guard<std::mutex> g(mutex_);
+            const auto exp =
+                StoreExpectedRevs(id, base_rev, res_rev);
             rr = store_.RemoveResource(id, kind, rid,
-                                       base_rev, res_rev);
+                                       exp.first, exp.second);
             if(rr.ok && id == current_.id)
             {
                 current_.resource_revision = rr.resource_revision;
@@ -1953,8 +2021,17 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
                 return fail("workspace marker unreadable: " +
                             rev.error, "marker_unreadable");
             }
-            if(rev.workspace_revision != base_rev ||
-               rev.resource_revision  != res_rev)
+            bool recovered_base = false;
+            {
+                std::lock_guard<std::mutex> g(mutex_);
+                recovered_base =
+                    current_.id == id && current_.recovered &&
+                    base_rev == current_.workspace_revision &&
+                    res_rev  == current_.resource_revision;
+            }
+            if(!recovered_base &&
+               (rev.workspace_revision != base_rev ||
+                rev.resource_revision  != res_rev))
             {
                 return fail("stale revision for '" + id + "'",
                             "revision_conflict");
@@ -2033,8 +2110,22 @@ WorkspaceService::Result WorkspaceService::CommitJson(
             res.detail = "marker_unreadable";
             return res;
         }
-        if(rev.workspace_revision != expected_workspace_revision ||
-           rev.resource_revision  != expected_resource_revision)
+        /* After a generation recovery the marker still names
+           the corrupt generation — its revisions legitimately
+           differ from the PUBLISHED ones the client holds.
+           A base matching the live recovered state is the
+           owner of that state, not a stale writer; the store
+           gate is fed the marker revision by CommitCommon's
+           StoreExpectedRevs translation. */
+        const bool recovered_base =
+            current_.id == id && current_.recovered &&
+            expected_workspace_revision ==
+                current_.workspace_revision &&
+            expected_resource_revision ==
+                current_.resource_revision;
+        if(!recovered_base &&
+           (rev.workspace_revision != expected_workspace_revision ||
+            rev.resource_revision  != expected_resource_revision))
         {
             res.error = "stale revision: expected {" +
                 std::to_string(expected_workspace_revision) + "," +
@@ -2077,10 +2168,14 @@ WorkspaceService::Result WorkspaceService::CommitJson(
         else
         {
             /* save_copy — commit under the OTHER id without
-               adopting: the current workspace is untouched. */
+               adopting: the current workspace is untouched.
+               The store gate still needs the marker revision
+               when the target is the recovered current. */
             const WorkspaceStore::CommitResult cr =
                 store_.Commit(id, cand, original_bytes,
-                              expected_workspace_revision);
+                              StoreExpectedRevs(
+                                  id, expected_workspace_revision,
+                                  0).first);
             res.warnings = cr.warnings;
             if(!cr.ok)
             {
@@ -2132,8 +2227,19 @@ WorkspaceService::Result WorkspaceService::ImportStagedJson(
         res.detail = "marker_unreadable";
         return res;
     }
-    if(rev.workspace_revision != expected_workspace_revision ||
-       rev.resource_revision  != expected_resource_revision)
+    /* Same recovery translation as CommitJson: a client
+       holding the published (recovered) revisions owns the
+       live state even though the marker still names the
+       corrupt generation. */
+    const bool recovered_base =
+        current_.id == id && current_.recovered &&
+        expected_workspace_revision ==
+            current_.workspace_revision &&
+        expected_resource_revision ==
+            current_.resource_revision;
+    if(!recovered_base &&
+       (rev.workspace_revision != expected_workspace_revision ||
+        rev.resource_revision  != expected_resource_revision))
     {
         res.error  = "stale revision for '" + id + "'";
         res.detail = "revision_conflict";

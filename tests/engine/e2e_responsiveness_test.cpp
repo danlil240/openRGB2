@@ -498,6 +498,16 @@ int main(int argc, char** argv)
           ipc::MsgType::Ok,            set_playback   },
         { "set_scene",       ipc::MsgType::SetScene,
           ipc::MsgType::Ok,            set_scene      },
+        /* Studio interaction — the workspace surface the
+           imported workflow drives: live workspace state read
+           and the dependency catalog (Task 12 qualification). */
+        { "ws_get",          ipc::MsgType::WorkspaceCommand,
+          ipc::MsgType::Ok,            json::object(
+              {{ "verb", "get" }}) },
+        { "ws_catalog",      ipc::MsgType::WorkspaceCommand,
+          ipc::MsgType::Ok,            json::object(
+              {{ "verb", "catalog" },
+               { "kind", "effects" }}) },
     };
     constexpr size_t kVerbs   = sizeof(verbs) / sizeof(verbs[0]);
     constexpr int    kSamples = 300;

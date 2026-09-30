@@ -517,10 +517,15 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
         return;
     }
 
-    /* Stale-echo guard: revisions the engine already passed
-       are ignored outright — an out-of-order push can never
-       roll the view back or clobber newer draft state. */
-    if(id == ws_id_ && managed_ && ws < ws_rev_)
+    /* Stale-echo guard: a replayed older snapshot carries the
+       SAME content hash — drop it so an out-of-order push can
+       never roll the view back or clobber newer draft state.
+       A LOWER revision with a DIFFERENT hash is a real rollback
+       (the store recovered a tampered generation and adopted
+       the last-valid one) — it must be fetched+adopted, not
+       ignored, or the UI latches stale flags forever. */
+    if(id == ws_id_ && managed_ && ws < ws_rev_ &&
+       (sha.isEmpty() || sha == ws_sha256_))
     {
         return;
     }
@@ -1915,6 +1920,20 @@ void WorkspaceController::ResolveJob(const QVariantMap& st)
         else
         {
             pending_switch_id_.clear();
+            /* A reload can move the published revision BACKWARD
+               — e.g. the store recovered a tampered active
+               generation and adopted the last-valid one. The
+               stale-echo guard in ApplySnapshot drops ws <
+               ws_rev_ forever, so re-baseline to the job's
+               reported truth before the next poll arrives. */
+            if(ws > 0 && ws < ws_rev_)
+            {
+                ws_rev_ = ws;
+            }
+            if(res > 0 && res < res_rev_)
+            {
+                res_rev_ = res;
+            }
             force_adopt_ = true;
             FetchDocument();
         }

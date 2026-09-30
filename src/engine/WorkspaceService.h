@@ -310,12 +310,30 @@ private:
            CheckExternal compares a fresh scan against it; a
            byte-identical rewrite reproduces the same token. */
         std::string external_sig;
+        /* True while the published state came from the marker
+           BACKUP (corrupt/active generation unrecoverable):
+           the durable marker still points at the failed
+           generation, so its revision differs from what
+           clients see. CommitCommon translates the commit
+           gate honestly — a writer holding the recovered
+           revision is compared against the real marker. */
+        bool        recovered          = false;
     };
     /* Serialized-commit core — CALLER HOLDS mutex_. When
        apply_after is set the committed candidate is handed back
        through apply_cand (never applied inside the lock — the
        apply emits events whose payloads re-enter this
        service). */
+    /* After a generation recovery the published revisions name
+       the last-valid generation while the durable marker still
+       points at the corrupt one — a caller whose expectations
+       equal the PUBLISHED revisions owns the live state, so
+       they translate to the real marker's; anything else is a
+       genuinely stale writer the store gate still rejects.
+       CALLER HOLDS mutex_. */
+    std::pair<uint64_t, uint64_t>
+        StoreExpectedRevs(const std::string& id,
+                          uint64_t ws_rev, uint64_t res_rev);
     Result CommitCommon(const std::string& id,
                         WorkspaceCandidate& cand,
                         const std::string& original_bytes,

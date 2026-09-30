@@ -475,7 +475,8 @@ function Invoke-ManagedStart {
                     "--backend-config", $BackendCfg,
                     "--devices-dir", (Join-Path $InstallDir "presets\devices"),
                     "--effects-dir", (Join-Path $InstallDir "presets\effects"),
-                    "--state", (Join-Path $InstallDir "profiles\local\engine-state.json"))
+                    "--state", (Join-Path $InstallDir "profiles\local\engine-state.json"),
+                    "--workspace-root", (Join-Path $InstallDir "profiles\local\workspaces"))
     if($Scene) { $engineArgs += @("--scene", $Scene) }
     # -ArgumentList joins with spaces -- quote elements that need it
     # (install paths under e.g. "C:\Program Files" must survive).

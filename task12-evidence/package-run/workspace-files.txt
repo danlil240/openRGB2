@@ -1,0 +1,13 @@
+<ws>\library\devices\qa-strip.device.json
+<ws>\qa-desk\active
+<ws>\qa-desk\active.lkg
+<ws>\qa-desk\generations\gen-000001\document.json
+<ws>\qa-desk\generations\gen-000001\manifest.json
+<ws>\qa-desk\generations\gen-000001\original.json
+<ws>\qa-desk\generations\gen-000001\resources\devices\keyboard-104.device.json
+<ws>\qa-desk\generations\gen-000001\resources\devices\qa-strip.device.json
+<ws>\qa-desk\generations\gen-000002\document.json
+<ws>\qa-desk\generations\gen-000002\manifest.json
+<ws>\qa-desk\generations\gen-000002\original.json
+<ws>\qa-desk\generations\gen-000002\resources\devices\keyboard-104.device.json
+<ws>\qa-desk\generations\gen-000002\resources\devices\qa-strip.device.json

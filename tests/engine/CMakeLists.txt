@@ -138,6 +138,28 @@ set_tests_properties(e2e_lifecycle_test PROPERTIES
     LABELS engine
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Studio-import Task 12 — the complete imported workflow over the
+# REAL EngineHost composition + REAL named pipes against the
+# in-process fake backend: legacy import (sanitized, never
+# auto-applied, extracted type lands in the managed library),
+# authored edit + revision-checked save with a personal-look
+# dependency, packed-bundle inspect/commit (custom device type),
+# repeated UI attach with preview disposal across a dead channel,
+# engine restart (authored data + resolved scene + managed library
+# survive), export/reimport round-trip, and the passive
+# external-change report on the polled get.
+add_executable(e2e_studio_workspace_test e2e_studio_workspace_test.cpp)
+target_link_libraries(e2e_studio_workspace_test PRIVATE
+    openrgb2_host
+    openrgb2_ipc)
+target_include_directories(e2e_studio_workspace_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(e2e_studio_workspace_test PRIVATE NDEBUG)
+add_test(NAME e2e_studio_workspace_test COMMAND e2e_studio_workspace_test)
+set_tests_properties(e2e_studio_workspace_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Plan section 6 acceptance measurement — "UI responsiveness:
 # p95 local control response below 100 ms during full output".
 # Real EngineHost composition + REAL named pipes + a SUBSCRIBE

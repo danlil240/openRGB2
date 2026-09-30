@@ -1,0 +1,7 @@
+# The staged package payload (Qt runtime + pinned backend binaries,
+# ~130 MB) is a build artifact — restage with
+# packaging/windows/stage-release.ps1 -BuildDir build-studio.
+# package-manifest.json and package-run/ logs carry the evidence.
+package/
+__pycache__/
+qa/__pycache__/

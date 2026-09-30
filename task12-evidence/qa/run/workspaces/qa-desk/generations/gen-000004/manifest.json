@@ -1,0 +1,31 @@
+{
+  "document": {
+    "bytes": 2395,
+    "file": "document.json",
+    "sha": "fnv1a64:9288806b7289b72b"
+  },
+  "generation": "gen-000004",
+  "kind": "openrgb2-workspace-generation",
+  "resources": {
+    "devices": {
+      "desk": {
+        "bytes": 419,
+        "file": "resources/devices/desk.device.json",
+        "sha": "fnv1a64:d5ac76dd2030ddde"
+      },
+      "keyboard-104": {
+        "bytes": 852,
+        "file": "resources/devices/keyboard-104.device.json",
+        "sha": "fnv1a64:ca7423584a8bfd7d"
+      },
+      "qa-strip": {
+        "bytes": 667,
+        "file": "resources/devices/qa-strip.device.json",
+        "sha": "fnv1a64:a88a08a09d028c7f"
+      }
+    },
+    "effects": {}
+  },
+  "schema_version": 1,
+  "source_form": "compact-workspace"
+}
