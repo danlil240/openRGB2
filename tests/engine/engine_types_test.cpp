@@ -124,6 +124,36 @@ static void TestDeliveryStats()
     CHECK(d.provenance == MeasurementProvenance::TransportMeasured);
 }
 
+/* F13 hardening: injected out-of-order `at` stamps (synthetic-
+   clock drains, concurrent pre-send stamps) can never produce
+   a negative interval — non-positive deltas are ignored and
+   the completion baseline stays monotonic. */
+static void TestDeliveryStatsOutOfOrder()
+{
+    const TimePoint t0 = Clock::now();
+    DeliveryStats d;
+
+    d.RecordTransportCompletion(t0 + std::chrono::milliseconds(100));
+    /* Backwards stamp: interval -50 ms — ignored, baseline kept. */
+    d.RecordTransportCompletion(t0 + std::chrono::milliseconds(50));
+    CHECK(d.transport_completed == 2);
+    CHECK(d.IntervalCount() == 0);
+    CHECK(d.min_interval_s >= 0.0 && d.last_interval_s >= 0.0);
+
+    /* The next in-order stamp measures against the REAL latest
+       completion (+100), not the dragged-back one. */
+    d.RecordTransportCompletion(t0 + std::chrono::milliseconds(160));
+    CHECK(d.IntervalCount() == 1);
+    CHECK(Near(d.last_interval_s, 0.060, 1e-3));
+    CHECK(Near(d.min_interval_s, 0.060, 1e-3));
+    CHECK(Near(d.MeanIntervalS(), 0.060, 1e-3));
+
+    /* A duplicate stamp (zero interval) is ignored too. */
+    d.RecordTransportCompletion(t0 + std::chrono::milliseconds(160));
+    CHECK(d.IntervalCount() == 1);
+    CHECK(d.min_interval_s >= 0.0);
+}
+
 static void TestPlaybackMode()
 {
     /* Persisted per scene as stable string tokens. */
@@ -198,6 +228,7 @@ int main()
     TestDeviceSnapshot();
     TestRgbFrame();
     TestDeliveryStats();
+    TestDeliveryStatsOutOfOrder();
     TestPlaybackMode();
     TestPlaybackStatus();
     TestSubmitResult();

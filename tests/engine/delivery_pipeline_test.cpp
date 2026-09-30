@@ -621,6 +621,61 @@ static void TestDrainVsDeviceRemoval()
     CHECK(!pipe.HasDevice(f.key));
 }
 
+/* F13 regression: lane workers used to stamp the completion
+   record with the PRE-SEND time — a lane parked inside a
+   blocking transport recorded its stale stamp AFTER faster
+   lanes' later completions, driving aggregate min_interval_s
+   negative. The stamp is now taken post-send inside the stats
+   lock, so concurrent lanes record monotonically. */
+static void TestConcurrentCompletionsNeverNegative()
+{
+    auto transport = std::make_shared<FakeTransport>();
+    DeliveryPipeline pipe(transport);
+    const DeviceSnapshot w = Wireless();
+    const DeviceSnapshot f = Wired();
+    pipe.RegisterDevice(w);
+    pipe.RegisterDevice(f);
+    CHECK(pipe.Start());
+
+    /* Park the wireless lane INSIDE the transport send — its
+       pre-fix completion stamp is captured before the block. */
+    transport->Block(w.key);
+    pipe.SubmitLatest(MakeFrame(w, 1, { 1, 0, 0 }));
+    const auto entered_deadline =
+        std::chrono::steady_clock::now() + 2s;
+    while(transport->BlockedEntries() == 0 &&
+          std::chrono::steady_clock::now() < entered_deadline)
+    {
+        std::this_thread::sleep_for(2ms);
+    }
+    CHECK(transport->BlockedEntries() == 1);
+
+    /* The wired lane records two completions while wireless
+       sits blocked — establishing a newer aggregate baseline
+       than the blocked lane's stale send-start stamp. (Each
+       submit waits for delivery so latest-wins backpressure
+       cannot collapse them into one.) */
+    pipe.SubmitLatest(MakeFrame(f, 1, { 1, 0, 0 }));
+    CHECK(transport->WaitDelivered(f.key, 1, 2s));
+    pipe.SubmitLatest(MakeFrame(f, 2, { 2, 0, 0 }));
+    CHECK(transport->WaitDelivered(f.key, 2, 2s));
+
+    /* Release: the wireless lane's completion is now recorded —
+       pre-fix this carried its pre-block timestamp and went
+       negative against the aggregate baseline. */
+    transport->Release();
+    CHECK(transport->WaitDelivered(w.key, 1, 2s));
+    pipe.Stop();
+
+    const DeliveryStats agg = pipe.Stats();
+    CHECK(agg.transport_completed == 3);
+    CHECK(agg.min_interval_s >= 0.0);
+    CHECK(agg.last_interval_s >= 0.0);
+    DeliveryStats ws, fs;
+    CHECK(pipe.Stats(w.key, ws) && ws.min_interval_s >= 0.0);
+    CHECK(pipe.Stats(f.key, fs) && fs.min_interval_s >= 0.0);
+}
+
 /* Regression: Stop()/RemoveDevice join lane threads, and a
    lane inside transport->SubmitLatest cannot be interrupted —
    the honest bound is "in-flight send + join". The production
@@ -684,6 +739,7 @@ int main()
     TestReliablePriority();
     TestNoTransport();
     TestBlockedWirelessKeepsWiredRate();
+    TestConcurrentCompletionsNeverNegative();
     TestDrainVsDeviceRemoval();
     TestStopBoundedByInFlightSend();
     std::printf("delivery pipeline: %d checks, %d failures\n",

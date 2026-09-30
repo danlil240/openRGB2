@@ -45,6 +45,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -275,13 +276,21 @@ private:
 
     /* Suppression check + transport call + stats. Delivers the
        frame popped by the caller; runs the transport send WITHOUT
-       holding mutex_. `now` stamps the send: the lane threads pass
-       Clock::now(), DrainDue passes the caller's time so budgets
-       and intervals are fully deterministic under a synthetic
-       clock. Returns true when the frame was handed to the
-       transport (even if the transport rejected it). */
+       holding mutex_. `now` stamps send-start pacing (last_send).
+       `completed_at` stamps the interval stats; nullopt (the lane-
+       worker path) re-stamps Clock::now() post-send INSIDE the
+       stats lock, so concurrent lanes record monotonically —
+       pre-send stamps recorded after faster lanes' completions
+       drove the aggregate min_interval_s negative (F13). An
+       engaged stamp is used verbatim — DrainDue passes its caller
+       time so budgets and interval stamps stay deterministic
+       under a synthetic clock (TimePoint{} is a legitimate
+       synthetic stamp, hence optional, not a sentinel).
+       Returns true when the frame was handed to the transport
+       (even if the transport rejected it). */
     bool   DeliverOne(Lane& lane, RgbFrame frame, bool reliable,
-                      TimePoint now);
+                      TimePoint now,
+                      std::optional<TimePoint> completed_at = std::nullopt);
 
     void   LaneRun(Lane* lane);
     void   StartLane(Lane& lane);      /* under mutex_ */

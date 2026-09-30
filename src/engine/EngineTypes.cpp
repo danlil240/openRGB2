@@ -77,10 +77,20 @@ SubmitResult SubmitResult::Reject(std::string why)
 void DeliveryStats::RecordTransportCompletion(TimePoint at)
 {
     ++transport_completed;
-    if(transport_completed > 1)
+    if(transport_completed == 1)
     {
-        const double interval =
-            std::chrono::duration<double>(at - last_completion_).count();
+        last_completion_ = at;   /* first stamp seeds the baseline */
+        return;
+    }
+    const double interval =
+        std::chrono::duration<double>(at - last_completion_).count();
+    /* F13 hardening: a non-positive interval is not a cadence
+       measurement — out-of-order `at` stamps (synthetic-clock
+       drains, pre-send stamps recorded after faster lanes'
+       completions) are ignored so last/min/mean can never
+       report a backwards interval. */
+    if(interval > 0.0)
+    {
         last_interval_s = interval;
         if(intervals_ == 0 || interval < min_interval_s)
         {
@@ -93,7 +103,13 @@ void DeliveryStats::RecordTransportCompletion(TimePoint at)
         interval_sum_ += interval;
         ++intervals_;
     }
-    last_completion_ = at;
+    /* The baseline is monotonic: an out-of-order stamp must not
+       drag it backwards (which would inflate the next recorded
+       interval). */
+    if(at > last_completion_)
+    {
+        last_completion_ = at;
+    }
 }
 
 double DeliveryStats::MeanIntervalS() const
