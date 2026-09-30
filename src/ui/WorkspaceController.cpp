@@ -1093,8 +1093,11 @@ void WorkspaceController::DoReload(const QString& id)
                    QStringLiteral("job:reload")) <= 0)
     {
         /* No job in flight — a latched force_adopt_ would
-           wholesale-adopt the next fetch over a dirty draft. */
+           wholesale-adopt the next fetch over a dirty draft,
+           and a foreign-open pending_switch_id_ would gate
+           FetchDocument until disconnect. Clear both. */
         force_adopt_ = false;
+        pending_switch_id_.clear();
         SetError(QStringLiteral("reload request could not be "
                                 "sent"), QStringLiteral("connection"));
     }

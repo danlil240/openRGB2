@@ -951,6 +951,99 @@ static void TestPackedServiceFlow()
         CHECK(rd.detail == "in_use" ||
               rd.error.find("in use") != std::string::npos);
     }
+
+    /* Whole-branch review regression: service-owned resource
+       writes rewrite the ACTIVE workspace's marker (the
+       bumped resource_revision is mixed into the
+       ExternalScan signature). Without the re-baseline every
+       resource_install / resource_remove / preset_import on
+       the current workspace reports a phantom
+       external_change "modified" — a sticky banner whose
+       offered remedy is a draft-replacing reload. All three
+       paths must leave CheckExternal "none", and
+       preset_import must publish the bumped resource
+       revision. ("imp2" is the adopted current workspace —
+       the conflict-choice import above adopted it.) */
+    {
+        CHECK(b.svc.Snapshot().id == "imp2");
+        CHECK(b.svc.CheckExternal().state == "none");
+        WorkspaceStore::Revisions rev =
+            b.svc.Store().LoadRevisions("imp2");
+        CHECK(rev.exists);
+        const auto ri = b.Run(json::object({
+            { "verb",  "resource_install" },
+            { "id",    "imp2"           },
+            { "kind",  "effect"         },
+            { "effect", json::parse(LookJson("svc-look")) },
+            { "base_revision",     rev.workspace_revision },
+            { "resource_revision", rev.resource_revision  },
+        }));
+        CHECK(ri.state == WorkspaceService::JobState::Succeeded);
+        if(ri.state != WorkspaceService::JobState::Succeeded)
+        {
+            std::printf("  (look install: %s)\n",
+                        ri.error.c_str());
+        }
+        CHECK(b.svc.CheckExternal().state == "none");
+        CHECK(b.svc.Snapshot().resource_revision ==
+              ri.resource_revision);
+
+        rev = b.svc.Store().LoadRevisions("imp2");
+        const auto rr = b.Run(json::object({
+            { "verb",        "resource_remove" },
+            { "id",          "imp2"            },
+            { "kind",        "effect"          },
+            { "resource_id", "svc-look"        },
+            { "base_revision",     rev.workspace_revision },
+            { "resource_revision", rev.resource_revision  },
+        }));
+        CHECK(rr.state == WorkspaceService::JobState::Succeeded);
+        if(rr.state != WorkspaceService::JobState::Succeeded)
+        {
+            std::printf("  (look remove: %s)\n",
+                        rr.error.c_str());
+        }
+        CHECK(b.svc.CheckExternal().state == "none");
+        CHECK(b.svc.Snapshot().resource_revision ==
+              rr.resource_revision);
+
+        /* preset_import — a types-only packed bundle installs
+           into the ACTIVE workspace's library via the
+           per-type loop; the tail must publish the bumped
+           resource_revision and re-baseline the signature. */
+        b.uploads["types-only"] = json::object({
+            { "format",  "openrgb2-bundle-files" },
+            { "version", 1 },
+            { "files", json::object({
+                  { "presets/devices/preset-fan.device.json",
+                    json::object({
+                        { "encoding", "utf8" },
+                        { "data",
+                          TypeJson("preset-fan", 6,
+                                   "bundled") } }) } }) },
+        }).dump();
+        rev = b.svc.Store().LoadRevisions("imp2");
+        const auto pi = b.Run(json::object({
+            { "verb",   "import_commit"  },
+            { "id",     "imp2"           },
+            { "mode",   "preset_import"  },
+            { "staged", "types-only"     },
+            { "base_revision",     rev.workspace_revision },
+            { "resource_revision", rev.resource_revision  },
+        }));
+        CHECK(pi.state == WorkspaceService::JobState::Succeeded);
+        if(pi.state != WorkspaceService::JobState::Succeeded)
+        {
+            std::printf("  (preset_import: %s)\n",
+                        pi.error.c_str());
+        }
+        CHECK(fs::exists(
+            fs::path(b.svc.Store().LibraryDevicesDir()) /
+            "preset-fan.device.json"));
+        CHECK(b.svc.CheckExternal().state == "none");
+        CHECK(b.svc.Snapshot().resource_revision ==
+              pi.resource_revision);
+    }
 }
 
 int main()

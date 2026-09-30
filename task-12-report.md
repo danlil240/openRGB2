@@ -347,3 +347,62 @@ ctest -C Release -R ipc_workspace_test      --output-on-failure  pass
 ctest -C Release -R e2e_studio_workspace_test --output-on-failure pass
 ctest -C Release --output-on-failure                            78/78
 ```
+
+## Whole-branch review fixes
+
+One cross-task defect + two cheap minors, committed separately.
+
+**Important — service-owned resource writes falsely reported an
+external change.** `resource_install` (effect + `device_type`),
+`resource_remove`, and the `preset_import` install loop rewrite the
+`active` marker with a bumped `resource_revision`, and
+`WorkspaceStore::ExternalScan` mixes `resource_revision` into the
+fingerprint — but the service's external-change baseline
+(`current_.external_sig`) was only refreshed in `Open`/
+`CommitCommon`. Result: every routine save-look / type-save /
+type-delete / `preset_import` on the ACTIVE workspace produced a
+sticky `external_change:"modified"` banner on the next poll — whose
+offered remedy is a draft-replacing Reload — until the next real
+commit; `preset_import` additionally left the published
+`resource_revision` stale. Fix (`src/engine/WorkspaceService.cpp`):
+inside the same `mutex_` scope, when the store op succeeded and the
+id is the current workspace, update `current_.resource_revision`,
+re-baseline `current_.external_sig =
+store_.ExternalScan(id).signature`, and `PublishLocked()` — applied
+to both `resource_install` paths, `resource_remove`, and the
+`preset_import` loop tail (which now also publishes the bumped
+revisions). Re-baselining after a service-owned write cannot
+suppress a legitimate external change: the scan runs under the same
+lock that serializes workspace mutations, so the new baseline
+includes exactly the files the service just wrote; any real external
+write after it still diffs on the next poll (identical trade-off to
+the commit path).
+
+**Regression test** — `workspace_bundle_test` (TestPackedServiceFlow)
+now installs an effect into the adopted current workspace, removes
+it, and runs a types-only `preset_import`, asserting
+`CheckExternal().state == "none"` after each and that the published
+`resource_revision` matches the job result (pre-fix run verified:
+4 failures — all three paths report phantom `modified` + stale
+published revision; post-fix: clean).
+
+**Minors swept:**
+
+- `Cancel`/`CancelSession` now drop `job.body` on cancel — the
+  record stays queryable, the up-to-1 MiB request payload does not
+  (same discipline as the terminal path).
+- `DoReload`'s `SendCommand ≤ 0` failure path now clears
+  `pending_switch_id_` symmetrically with `force_adopt_` — a latched
+  foreign-open id would otherwise gate `FetchDocument` until
+  disconnect.
+- `docs/studio-import.md` notes the intentional same-name Save Copy
+  `revision_conflict` (never-overwrite semantics).
+
+**Ruled out (review rulings, no change):** preview `refused_` latch
+on transient errors; `SetExternal` ws-id misattribution on a
+coincident transition; `cal-N` sequential tokens (session+owner
+bound).
+
+**Tests:** `-R workspace_bundle_test|ipc_workspace_test|
+workspace_store_test|ui_workspace_test|ui_workspace_recovery_test`
+5/5, `-L engine` 27/27, `-L ui` 29/29.

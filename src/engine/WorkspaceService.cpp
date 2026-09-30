@@ -1330,6 +1330,10 @@ WorkspaceService::JobResult WorkspaceService::Cancel(
         return r;
     }
     job.st.state = JobState::Cancelled;
+    /* Same discipline as the terminal path: the record stays
+       queryable, the request body (a full document) does
+       not. */
+    job.body = nlohmann::json();
     jobs_pending_.erase(
         std::remove(jobs_pending_.begin(), jobs_pending_.end(),
                     job_id),
@@ -1352,6 +1356,8 @@ void WorkspaceService::CancelSession(uint64_t session_id)
             {
                 job.st.state = JobState::Cancelled;
                 job.st.error = "session ended";
+                /* never retain a dead session's request body */
+                job.body = nlohmann::json();
                 finished.push_back(job.st);
             }
         }
@@ -1731,8 +1737,17 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
                     exp.first, exp.second);
                 if(ir.ok && id == current_.id)
                 {
+                    /* Our own install bumped the marker's
+                       resource_revision — ExternalScan mixes
+                       it, so without a re-baseline the next
+                       poll reports a phantom "modified" whose
+                       remedy (reload) would discard drafts.
+                       Files the service itself just wrote are
+                       the new truth, never a change. */
                     current_.resource_revision =
                         ir.resource_revision;
+                    current_.external_sig =
+                        store_.ExternalScan(id).signature;
                     PublishLocked();
                 }
             }
@@ -1791,8 +1806,13 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
             {
                 /* Keep the published snapshot coherent — a
                    landed resource is part of the current
-                   workspace's resource set immediately. */
+                   workspace's resource set immediately. The
+                   bumped marker revision is service-owned, so
+                   re-baseline the external signature with it —
+                   otherwise the poll cries "modified". */
                 current_.resource_revision = ir.resource_revision;
+                current_.external_sig      =
+                    store_.ExternalScan(id).signature;
                 PublishLocked();
             }
         }
@@ -1843,7 +1863,12 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
                                        exp.first, exp.second);
             if(rr.ok && id == current_.id)
             {
+                /* Same re-baseline as installs — the store's
+                   own marker rewrite is not an external
+                   change. */
                 current_.resource_revision = rr.resource_revision;
+                current_.external_sig      =
+                    store_.ExternalScan(id).signature;
                 PublishLocked();
             }
         }
@@ -2511,6 +2536,21 @@ WorkspaceService::Result WorkspaceService::ImportStagedJson(
                             "' copy failed: " + cec.message());
                     }
                 }
+            }
+            /* The per-type installs above rewrote the ACTIVE
+               workspace's marker (each bumped
+               resource_revision) — publish the landing
+               revisions and re-baseline the external-change
+               signature like a commit does. Without this the
+               next poll reports a phantom "modified" AND the
+               published resource_revision stays stale. */
+            if(id == current_.id)
+            {
+                current_.workspace_revision = ws_rev;
+                current_.resource_revision  = rs_rev;
+                current_.external_sig       =
+                    store_.ExternalScan(id).signature;
+                PublishLocked();
             }
             res.ok                 = true;
             res.detail             = "preset_import";
