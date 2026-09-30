@@ -34,10 +34,20 @@ Extra flags: `click SEL --reveal` scrolls the target into view
 first (flickables clip). `click SEL` verifies by default: an
 off-window center auto-reveals, and if the resolved point is
 covered by another item the click refuses instead of silently
-landing on the wrong thing (--no-verify restores the raw send).
-Pinned items (footers) that can't be scrolled are detected by an
-unmoving rect. `shot` creates the parent directory before asking
-the app to write.
+landing on the wrong thing. Coverage is judged on input, not
+painting: items stacked above the target that accept no mouse
+input (plain Item/Rectangle, QQuickDropArea, disabled or
+hover-only items) let the click through — only an interactive
+cover refuses. --allow-covered forces the click anyway;
+--no-verify skips verification (raw send). Pinned items
+(footers) that can't be scrolled are detected by an unmoving
+rect. `shot` creates the parent directory before asking the
+app to write.
+
+`pick` entries: {n: objectName, t: type, r: scene rect,
+p: child-index path, m: accepts mouse buttons (own or an
+enabled pointer handler's), h: hoverEnabled, en: enabled}.
+The chain lists every item under the point, topmost first.
 """
 
 import json
@@ -168,21 +178,60 @@ def reveal(sel, port, margin=40, max_steps=20):
             "message": f"could not scroll {sel} into view"}
 
 
-_PICK_JS = ("(function(root){var p=root.contentItem,x=%r,y=%r,out=[];"
-            "for(var i=0;i<40;i++){var c=p.childAt(x,y);if(!c)break;"
-            "var tl=c.mapToItem(null,0,0),br=c.mapToItem(null,"
-            "c.width,c.height);"
-            "out.push({n:c.objectName||'',t:String(c).split('(')[0],"
-            "r:[tl.x,tl.y,br.x-tl.x,br.y-tl.y]});"
-            "var pt=c.mapFromItem(p,x,y);x=pt.x;y=pt.y;p=c}"
-            "return JSON.stringify(out)})(this)")
+# Enumerate EVERY item under the point (not just the childAt
+# descent), in stacking order topmost-first: children visit
+# bottom->top, we iterate reversed and emit a node after its
+# subtree (children render above their parent). Per item we
+# report whether a click would be consumed at-or-by it: its own
+# acceptedMouseButtons/acceptedButtons, or an enabled pointer
+# handler (TapHandler/DragHandler...) sitting on it via `data`.
+# Root choice: root.contentItem is the ApplicationWindow's
+# content AREA — popups live under QQuickOverlay, a SIBLING of it
+# beneath the window root item (QQuickRootItem). Walking from the
+# content area alone makes every in-popup item unreachable: the
+# pick used to descend into the page below and report the click
+# "covered" by whatever painted there (observed: the layout
+# canvas' QQuickDropArea over wsOpen_*). Start at the window root
+# item (contentItem.parent) so the overlay branch is included —
+# the overlay is its topmost child, matching z-order.
+_PICK_JS = (
+    "(function(root){var p=root.contentItem;"
+    "try{if(p&&p.parent)p=p.parent}catch(e){}"
+    "if(!p)p=root;var x=%r,y=%r,out=[];"
+    "function macc(k){var mb=0;"
+    "try{if(typeof k.acceptedMouseButtons==='function')"
+    "mb=mb|k.acceptedMouseButtons()}catch(e){}"
+    "try{if(k.acceptedButtons!==undefined&&k.acceptedButtons!==null)"
+    "mb=mb|k.acceptedButtons}catch(e){}"
+    "if(mb===0){try{var d=k.data;for(var j=0;j<d.length;j++){var q=d[j];"
+    "if(q!==k&&q.acceptedButtons!==undefined&&q.acceptedButtons!==null"
+    "&&q.enabled!==false)mb=mb|q.acceptedButtons}}catch(e){}}"
+    "return mb!==0}"
+    "function emit(k,path){var tl=k.mapToItem(null,0,0),"
+    "br=k.mapToItem(null,k.width,k.height),hov=false,en=true;"
+    "try{hov=!!k.hoverEnabled}catch(e){}"
+    "try{en=k.enabled!==false}catch(e){}"
+    "out.push({n:k.objectName||'',t:String(k).split('(')[0],"
+    "p:path,r:[tl.x,tl.y,br.x-tl.x,br.y-tl.y],"
+    "m:macc(k),h:hov,en:en})}"
+    "function walk(item,path){var kids;try{kids=item.children}"
+    "catch(e){}if(!kids)return;"
+    "for(var i=kids.length-1;i>=0;i--){var k=kids[i];"
+    "try{if(!k.visible||k.width<=0||k.height<=0)continue;"
+    "var pt=k.mapFromItem(null,x,y);"
+    "if(pt.x<0||pt.y<0||pt.x>k.width||pt.y>k.height)continue;"
+    "var cp=path+'.'+i;walk(k,cp);"
+    "if(out.length<800)emit(k,cp)}catch(e){}}}"
+    "walk(p,'');return JSON.stringify(out)})(this)")
 
 
 def pick_chain(port, x, y):
-    """Deepest-first ancestor chain of items under window point.
+    """Items under a window point, topmost-first stacking order.
 
     Uses the eval escape hatch — no server change needed. Each
-    entry: {n: objectName, t: type name, r: scene rect}.
+    entry: {n: objectName, t: type name, r: scene rect,
+    p: child-index path from contentItem, m: accepts mouse
+    buttons, h: hoverEnabled, en: enabled}.
     """
     r = send({"op": "eval", "code": _PICK_JS % (x, y)}, port)
     if not r.get("ok") or not r.get("result"):
@@ -198,24 +247,69 @@ def _rect_close(a, b, eps=2.0):
         all(abs(x - y) <= eps for x, y in zip(a, b))
 
 
+# Type-name hints for items that consume a click without an
+# acceptedButtons query resolving to JS (C++ items with
+# overridden mouse handlers). QQuickDropArea deliberately is
+# NOT here — it handles drag/drop only and never takes a click.
+_INTERACTIVE_HINTS = (
+    "MouseArea", "TapHandler", "DragHandler", "PinchHandler",
+    "Flickable", "ScrollBar", "Slider", "SpinBox", "Dial",
+    "Button", "CheckBox", "RadioButton", "Switch", "ComboBox",
+    "TextInput", "TextField", "TextArea", "RangeSlider",
+    "SwipeDelegate", "ItemDelegate", "TabButton", "ToolButton",
+)
+
+
+def _accepts_mouse(el):
+    """Would this item actually consume a mouse press?
+
+    `m` (acceptedButtons on the item or an enabled pointer
+    handler on it) is authoritative; the type-name hints cover
+    input consumers whose flag query didn't resolve. Disabled
+    items consume nothing.
+    """
+    if el.get("en") is False:
+        return False
+    if el.get("m"):
+        return True
+    t = el.get("t") or ""
+    return any(hint in t for hint in _INTERACTIVE_HINTS)
+
+
+def _blocks_target(cover, target):
+    """True when `cover` can steal the click from `target`.
+
+    Entries inside the target's own subtree never block (a click
+    consumed by the target's inner content still lands on the
+    target) and strict ancestors cannot occlude — both are told
+    apart by the child-index path prefix.
+    """
+    tp, cp = target.get("p") or "", cover.get("p") or ""
+    if not tp or not cp:
+        return True
+    return not (cp == tp or cp.startswith(tp + ".")
+                or tp.startswith(cp + "."))
+
+
 def verify_hit(port, rect, name):
     """Check that a click at rect's center lands inside the
-    target's subtree. The chain from childAt already guarantees
-    containment at the point; the target proves it is in that
-    chain by matching objectName AND its own rect (rect alone
-    when the item is unnamed).
-    Returns (ok, chain)."""
+    target's subtree. The stack lists every item containing the
+    point; the target proves it is in that stack by matching
+    objectName AND its own rect (rect alone when unnamed).
+    Returns (target_entry, covers, chain): covers are the items
+    stacked ABOVE the target — entries that paint over it but
+    may or may not intercept the click (see _accepts_mouse)."""
     if not rect or rect[2] <= 0 or rect[3] <= 0:
-        return False, []
+        return None, [], []
     cx, cy = rect[0] + rect[2] / 2, rect[1] + rect[3] / 2
     chain = pick_chain(port, cx, cy)
-    for el in chain:
+    for i, el in enumerate(chain):
         if name:
             if el["n"] == name and _rect_close(el["r"], rect):
-                return True, chain
+                return el, chain[:i], chain
         elif _rect_close(el["r"], rect):
-            return True, chain
-    return False, chain
+            return el, chain[:i], chain
+    return None, [], chain
 
 
 def build(op, args):
@@ -374,6 +468,13 @@ def main():
                 # A click is only honest if it lands on the
                 # target: off-window centers get a reveal; a
                 # point covered by another item refuses loudly.
+                # Covers that accept no mouse input (DropArea,
+                # plain Item/Rectangle) don't intercept — the
+                # click legitimately falls through to the target.
+                # --allow-covered overrides the refusal entirely.
+                allow_covered = "--allow-covered" in args
+                if allow_covered:
+                    args.remove("--allow-covered")
                 sel = parse_sel(args[1])
                 win_w, win_h = window_size(port)
                 r = geom_rect(sel, port)
@@ -394,14 +495,31 @@ def main():
                              if sel.startswith("name:") else "")
                     elif isinstance(sel, dict):
                         name = sel.get("name", "")
-                    hit, chain = verify_hit(port, r, name)
-                    if not hit:
-                        leaf = chain[-1] if chain else {}
+                    target, covers, chain = verify_hit(
+                        port, r, name)
+                    msg = None
+                    leaf = chain[0] if chain else {}
+                    if target is None:
+                        msg = ("click point is covered by "
+                               + (leaf.get("n") or leaf.get("t")
+                                  or "nothing"))
+                    else:
+                        blockers = [c for c in covers
+                                    if _blocks_target(c, target)
+                                    and _accepts_mouse(c)]
+                        if blockers:
+                            leaf = blockers[0]
+                            msg = ("click point is covered by "
+                                   + (leaf.get("n")
+                                      or leaf.get("t"))
+                                   + " (interactive cover — "
+                                     "--allow-covered to force)")
+                    if msg is not None and not allow_covered:
                         reply = {"ok": False, "error": "covered",
-                                 "message": f"click point is "
-                                           f"covered by "
-                                           f"{leaf.get('n') or leaf.get('t') or 'nothing'}",
+                                 "message": msg,
                                  "rect": r, "leaf": leaf}
+                        if covers:
+                            reply["covers"] = covers
                         print(json.dumps(reply, indent=2,
                                          ensure_ascii=False))
                         sys.exit(1)
