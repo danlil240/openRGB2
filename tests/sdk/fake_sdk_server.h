@@ -20,11 +20,14 @@
 #include "SdkWire.h"
 #include "Transport.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <deque>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace sdk_test
@@ -216,6 +219,11 @@ public:
     void SetPeerClosed(bool closed) { peer_closed_ = closed; }
     void SetSendFails(bool fails)   { send_fails_  = fails; }
 
+    /* Per-RecvExact stall — models a slow wire so tests can
+       prove the client's state getters never block behind
+       in-flight I/O (the qa F12 lock-split regression). */
+    std::atomic<uint32_t> recv_delay_ms{ 0 };
+
     bool Connect(const std::string& host, uint16_t port,
                  uint32_t connect_timeout_ms,
                  uint32_t recv_timeout_ms,
@@ -264,6 +272,12 @@ public:
                          std::string& err) override
     {
         (void)err;
+        const uint32_t delay = recv_delay_ms.load();
+        if(delay > 0)
+        {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(delay));
+        }
         if(peer_closed_)
         {
             return RecvResult::Closed;
