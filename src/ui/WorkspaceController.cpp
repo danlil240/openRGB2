@@ -338,12 +338,11 @@ void WorkspaceController::OnEngineLost(const QString& reason)
     {
         emit importFinished(inflight_import, false, lost);
     }
-    while(!import_submit_names_.empty())
+    for(const auto& kv : import_req_names_)
     {
-        emit importFinished(import_submit_names_.front(),
-                            false, lost);
-        import_submit_names_.pop_front();
+        emit importFinished(kv.second, false, lost);
     }
+    import_req_names_.clear();
     for(const auto& kv : import_names_)
     {
         emit importFinished(kv.second, false, lost);
@@ -920,7 +919,7 @@ void WorkspaceController::importDocument(const QString& name,
 }
 
 void WorkspaceController::inspectImport(const QString& name,
-                                        const QByteArray& bytes)
+                                        const QString& bytesBase64)
 {
     auto bad = [this](const QString& why)
     {
@@ -929,9 +928,22 @@ void WorkspaceController::inspectImport(const QString& name,
             { QStringLiteral("errors"), QStringList{ why } },
         }));
     };
-    if(bytes.isEmpty())
+    /* The dialog hands over readLocalFile's base64 TEXT — the
+       wire upload carries the decoded bundle bytes, never the
+       twice-encoded form (the engine parses studio.json
+       directly). */
+    const QByteArray bytes =
+        QByteArray::fromBase64(bytesBase64.toLatin1());
+    /* Every accepted form is a JSON object (a bare compact
+       document or the packed bundle map) — the cheap shape
+       check keeps undecodable/garbage input honest before the
+       upload round-trip. */
+    if(bytes.isEmpty() ||
+       bytes.trimmed().isEmpty() ||
+       bytes.trimmed().front() != '{')
     {
-        bad(QStringLiteral("empty import document"));
+        bad(QStringLiteral("file did not decode to a workspace"
+                           " bundle (base64 JSON expected)"));
         return;
     }
     if(!available_)
@@ -961,11 +973,32 @@ void WorkspaceController::confirmImport(const QVariantMap& choices,
         return;
     }
     const QString name = pending_inspect_name_;
-    const QString id   = SlugFor(name);
+    /* mode selects the target/verb semantics:
+         ""              → a NEW workspace slugged from the file
+                           name (never adopted, never applied);
+         "current"       → the imported document commits onto
+                           the ACTIVE workspace (the dialog's
+                           replace-my-layout) — gated on the
+                           live revisions, still never applied;
+         "preset_import" → resources only, gated on the active
+                           workspace's resource scope (the mode
+                           is forwarded to the engine). */
+    const bool preset_only = (mode == QLatin1String("preset_import"));
+    const bool into_current =
+        (mode == QLatin1String("current") && managed_);
+    QString id;
+    if(into_current || (preset_only && managed_))
+    {
+        id = ws_id_;
+    }
+    else
+    {
+        id = SlugFor(name);
+    }
     /* The revisions gate on the TARGET workspace — a fresh id
-       expects 0/0; importing over the open workspace passes its
-       known revisions (a stale pair fails revision_conflict —
-       honest, never clobbered). */
+       expects 0/0; importing over/inside the open workspace
+       passes its known revisions (a stale pair fails
+       revision_conflict — honest, never clobbered). */
     const bool target_is_current = (id == ws_id_);
     QVariantMap args({
         { QStringLiteral("staged"), pending_inspect_token_ },
@@ -982,19 +1015,21 @@ void WorkspaceController::confirmImport(const QVariantMap& choices,
     {
         args.insert(QStringLiteral("choices"), choices);
     }
-    if(!mode.isEmpty())
+    if(preset_only)
     {
-        args.insert(QStringLiteral("mode"), mode);
+        args.insert(QStringLiteral("mode"),
+                    QStringLiteral("preset_import"));
     }
-    import_submit_names_.push_back(name);
-    if(SendCommand(QStringLiteral("import_commit"), args,
-                   QStringLiteral("job:import_commit")) <= 0)
+    const int req = SendCommand(QStringLiteral("import_commit"),
+                                args,
+                                QStringLiteral("job:import_commit"));
+    if(req <= 0)
     {
-        import_submit_names_.pop_back();
         emit importFinished(name, false,
             QStringLiteral("commit could not be sent"));
         return;
     }
+    import_req_names_[req] = name;
     pending_inspect_token_.clear();
 }
 
@@ -1221,7 +1256,7 @@ void WorkspaceController::OnReplyReceived(int id,
     }
     else if(tag.startsWith(QLatin1String("job:")))
     {
-        OnJobReply(tag.mid(4), body, ok, msg);
+        OnJobReply(id, tag.mid(4), body, ok, msg);
     }
     else if(tag == QLatin1String("job_status"))
     {
@@ -1229,19 +1264,25 @@ void WorkspaceController::OnReplyReceived(int id,
     }
 }
 
-void WorkspaceController::OnJobReply(const QString& verb,
+void WorkspaceController::OnJobReply(int request_id,
+                                     const QString& verb,
                                      const QVariantMap& body,
                                      bool ok,
                                      const QString& message)
 {
-    /* An import_commit answer pairs with the oldest queued
-       submit name — the serial queue guarantees order. */
+    /* An import_commit answer pairs with the name recorded
+       under THIS request id — replies are not guaranteed to
+       land in submit order, so a FIFO could mislabel which
+       entry finished. */
     QString import_name;
-    if(verb == QLatin1String("import_commit") &&
-       !import_submit_names_.empty())
+    if(verb == QLatin1String("import_commit"))
     {
-        import_name = import_submit_names_.front();
-        import_submit_names_.pop_front();
+        const auto it = import_req_names_.find(request_id);
+        if(it != import_req_names_.end())
+        {
+            import_name = it->second;
+            import_req_names_.erase(it);
+        }
     }
     if(!ok)
     {
@@ -1805,16 +1846,10 @@ void WorkspaceController::OnUploadReply(const QString& stage,
             QVariantMap args = u.args;
             args.insert(QStringLiteral("staged"), token);
             /* Job-accept replies carry only the request id —
-               the entry's name rides a FIFO keyed to the
-               serial queue so the terminal event reports
-               WHICH import finished or failed. */
-            if(u.verb == QLatin1String("import_commit"))
-            {
-                import_submit_names_.push_back(
-                    u.args.value(QStringLiteral("name"))
-                        .toString());
-            }
-            else if(u.verb == QLatin1String("import_inspect"))
+               the entry's name rides a request-keyed map so
+               out-of-order accepts can never mislabel WHICH
+               import finished or failed. */
+            if(u.verb == QLatin1String("import_inspect"))
             {
                 /* The staged token stays consumable for the
                    SAME session — confirmImport reuses it for
@@ -1827,7 +1862,6 @@ void WorkspaceController::OnUploadReply(const QString& stage,
             {
                 if(u.verb == QLatin1String("import_commit"))
                 {
-                    import_submit_names_.pop_back();
                     emit importFinished(
                         u.args.value(QStringLiteral("name"))
                             .toString(),
@@ -1838,6 +1872,12 @@ void WorkspaceController::OnUploadReply(const QString& stage,
                 SetError(QStringLiteral("staged upload could "
                                         "not be committed"),
                          QStringLiteral("connection"));
+            }
+            else if(u.verb == QLatin1String("import_commit"))
+            {
+                import_req_names_[id] =
+                    u.args.value(QStringLiteral("name"))
+                        .toString();
             }
         }
         PumpImportQueue();

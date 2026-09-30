@@ -45,6 +45,13 @@ Popup {
     property var   previewRows: []
     /* The loaded document's non-field sections, edited as JSON. */
     property var   baseDoc: null
+    /* Late-reply guard: the engine's resource_get can land while
+       the user is already editing — it must never clobber
+       in-progress fields. Snapshot what applyDoc last wrote and
+       remember which id the outstanding fetch is for. */
+    property string appliedBody: ""
+    property string appliedName: ""
+    property string fetchId: ""
 
     function buildCandidate() {
         var body = {}
@@ -79,8 +86,11 @@ Popup {
             nameField.text = ""
             catField.text = ""
             bodyField.text = "{\n    \"entities\": [],\n    \"zones\": []\n}"
+            appliedBody = bodyField.text
+            appliedName = ""
             status = qsTr("Fetching the library copy…")
         }
+        fetchId = typeId
         if (typeof c.fetchPresetDocument === "function")
             c.fetchPresetDocument(typeId)
         open()
@@ -91,11 +101,14 @@ Popup {
         status = ""
         lastErrors = []
         previewRows = []
+        fetchId = ""
         idField.text = ""
         nameField.text = ""
         catField.text = "misc"
         bodyField.text =
             "{\n    \"entities\": [],\n    \"zones\": [],\n    \"binding_hints\": {}\n}"
+        appliedBody = bodyField.text
+        appliedName = ""
         open()
     }
 
@@ -116,6 +129,8 @@ Popup {
             body[k] = doc[k]
         }
         bodyField.text = JSON.stringify(body, null, 4)
+        appliedBody = bodyField.text
+        appliedName = nameField.text
         status = packaged
             ? qsTr("Packaged default — saving writes a user override")
             : qsTr("%1 instance(s) use this type").arg(instances)
@@ -127,10 +142,24 @@ Popup {
             return (c !== null && c.objectName !== undefined) ? c : null
         }
         function onPresetDocumentReady(doc) {
-            if (doc.ok === true && doc.doc !== undefined)
+            /* A fetch reply is only honest when it answers the
+               OUTSTANDING request — and only applied when the
+               user hasn't typed since openFor; a late engine
+               reply must never clobber in-progress edits. */
+            if (doc.ok === true && doc.doc !== undefined) {
+                if (String(doc.id) !== editor.fetchId)
+                    return
+                editor.fetchId = ""
+                if (bodyField.text !== editor.appliedBody ||
+                        nameField.text !== editor.appliedName) {
+                    editor.status = qsTr(
+                        "Library copy arrived — your edits were kept")
+                    return
+                }
                 editor.applyDoc(doc.doc,
                                 doc.packaged === true,
                                 doc.instances || 0)
+            }
             else if (doc.error !== undefined)
                 editor.status = String(doc.error)
         }

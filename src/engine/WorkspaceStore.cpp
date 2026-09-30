@@ -791,7 +791,6 @@ bool InstallEffectLooks(const fs::path& dir,
    import flow stages there, so a caller-supplied absolute path
    outside the root is refused rather than followed. */
 bool InstallAssets(const std::string& root,
-                   const std::string& wsid,
     const std::vector<std::pair<std::string, std::string>>& assets,
                    std::vector<std::string>& warnings,
                    std::string& err)
@@ -876,7 +875,6 @@ bool InstallAssets(const std::string& root,
             return false;
         }
     }
-    (void)wsid;
     return true;
 }
 
@@ -1423,7 +1421,7 @@ WorkspaceStore::CommitResult WorkspaceStore::Commit(
            !InstallEffectLooks(LibraryEffectsDir(), deps_.effects,
                                work_doc, ex_fx,
                                res.warnings, ierr) ||
-           !InstallAssets(root_, id, candidate.extracted_assets,
+           !InstallAssets(root_, candidate.extracted_assets,
                           res.warnings, ierr))
         {
             return fail("resource install failed: " + ierr);
@@ -2362,17 +2360,22 @@ WorkspaceStore::ResourceRemoveResult WorkspaceStore::RemoveResource(
         }
     }
 
-    if(!fs::remove(target, ec) || ec)
-    {
-        return fail("cannot remove '" + target.string() + "'" +
-                    (ec ? ": " + ec.message() : ""));
-    }
-
+    /* Marker bump BEFORE the delete: a failed bump leaves the
+       file in place and the caller's stale revision can simply
+       retry — the reverse order could strand a deleted file
+       with an un-bumped (lying) marker. A bump without the
+       remove only wastes a revision number, never content. */
     uint64_t next_res_rev = current.resource_revision;
     std::string werr;
     if(!BumpResourceRevision(wsdir, current, next_res_rev, werr))
     {
         return fail(werr);
+    }
+
+    if(!fs::remove(target, ec) || ec)
+    {
+        return fail("cannot remove '" + target.string() + "'" +
+                    (ec ? ": " + ec.message() : ""));
     }
     res.removed = true;
     res.reverted_to_default = is_type

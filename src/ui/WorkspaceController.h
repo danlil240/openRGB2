@@ -170,17 +170,25 @@ public:
     Q_INVOKABLE void importDocument(const QString& name,
                                     const QByteArray& bytes);
     /*---- Task 9 bundle import (inspect -> choose -> commit) ---*\
-    |  inspectImport stages `bytes` and runs import_inspect;    |
+    |  inspectImport stages the bundle — `bytesBase64` is the   |
+    |  base64 text readLocalFile returns (it is decoded here,   |
+    |  never uploaded twice-encoded) — and runs import_inspect; |
     |  the report (validity, type conflicts + suggested import  |
     |  ids, bundled assets, warnings) arrives in                 |
     |  importInspectionReady. confirmImport commits the SAME    |
     |  staged upload with the caller's {conflict_id: import_id} |
     |  choices; cancelImport drops the pending inspect (the     |
-    |  staged upload expires engine-side). mode may be          |
-    |  "preset_import" — types only, no document commit.        |
+    |  staged upload expires engine-side). mode selects the     |
+    |  target/mode: "" imports as a NEW workspace slugged from  |
+    |  the file name, "current" commits the imported document   |
+    |  onto the ACTIVE workspace (replace-my-layout; never      |
+    |  applied without a reload), "preset_import" installs only |
+    |  the bundled resources into the active workspace's        |
+    |  resource scope (types/assets, no document commit — the   |
+    |  mode is forwarded to the engine).                        |
     \*----------------------------------------------------------*/
     Q_INVOKABLE void inspectImport(const QString& name,
-                                   const QByteArray& bytes);
+                                   const QString& bytesBase64);
     Q_INVOKABLE void confirmImport(const QVariantMap& choices,
                                    const QString& mode = QString());
     Q_INVOKABLE void cancelImport();
@@ -424,10 +432,11 @@ private:
     /* Names ride alongside the serial queue so a failed or
        finished import_commit reports WHICH entry — never an
        empty name — and the queue keeps moving either way.
-       submit_names is a FIFO drained at each job-accept reply;
-       names_ holds accepted job_id -> name until the terminal
-       event resolves it. */
-    std::deque<QString>           import_submit_names_;
+       req_names_ keys the name on the workspaceCommand REQUEST
+       id (replies are never guaranteed to land in submit
+       order); names_ holds accepted job_id -> name until the
+       terminal event resolves it. */
+    std::map<int, QString>        import_req_names_;
     std::map<uint64_t, QString>   import_names_;
     /* Cached baseline hash for the durable record — the
        baseline only moves at LoadApplied/ApplyRemote/
@@ -438,8 +447,9 @@ private:
                     const QString& tag);
     QString BaselineSha();
     static QString SlugFor(const QString& name);
-    void OnJobReply(const QString& verb, const QVariantMap& body,
-                    bool ok, const QString& message);
+    void OnJobReply(int request_id, const QString& verb,
+                    const QVariantMap& body, bool ok,
+                    const QString& message);
     void OnJobStatusReply(const QVariantMap& body, bool ok);
     void OnDownloadReply(const QString& stage,
                          const QVariantMap& body, bool ok,

@@ -39,14 +39,12 @@ Popup {
        "done" | "exporting"                                    */
     property string phase: "idle"
     property var    report: null
-    property var    pendingBytes: null
     property string status: ""
     property var    renameMap: ({})
 
     function reset() {
         phase = "idle"
         report = null
-        pendingBytes = null
         status = ""
         renameMap = ({})
     }
@@ -56,22 +54,52 @@ Popup {
     function readAndInspect() {
         var c = ctl()
         if (c === null) { status = qsTr("workspace unavailable"); return }
+        if (phase !== "idle" && phase !== "report") return
         var r = c.readLocalFile(pathField.text.trim())
         if (r.ok !== true) {
             status = String(r.error !== undefined ? r.error
                                                   : qsTr("read failed"))
             return
         }
-        pendingBytes = r.base64   /* latin1 base64 wire form */
         var name = pathField.text.trim()
         name = name.substring(Math.max(name.lastIndexOf("/"),
                                        name.lastIndexOf("\\")) + 1)
         phase = "inspecting"
         status = qsTr("Inspecting bundle…")
+        /* readLocalFile returns base64 text — inspectImport
+           decodes it before the bounded upload. */
         c.inspectImport(name, r.base64)
     }
 
-    /* Conflict rows rebuild this map — {source_id: target_id}. */
+    /* The confirm button's real work — engine report contract:
+       {valid, types[], conflicts[] (keyed `id`), assets[],
+       warnings[], errors[], has_workspace}. */
+    function confirm() {
+        var c = ctl()
+        if (c === null || report === null || phase === "committing")
+            return
+        var mode = ""
+        if (report.has_workspace === false)
+            mode = "preset_import"      /* types-only bundle */
+        else if (overwriteBox.checked)
+            mode = "current"          /* replace my layout */
+        phase = "committing"
+        status = qsTr("Importing…")
+        c.confirmImport(collectChoices(), mode)
+    }
+
+    function doExport() {
+        var c = ctl()
+        if (c === null || phase !== "idle") return
+        phase = "exporting"
+        status = qsTr("Exporting…")
+        /* void — the outcome lands in onExportReady or the
+           controller's error signal; never read a return. */
+        c.exportBundle()
+    }
+
+    /* Conflict rows rebuild this map — {conflict_id: import_id},
+       keyed on the engine report's `id` field. */
     function collectChoices() {
         var out = {}
         var keys = Object.keys(renameMap)
@@ -86,31 +114,37 @@ Popup {
             return (c !== null && c.objectName !== undefined) ? c : null
         }
         function onImportInspectionReady(rep) {
-            if (rep.ok !== true) {
+            /* Engine report: {valid, types, conflicts, assets,
+               warnings, errors} — `valid` is the gate. */
+            if (rep.valid !== true) {
                 dialog.phase = "idle"
-                dialog.status = rep.error !== undefined
-                    ? String(rep.error) : qsTr("inspect failed")
+                var errs = rep.errors !== undefined ? rep.errors : []
+                dialog.status = errs.length
+                    ? String(errs[0])
+                    : qsTr("inspect failed")
                 return
             }
             dialog.report = rep
             var seeds = {}
             var confs = rep.conflicts !== undefined ? rep.conflicts : []
             for (var i = 0; i < confs.length; i++)
-                seeds[confs[i].source_id] =
+                seeds[confs[i].id] =
                     confs[i].suggested_id !== undefined
-                        ? confs[i].suggested_id : confs[i].source_id
+                        ? confs[i].suggested_id : confs[i].id
             dialog.renameMap = seeds
             dialog.phase = "report"
             dialog.status = ""
         }
-        function onImportFinished(res) {
-            dialog.phase = res.ok === true ? "done" : "report"
-            dialog.status = res.ok === true
-                ? qsTr("Imported — not applied until you commit")
-                : String(res.error !== undefined ? res.error
-                                                 : qsTr("import failed"))
+        /* importFinished(name, ok, error) — positional args. */
+        function onImportFinished(name, ok, error) {
+            dialog.phase = ok === true ? "done" : "report"
+            dialog.status = ok === true
+                ? qsTr("Imported '%1' — not applied until you reload")
+                    .arg(String(name))
+                : String(error !== undefined && error !== ""
+                         ? error : qsTr("import failed"))
         }
-        function onExportReady(name, bytesBase64, hash) {
+        function onExportReady(name, bytesBase64) {
             var r = dialog.ctl().writeLocalFile(
                 exportPathField.text.trim(), bytesBase64)
             dialog.status = r.ok === true
@@ -118,6 +152,23 @@ Popup {
                 : String(r.error !== undefined ? r.error
                                               : qsTr("write failed"))
             dialog.phase = "idle"
+        }
+        /* An export/inspect failure surfaces through the shared
+           error property — unlatch the busy phase so the dialog
+           is never stuck "exporting". */
+        function onErrorChanged() {
+            var c = dialog.ctl()
+            var e = (c !== null && c.error !== undefined)
+                ? String(c.error) : ""
+            if (e === "")
+                return
+            if (dialog.phase === "exporting") {
+                dialog.phase = "idle"
+                dialog.status = e
+            } else if (dialog.phase === "committing") {
+                dialog.phase = "report"
+                dialog.status = e
+            }
         }
     }
 
@@ -236,6 +287,8 @@ Popup {
                         font.pixelSize: Theme.fontSizeSmall
                     }
                     Repeater {
+                        id: conflictRepeater
+                        objectName: "conflictRepeater"
                         model: dialog.report !== null
                             ? (dialog.report.conflicts !== undefined
                                ? dialog.report.conflicts : []) : []
@@ -243,10 +296,20 @@ Popup {
                             Layout.fillWidth: true
                             spacing: Theme.spaceS
                             Text {
-                                text: modelData.source_id
+                                /* Engine conflict rows:
+                                   {id, local_name, bundled_name,
+                                   suggested_id}. */
+                                text: modelData.id +
+                                      "  (" +
+                                      (modelData.local_name !== undefined
+                                       ? modelData.local_name : "?") +
+                                      " ≠ " +
+                                      (modelData.bundled_name !== undefined
+                                       ? modelData.bundled_name : "?") +
+                                      ")"
                                 color: Theme.textSecondary
                                 font.pixelSize: Theme.fontSizeSmall
-                                Layout.preferredWidth: 150
+                                Layout.preferredWidth: 190
                                 elide: Text.ElideRight
                             }
                             Text {
@@ -254,16 +317,16 @@ Popup {
                                 color: Theme.textDisabled
                             }
                             TextField {
-                                objectName: "rename_" + modelData.source_id
+                                objectName: "rename_" + modelData.id
                                 Layout.fillWidth: true
                                 text: modelData.suggested_id !== undefined
                                     ? modelData.suggested_id
-                                    : modelData.source_id
+                                    : modelData.id
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSizeSmall
                                 onTextChanged: {
                                     var m = dialog.renameMap
-                                    m[modelData.source_id] = text.trim()
+                                    m[modelData.id] = text.trim()
                                     dialog.renameMap = m
                                 }
                                 background: Rectangle {
@@ -282,26 +345,27 @@ Popup {
                 CheckBox {
                     id: overwriteBox
                     objectName: "overwriteBox"
+                    /* Commits the imported document onto the
+                       ACTIVE workspace (gated on its live
+                       revisions; still never applied until a
+                       reload). Hidden for types-only bundles —
+                       there is no layout to replace. */
+                    visible: dialog.report === null
+                             || dialog.report.has_workspace !== false
                     text: qsTr("replace my layout")
                     checked: false
                 }
                 Item { Layout.fillWidth: true }
                 AppButton {
                     objectName: "confirmImportBtn"
-                    text: qsTr("Import")
+                    text: dialog.report !== null
+                             && dialog.report.has_workspace === false
+                          ? qsTr("Import types")
+                          : qsTr("Import")
                     enabled: dialog.report !== null
                              && (dialog.report.errors === undefined
                                  || dialog.report.errors.length === 0)
-                    onClicked: {
-                        var c = dialog.ctl()
-                        if (c === null) return
-                        dialog.phase = "committing"
-                        dialog.status = qsTr("Importing…")
-                        c.confirmImport(
-                            dialog.collectChoices(),
-                            overwriteBox.checked
-                                ? "overwrite_workspace" : "")
-                    }
+                    onClicked: dialog.confirm()
                 }
             }
         }
@@ -355,19 +419,7 @@ Popup {
                 text: qsTr("Export")
                 enabled: dialog.phase === "idle"
                          && exportPathField.text.trim() !== ""
-                onClicked: {
-                    var c = dialog.ctl()
-                    if (c === null) return
-                    var r = c.exportBundle()
-                    if (r.ok === true) {
-                        dialog.phase = "exporting"
-                        dialog.status = qsTr("Exporting…")
-                    } else {
-                        dialog.status = String(
-                            r.error !== undefined ? r.error
-                                                  : qsTr("export refused"))
-                    }
-                }
+                onClicked: dialog.doExport()
             }
         }
 

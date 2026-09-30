@@ -489,7 +489,8 @@ telemetry stay live — the plan only gates document mutation.
 | `get` | `{id?}` | `{managed,id?,workspace_revision,resource_revision,generation?,name?,content_sha256?,source_form?}` — `id` reads the durable marker of a non-current workspace |
 | `list` | `{offset?,limit?}` (limit ≤256) | `{workspaces:[id...],total,offset,limit,active}` |
 | `catalog` | `{kind:devices|effects|workspaces,offset?,limit?}` | `{kind,entries:[...],total,offset,limit,more,next_offset}` — pages are additionally byte-budgeted (~768 KiB serialized); `more:true` + `next_offset` continue the walk, and `next_offset` always advances so a malformed stream can't stall. `effects` entries carry `document_text` (authored field-order byte stream); an oversized lone entry degrades to `document_omitted:true` (document_text dropped) then `description_omitted:true` (bounded description) instead of failing the page |
-| `validate`/`commit`/`save_copy`/`import_inspect`/`import_commit`/`export`/`reload` | `{staged?|document?, base_revision?, resource_revision?, id?, name?, ...}` | `OK {accepted:true,job_id}` or `OK {accepted:false,detail:"busy"}` (bounded queue full); `staged` is a finished upload token owned by this session |
+| `validate`/`commit`/`save_copy`/`import_inspect`/`import_commit`/`export`/`reload`/`resource_install`/`resource_remove` | `{staged?|document?, base_revision?, resource_revision?, id?, name?, ...}` | `OK {accepted:true,job_id}` or `OK {accepted:false,detail:"busy"}` (bounded queue full); `staged` is a finished upload token owned by this session |
+| `resource_get` | `{kind:device_type|effect, id:<preset id>}` | `{kind,id,found,document?,from_file?,packaged_default?}` — synchronous read of the effective resource (file-layer override over the packaged default); `found:false` when no layer resolves |
 | `job_status` | `{job_id}` | job status record (below) |
 | `job_cancel` | `{job_id}` | `{cancelled:true,job_id}` / ERROR |
 | `transfer_begin` | `{direction:"upload",kind,length,sha256}` / `{direction:"download",kind,id}` | upload: `{transfer_id,max_chunk_bytes}`; download: `{transfer_id,length,sha256,max_chunk_bytes}` — client-supplied paths are never accepted; staging is server-named inside the managed root |
@@ -499,6 +500,39 @@ telemetry stay live — the plan only gates document mutation.
 | `preview_begin` | `{document?|staged?, draft_revision?, visible?}` | `OK {active:true,draft_revision,rate_hz}` — begins (or re-begins) this session's draft preview; `document` is the same compact v3 authoring document `commit` accepts and `staged` a finished upload token owned by this session. Errors: `bad_request`+`invalid_document` (parse/resolve failure), `bad_request`+`bad_request` (no document/staged), `busy`+`preview_limit` (global session cap reached) |
 | `preview_update` | `{document?|staged?, draft_revision?, visible?}` | `OK {active:true,draft_revision}` — latest-wins candidate replacement and/or visibility on this session's preview; `ERROR bad_request`+`no_preview` when none is active |
 | `preview_end` | `{}` | `OK {active:false}` — idempotent; ends this session's preview |
+
+Task-9 verb details — the portable-bundle and resource surface:
+
+- `export` `{id?}` stages a packed bundle for download on the
+  requesting session; the job result carries
+  `{transfer_id,bytes,sha256,types_written,assets_copied,warnings[]}`
+  — read the bundle through `transfer_chunk`/`transfer_finish` like
+  any staged download.
+- `import_inspect` consumes a `staged` upload (usually the packed
+  `openrgb2-bundle-files` v1 map: `files` keys restricted to
+  `studio.json`, `presets/devices/<id>.device.json`,
+  `presets/effects/<id>.effect.json`, `assets/<rel>`; encodings
+  `utf8`/`base64`; bounded by 4 MiB per JSON, 16 MiB per asset,
+  64 MiB total, ≤512 entries). The result is
+  `{valid,types:[{id,name,status}],conflicts:[{id,local_name,
+  bundled_name,suggested_id}],assets[],warnings[],errors[],
+  has_workspace,workspace:{name}}` — nothing is written.
+- `import_commit` `{staged,id,name,base_revision,
+  resource_revision,choices?,mode?}` replays the same staged
+  upload: `choices` maps `{conflict_id: import_as_id}` (every
+  conflicting same-id type needs one, else
+  `detail:"conflict_choice_required"`); `mode:"preset_import"`
+  installs resources only and skips the document commit (the form
+  a `has_workspace:false` bundle requires). Otherwise the remapped
+  document commits onto `id` — never applied.
+- `resource_install` `{kind:device_type|effect, id, device_type?|
+  effect?, replace?}` validates-then-installs ONE resource into the
+  managed library (collision-safe suffix unless `replace:true`);
+  result `{landed_id,reused,replaced?}`.
+- `resource_remove` `{kind,id,resource_id}` deletes a file-layer
+  entry — packaged defaults, in-use ids, and child-referenced ids
+  refuse honestly (`detail:"in_use"`); deleting an override reverts
+  to the packaged default (`result.reverted_to_default`).
 
 The preview verbs drive the bounded draft-preview feed (Task 7,
 plan §3.4): ONE `PreviewSession` per IPC session, at most two

@@ -307,8 +307,11 @@ bool B64Decode(const std::string& in, std::string& out)
 /* Unpack a packed-bundle `files` map into `dest` — a staging
    dir the caller owns (inside the managed root). Bounds:
    BUNDLE_MAX_JSON_BYTES per .json, BUNDLE_MAX_ASSET_BYTES per
-   decoded asset, BUNDLE_MAX_TOTAL_BYTES total; every path must
-   satisfy IsBundleRelPath. Returns the file count. */
+   decoded asset, BUNDLE_MAX_TOTAL_BYTES total, and a file-count
+   cap — a zip-bomb-shaped map of tiny entries is as hostile as
+   a huge one (directory entry + metadata cost per file). Every
+   path must satisfy IsBundleRelPath. Returns the file count. */
+constexpr unsigned int kBundleMaxFiles = 512;
 bool UnpackBundleFiles(const nlohmann::json& files,
                        const fs::path& dest,
                        std::vector<std::string>& errors,
@@ -318,6 +321,13 @@ bool UnpackBundleFiles(const nlohmann::json& files,
     unsigned int n = 0;
     for(auto it = files.begin(); it != files.end(); ++it)
     {
+        if(n >= kBundleMaxFiles)
+        {
+            Err(errors, "bundle exceeds the " +
+                        std::to_string(kBundleMaxFiles) +
+                        "-file entry bound");
+            return false;
+        }
         const std::string rel = it.key();
         if(!IsBundleRelPath(rel))
         {
@@ -2432,12 +2442,13 @@ nlohmann::json WorkspaceService::InspectPackedBundle(
     std::vector<std::string>& warnings)
 {
     nlohmann::json out = nlohmann::json::object({
-        { "valid",     false                   },
-        { "types",     nlohmann::json::array() },
-        { "conflicts", nlohmann::json::array() },
-        { "assets",    nlohmann::json::array() },
-        { "warnings",  nlohmann::json::array() },
-        { "errors",    nlohmann::json::array() },
+        { "valid",         false                   },
+        { "types",         nlohmann::json::array() },
+        { "conflicts",     nlohmann::json::array() },
+        { "assets",        nlohmann::json::array() },
+        { "warnings",      nlohmann::json::array() },
+        { "errors",        nlohmann::json::array() },
+        { "has_workspace", true                    },
     });
     /* Scratch dir inside the managed root — nothing escapes
        it; a crash orphan is removed on the next run. */
@@ -2466,8 +2477,13 @@ nlohmann::json WorkspaceService::InspectPackedBundle(
     }
     /* Types-only bundles carry no studio.json — synthesize the
        empty document so InspectBundle's plan parses (the
-       preset_import mode commits no document anyway). */
-    if(!fs::exists(sdir / "studio.json", ec))
+       preset_import mode commits no document anyway). The
+       report flags the missing workspace document so the
+       client picks a mode commit can actually satisfy —
+       `has_workspace:false` means only preset_import lands. */
+    const bool has_workspace =
+        fs::exists(sdir / "studio.json", ec);
+    if(!has_workspace)
     {
         std::ofstream ef(sdir / "studio.json",
                          std::ios::binary | std::ios::trunc);
@@ -2523,6 +2539,10 @@ nlohmann::json WorkspaceService::InspectPackedBundle(
     out["types"]      = std::move(types);
     out["conflicts"]  = std::move(confl);
     out["assets"]     = nlohmann::json(plan.assets);
+    out["has_workspace"] = has_workspace;
+    out["workspace"]  = nlohmann::json::object({
+        { "name", has_workspace ? plan.workspace.meta.name
+                                : std::string() } });
     warnings.insert(warnings.end(), plan.warnings.begin(),
                     plan.warnings.end());
     out["warnings"]   = warnings;

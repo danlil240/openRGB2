@@ -199,7 +199,6 @@ private:
     QString             pending_install_post_;
     QString             pending_install_iid_;
     studio::DevicePreset pending_preset_;
-    bool                pending_install_sent_ = false;
 
     /* resource_remove bookkeeping — one in flight. */
     int                 pending_delete_req_ = 0;

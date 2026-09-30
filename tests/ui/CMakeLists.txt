@@ -338,6 +338,41 @@ set_tests_properties(ui_studio_presets_test PROPERTIES
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${QT_BIN_DIR};DLS_PRESET_DIR=set:${CMAKE_SOURCE_DIR}/src/core/presets/devices")
 
+# studio-import Task 9 fix round 1: the REAL end-to-end
+# portable-bundle flow — the actual WorkspaceImportDialog.qml
+# drives the actual WorkspaceController over the in-process pipe
+# against the actual IpcServer + EngineService + WorkspaceService
+# on a temp managed root (base64 decode, report/conflict keys,
+# choices, importFinished signature, open+list, packed export,
+# preset_import for types-only bundles). Stubs cannot catch these
+# contract mismatches, so every boundary is the production one.
+add_executable(ui_workspace_import_test
+    ui_workspace_import_test.cpp)
+target_link_libraries(ui_workspace_import_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    openrgb2_ipc_wire
+    openrgb2_ipc
+    openrgb2_engine
+    openrgb2_studio_core
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Test)
+target_include_directories(ui_workspace_import_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui
+    ${CMAKE_SOURCE_DIR}/src/ipc
+    ${CMAKE_SOURCE_DIR}/src/engine)
+target_compile_definitions(ui_workspace_import_test PRIVATE NDEBUG)
+set_target_properties(ui_workspace_import_test PROPERTIES
+    AUTOMOC ON)
+qt_import_qml_plugins(ui_workspace_import_test)
+add_test(NAME ui_workspace_import_test
+         COMMAND ui_workspace_import_test)
+set_tests_properties(ui_workspace_import_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
+
 # studio-import Task 8: the Quick3D Layout viewport — the real
 # WorkspaceController/ObjectEditorController offline drive the
 # adapted SelectionController/CameraController (gesture routing,
