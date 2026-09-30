@@ -118,7 +118,13 @@ void QaServer::OnDisconnected(QTcpSocket* sock)
 void QaServer::OnReadyRead(QTcpSocket* sock)
 {
     /* Per-socket buffered line framing: partial lines stay on
-       the socket property until a '\n' completes a request. */
+       the socket property until a '\n' completes a request.
+       Dispatch() delivers REAL input events — a click/type op
+       can close this very socket mid-line (the peer hung up,
+       a quit shortcut, a handler that tears the UI down). The
+       raw pointer is unusable past that boundary, so every
+       use after Dispatch re-checks the QPointer guard. */
+    const QPointer<QTcpSocket> guard(sock);
     QByteArray acc = sock->property("_qa_acc").toByteArray();
     acc += sock->readAll();
     int nl;
@@ -144,21 +150,36 @@ void QaServer::OnReadyRead(QTcpSocket* sock)
         }
         else
         {
-            reply = Dispatch(doc.object());
+            reply = Dispatch(doc.object(), sock);
+        }
+        /* The dispatch may have disconnected+deleted the
+           client — writing to a dangling socket is the crash
+           this guard exists for. */
+        if(guard.isNull())
+        {
+            return;
         }
         sock->write(QJsonDocument(reply).toJson(
                         QJsonDocument::Compact));
         sock->write("\n");
         sock->flush();
+        if(guard.isNull())
+        {
+            return;
+        }
     }
-    sock->setProperty("_qa_acc", acc);
+    if(!guard.isNull())
+    {
+        sock->setProperty("_qa_acc", acc);
+    }
 }
 
 /*---------------------------------------------------------*\
 ||| Dispatch                                                ||
 ||\*---------------------------------------------------------*/
 
-QJsonObject QaServer::Dispatch(const QJsonObject& req)
+QJsonObject QaServer::Dispatch(const QJsonObject& req,
+                               QTcpSocket* client)
 {
     const QString op = req.value(QStringLiteral("op")).toString();
     if(op.isEmpty())
@@ -182,7 +203,7 @@ QJsonObject QaServer::Dispatch(const QJsonObject& req)
     if(op == QLatin1String("key"))     return OpKey(req);
     if(op == QLatin1String("scroll"))  return OpScroll(req);
     if(op == QLatin1String("shot"))    return OpShot(req);
-    if(op == QLatin1String("wait"))    return OpWait(req);
+    if(op == QLatin1String("wait"))    return OpWait(req, client);
     if(op == QLatin1String("eval"))    return OpEval(req);
     return Err(QStringLiteral("unknown_op"),
                QStringLiteral("unknown op \"%1\"").arg(op));
@@ -536,8 +557,8 @@ QPointF QaServer::ItemCenter(QQuickItem* item) const
 bool QaServer::ClickAt(const QPointF& scene_pos, int button,
                        bool dbl)
 {
-    QQuickWindow* w = Window();
-    if(!w)
+    QPointer<QQuickWindow> w(Window());
+    if(w.isNull())
     {
         return false;
     }
@@ -547,7 +568,15 @@ bool QaServer::ClickAt(const QPointF& scene_pos, int button,
     const QPoint  global =
         w->mapToGlobal(local.toPoint());
 
+    /* Every sendEvent runs QML handlers — a press can close
+       the window (quit shortcut, dialog teardown). The
+       QPointer re-check keeps each subsequent delivery off a
+       dangling window. */
     auto send = [&](QEvent::Type t, Qt::MouseButtons buttons) {
+        if(w.isNull())
+        {
+            return;
+        }
         QMouseEvent ev(t, local, scene_pos, global, b, buttons,
                        Qt::NoModifier);
         QCoreApplication::sendEvent(w, &ev);
@@ -704,6 +733,7 @@ QJsonObject QaServer::OpSet(const QJsonObject& req)
        on a Slider, `checked`, `currentIndex`, `text` need
        their own types). Dynamic QML properties accept the
        QVariant as-is. */
+    QPointer<QQuickItem> guard(it);
     const QMetaObject* mo = it->metaObject();
     const int pi = mo->indexOfProperty(prop.toUtf8());
     if(pi >= 0)
@@ -723,6 +753,15 @@ QJsonObject QaServer::OpSet(const QJsonObject& req)
                    QStringLiteral("property \"%1\" rejected "
                                   "(read-only or missing)")
                        .arg(prop));
+    }
+    /* setProperty runs NOTIFY handlers + bindings — a write
+       can legitimately destroy the item it landed on. */
+    if(guard.isNull())
+    {
+        QJsonObject r;
+        r.insert(QStringLiteral("prop"), prop);
+        r.insert(QStringLiteral("destroyed"), true);
+        return Ok(r);
     }
     QJsonObject r;
     r.insert(QStringLiteral("prop"), prop);
@@ -791,31 +830,48 @@ QJsonObject QaServer::OpGeom(const QJsonObject& req)
 QJsonObject QaServer::OpType(const QJsonObject& req)
 {
     QString err;
-    QQuickItem* it =
-        ResolveOne(req.value(QStringLiteral("sel")), err);
-    if(!it)
+    QPointer<QQuickItem> it(
+        ResolveOne(req.value(QStringLiteral("sel")), err));
+    if(it.isNull())
     {
         return Err(QStringLiteral("not_found"), err);
     }
     if(req.value(QStringLiteral("clear")).toBool(false))
     {
         /* Ctrl+A + Delete through the key path, so cleared
-           signal handlers fire exactly like user input. */
+           signal handlers fire exactly like user input. The
+           delete can take the item (or the window) with it —
+           re-check both before the next delivery. */
         it->forceActiveFocus(Qt::MouseFocusReason);
-        QKeyEvent sel_all(QEvent::KeyPress, Qt::Key_A,
-                          Qt::ControlModifier);
-        QCoreApplication::sendEvent(Window(), &sel_all);
-        QKeyEvent del(QEvent::KeyPress, Qt::Key_Delete,
-                      Qt::NoModifier);
-        QCoreApplication::sendEvent(Window(), &del);
+        if(QQuickWindow* w = Window())
+        {
+            QKeyEvent sel_all(QEvent::KeyPress, Qt::Key_A,
+                              Qt::ControlModifier);
+            QCoreApplication::sendEvent(w, &sel_all);
+            QKeyEvent del(QEvent::KeyPress, Qt::Key_Delete,
+                          Qt::NoModifier);
+            QCoreApplication::sendEvent(w, &del);
+        }
+        if(it.isNull())
+        {
+            QJsonObject r;
+            r.insert(QStringLiteral("sent"), 0);
+            r.insert(QStringLiteral("destroyed"), true);
+            return Ok(r);
+        }
     }
     it->forceActiveFocus(Qt::MouseFocusReason);
     const QString text =
         req.value(QStringLiteral("text")).toString();
     int sent = 0;
-    QQuickWindow* w = Window();
     for(const QChar ch : text)
     {
+        QQuickWindow* w = Window();
+        if(w == nullptr || it.isNull())
+        {
+            break;   /* the previous keystroke's handler tore
+                        down the item or its window */
+        }
         /* The event's text field carries the literal char —
            that is what TextInput/TextEdit consume; key() only
            needs to be a plausible Qt::Key for the char. */
@@ -825,15 +881,37 @@ QJsonObject QaServer::OpType(const QJsonObject& req)
         QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier,
                         QString(ch));
         QCoreApplication::sendEvent(w, &press);
-        QKeyEvent release(QEvent::KeyRelease, key,
-                          Qt::NoModifier, QString(ch));
-        QCoreApplication::sendEvent(w, &release);
+        if(it.isNull())
+        {
+            ++sent;
+            break;
+        }
+        if(QQuickWindow* rw = Window())
+        {
+            QKeyEvent release(QEvent::KeyRelease, key,
+                              Qt::NoModifier, QString(ch));
+            QCoreApplication::sendEvent(rw, &release);
+        }
         ++sent;
+        if(it.isNull())
+        {
+            break;
+        }
     }
     QJsonObject r;
     r.insert(QStringLiteral("sent"), sent);
-    r.insert(QStringLiteral("text"),
-             it->property("text").toString());
+    if(it.isNull())
+    {
+        /* Honest reply: the read-back below would dereference
+           a dead item. The script can see the truncation via
+           "sent" + this flag. */
+        r.insert(QStringLiteral("destroyed"), true);
+    }
+    else
+    {
+        r.insert(QStringLiteral("text"),
+                 it->property("text").toString());
+    }
     return Ok(r);
 }
 
@@ -939,8 +1017,8 @@ QJsonObject QaServer::OpKey(const QJsonObject& req)
                    QStringLiteral("unrecognized key \"%1\"")
                        .arg(k));
     }
-    QQuickWindow* w = Window();
-    if(!w)
+    QPointer<QQuickWindow> w(Window());
+    if(w.isNull())
     {
         return Err(QStringLiteral("no_window"),
                    QStringLiteral("no QQuickWindow"));
@@ -949,9 +1027,17 @@ QJsonObject QaServer::OpKey(const QJsonObject& req)
        sendEvent to the window: the ShortcutOverride pass and
        the QShortcutMap match live in QGuiApplication::notify —
        sendEvent would skip window Shortcuts entirely (Ctrl+S,
-       Ctrl+1..5 are the real keyboard-access surface). */
+       Ctrl+1..5 are the real keyboard-access surface). The
+       press itself can close the window — guard before the
+       release. */
     QKeyEvent press(QEvent::KeyPress, key, mods);
     QCoreApplication::instance()->notify(w, &press);
+    if(w.isNull())
+    {
+        return Err(QStringLiteral("no_window"),
+                   QStringLiteral("window closed during key "
+                                  "delivery"));
+    }
     QKeyEvent release(QEvent::KeyRelease, key, mods);
     QCoreApplication::instance()->notify(w, &release);
     QJsonObject r;
@@ -979,8 +1065,8 @@ QJsonObject QaServer::OpScroll(const QJsonObject& req)
         }
         pos = ItemCenter(it);
     }
-    QQuickWindow* w = Window();
-    if(!w)
+    QPointer<QQuickWindow> w(Window());
+    if(w.isNull())
     {
         return Err(QStringLiteral("no_window"),
                    QStringLiteral("no QQuickWindow"));
@@ -1003,15 +1089,22 @@ QJsonObject QaServer::OpScroll(const QJsonObject& req)
 
 QJsonObject QaServer::OpShot(const QJsonObject& req)
 {
-    QQuickWindow* w = Window();
-    if(!w)
+    QPointer<QQuickWindow> w(Window());
+    if(w.isNull())
     {
         return Err(QStringLiteral("no_window"),
                    QStringLiteral("no QQuickWindow"));
     }
     /* Pump one frame so deferred polish/layout settles before
-       the grab. */
+       the grab — the pump itself can tear the window down
+       (a queued close), so re-check before touching it. */
     QCoreApplication::processEvents();
+    if(w.isNull())
+    {
+        return Err(QStringLiteral("no_window"),
+                   QStringLiteral("window closed during "
+                                  "deferred processing"));
+    }
     const QImage img = w->grabWindow();
     if(img.isNull())
     {
@@ -1039,10 +1132,14 @@ QJsonObject QaServer::OpShot(const QJsonObject& req)
     return Ok(r);
 }
 
-QJsonObject QaServer::OpWait(const QJsonObject& req)
+QJsonObject QaServer::OpWait(const QJsonObject& req,
+                             QTcpSocket* client)
 {
     /* Nested event loop — the GUI keeps processing while the
-       reply is pending. Bounded by timeout_ms (cap 30 s). */
+       reply is pending. Bounded by timeout_ms (cap 30 s). A
+       client that hangs up mid-wait ends the loop too —
+       OnReadyRead must never write the reply to a socket it
+       no longer owns. */
     const int timeout = qBound(
         0, req.value(QStringLiteral("timeout_ms")).toInt(5000),
         30000);
@@ -1057,6 +1154,20 @@ QJsonObject QaServer::OpWait(const QJsonObject& req)
     poll.setInterval(25);
     QJsonObject result;
     bool done = false;
+    bool client_gone = false;
+    QMetaObject::Connection dc;
+    if(client != nullptr)
+    {
+        /* The lambda only flips stack flags — it never
+           dereferences `client`, so the connection dying with
+           the socket stays safe. */
+        dc = QObject::connect(client, &QTcpSocket::disconnected,
+                              [&] {
+                                  client_gone = true;
+                                  done        = true;
+                                  loop.quit();
+                              });
+    }
     QObject::connect(&poll, &QTimer::timeout, [&] {
         QString err;
         QQuickItem* it =
@@ -1099,6 +1210,18 @@ QJsonObject QaServer::OpWait(const QJsonObject& req)
     {
         loop.exec();
     }
+    if(client_gone)
+    {
+        /* The reply has nowhere to go — report it honestly so
+           OnReadyRead's guard can drop the write. */
+        return Err(QStringLiteral("client_disconnected"),
+                   QStringLiteral("client closed the socket "
+                                  "during wait"));
+    }
+    if(dc)
+    {
+        QObject::disconnect(dc);
+    }
     return result;
 }
 
@@ -1135,6 +1258,11 @@ QJsonObject QaServer::OpEval(const QJsonObject& req)
         }
         scope = it;
     }
+    /* The evaluated JS is arbitrary — `this.destroy()` or a
+       parent teardown can delete the scope mid-evaluation.
+       QPointer lets the reply path report it rather than
+       build on a dangling object. */
+    const QPointer<QObject> scope_guard(scope);
     QQmlExpression expr(engine_.rootContext(), scope, code);
     bool undefined = false;
     const QVariant v = expr.evaluate(&undefined);
@@ -1142,6 +1270,12 @@ QJsonObject QaServer::OpEval(const QJsonObject& req)
     {
         return Err(QStringLiteral("eval_error"),
                    expr.error().toString());
+    }
+    if(scope_guard.isNull())
+    {
+        return Err(QStringLiteral("scope_destroyed"),
+                   QStringLiteral("eval destroyed its scope "
+                                  "item"));
     }
     return Ok(undefined ? QJsonValue()
                         : QJsonValue::fromVariant(v));

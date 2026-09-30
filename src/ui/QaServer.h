@@ -59,7 +59,13 @@ private:
     void        OnReadyRead(QTcpSocket* sock);
     void        OnDisconnected(QTcpSocket* sock);
 
-    QJsonObject Dispatch(const QJsonObject& req);
+    /* Dispatch delivers real input events — an op can tear
+       down the very socket that carried the request (e.g. a
+       click that quits, a wait whose client hung up). The
+       client pointer threads through so OpWait can listen for
+       its disconnect. */
+    QJsonObject Dispatch(const QJsonObject& req,
+                         QTcpSocket* client);
 
     /*---- Item resolution ------------------------------------*/
     QQuickWindow*       Window() const;
@@ -86,7 +92,7 @@ private:
     QJsonObject OpKey(const QJsonObject& req);
     QJsonObject OpScroll(const QJsonObject& req);
     QJsonObject OpShot(const QJsonObject& req);
-    QJsonObject OpWait(const QJsonObject& req);
+    QJsonObject OpWait(const QJsonObject& req, QTcpSocket* client);
     QJsonObject OpEval(const QJsonObject& req);
     QJsonObject OpState();
 

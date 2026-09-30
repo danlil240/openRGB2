@@ -28,11 +28,14 @@
 #include <QEventLoop>
 #include <QGuiApplication>
 #include <QJsonArray>
+#include <QKeyEvent>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQuickItem>
 #include <QQuickStyle>
+#include <QQuickWindow>
 #include <QTcpSocket>
 
 #include <cstdio>
@@ -354,6 +357,108 @@ int main(int argc, char** argv)
                       .toObject()
                       .value(QStringLiteral("width")).toInt() > 0);
         }
+    }
+
+    /* F02 hardening — a type whose FIRST keystroke destroys
+       the target item SYNCHRONOUSLY. QML destroy()/Repeater
+       and Loader teardown are all deferred, so they cannot
+       reproduce the crash; the real F02 teardown came from
+       C++ (a model reset) inside delivery. The event filter
+       deletes the victim while the KeyPress is in flight —
+       'a' kills it, 'b' must never be delivered to a
+       dangling item and the reply stays honest. */
+    {
+        class VictimFilter final : public QObject
+        {
+        public:
+            explicit VictimFilter(QQuickItem* v) : victim_(v) {}
+            bool eventFilter(QObject*, QEvent* ev) override
+            {
+                if(ev->type() == QEvent::KeyPress)
+                {
+                    /* Synchronous delete inside the delivery
+                       stack — returning true filters the
+                       event so Qt never calls event() on the
+                       freed object. */
+                    delete victim_;
+                    return true;
+                }
+                return false;
+            }
+        private:
+            QQuickItem* victim_;
+        };
+        QQuickWindow* win = qobject_cast<QQuickWindow*>(
+            engine.rootObjects().value(0));
+        CHECK(win != nullptr);
+        QQuickItem* victim = new QQuickItem(win->contentItem());
+        victim->setObjectName(QStringLiteral("qaTypeVictim"));
+        victim->setWidth(60);
+        victim->setHeight(24);
+        victim->setFocus(true);
+        auto* vf = new VictimFilter(victim);
+        vf->setParent(victim);
+        victim->installEventFilter(vf);
+        const QJsonObject r =
+            Req(sock, {{ QStringLiteral("op"),
+                         QStringLiteral("type") },
+                       { QStringLiteral("sel"),
+                         QStringLiteral("qaTypeVictim") },
+                       { QStringLiteral("text"),
+                         QStringLiteral("ab") }});
+        CHECK(OkField(r));
+        const QJsonObject res =
+            r.value(QStringLiteral("result")).toObject();
+        /* one char delivered, the second never sent — and the
+           reply says the item died under the op honestly */
+        CHECK(res.value(QStringLiteral("sent")).toInt() == 1);
+        CHECK(res.value(QStringLiteral("destroyed"))
+                  .toBool(false) == true);
+        /* the item is really gone — resolution fails
+           honestly afterwards */
+        const QJsonObject gone =
+            Req(sock, {{ QStringLiteral("op"),
+                         QStringLiteral("find") },
+                       { QStringLiteral("sel"),
+                         QStringLiteral("qaTypeVictim") }});
+        CHECK(!OkField(gone));
+    }
+
+    /* F02 hardening — the client abandons a pending `wait`.
+       The op's nested event loop must exit on disconnect and
+       the reply must never be written to a dead socket (the
+       raw-pointer dispatch crash). A fresh connection then
+       proves the server itself survived. */
+    {
+        sock.write(QJsonDocument(QJsonObject{
+            { QStringLiteral("op"),   QStringLiteral("wait") },
+            { QStringLiteral("sel"),  QStringLiteral("navLighting") },
+            { QStringLiteral("prop"), QStringLiteral("visible") },
+            { QStringLiteral("value"), false },
+            { QStringLiteral("timeout_ms"), 30000 }})
+                .toJson(QJsonDocument::Compact));
+        sock.write("\n");
+        sock.flush();
+        /* let readyRead pick the line up and enter OpWait's
+           nested loop */
+        for(int i = 0; i < 10; ++i)
+        {
+            QCoreApplication::processEvents(
+                QEventLoop::AllEvents, 50);
+        }
+        /* hard disconnect — RST, no graceful close */
+        sock.abort();
+        for(int i = 0; i < 10; ++i)
+        {
+            QCoreApplication::processEvents(
+                QEventLoop::AllEvents, 50);
+        }
+        QTcpSocket sock2;
+        sock2.connectToHost(QStringLiteral("127.0.0.1"), port);
+        CHECK(sock2.waitForConnected(3000));
+        CHECK(OkField(Req(sock2, {{ QStringLiteral("op"),
+                                  QStringLiteral("ping") }})));
+        sock2.disconnectFromHost();
     }
 
     std::printf("%d checks, %d failures\n", checks, failures);
