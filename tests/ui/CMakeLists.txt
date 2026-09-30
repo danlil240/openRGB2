@@ -373,6 +373,41 @@ set_tests_properties(ui_workspace_import_test PROPERTIES
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${QT_BIN_DIR}")
 
+# studio-import Task 10: file actions + external-change
+# recovery — the real EngineBridge + WorkspaceController over
+# the in-process pipe against the real IpcServer +
+# EngineService + WorkspaceService + WorkspaceStore on a temp
+# managed root. Covers the ported ConfigStore cases (external
+# replacement/deletion reported once and NEVER applied,
+# same-content suppression, last-valid backup restore
+# committed forward, dirty-draft replace latching, durable
+# draft survival across workspace switches and sessions).
+add_executable(ui_workspace_recovery_test
+    ui_workspace_recovery_test.cpp)
+target_link_libraries(ui_workspace_recovery_test PRIVATE
+    openrgb2_ui
+    openrgb2_ipc_wire
+    openrgb2_ipc
+    openrgb2_engine
+    openrgb2_studio_core
+    Qt6::Gui)
+target_include_directories(ui_workspace_recovery_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui
+    ${CMAKE_SOURCE_DIR}/src/ipc
+    ${CMAKE_SOURCE_DIR}/src/engine)
+target_compile_definitions(ui_workspace_recovery_test
+    PRIVATE NDEBUG)
+set_target_properties(ui_workspace_recovery_test PROPERTIES
+    AUTOMOC ON)
+add_test(NAME ui_workspace_recovery_test
+         COMMAND ui_workspace_recovery_test)
+set_tests_properties(ui_workspace_recovery_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
+
 # studio-import Task 8: the Quick3D Layout viewport — the real
 # WorkspaceController/ObjectEditorController offline drive the
 # adapted SelectionController/CameraController (gesture routing,

@@ -35,6 +35,7 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
 
@@ -107,6 +108,29 @@ class WorkspaceController : public QObject
     Q_PROPERTY(QString statusText READ statusText
                    NOTIFY statusTextChanged)
 
+    /*---- studio-import Task 10: external change + actions ----\
+    |  The engine polls its own files (the get reply carries    |
+    |  the compare). "" | "modified" | "deleted" — surfaced for  |
+    |  the user to resolve; detection NEVER applies, saves, or   |
+    |  touches hardware. workspaceDir/Root are the engine-       |
+    |  reported managed paths (Open Workspace Folder target).    |
+    |  replaceOffered: a draft-replacing action (reload / open   |
+    |  / restore backup) is latched for an explicit confirm —    |
+    |  replaceText carries the source/destination summary.       |
+    \*---------------------------------------------------------*/
+    Q_PROPERTY(QString externalChange READ externalChange
+                   NOTIFY externalChanged)
+    Q_PROPERTY(QString externalDetail READ externalDetail
+                   NOTIFY externalChanged)
+    Q_PROPERTY(QString workspaceDir READ workspaceDir
+                   NOTIFY workspaceChanged)
+    Q_PROPERTY(QString workspaceRoot READ workspaceRoot
+                   NOTIFY workspaceChanged)
+    Q_PROPERTY(bool replaceOffered READ replaceOffered
+                   NOTIFY replaceChanged)
+    Q_PROPERTY(QString replaceText READ replaceText
+                   NOTIFY replaceChanged)
+
     /*---- studio-import Task 8: viewport editor prefs ----------
        meta.camera / meta.render / meta.ui are document editor
        preferences — they ride the draft (dirty + draft-store
@@ -147,8 +171,23 @@ public:
        switching away never loses unsaved work. */
     Q_INVOKABLE void openWorkspace(const QString& id);
     /* Re-open the active workspace from disk (reload {}), then
-       re-fetch the document — abandons draft edits + record. */
+       re-fetch the document — abandons draft edits. With a
+       dirty draft and no already-latched conflict the action
+       LATCHES for confirmation (replaceOffered) instead of
+       running — confirmReplace() executes it. */
     Q_INVOKABLE void reload();
+    /* Restore Backup (Task 10): the marker backup's last-valid
+       generation commits forward as a new generation —
+       revision-gated engine-side. Dirty drafts get the same
+       replace latch as reload. */
+    Q_INVOKABLE void restoreBackup();
+    /* Confirm / drop a latched draft-replacing action. */
+    Q_INVOKABLE void confirmReplace();
+    Q_INVOKABLE void cancelReplace();
+    /* Open the engine-reported managed workspace dir in the
+       OS shell — UI-side (QDesktopServices), the engine never
+       spawns anything. */
+    Q_INVOKABLE void openWorkspaceFolder();
     /* Reset draft edits back to the accepted baseline. */
     Q_INVOKABLE void resetEdits();
     /* Adopt / drop the offered recovery record. Recovery only
@@ -236,6 +275,13 @@ public:
     bool        recoveryOffered() const;
     bool        recoveryStale() const;
     QString     statusText() const;
+    /* Task 10 state */
+    QString     externalChange() const;
+    QString     externalDetail() const;
+    QString     workspaceDir() const;
+    QString     workspaceRoot() const;
+    bool        replaceOffered() const;
+    QString     replaceText() const;
 
     /*---- viewport editor prefs (Task 8) -------------------------*/
     /* {view,projection,tx,ty,tz,yaw,pitch,distance,span,
@@ -258,6 +304,8 @@ public:
     /*---- test hooks --------------------------------------------*/
     void setDraftDirForTesting(const QString& dir);
     void setDebounceForTesting(int ms);
+    /* External-change poll interval (ms); <=0 disables. */
+    void setExternalPollForTesting(int ms);
     int  PendingJobIdForTesting() const { return pending_job_id_; }
     /* Poll job_status for the tracked pending job — the
        lost-event reconcile path. */
@@ -294,6 +342,11 @@ signals:
     /* save() completed — `ok` distinguishes committed from
        refused so pages can surface honestly. */
     void saveFinished(bool ok);
+    /* Task 10: the engine-reported on-disk compare moved
+       (externalChange/externalDetail). */
+    void externalChanged();
+    /* Task 10: a draft-replacing action latched / resolved. */
+    void replaceChanged();
     /* meta.camera changed (setCameraState or a workspace load). */
     void cameraChanged();
     /* meta.render/meta.ui editor prefs changed. */
@@ -322,6 +375,16 @@ private:
     void SetConflict(bool on, const QString& why = QString());
     void SetSaving(bool on);
     void SetLoading(bool on);
+    /* Task 10 helpers — the external compare, the poll, and
+       the replace latch + the latched actions themselves.
+       `action` is "reload" (id = target workspace, empty for
+       the active one) or "restore_backup". */
+    void SetExternal(const QString& state, const QString& detail);
+    void UpdatePoll();
+    void OfferReplace(const QString& action, const QString& id,
+                      const QString& text);
+    void DoReload(const QString& id);
+    void DoRestoreBackup();
 
     /*---- transfers -------------------------------------------*/
     /* Staged upload: `bytes` up, then `verb` with `args` +
@@ -383,6 +446,7 @@ private:
         quint64    max_chunk = 0;
         QString    sha256;
         QString    workspace_id;   /* document fetch only       */
+        quint64    epoch = 0;      /* fetch_epoch_ at request   */
     };
     std::optional<Download> dl_;
     /* transfer_begin round-trip in flight — snapshot pushes
@@ -390,6 +454,17 @@ private:
        the first begin reply lands; never issue a second
        begin (duplicate offset-0 chunks corrupt the stream). */
     bool        dl_requested_ = false;
+    /* Identity of the in-flight document request — stamped
+       onto dl_ at begin-reply (replies carry no id). */
+    QString     dl_request_ws_;
+    quint64     dl_request_epoch_ = 0;
+    /* Bumped by every explicit reload/open/restore — a
+       document fetch that began BEFORE the user confirmed a
+       replace adopts stale bytes (the pre-switch document) and
+       its clean path would Discard the just-staged draft
+       record. Stale-epoch finishes are dropped, never
+       adopted. */
+    quint64     fetch_epoch_ = 0;
     struct Upload
     {
         QString    purpose;        /* "commit"|"save_copy"|"import" */
@@ -421,6 +496,13 @@ private:
        wholesale (draft edits abandoned — the draft record is
        already staged so nothing is lost). */
     bool        force_adopt_     = false;
+    /* openWorkspace target between the reload job's terminal
+       event and the workspace snapshot naming the new id —
+       FetchDocument must NEVER run with the stale id (it would
+       download the OLD workspace's document, adopt it, and the
+       clean path would Discard the abandoned draft record —
+       switching must never lose unsaved work). */
+    QString     pending_switch_id_;
     /* Reconnect reconcile: a commit interrupted mid-flight
        keeps its doc + hash until the next snapshot resolves
        it — never resubmitted blindly, never rolled back. */
@@ -438,11 +520,38 @@ private:
        terminal event resolves it. */
     std::map<int, QString>        import_req_names_;
     std::map<uint64_t, QString>   import_names_;
+    /* The workspace whose durable record is THIS session's
+       live-draft shadow — a clean transition drops only that
+       record; one staged by a previous session is a recovery
+       candidate CheckRecoveryOffer must surface, never
+       silently drop. */
+    QString     staged_id_;
     /* Cached baseline hash for the durable record — the
        baseline only moves at LoadApplied/ApplyRemote/
        AdoptCommitted; recomputing per edit serializes the
        whole document every keystroke. */
     QString     baseline_sha_;
+
+    /*---- Task 10: external-change surface ---------------------*/
+    /* Passive poll — issues a `get` (the reply carries the
+       engine's file compare). Detection is read-only both
+       sides; it never loads a document or applies anything. */
+    QTimer      ext_poll_;
+    int         ext_poll_ms_ = 2000;
+    QString     external_state_;      /* ""|"modified"|"deleted" */
+    QString     external_detail_;
+    QString     ws_dir_;              /* engine-reported paths  */
+    QString     ws_root_;
+    /* A draft-replacing action the user must confirm —
+       replaceText carries source/destination + the conflict
+       consequence before anything is discarded. */
+    struct PendingReplace
+    {
+        QString action;               /* "reload"|"restore_backup" */
+        QString id;                   /* reload target, "" = self  */
+        QString text;
+    };
+    std::optional<PendingReplace> pending_replace_;
     int SendCommand(const QString& verb, const QVariantMap& args,
                     const QString& tag);
     QString BaselineSha();

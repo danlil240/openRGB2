@@ -175,6 +175,39 @@ public:
        the shared "library" dir is never listed). */
     std::vector<std::string> List() const;
 
+    /*---- External-change detection (studio-import Task 10) --*\
+    |  ExternalScan is a PASSIVE fingerprint of the active      |
+    |  generation's tracked files — the marker pair (contents + |
+    |  the generation/revisions they name), the pointed         |
+    |  generation's document.json/manifest.json/original.json,  |
+    |  and a name:size stamp of its resources/ tree. The        |
+    |  service captures `signature` at every adopt/commit and   |
+    |  compares later scans against it:                         |
+    |    - identical bytes produce the SAME signature — a       |
+    |      same-content rewrite never reports a change;         |
+    |    - `missing` means a tracked file vanished (the notice  |
+    |      reads "deleted"); any other difference reads         |
+    |      "modified";                                          |
+    |    - `detail` names what moved, for the UI's notice.      |
+    |  READ-ONLY — it never cleans orphans, never mutates,      |
+    |  never rewrites a marker. watched=false means the id has  |
+    |  no managed dir at all (nothing to compare).              |
+    \*---------------------------------------------------------*/
+    struct ExternalFingerprint
+    {
+        bool        watched   = false;
+        bool        missing   = false;
+        std::string signature;
+        std::string detail;
+    };
+    ExternalFingerprint ExternalScan(const std::string& id) const;
+
+    /* The marker BACKUP's generation (active.lkg) — the
+       last-known-good load Restore Backup commits forward.
+       Empty/Failed statuses carry the honest reason; the
+       store itself never repoints the marker here. */
+    LoadResult LoadBackup(const std::string& id) const;
+
     struct CommitResult
     {
         bool        ok                 = false;

@@ -29,6 +29,7 @@
 #include "config/StudioConfig.h"
 
 #include <QCryptographicHash>
+#include <QDesktopServices>
 #include <QFile>
 #include <QMetaObject>
 #include <QUrl>
@@ -75,6 +76,18 @@ WorkspaceController::WorkspaceController(EngineBridge* bridge,
             this, &WorkspaceController::OnConnectionStateChanged);
     connect(bridge_, &EngineBridge::engineLost,
             this, &WorkspaceController::OnEngineLost);
+    /* Task 10: passive external-change detection — the poll
+       issues `get`; the reply's external_change compare is
+       read-only both sides. It never loads a document and
+       never applies. */
+    connect(&ext_poll_, &QTimer::timeout, this, [this] {
+        if(available_ && managed_ && bridge_ &&
+           bridge_->connected())
+        {
+            SendCommand(QStringLiteral("get"), {},
+                        QStringLiteral("get"));
+        }
+    });
     /* Draft records from a previous run predate any engine —
        offer recovery once local state exists. */
     QMetaObject::invokeMethod(
@@ -114,6 +127,81 @@ QString WorkspaceController::redoLabel() const
 bool    WorkspaceController::recoveryOffered() const { return recovery_offered_; }
 bool    WorkspaceController::recoveryStale() const   { return recovery_stale_; }
 QString WorkspaceController::statusText() const      { return status_text_; }
+QString WorkspaceController::externalChange() const  { return external_state_; }
+QString WorkspaceController::externalDetail() const  { return external_detail_; }
+QString WorkspaceController::workspaceDir() const    { return ws_dir_; }
+QString WorkspaceController::workspaceRoot() const   { return ws_root_; }
+bool    WorkspaceController::replaceOffered() const  { return pending_replace_.has_value(); }
+QString WorkspaceController::replaceText() const
+{
+    return pending_replace_ ? pending_replace_->text : QString();
+}
+
+void WorkspaceController::setExternalPollForTesting(int ms)
+{
+    ext_poll_ms_ = ms;
+    UpdatePoll();
+}
+
+void WorkspaceController::SetExternal(const QString& state,
+                                      const QString& detail)
+{
+    const QString s =
+        (state == QLatin1String("modified") ||
+         state == QLatin1String("deleted")) ? state : QString();
+    const bool was = !external_state_.isEmpty();
+    if(s == external_state_ && detail == external_detail_)
+    {
+        return;
+    }
+    external_state_  = s;
+    external_detail_ = detail;
+    emit externalChanged();
+    if(!s.isEmpty() && !was)
+    {
+        /* Reported ONCE per transition — detection never
+           applies, never saves, never touches hardware; the
+           notice is the whole mechanism (Task 10 hard rule). */
+        emit notice(QStringLiteral(
+            "Workspace '%1' files changed on disk (%2%3) — "
+            "nothing was applied. Reload takes the disk copy; "
+            "your draft is untouched.")
+                .arg(ws_id_)
+                .arg(s)
+                .arg(detail.isEmpty()
+                         ? QString()
+                         : QStringLiteral(": ") + detail));
+    }
+}
+
+void WorkspaceController::UpdatePoll()
+{
+    if(ext_poll_ms_ > 0 && available_ && managed_ &&
+       bridge_ != nullptr && bridge_->connected())
+    {
+        if(!ext_poll_.isActive())
+        {
+            ext_poll_.start(ext_poll_ms_);
+        }
+    }
+    else
+    {
+        ext_poll_.stop();
+    }
+}
+
+void WorkspaceController::OfferReplace(const QString& action,
+                                       const QString& id,
+                                       const QString& text)
+{
+    /* The dirty draft is NEVER replaced silently — the action
+       latches here until confirmReplace()/cancelReplace()
+       resolves it (Task 10: source/destination + conflict
+       info BEFORE replacing). */
+    pending_replace_ = PendingReplace{ action, id, text };
+    emit replaceChanged();
+    emit notice(text);
+}
 
 /*---------------------------------------------------------*\
 || small helpers                                             ||
@@ -276,6 +364,7 @@ void WorkspaceController::OnAvailabilityChanged()
             "legacy controls in use"));
     }
     CheckRecoveryOffer();
+    UpdatePoll();
 }
 
 void WorkspaceController::OnConnectionStateChanged()
@@ -295,6 +384,7 @@ void WorkspaceController::OnConnectionStateChanged()
                         QStringLiteral("get"));
         }
     }
+    UpdatePoll();
 }
 
 void WorkspaceController::OnEngineLost(const QString& reason)
@@ -353,6 +443,17 @@ void WorkspaceController::OnEngineLost(const QString& reason)
         emit importFinished(imp.name, false, lost);
     }
     import_queue_.clear();
+    /* Task 10: a pending replace latch and the external
+       compare die with the session — both re-derive from the
+       next attach's poll. */
+    if(pending_replace_)
+    {
+        pending_replace_.reset();
+        emit replaceChanged();
+    }
+    pending_switch_id_.clear();
+    SetExternal(QString(), QString());
+    UpdatePoll();
     /* A pending bundle inspect dies with the session — the
        dialog sees the honest failure, never a hang. */
     if(!pending_inspect_token_.isEmpty() ||
@@ -407,6 +508,10 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
             managed_ = false;
             emit workspaceChanged();
         }
+        SetExternal(QString(), QString());
+        ws_dir_.clear();
+        ws_root_.clear();
+        UpdatePoll();
         return;
     }
 
@@ -419,6 +524,12 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
     }
 
     const bool ws_changed  = id != ws_id_;
+    if(ws_changed || id == pending_switch_id_)
+    {
+        /* The open-target switch resolved — the ws_changed
+           fetch below now downloads the RIGHT id. */
+        pending_switch_id_.clear();
+    }
     const bool revs_moved  = ws_changed || ws != ws_rev_ ||
                              res != res_rev_;
     const bool sha_changed = sha != ws_sha256_;
@@ -427,11 +538,37 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
     ws_rev_  = ws;
     res_rev_ = res;
     ws_sha256_ = sha;
-    if(!managed_ || ws_changed || revs_moved)
+    /* Task 10: the poll reply also carries the managed paths
+       and the engine's passive file compare. Absent fields
+       (a scripted/older engine) leave prior state alone. */
+    const QString new_root =
+        snap.value(QStringLiteral("workspace_root")).toString();
+    const QString new_dir  =
+        snap.value(QStringLiteral("workspace_dir")).toString();
+    bool identity_changed = false;
+    if(!new_root.isEmpty() && new_root != ws_root_)
+    {
+        ws_root_ = new_root;
+        identity_changed = true;
+    }
+    if(!new_dir.isEmpty() && new_dir != ws_dir_)
+    {
+        ws_dir_ = new_dir;
+        identity_changed = true;
+    }
+    if(snap.contains(QStringLiteral("external_change")))
+    {
+        SetExternal(snap.value(QStringLiteral("external_change"))
+                        .toString(),
+                    snap.value(QStringLiteral("external_detail"))
+                        .toString());
+    }
+    if(!managed_ || ws_changed || revs_moved || identity_changed)
     {
         managed_ = true;
         emit workspaceChanged();
     }
+    UpdatePoll();
 
     /* An offer may predate the engine attach — restate its
        staleness against the live revisions, and DROP an offer
@@ -544,7 +681,9 @@ void WorkspaceController::FetchDocument()
     }
     else
     {
-        dl_requested_ = true;
+        dl_requested_      = true;
+        dl_request_ws_     = ws_id_;
+        dl_request_epoch_  = fetch_epoch_;
     }
 }
 
@@ -833,19 +972,24 @@ void WorkspaceController::openWorkspace(const QString& id)
     {
         return;
     }
-    /* The current draft record is staged already (debounced
-       shadow) — switching never loses unsaved work. */
-    force_adopt_ = true;
-    if(SendCommand(QStringLiteral("reload"),
-                   QVariantMap({{ QStringLiteral("id"), id }}),
-                   QStringLiteral("job:reload")) <= 0)
+    /* Task 10: a dirty draft is never replaced silently — the
+       switch latches for confirmation first (unless the
+       conflict strip already presented the choice). The draft
+       record stays staged either way — switching never loses
+       unsaved work. */
+    if(session_.Dirty() && !conflict_)
     {
-        /* No job in flight — a latched force_adopt_ would
-           wholesale-adopt the next fetch over a dirty draft. */
-        force_adopt_ = false;
-        SetError(QStringLiteral("reload request could not be "
-                                "sent"), QStringLiteral("connection"));
+        OfferReplace(QStringLiteral("reload"), id,
+            QStringLiteral(
+                "Open workspace '%1'? Source: the engine's "
+                "managed copy of '%1'. Destination: this "
+                "editing session — your unsaved edits to '%2' "
+                "would be replaced (they stay in the draft "
+                "store, recoverable until you discard).")
+                .arg(id).arg(ws_id_));
+        return;
     }
+    DoReload(id);
 }
 
 void WorkspaceController::reload()
@@ -859,14 +1003,164 @@ void WorkspaceController::reload()
         }
         return;
     }
+    /* Dirty draft + no latched conflict: confirm before the
+       disk copy replaces pending edits (Task 10). */
+    if(session_.Dirty() && !conflict_)
+    {
+        OfferReplace(QStringLiteral("reload"), QString(),
+            QStringLiteral(
+                "Reload '%1' from disk? Source: the engine's "
+                "accepted generation (revision %2)%3. "
+                "Destination: this editing session — your "
+                "unsaved edits would be replaced (they stay in "
+                "the draft store until you discard).")
+                .arg(ws_id_)
+                .arg(ws_rev_)
+                .arg(external_state_.isEmpty()
+                         ? QString()
+                         : QStringLiteral(" — the on-disk files "
+                                          "reported %1")
+                               .arg(external_state_)));
+        return;
+    }
+    DoReload(QString());
+}
+
+void WorkspaceController::DoReload(const QString& id)
+{
+    QVariantMap args;
+    if(!id.isEmpty())
+    {
+        args.insert(QStringLiteral("id"), id);
+    }
+    /* Revision-checked reload: the engine refuses when the
+       marker moved past what we last saw (Task 10). For a
+       foreign target id the revisions aren't ours to claim —
+       the engine resolves that read on its own truth. */
+    if(id.isEmpty() || id == ws_id_)
+    {
+        pending_switch_id_.clear();
+        args.insert(QStringLiteral("base_revision"),
+                    QVariant::fromValue<qulonglong>(ws_rev_));
+        args.insert(QStringLiteral("resource_revision"),
+                    QVariant::fromValue<qulonglong>(res_rev_));
+    }
+    else
+    {
+        /* Foreign open: the job event can resolve BEFORE the
+           workspace snapshot renames ws_id_ — the fetch must
+           wait for the snapshot (ApplySnapshot's ws_changed
+           path) so the old workspace's document is never
+           downloaded, adopted, or mistaken for clean state. */
+        pending_switch_id_ = id;
+    }
     force_adopt_ = true;
-    if(SendCommand(QStringLiteral("reload"), {},
+    /* Invalidate any document fetch already in flight — its
+       bytes predate the confirmed replace and must never
+       adopt (it would Discard the staged draft record). */
+    ++fetch_epoch_;
+    if(SendCommand(QStringLiteral("reload"), args,
                    QStringLiteral("job:reload")) <= 0)
     {
+        /* No job in flight — a latched force_adopt_ would
+           wholesale-adopt the next fetch over a dirty draft. */
         force_adopt_ = false;
         SetError(QStringLiteral("reload request could not be "
                                 "sent"), QStringLiteral("connection"));
     }
+}
+
+void WorkspaceController::restoreBackup()
+{
+    if(!available_ || !bridge_->connected() || !managed_)
+    {
+        if(!available_)
+        {
+            SetError(QStringLiteral("engine unavailable"),
+                     QStringLiteral("engine"));
+        }
+        return;
+    }
+    if(session_.Dirty() && !conflict_)
+    {
+        OfferReplace(QStringLiteral("restore_backup"), QString(),
+            QStringLiteral(
+                "Restore Backup for '%1'? Source: the marker "
+                "backup's last-valid generation. Destination: a "
+                "NEW committed generation — the current one "
+                "stays in history; your unsaved edits would be "
+                "replaced (they stay in the draft store).")
+                .arg(ws_id_));
+        return;
+    }
+    DoRestoreBackup();
+}
+
+void WorkspaceController::DoRestoreBackup()
+{
+    /* Same invalidation as DoReload — a fetch that began
+       before the confirmed restore must not adopt. */
+    ++fetch_epoch_;
+    const int req = SendCommand(
+        QStringLiteral("restore_backup"),
+        QVariantMap({
+            { QStringLiteral("id"),                ws_id_ },
+            { QStringLiteral("base_revision"),
+              QVariant::fromValue<qulonglong>(ws_rev_) },
+            { QStringLiteral("resource_revision"),
+              QVariant::fromValue<qulonglong>(res_rev_) },
+        }),
+        QStringLiteral("job:restore_backup"));
+    if(req <= 0)
+    {
+        SetError(QStringLiteral("restore request could not be "
+                                "sent"), QStringLiteral("connection"));
+    }
+}
+
+void WorkspaceController::confirmReplace()
+{
+    if(!pending_replace_)
+    {
+        return;
+    }
+    const PendingReplace pr = *pending_replace_;
+    pending_replace_.reset();
+    emit replaceChanged();
+    if(pr.action == QLatin1String("restore_backup"))
+    {
+        DoRestoreBackup();
+    }
+    else
+    {
+        DoReload(pr.id);
+    }
+}
+
+void WorkspaceController::cancelReplace()
+{
+    if(!pending_replace_)
+    {
+        return;
+    }
+    pending_replace_.reset();
+    emit replaceChanged();
+    SetStatus(QStringLiteral("Kept your draft — nothing was "
+                             "replaced"));
+}
+
+void WorkspaceController::openWorkspaceFolder()
+{
+    const QString dir = !ws_dir_.isEmpty() ? ws_dir_ : ws_root_;
+    if(dir.isEmpty())
+    {
+        SetError(QStringLiteral("the engine did not report a "
+                                "workspace folder"),
+                 QStringLiteral("engine"));
+        return;
+    }
+    /* UI-side only — the engine never spawns a shell. */
+    QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
 }
 
 void WorkspaceController::resetEdits()
@@ -897,12 +1191,21 @@ void WorkspaceController::redo()
 
 void WorkspaceController::exportBundle()
 {
-    if(!available_ || !managed_)
+    /* Task 10 edge: a silent return left the dialog in
+       "exporting" forever — refusals surface through error,
+       which the dialog's onErrorChanged unlatches. */
+    if(!available_ || !managed_ || !bridge_->connected())
     {
+        SetError(QStringLiteral("no managed workspace to "
+                                "export"), QStringLiteral("engine"));
         return;
     }
-    SendCommand(QStringLiteral("export"), {},
-                QStringLiteral("job:export"));
+    if(SendCommand(QStringLiteral("export"), {},
+                   QStringLiteral("job:export")) <= 0)
+    {
+        SetError(QStringLiteral("export request could not be "
+                                "sent"), QStringLiteral("connection"));
+    }
 }
 
 void WorkspaceController::importDocument(const QString& name,
@@ -994,6 +1297,40 @@ void WorkspaceController::confirmImport(const QVariantMap& choices,
     else
     {
         id = SlugFor(name);
+        /* Task 10 edge: empty mode must NEVER collide with an
+           existing workspace slug — an accidental hit would
+           read as an overwrite of the open id (revision-gated
+           but confusing). Suffix until free; the engine's
+           revision check stays the authority for anything the
+           cached list missed. */
+        auto taken = [this](const QString& c) -> bool
+        {
+            if(c == ws_id_)
+            {
+                return true;
+            }
+            for(const QVariant& v : ws_list_)
+            {
+                if(v.toString() == c)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+        if(taken(id))
+        {
+            for(int n = 2; ; ++n)
+            {
+                const QString cand =
+                    id + QLatin1Char('-') + QString::number(n);
+                if(!taken(cand))
+                {
+                    id = cand;
+                    break;
+                }
+            }
+        }
     }
     /* The revisions gate on the TARGET workspace — a fresh id
        expects 0/0; importing over/inside the open workspace
@@ -1187,14 +1524,27 @@ void WorkspaceController::NoteDraftEdited()
                       session_.ResourceRevision(),
                       BaselineSha(),
                       studio::ToJson(session_.Working()));
+        /* The record under `id` is now THIS session's live
+           shadow — a clean transition may drop it. A record
+           staged by a previous session (or a different id)
+           is a recovery candidate: never silently dropped. */
+        staged_id_ = id;
         SetStatus(QStringLiteral("Unsaved changes"));
     }
-    else if(!(recovery_offered_ && offered_ws_id_ == id))
+    else if(staged_id_ == id &&
+            !(recovery_offered_ && offered_ws_id_ == id))
     {
         /* A clean draft drops its durable shadow — unless the
            record is the outstanding recovery offer, which is
            the user's call, never ours. */
         drafts_.Discard(id);
+        staged_id_.clear();
+        SetStatus(QStringLiteral("In sync with engine"));
+    }
+    else if(staged_id_ != id)
+    {
+        /* Clean, but the record on disk was NOT staged by
+           this session — leave it for CheckRecoveryOffer. */
         SetStatus(QStringLiteral("In sync with engine"));
     }
 }
@@ -1301,12 +1651,15 @@ void WorkspaceController::OnJobReply(int request_id,
             emit importFinished(import_name, false, message);
             PumpImportQueue();
         }
-        else if(verb == QLatin1String("reload"))
+        else if(verb == QLatin1String("reload") ||
+                verb == QLatin1String("restore_backup"))
         {
             /* No job will ever resolve — a latched force_adopt_
                would wholesale-adopt the NEXT fetch over a dirty
-               draft. */
+               draft; a pending foreign-open target dies with
+               its job too. */
             force_adopt_ = false;
+            pending_switch_id_.clear();
         }
         SetError(message, QStringLiteral("engine"));
         return;
@@ -1328,9 +1681,11 @@ void WorkspaceController::OnJobReply(int request_id,
                 QStringLiteral("engine job queue is busy"));
             PumpImportQueue();
         }
-        else if(verb == QLatin1String("reload"))
+        else if(verb == QLatin1String("reload") ||
+                verb == QLatin1String("restore_backup"))
         {
             force_adopt_ = false;
+            pending_switch_id_.clear();
         }
         SetError(QStringLiteral("engine job queue is busy — "
                                 "try again"),
@@ -1344,6 +1699,7 @@ void WorkspaceController::OnJobReply(int request_id,
         pending_job_id_ = job;
     }
     else if(verb == QLatin1String("reload") ||
+            verb == QLatin1String("restore_backup") ||
             verb == QLatin1String("import_inspect") ||
             verb == QLatin1String("import_commit") ||
             verb == QLatin1String("export"))
@@ -1459,8 +1815,15 @@ void WorkspaceController::ResolveJob(const QVariantMap& st)
         else if(verb == QLatin1String("reload"))
         {
             force_adopt_ = false;
+            pending_switch_id_.clear();
             SetLoading(false);
             SetError(err, QStringLiteral("engine"));
+        }
+        else if(verb == QLatin1String("restore_backup"))
+        {
+            SetError(err.isEmpty()
+                         ? QStringLiteral("backup restore failed")
+                         : err, QStringLiteral("engine"));
         }
         else if(verb == QLatin1String("import_inspect"))
         {
@@ -1530,8 +1893,35 @@ void WorkspaceController::ResolveJob(const QVariantMap& st)
     }
     else if(verb == QLatin1String("reload"))
     {
+        if(!pending_switch_id_.isEmpty() &&
+           pending_switch_id_ != ws_id_)
+        {
+            /* Foreign open: the terminal event beat the
+               workspace snapshot — fetch NOTHING under the
+               stale id. A `get` forces the snapshot (whose
+               ws_changed path fetches the new id); the
+               passive poll is the backstop. */
+            SendCommand(QStringLiteral("get"), {},
+                        QStringLiteral("get"));
+        }
+        else
+        {
+            pending_switch_id_.clear();
+            force_adopt_ = true;
+            FetchDocument();
+        }
+    }
+    else if(verb == QLatin1String("restore_backup"))
+    {
+        /* The backup committed forward — adopt its document
+           wholesale (the user confirmed the replace) and let
+           the next poll re-baseline the external compare. */
         force_adopt_ = true;
         FetchDocument();
+        emit notice(QStringLiteral(
+            "Restored the last-valid backup — committed as "
+            "generation %1")
+                .arg(JU64(st, "generation")));
     }
     else if(verb == QLatin1String("import_inspect"))
     {
@@ -1661,6 +2051,12 @@ void WorkspaceController::OnDownloadReply(const QString& stage,
         d.sha256    = body.value(QStringLiteral("sha256"))
                           .toString();
         d.max_chunk = JU64(body, "max_chunk_bytes");
+        /* The begin reply carries no id — stamp the request's
+           workspace + epoch so a pre-switch fetch finishing
+           late is dropped instead of adopting the OLD
+           workspace's document over a confirmed replace. */
+        d.workspace_id = dl_request_ws_;
+        d.epoch        = dl_request_epoch_;
         dl_ = d;
         ContinueDownload();
         return;
@@ -1736,6 +2132,17 @@ void WorkspaceController::FinishDownload()
         emit exportReady(
             ws_name_ + QStringLiteral(".workspace.json"),
             QString::fromLatin1(d.bytes.toBase64()));
+        return;
+    }
+    /* Stale pre-switch/pre-replace fetch — its bytes are the
+       document the user already moved past. Adopting would
+       clobber the draft AND clean-Discard the durable record
+       it was just staged into; drop it and fetch the doc the
+       CURRENT snapshot actually names. */
+    if(d.epoch != fetch_epoch_ ||
+       (!d.workspace_id.isEmpty() && d.workspace_id != ws_id_))
+    {
+        FetchDocument();
         return;
     }
     AdoptFetchedDocument(d.bytes);

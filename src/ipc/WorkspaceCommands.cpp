@@ -386,7 +386,28 @@ IpcReply WorkspaceCommands::HandleGet(uint64_t session_id,
         }
         return IpcReply::Success(MsgType::Ok, out);
     }
-    return IpcReply::Success(MsgType::Ok, SnapshotJson());
+    nlohmann::json out = SnapshotJson();
+    /* Task 10: the current-workspace poll also carries the
+       on-disk truth the UI needs — the managed paths (for
+       "Open Workspace Folder") and the passive external-change
+       compare. The scan is read-only: detection NEVER loads,
+       writes, or applies a scene. */
+    out["workspace_root"] = service_->Store().Root();
+    const WorkspaceService::ExternalCheck chk =
+        service_->CheckExternal();
+    out["external_change"] = chk.state;
+    if(!chk.detail.empty())
+    {
+        out["external_detail"] = chk.detail;
+    }
+    if(out.value("managed", false) &&
+       out.contains("id") && out["id"].is_string())
+    {
+        out["workspace_dir"] =
+            service_->Store().WorkspaceDir(
+                out["id"].get<std::string>());
+    }
+    return IpcReply::Success(MsgType::Ok, out);
 }
 
 IpcReply WorkspaceCommands::HandleList(const nlohmann::json& body)
@@ -960,7 +981,7 @@ IpcReply WorkspaceCommands::Handle(uint64_t session_id,
        verb == "import_commit"  || verb == "export"      ||
        verb == "resource_install" ||
        verb == "resource_remove"  ||
-       verb == "reload")
+       verb == "reload"           || verb == "restore_backup")
     {
         return HandleJobVerb(session_id, verb, body);
     }

@@ -1002,6 +1002,343 @@ static void TestEffectResourceInstall()
     }
 }
 
+/*---------------------------------------------------------*\
+|||| T10a: ExternalScan — the passive active-generation     ||
+|||| fingerprint (studio-import Task 10, ported from the    ||
+|||| source ConfigStore external-change cases).             ||
+|||| Same-content rewrites reproduce the signature          ||
+|||| (suppression); replacement changes it; removal sets    ||
+|||| `missing`; the scan never mutates.                     ||
+\*---------------------------------------------------------*/
+static void TestExternalScan()
+{
+    const fs::path types = g_tmp / "types-t10a";
+    fs::create_directories(types);
+    WriteText((types / "mini-fan.device.json").string(),
+              TypeJson("mini-fan", 8, "base"));
+
+    WorkspaceStore::Deps deps;
+    deps.devices = RegistryWith(types.string());
+    const fs::path root = g_tmp / "ws-ext";
+    WorkspaceStore store(root.string(), deps);
+    const fs::path wsdir = root / "desk";
+
+    /* Nothing managed — not watched, not missing. */
+    {
+        const WorkspaceStore::ExternalFingerprint fp =
+            store.ExternalScan("desk");
+        CHECK(!fp.watched);
+        CHECK(!fp.missing);
+        CHECK(!store.ExternalScan("../bad").watched);
+    }
+
+    WorkspaceCandidate cand;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("disk-a", "mini-fan")),
+                        deps.devices, deps.effects, cand));
+    CHECK(store.Commit("desk", cand, std::string(), 0).ok);
+
+    const WorkspaceStore::ExternalFingerprint base =
+        store.ExternalScan("desk");
+    CHECK(base.watched);
+    CHECK(!base.missing);
+    CHECK(!base.signature.empty());
+
+    /* Same-content rewrite — identical bytes reproduce the
+       identical signature (the source's same-content watcher
+       suppression). */
+    const fs::path doc = wsdir / "generations" / "gen-000001" /
+                         "document.json";
+    const std::string orig = ReadText(doc.string());
+    WriteText(doc.string(), orig);
+    {
+        const WorkspaceStore::ExternalFingerprint fp =
+            store.ExternalScan("desk");
+        CHECK(fp.watched);
+        CHECK(fp.signature == base.signature);
+        CHECK(!fp.missing);
+    }
+
+    /* Content replacement — a different document flips the
+       signature; nothing is missing. The scan is READ-ONLY:
+       the file's own bytes are untouched afterwards. */
+    WriteText(doc.string(), orig + "\n/* outside edit */");
+    {
+        const WorkspaceStore::ExternalFingerprint fp =
+            store.ExternalScan("desk");
+        CHECK(fp.signature != base.signature);
+        CHECK(!fp.missing);
+    }
+    WriteText(doc.string(), orig);
+    {
+        const WorkspaceStore::ExternalFingerprint fp =
+            store.ExternalScan("desk");
+        CHECK(fp.signature == base.signature);   /* restore suppresses */
+    }
+
+    /* Removal sets missing + names what vanished. */
+    fs::remove(doc);
+    {
+        const WorkspaceStore::ExternalFingerprint fp =
+            store.ExternalScan("desk");
+        CHECK(fp.signature != base.signature);
+        CHECK(fp.missing);
+        CHECK(fp.detail.find("document.json") !=
+              std::string::npos);
+    }
+    WriteText(doc.string(), orig);
+
+    /* Marker deletion — the top-level "deleted" case. */
+    const std::string marker = ReadText((wsdir / "active").string());
+    fs::remove(wsdir / "active");
+    {
+        const WorkspaceStore::ExternalFingerprint fp =
+            store.ExternalScan("desk");
+        CHECK(fp.missing);
+        CHECK(fp.detail.find("marker") != std::string::npos);
+    }
+    WriteText((wsdir / "active").string(), marker);
+
+    /* Corrupt marker — modified (replaced), not missing. */
+    WriteText((wsdir / "active").string(), "garbage{{{");
+    {
+        const WorkspaceStore::ExternalFingerprint fp =
+            store.ExternalScan("desk");
+        CHECK(fp.signature != base.signature);
+        CHECK(!fp.missing);
+        CHECK(fp.detail.find("corrupt") != std::string::npos ||
+              fp.detail.find("replaced") != std::string::npos);
+    }
+    WriteText((wsdir / "active").string(), marker);
+    {
+        const WorkspaceStore::ExternalFingerprint fp =
+            store.ExternalScan("desk");
+        CHECK(fp.signature == base.signature);
+    }
+    /* The scan left everything in place. */
+    CHECK(store.Load("desk").status ==
+          WorkspaceStore::LoadStatus::Loaded);
+}
+
+/*---------------------------------------------------------*\
+|||| T10b: LoadBackup — Restore Backup's source. The       ||
+|||| marker backup's generation loads honestly; no backup   ||
+|||| refuses; a torn primary still reads the backup.        ||
+\*---------------------------------------------------------*/
+static void TestLoadBackup()
+{
+    const fs::path types = g_tmp / "types-t10b";
+    fs::create_directories(types);
+    WriteText((types / "mini-fan.device.json").string(),
+              TypeJson("mini-fan", 8, "base"));
+
+    WorkspaceStore::Deps deps;
+    deps.devices = RegistryWith(types.string());
+    const fs::path root = g_tmp / "ws-backup";
+    WorkspaceStore store(root.string(), deps);
+    const fs::path wsdir = root / "desk";
+
+    WorkspaceCandidate cand;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("gen-one", "mini-fan")),
+                        deps.devices, deps.effects, cand));
+    CHECK(store.Commit("desk", cand, std::string(), 0).ok);
+
+    /* One commit — no backup exists yet. */
+    CHECK(store.LoadBackup("desk").status ==
+          WorkspaceStore::LoadStatus::Failed);
+
+    WorkspaceCandidate cand2;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("gen-two", "mini-fan")),
+                        deps.devices, deps.effects, cand2));
+    CHECK(store.Commit("desk", cand2, std::string(), 1).ok);
+
+    /* The backup names the PREVIOUS generation — the
+       last-known-good the commit boundary saved. */
+    WorkspaceStore::LoadResult lr = store.LoadBackup("desk");
+    CHECK(lr.status == WorkspaceStore::LoadStatus::Loaded);
+    CHECK(lr.generation == 1);
+    CHECK(lr.workspace_revision == 1);
+    CHECK(lr.candidate != nullptr);
+    if(lr.candidate)
+    {
+        CHECK(lr.candidate->document.meta.name == "gen-one");
+    }
+
+    /* A torn primary doesn't disturb the backup read. */
+    const std::string marker_bytes =
+        ReadText((wsdir / "active").string());
+    WriteText((wsdir / "active").string(), "garbage{{{");
+    lr = store.LoadBackup("desk");
+    CHECK(lr.status == WorkspaceStore::LoadStatus::Loaded);
+    CHECK(lr.generation == 1);
+
+    /* Restore via the service commits the backup FORWARD as
+       a new generation — never write-in-place. */
+    WriteText((wsdir / "active").string(), marker_bytes);
+    WorkspaceService::Deps sdeps;
+    sdeps.devices = deps.devices;
+    WorkspaceService svc(root.string(), sdeps);
+    CHECK(svc.Open("desk").ok);
+    /* The revision pair is read from the durable marker —
+       doc-only commits may leave resource_revision at 1. */
+    const WorkspaceStore::Revisions rev =
+        store.LoadRevisions("desk");
+    CHECK(rev.exists);
+    CHECK(rev.workspace_revision == 2);
+    WorkspaceService::Result rr =
+        svc.RestoreBackup("desk", rev.workspace_revision,
+                          rev.resource_revision);
+    CHECK(rr.ok);
+    CHECK(rr.committed);
+    CHECK(rr.recovered);
+    CHECK(rr.generation == 3);
+    WorkspaceStore::LoadResult after = store.Load("desk");
+    CHECK(after.status == WorkspaceStore::LoadStatus::Loaded);
+    CHECK(after.generation == 3);
+    CHECK(after.candidate->document.meta.name == "gen-one");
+
+    /* A stale caller is refused — the revision gate is the
+       durable marker's, not the enqueued snapshot's. */
+    rr = svc.RestoreBackup("desk", rev.workspace_revision,
+                           rev.resource_revision);
+    CHECK(!rr.ok);
+    CHECK(rr.detail == "revision_conflict");
+    /* ...and nothing managed under an id refuses honestly. */
+    rr = svc.RestoreBackup("ghost", 0, 0);
+    CHECK(!rr.ok);
+}
+
+/*---------------------------------------------------------*\
+|||| T10c: future-schema refusal (ported source case): a    ||
+|||| marker or document declaring a NEWER schema version    ||
+|||| is never guessed/migrated — the store reports the      ||
+|||| honest failure (or recovers the last-valid gen).       ||
+\*---------------------------------------------------------*/
+static void TestFutureSchemaRefusal()
+{
+    const fs::path types = g_tmp / "types-t10c";
+    fs::create_directories(types);
+    WriteText((types / "mini-fan.device.json").string(),
+              TypeJson("mini-fan", 8, "base"));
+
+    WorkspaceStore::Deps deps;
+    deps.devices = RegistryWith(types.string());
+    const fs::path root = g_tmp / "ws-future";
+    WorkspaceStore store(root.string(), deps);
+    const fs::path wsdir = root / "desk";
+
+    WorkspaceCandidate cand;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("v3", "mini-fan")),
+                        deps.devices, deps.effects, cand));
+    CHECK(store.Commit("desk", cand, std::string(), 0).ok);
+    WorkspaceCandidate cand2;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("v3-b", "mini-fan")),
+                        deps.devices, deps.effects, cand2));
+    CHECK(store.Commit("desk", cand2, std::string(), 1).ok);
+
+    /* A future-version MARKER refuses — the lkg backup
+       recovers the last-valid generation. */
+    const fs::path marker = wsdir / "active";
+    json mj = json::parse(ReadText(marker.string()));
+    mj["schema_version"] = 99;
+    WriteText(marker.string(), mj.dump(2));
+    WorkspaceStore::LoadResult lr = store.Load("desk");
+    CHECK(lr.status == WorkspaceStore::LoadStatus::Recovered);
+    CHECK(lr.generation == 1);   /* the backup's gen */
+
+    /* Restore a sane marker; then a future-version DOCUMENT
+       (manifest hash re-pinned so the refusal is the SCHEMA,
+       not the manifest) — the generation is unusable and the
+       last-valid generation recovers. */
+    WriteText(marker.string(),
+              ReadText((wsdir / "active.lkg").string()));
+    const fs::path gendir = wsdir / "generations" / "gen-000001";
+    const fs::path doc = gendir / "document.json";
+    json dj = json::parse(ReadText(doc.string()));
+    dj["schema_version"] = 99;
+    const std::string dbytes = dj.dump(2);
+    WriteText(doc.string(), dbytes);
+    /* Re-pin the manifest entry so manifest verification
+       passes and the SCHEMA refusal is what fails. */
+    const fs::path mpath = gendir / "manifest.json";
+    json man = json::parse(ReadText(mpath.string()));
+    uint64_t h = 1469598103934665603ull;
+    for(unsigned char c : dbytes)
+    {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "fnv1a64:%016llx",
+                  (unsigned long long)h);
+    for(auto& e : man["files"])
+    {
+        if(e.value("file", std::string()) == "document.json")
+        {
+            e["sha"]   = buf;
+            e["bytes"] = (uint64_t)dbytes.size();
+        }
+    }
+    WriteText(mpath.string(), man.dump(2));
+    lr = store.Load("desk");
+    CHECK(lr.status != WorkspaceStore::LoadStatus::Loaded);
+    CHECK(lr.candidate == nullptr ||
+          lr.candidate->document.meta.name != "");
+    /* The corrupt-forward workspace never loads gen-000001's
+       document as truth — either honest recovery or an honest
+       failure, never a guessed schema. */
+    CHECK(!lr.error.empty());
+}
+
+/*---------------------------------------------------------*\
+|||| T10d: failed save -> retry (ported source case:        ||
+|||| "migration retry after failed save"). A denied write   ||
+|||| fails the commit and leaves the last generation        ||
+|||| intact; the RETRY commits cleanly on the same base.    ||
+\*---------------------------------------------------------*/
+static void TestFailedCommitRetry()
+{
+    const fs::path types = g_tmp / "types-t10d";
+    fs::create_directories(types);
+    WriteText((types / "mini-fan.device.json").string(),
+              TypeJson("mini-fan", 8, "base"));
+
+    WorkspaceStore::Deps deps;
+    deps.devices = RegistryWith(types.string());
+    const fs::path root = g_tmp / "ws-retry";
+    WorkspaceStore store(root.string(), deps);
+    const fs::path wsdir = root / "desk";
+
+    WorkspaceCandidate cand;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("first", "mini-fan")),
+                        deps.devices, deps.effects, cand));
+    CHECK(store.Commit("desk", cand, std::string(), 0).ok);
+
+    /* Deny the marker replace — the save fails, prior state
+       intact. */
+    const fs::path marker = wsdir / "active";
+    std::error_code ec;
+    fs::permissions(marker, fs::perms::owner_read,
+                    fs::perm_options::replace, ec);
+    CHECK(!ec);
+    WorkspaceCandidate cand2;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("second", "mini-fan")),
+                        deps.devices, deps.effects, cand2));
+    CHECK(!store.Commit("desk", cand2, std::string(), 1).ok);
+    WorkspaceStore::LoadResult lr = store.Load("desk");
+    CHECK(lr.status == WorkspaceStore::LoadStatus::Loaded);
+    CHECK(lr.candidate->document.meta.name == "first");
+
+    /* The retry — same base revision — lands cleanly. */
+    fs::permissions(marker, fs::perms::owner_all,
+                    fs::perm_options::replace, ec);
+    CHECK(!ec);
+    CHECK(store.Commit("desk", cand2, std::string(), 1).ok);
+    lr = store.Load("desk");
+    CHECK(lr.status == WorkspaceStore::LoadStatus::Loaded);
+    CHECK(lr.generation == 2);
+    CHECK(lr.candidate->document.meta.name == "second");
+}
+
 int main()
 {
     g_tmp = fs::temp_directory_path() /
@@ -1021,6 +1358,11 @@ int main()
     TestServiceSurface();
     TestFutureGenerationNotRewritten();
     TestEffectResourceInstall();
+    /* studio-import Task 10 */
+    TestExternalScan();
+    TestLoadBackup();
+    TestFutureSchemaRefusal();
+    TestFailedCommitRetry();
 
     fs::remove_all(g_tmp, ec);
     std::printf("%d checks, %d failures\n", checks, failures);

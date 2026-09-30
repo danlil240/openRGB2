@@ -486,10 +486,10 @@ telemetry stay live — the plan only gates document mutation.
 
 | verb | body | reply |
 | --- | --- | --- |
-| `get` | `{id?}` | `{managed,id?,workspace_revision,resource_revision,generation?,name?,content_sha256?,source_form?}` — `id` reads the durable marker of a non-current workspace |
+| `get` | `{id?}` | `{managed,id?,workspace_revision,resource_revision,generation?,name?,content_sha256?,source_form?,workspace_root,workspace_dir?,external_change,external_detail?}` — `id` reads the durable marker of a non-current workspace. For the CURRENT workspace the reply also carries the managed paths and the passive external-change compare (Task 10): `external_change` is `"none"` \| `"modified"` \| `"deleted"` — REPORT ONLY, the engine never reloads or applies on detection, and a byte-identical rewrite reproduces the same signature (same-content suppression, re-baselined at every adopt/commit) |
 | `list` | `{offset?,limit?}` (limit ≤256) | `{workspaces:[id...],total,offset,limit,active}` |
 | `catalog` | `{kind:devices|effects|workspaces,offset?,limit?}` | `{kind,entries:[...],total,offset,limit,more,next_offset}` — pages are additionally byte-budgeted (~768 KiB serialized); `more:true` + `next_offset` continue the walk, and `next_offset` always advances so a malformed stream can't stall. `effects` entries carry `document_text` (authored field-order byte stream); an oversized lone entry degrades to `document_omitted:true` (document_text dropped) then `description_omitted:true` (bounded description) instead of failing the page |
-| `validate`/`commit`/`save_copy`/`import_inspect`/`import_commit`/`export`/`reload`/`resource_install`/`resource_remove` | `{staged?|document?, base_revision?, resource_revision?, id?, name?, ...}` | `OK {accepted:true,job_id}` or `OK {accepted:false,detail:"busy"}` (bounded queue full); `staged` is a finished upload token owned by this session |
+| `validate`/`commit`/`save_copy`/`import_inspect`/`import_commit`/`export`/`reload`/`restore_backup`/`resource_install`/`resource_remove` | `{staged?|document?, base_revision?, resource_revision?, id?, name?, ...}` | `OK {accepted:true,job_id}` or `OK {accepted:false,detail:"busy"}` (bounded queue full); `staged` is a finished upload token owned by this session |
 | `resource_get` | `{kind:device_type|effect, id:<preset id>}` | `{kind,id,found,document?,from_file?,packaged_default?}` — synchronous read of the effective resource (file-layer override over the packaged default); `found:false` when no layer resolves |
 | `job_status` | `{job_id}` | job status record (below) |
 | `job_cancel` | `{job_id}` | `{cancelled:true,job_id}` / ERROR |
@@ -533,6 +533,30 @@ Task-9 verb details — the portable-bundle and resource surface:
   entry — packaged defaults, in-use ids, and child-referenced ids
   refuse honestly (`detail:"in_use"`); deleting an override reverts
   to the packaged default (`result.reverted_to_default`).
+
+Task-10 verb details — file actions + external-change recovery:
+
+- `reload` `{id?, base_revision?, resource_revision?}` re-opens the
+  durable workspace state. When the caller passes its last-seen
+  revisions they are re-checked against the marker at job time —
+  a moved workspace refuses `revision_conflict` instead of
+  silently adopting. Omitting them (or passing a foreign `id`)
+  asks the engine to read on its own truth.
+- `restore_backup` `{id?, base_revision, resource_revision}` loads
+  the generation the marker BACKUP (`active.lkg`) names and
+  commits it forward as a NEW immutable generation — never a
+  write-in-place repoint; the restored candidate applies through
+  the normal post-commit seam (explicit user action). No marker
+  backup or an unusable generation fails honestly.
+- `external_change` on `get` is a passive fingerprint of the
+  active generation's tracked files (both markers, the pointed
+  generation's document/manifest/original, and a resources
+  name:size stamp): `"modified"` for replaced/corrupt bytes,
+  `"deleted"` when a tracked file vanished, `"none"` when the
+  scan reproduces the baseline. The UI polls it; detection never
+  auto-loads, never saves, and never touches `apply_scene` — the
+  notice is the whole mechanism and the user picks reload vs.
+  keep-draft explicitly.
 
 The preview verbs drive the bounded draft-preview feed (Task 7,
 plan §3.4): ONE `PreviewSession` per IPC session, at most two

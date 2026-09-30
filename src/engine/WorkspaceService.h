@@ -238,6 +238,34 @@ public:
        mutations (plan 3.3: detail "workspace_required"). */
     bool         ManagedActive()      const;
 
+    /*---- External-change detection (studio-import Task 10) --*\
+    |  CheckExternal re-scans the active generation's tracked   |
+    |  files and compares against the signature captured at the |
+    |  last adopt/commit. state is "none" | "modified" |        |
+    |  "deleted" — REPORTED ONLY: detection never loads, never  |
+    |  writes, and NEVER reaches deps_.apply_scene. A           |
+    |  byte-identical rewrite reproduces the same signature     |
+    |  (same-content suppression). A commit racing the scan     |
+    |  simply reports "none" this round.                        |
+    \*---------------------------------------------------------*/
+    struct ExternalCheck
+    {
+        bool        managed = false;
+        std::string state;      /* "none" when clean/absent */
+        std::string detail;
+    };
+    ExternalCheck CheckExternal();
+
+    /* Restore Backup (job verb "restore_backup"): loads the
+       generation the marker BACKUP (active.lkg) names and
+       commits it forward as a NEW immutable generation —
+       revision-gated like every commit, never write-in-place.
+       The restored candidate applies through the normal
+       post-commit seam (this is an explicit user action). */
+    Result RestoreBackup(const std::string& id,
+                         uint64_t expected_workspace_revision,
+                         uint64_t expected_resource_revision);
+
     /*---- Job queue (session-bound; plan 3.3) --------------
        Enqueue validates cheaply (verb, required fields, the
        pending bound) and returns the accepted job id — job
@@ -277,6 +305,11 @@ private:
         uint64_t workspace_revision = 0;
         uint64_t resource_revision  = 0;
         uint64_t generation         = 0;
+        /* External-change baseline — the active generation's
+           signature captured by ExternalScan at adopt/commit.
+           CheckExternal compares a fresh scan against it; a
+           byte-identical rewrite reproduces the same token. */
+        std::string external_sig;
     };
     /* Serialized-commit core — CALLER HOLDS mutex_. When
        apply_after is set the committed candidate is handed back

@@ -292,6 +292,16 @@ Item {
                              && workspace.ready
                     onClicked: bundleDlg.open()
                 }
+                AppButton {
+                    objectName: "wsActionsButton"
+                    /* Task 10: the remaining workspace file
+                       actions — open/save-copy/reload/restore
+                       backup/reset/open folder. */
+                    text: qsTr("Workspace…")
+                    enabled: typeof workspace !== "undefined"
+                             && workspace.managed
+                    onClicked: wsActionsDlg.open()
+                }
                 Text {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignRight
@@ -1712,6 +1722,10 @@ Item {
     }
     WorkspaceImportDialog {
         id: bundleDlg
+        anchors.centerIn: parent
+    }
+    WorkspaceActionsDialog {
+        id: wsActionsDlg
         anchors.centerIn: parent
     }
 }

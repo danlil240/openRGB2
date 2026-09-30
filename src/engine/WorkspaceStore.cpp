@@ -1304,6 +1304,242 @@ WorkspaceStore::LoadResult WorkspaceStore::Load(
     return res;    /* dir existed but held nothing — Empty */
 }
 
+WorkspaceStore::LoadResult WorkspaceStore::LoadBackup(
+    const std::string& id) const
+{
+    LoadResult res;
+    if(!IsWorkspaceId(id))
+    {
+        res.status = LoadStatus::Failed;
+        res.error  = "invalid workspace id '" + id + "'";
+        return res;
+    }
+    const fs::path wsdir = WorkspaceDir(id);
+    std::error_code ec;
+    if(!fs::is_directory(wsdir, ec))
+    {
+        return res;    /* Empty — nothing managed under this id */
+    }
+    if(!InsideRoot(root_, wsdir))
+    {
+        res.status = LoadStatus::Failed;
+        res.error  = "workspace dir '" + wsdir.string() +
+                     "' is outside the managed root — refused";
+        return res;
+    }
+    /* Restore Backup loads the generation the MARKER BACKUP
+       names — the last-valid pointer the commit boundary
+       maintains. It is never guessed: a missing/corrupt
+       backup reports honestly instead of picking a dir. */
+    const Marker backup = ReadMarker(wsdir / "active.lkg");
+    if(!backup.valid)
+    {
+        res.status = LoadStatus::Failed;
+        res.error  = backup.exists
+            ? "workspace '" + id + "' marker backup is unreadable "
+              "(" + backup.error + ")"
+            : "workspace '" + id + "' has no marker backup — "
+              "nothing to restore";
+        return res;
+    }
+    WorkspaceCandidate cand;
+    std::vector<std::string> errs;
+    const fs::path gendir =
+        wsdir / "generations" / backup.generation;
+    if(!LoadGeneration(root_, deps_, gendir, cand, errs,
+                       res.warnings))
+    {
+        res.status = LoadStatus::Failed;
+        for(const std::string& e : errs)
+        {
+            if(!res.error.empty())
+            {
+                res.error += "; ";
+            }
+            res.error += e;
+        }
+        if(res.error.empty())
+        {
+            res.error = "backup generation '" + backup.generation +
+                        "' unusable";
+        }
+        return res;
+    }
+    res.status            = LoadStatus::Loaded;
+    res.candidate         =
+        std::make_shared<WorkspaceCandidate>(std::move(cand));
+    res.generation        = backup.gen_num;
+    res.workspace_revision = backup.workspace_revision;
+    res.resource_revision  = backup.resource_revision;
+    return res;
+}
+
+WorkspaceStore::ExternalFingerprint WorkspaceStore::ExternalScan(
+    const std::string& id) const
+{
+    ExternalFingerprint fp;
+    if(!IsWorkspaceId(id))
+    {
+        fp.detail = "invalid workspace id '" + id + "'";
+        return fp;
+    }
+    const fs::path wsdir = WorkspaceDir(id);
+    std::error_code ec;
+    if(!fs::is_directory(wsdir, ec))
+    {
+        /* Nothing managed under this id — not an external
+           change, just nothing to watch. */
+        return fp;
+    }
+    fp.watched = true;
+
+    /* Signature mixer — every tracked byte feeds one ordered
+       token; identical content reproduces it exactly. */
+    std::string sig;
+    auto mix = [&sig](const char* tag, const std::string& v)
+    {
+        sig += tag;
+        sig += '=';
+        sig += v;
+        sig += ';';
+    };
+    auto mix_marker = [&](const char* tag, const Marker& m)
+    {
+        if(!m.exists)
+        {
+            mix(tag, "absent");
+        }
+        else if(!m.valid)
+        {
+            /* Content-pinned: rewriting the marker with the
+               same corrupt bytes stays suppressed. */
+            mix(tag, "corrupt:" + HashBytes(m.bytes));
+        }
+        else
+        {
+            mix(tag, m.generation + "/" +
+                     std::to_string(m.workspace_revision) + "/" +
+                     std::to_string(m.resource_revision));
+        }
+    };
+    const Marker primary = ReadMarker(wsdir / "active");
+    const Marker backup  = ReadMarker(wsdir / "active.lkg");
+    mix_marker("m", primary);
+    mix_marker("b", backup);
+
+    if(!primary.exists)
+    {
+        fp.missing = true;
+        fp.detail  = "active marker removed";
+    }
+    else if(!primary.valid)
+    {
+        fp.detail  = "active marker replaced or corrupt (" +
+                     primary.error + ")";
+    }
+    else
+    {
+        const fs::path gendir =
+            wsdir / "generations" / primary.generation;
+        if(!fs::is_directory(gendir, ec))
+        {
+            fp.missing = true;
+            fp.detail  = "generation '" + primary.generation +
+                         "' removed";
+            mix("g", "absent");
+        }
+        else
+        {
+            mix("g", primary.generation);
+            auto mix_file = [&](const char* tag,
+                                const char* rel)
+            {
+                std::string bytes;
+                const fs::path p = gendir / rel;
+                if(ReadFileBytes(p, bytes))
+                {
+                    mix(tag, HashBytes(bytes));
+                }
+                else
+                {
+                    mix(tag, "absent");
+                    if(fs::exists(p, ec))
+                    {
+                        if(fp.detail.empty())
+                        {
+                            fp.detail = std::string(rel) +
+                                        " unreadable";
+                        }
+                    }
+                    else
+                    {
+                        fp.missing = true;
+                        if(fp.detail.empty())
+                        {
+                            fp.detail = std::string(rel) +
+                                        " removed";
+                        }
+                    }
+                }
+            };
+            mix_file("doc",    "document.json");
+            mix_file("man",    "manifest.json");
+            /* original.json is OPTIONAL — absent is a state,
+               never a "missing" finding. Mix it as a plain
+               present/absent+hash so its arrival or churn
+               still registers. */
+            {
+                std::string bytes;
+                const fs::path op = gendir / "original.json";
+                if(ReadFileBytes(op, bytes))
+                {
+                    mix("orig", HashBytes(bytes));
+                }
+                else
+                {
+                    mix("orig", "absent");
+                    if(fs::exists(op, ec) && fp.detail.empty())
+                    {
+                        fp.detail = "original.json unreadable";
+                    }
+                }
+            }
+            /* Resource snapshot stamp — sorted rel:size pairs
+               catch add/remove/replace without hashing every
+               byte (content churn inside the generation's own
+               snapshot is engine-owned anyway). */
+            const fs::path rdir = gendir / "resources";
+            std::string stamp;
+            if(fs::is_directory(rdir, ec))
+            {
+                std::vector<std::string> entries;
+                for(fs::recursive_directory_iterator
+                        it(rdir, ec), end;
+                    !ec && it != end; it.increment(ec))
+                {
+                    if(!it->is_regular_file(ec))
+                    {
+                        continue;
+                    }
+                    entries.push_back(
+                        fs::relative(it->path(), rdir, ec)
+                            .generic_string() + ":" +
+                        std::to_string(it->file_size(ec)));
+                }
+                std::sort(entries.begin(), entries.end());
+                for(const std::string& e : entries)
+                {
+                    stamp += e;
+                    stamp += ';';
+                }
+            }
+            mix("res", stamp);
+        }
+    }
+    fp.signature = std::move(sig);
+    return fp;
+}
+
 WorkspaceStore::CommitResult WorkspaceStore::Commit(
     const std::string& id,
     const WorkspaceCandidate& candidate,

@@ -553,6 +553,10 @@ WorkspaceService::Result WorkspaceService::Open(const std::string& id)
     current_.workspace_revision = lr.workspace_revision;
     current_.resource_revision  = lr.resource_revision;
     current_.generation         = lr.generation;
+    /* Re-baseline the external-change signature at every
+       adopt — files the service itself just selected are the
+       new truth, never a "change" (Task 10). */
+    current_.external_sig      = store_.ExternalScan(id).signature;
     PublishLocked();
     res.ok                 = true;
     res.generation         = lr.generation;
@@ -607,6 +611,9 @@ WorkspaceService::Result WorkspaceService::CommitCommon(
     current_.workspace_revision = cr.workspace_revision;
     current_.resource_revision  = cr.resource_revision;
     current_.generation         = cr.generation;
+    /* Our own commit is the new baseline — the files the
+       store just wrote are never an external "change". */
+    current_.external_sig      = store_.ExternalScan(id).signature;
     PublishLocked();
 
     /* Publish AFTER the durable commit — and AFTER the caller
@@ -656,6 +663,138 @@ void WorkspaceService::ApplyAfterCommit(
                     std::to_string(generation) +
                     " but the scene apply failed: " + aerr;
     }
+}
+
+WorkspaceService::ExternalCheck WorkspaceService::CheckExternal()
+{
+    ExternalCheck out;
+    const PublishedState snap = Snapshot();
+    if(!snap.managed)
+    {
+        return out;
+    }
+    out.managed = true;
+    /* Capture the baseline under the lock, scan OFF it (file
+       I/O on a reader thread — the DocumentBytes discipline),
+       then re-verify the baseline did not move. A commit
+       landing mid-scan reports "none" this round; the next
+       poll compares against the new baseline. */
+    std::string baseline;
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        if(current_.id != snap.id || current_.external_sig.empty())
+        {
+            out.state = "none";
+            return out;
+        }
+        baseline = current_.external_sig;
+    }
+    const WorkspaceStore::ExternalFingerprint fp =
+        store_.ExternalScan(snap.id);
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        if(current_.id != snap.id ||
+           current_.external_sig != baseline)
+        {
+            out.state = "none";
+            return out;
+        }
+        if(!fp.watched)
+        {
+            /* Managed id, but its workspace dir is gone —
+               that IS a deletion. */
+            out.state  = "deleted";
+            out.detail = "workspace directory removed";
+            return out;
+        }
+        if(fp.signature == baseline)
+        {
+            out.state = "none";
+            return out;
+        }
+        out.state  = fp.missing ? "deleted" : "modified";
+        out.detail = fp.detail.empty()
+            ? (fp.missing ? "workspace files were removed"
+                          : "workspace files changed on disk")
+            : fp.detail;
+        return out;
+    }
+}
+
+WorkspaceService::Result WorkspaceService::RestoreBackup(
+    const std::string& id,
+    uint64_t expected_workspace_revision,
+    uint64_t expected_resource_revision)
+{
+    std::shared_ptr<const WorkspaceCandidate> apply_cand;
+    Result res;
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        if(!WorkspaceStore::IsWorkspaceId(id))
+        {
+            res.error  = "invalid workspace id '" + id + "'";
+            res.detail = "bad_request";
+            return res;
+        }
+        /* Same commit-time gate as CommitJson — the durable
+           marker decides, never the enqueue snapshot. */
+        const WorkspaceStore::Revisions rev =
+            store_.LoadRevisions(id);
+        if(rev.exists && !rev.error.empty())
+        {
+            res.error  = "workspace marker unreadable: " +
+                         rev.error;
+            res.detail = "marker_unreadable";
+            return res;
+        }
+        if(!rev.exists)
+        {
+            res.error  = "no managed workspace '" + id +
+                         "' under " + store_.Root();
+            res.detail = "bad_request";
+            return res;
+        }
+        if(rev.workspace_revision != expected_workspace_revision ||
+           rev.resource_revision  != expected_resource_revision)
+        {
+            res.error = "stale revision: expected {" +
+                std::to_string(expected_workspace_revision) + "," +
+                std::to_string(expected_resource_revision) +
+                "} but '" + id + "' is at {" +
+                std::to_string(rev.workspace_revision) + "," +
+                std::to_string(rev.resource_revision) + "}";
+            res.detail = "revision_conflict";
+            return res;
+        }
+        const WorkspaceStore::LoadResult lr =
+            store_.LoadBackup(id);
+        res.warnings = lr.warnings;
+        if(lr.status != WorkspaceStore::LoadStatus::Loaded ||
+           !lr.candidate)
+        {
+            res.error = lr.error.empty()
+                ? "no usable backup generation for '" + id + "'"
+                : lr.error;
+            return res;
+        }
+        /* The backup's candidate commits FORWARD as a new
+           immutable generation — the store's own atomic
+           contract; never write-in-place over the active
+           generation (Task 10 hard rule). */
+        WorkspaceCandidate cand = *lr.candidate;
+        res = CommitCommon(id, cand, std::string(),
+                           expected_workspace_revision,
+                           /*apply_after=*/true, &apply_cand);
+        if(res.ok)
+        {
+            res.recovered = true;
+            res.warnings.push_back(
+                "restored generation " + std::to_string(lr.generation) +
+                " (the marker backup's last-valid generation)");
+        }
+    }
+    ApplyAfterCommit(apply_cand, res.generation, res);
+    return res;
 }
 
 WorkspaceService::Result WorkspaceService::Save(
@@ -951,7 +1090,7 @@ bool IsJobVerb(const std::string& v)
            v == "import_commit" || v == "export"      ||
            v == "resource_install" ||
            v == "resource_remove" ||
-           v == "reload";
+           v == "reload"      || v == "restore_backup";
 }
 
 } /* anonymous namespace */
@@ -970,11 +1109,12 @@ WorkspaceService::JobResult WorkspaceService::Enqueue(
 
     /* Cheap synchronous validation — the worker re-checks the
        durable revisions; enqueue never does file I/O. `reload`
-       may omit id: the worker falls back to the current
-       workspace. */
+       and `restore_backup` may omit id: the worker falls back
+       to the current workspace. */
     const bool needs_id = verb != "export" &&
                           verb != "import_inspect" &&
-                          verb != "reload";
+                          verb != "reload" &&
+                          verb != "restore_backup";
     const std::string id = body.value("id", std::string());
     if(needs_id && id.empty())
     {
@@ -991,7 +1131,7 @@ WorkspaceService::JobResult WorkspaceService::Enqueue(
     const bool needs_revisions =
         verb == "commit" || verb == "save_copy" ||
         verb == "validate" || verb == "resource_install" ||
-        verb == "resource_remove";
+        verb == "resource_remove" || verb == "restore_backup";
     if(needs_revisions)
     {
         uint64_t unused = 0;
@@ -1796,6 +1936,30 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
             return fail("no managed workspace is active",
                         "bad_request");
         }
+        /* Task 10: when the caller passes its last-seen
+           revisions, a reload issued against state the engine
+           already moved past refuses honestly rather than
+           silently adopting — the explicit, revision-checked
+           re-read the brief requires. */
+        if(body.contains("base_revision"))
+        {
+            uint64_t base_rev = 0, res_rev = 0;
+            JsonU64(body, "base_revision",     base_rev);
+            JsonU64(body, "resource_revision", res_rev);
+            const WorkspaceStore::Revisions rev =
+                store_.LoadRevisions(id);
+            if(rev.exists && !rev.error.empty())
+            {
+                return fail("workspace marker unreadable: " +
+                            rev.error, "marker_unreadable");
+            }
+            if(rev.workspace_revision != base_rev ||
+               rev.resource_revision  != res_rev)
+            {
+                return fail("stale revision for '" + id + "'",
+                            "revision_conflict");
+            }
+        }
         Result res = Open(id);
         if(res.ok && deps_.apply_scene)
         {
@@ -1812,6 +1976,29 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
             }
         }
         return done(res);
+    }
+
+    if(verb == "restore_backup")
+    {
+        /* Task 10 Restore Backup — the marker backup's
+           generation commits forward as a NEW generation,
+           revision-gated at commit time. An explicit user
+           action, so the restored scene applies. */
+        std::string id = body.value("id", std::string());
+        if(id.empty())
+        {
+            std::lock_guard<std::mutex> g(mutex_);
+            id = current_.id;
+        }
+        if(id.empty())
+        {
+            return fail("no managed workspace is active",
+                        "bad_request");
+        }
+        uint64_t base_rev = 0, res_rev = 0;
+        JsonU64(body, "base_revision",     base_rev);
+        JsonU64(body, "resource_revision", res_rev);
+        return done(RestoreBackup(id, base_rev, res_rev));
     }
 
     return fail("unknown job verb '" + verb + "'", "bad_request");
@@ -1950,6 +2137,18 @@ WorkspaceService::Result WorkspaceService::ImportStagedJson(
     {
         res.error  = "stale revision for '" + id + "'";
         res.detail = "revision_conflict";
+        return res;
+    }
+    /* Task 10 edge: types-only installs land in a managed
+       workspace's library — with nothing managed under the
+       id the per-type install used to die on the cryptic
+       "no readable marker" marker gate. Refuse up front. */
+    if(mode == "preset_import" && !rev.exists)
+    {
+        res.error  = "'preset_import' installs bundle types "
+                     "into a managed workspace's library — '" +
+                     id + "' has no managed workspace";
+        res.detail = "bad_request";
         return res;
     }
 

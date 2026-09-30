@@ -160,8 +160,20 @@ Popup {
                                 doc.packaged === true,
                                 doc.instances || 0)
             }
-            else if (doc.error !== undefined)
+            else if (doc.error !== undefined) {
+                /* Same outstanding-request guard as the ok
+                   branch — a late error for a superseded
+                   fetch must not overwrite the status of a
+                   newer openFor. */
+                if (editor.fetchId !== ""
+                        && doc.id !== undefined
+                        && String(doc.id) !== editor.fetchId)
+                    return
+                if (doc.id !== undefined
+                        && String(doc.id) === editor.fetchId)
+                    editor.fetchId = ""
                 editor.status = String(doc.error)
+            }
         }
         function onPresetSaveResult(res) {
             editor.busy = false

@@ -87,6 +87,7 @@ qt_add_qml_module(openrgb2_ui
         studio/DeviceTree.qml
         studio/TransformInspector.qml
         studio/WorkspaceImportDialog.qml
+        studio/WorkspaceActionsDialog.qml
         studio/EffectEditor.qml
         studio/EffectInspector.qml
         studio/LayerStack.qml

@@ -90,7 +90,9 @@ Popup {
 
     function doExport() {
         var c = ctl()
-        if (c === null || phase !== "idle") return
+        /* "done" is quiescent too — a successful import must
+           not leave the export path dead until reopen. */
+        if (c === null || (phase !== "idle" && phase !== "done")) return
         phase = "exporting"
         status = qsTr("Exporting…")
         /* void — the outcome lands in onExportReady or the

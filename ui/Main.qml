@@ -374,7 +374,13 @@ ApplicationWindow {
                          && (workspace.recoveryOffered
                              || (root.wsManaged
                                  && (workspace.conflict
-                                     || workspace.saving))
+                                     || workspace.saving
+                                     || (workspace.externalChange
+                                         !== undefined
+                                         && workspace.externalChange
+                                            !== "")
+                                     || workspace.replaceOffered
+                                         === true))
                              || root.wsNotice !== "")
                 Layout.fillWidth: true
                 implicitHeight: wsRow.implicitHeight
@@ -400,9 +406,8 @@ ApplicationWindow {
 
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
-                        width: parent.width - recBtn.width
-                               - dropBtn.width - keepBtn.width
-                               - takeBtn.width - Theme.spaceL * 4
+                        width: parent.width - wsBtns.width
+                               - parent.spacing
                         wrapMode: Text.WordWrap
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSizeBody
@@ -413,6 +418,17 @@ ApplicationWindow {
                                 return workspace.recoveryStale
                                     ? qsTr("An unsaved draft was found for this workspace — it was made against an older revision. Recover it as pending edits or discard it.")
                                     : qsTr("An unsaved draft was found for this workspace. Recover it as pending edits or discard it.");
+                            if(root.wsManaged && workspace.replaceOffered)
+                                return workspace.replaceText;
+                            if(root.wsManaged
+                               && workspace.externalChange !== undefined
+                               && workspace.externalChange !== "")
+                                return workspace.externalDetail !== ""
+                                    ? qsTr("Workspace files changed on disk (%1: %2). Nothing was applied — Reload takes the disk copy, or keep working and Save.")
+                                          .arg(workspace.externalChange)
+                                          .arg(workspace.externalDetail)
+                                    : qsTr("Workspace files changed on disk (%1). Nothing was applied — Reload takes the disk copy, or keep working and Save.")
+                                          .arg(workspace.externalChange);
                             if(root.wsManaged && workspace.conflict)
                                 return qsTr("The workspace changed on the engine under your edits. Save commits your draft on top; Reload takes the engine copy.");
                             if(root.wsManaged && workspace.saving)
@@ -420,45 +436,81 @@ ApplicationWindow {
                             return root.wsNotice;
                         }
                     }
-                    AppButton {
-                        id: recBtn
-                        objectName: "wsRecover"
+                    Row {
+                        id: wsBtns
                         anchors.verticalCenter: parent.verticalCenter
-                        visible: typeof workspace !== "undefined"
-                                 && workspace.recoveryOffered
-                        text: qsTr("Recover draft")
-                        onClicked: workspace.recoverDraft()
-                    }
-                    AppButton {
-                        id: dropBtn
-                        objectName: "wsDiscardDraft"
-                        anchors.verticalCenter: parent.verticalCenter
-                        visible: typeof workspace !== "undefined"
-                                 && workspace.recoveryOffered
-                        text: qsTr("Discard")
-                        onClicked: workspace.discardDraft()
-                    }
-                    AppButton {
-                        id: keepBtn
-                        objectName: "wsKeepDraft"
-                        anchors.verticalCenter: parent.verticalCenter
-                        visible: root.wsManaged
-                                 && workspace.conflict
-                        text: qsTr("Keep my draft (Save)")
-                        /* Same path as Lighting's Save — the
-                           focused text field's uncommitted
-                           text flushes into the draft before
-                           the commit, never silently lost. */
-                        onClicked: lightingPage.commitPendingEdits()
-                    }
-                    AppButton {
-                        id: takeBtn
-                        objectName: "wsTakeEngine"
-                        anchors.verticalCenter: parent.verticalCenter
-                        visible: root.wsManaged
-                                 && workspace.conflict
-                        text: qsTr("Take engine copy")
-                        onClicked: workspace.reload()
+                        spacing: Theme.spaceS
+                        AppButton {
+                            id: recBtn
+                            objectName: "wsRecover"
+                            visible: typeof workspace !== "undefined"
+                                     && workspace.recoveryOffered
+                            text: qsTr("Recover draft")
+                            onClicked: workspace.recoverDraft()
+                        }
+                        AppButton {
+                            id: dropBtn
+                            objectName: "wsDiscardDraft"
+                            visible: typeof workspace !== "undefined"
+                                     && workspace.recoveryOffered
+                            text: qsTr("Discard")
+                            onClicked: workspace.discardDraft()
+                        }
+                        /* Task 10: a draft-replacing action latched
+                           for confirmation — the text on the left
+                           carries the source/destination summary. */
+                        AppButton {
+                            id: confirmBtn
+                            objectName: "wsConfirmReplace"
+                            visible: root.wsManaged
+                                     && workspace.replaceOffered === true
+                            text: qsTr("Replace my draft")
+                            onClicked: workspace.confirmReplace()
+                        }
+                        AppButton {
+                            id: cancelBtn
+                            objectName: "wsCancelReplace"
+                            visible: root.wsManaged
+                                     && workspace.replaceOffered === true
+                            text: qsTr("Keep my draft")
+                            onClicked: workspace.cancelReplace()
+                        }
+                        AppButton {
+                            id: reloadDiskBtn
+                            objectName: "wsReloadDisk"
+                            /* External-change notice only offers the
+                               reload while no replace is latched — a
+                               dirty draft confirms through the strip
+                               above first. */
+                            visible: root.wsManaged
+                                     && workspace.externalChange
+                                        !== undefined
+                                     && workspace.externalChange !== ""
+                                     && !workspace.replaceOffered
+                            text: qsTr("Reload from disk")
+                            onClicked: workspace.reload()
+                        }
+                        AppButton {
+                            id: keepBtn
+                            objectName: "wsKeepDraft"
+                            visible: root.wsManaged
+                                     && workspace.conflict
+                            text: qsTr("Keep my draft (Save)")
+                            /* Same path as Lighting's Save — the
+                               focused text field's uncommitted
+                               text flushes into the draft before
+                               the commit, never silently lost. */
+                            onClicked: lightingPage.commitPendingEdits()
+                        }
+                        AppButton {
+                            id: takeBtn
+                            objectName: "wsTakeEngine"
+                            visible: root.wsManaged
+                                     && workspace.conflict
+                                     && !workspace.replaceOffered
+                            text: qsTr("Take engine copy")
+                            onClicked: workspace.reload()
+                        }
                     }
                 }
             }
