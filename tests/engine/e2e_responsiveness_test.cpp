@@ -204,6 +204,8 @@ struct PipeClient
     uint32_t                            req_id = 0;
     uint64_t                            events_seen = 0;
     uint64_t                            topo_seen   = 0;
+    ipc::Message                        last_reply;   /* match of
+                                                         last AwaitType */
 
     bool Connect(const std::string& pipe)
     {
@@ -276,6 +278,7 @@ struct PipeClient
                         ipc::MsgTypeName(m.type));
                 return false;
             }
+            last_reply = m;
             return true;
         }
     }
@@ -371,11 +374,12 @@ int main(int argc, char** argv)
     EngineHostOptions opts;
     opts.sdk_enabled    = true;
     opts.ipc_enabled    = true;
-    const std::string cmd_pipe =
+    const std::string cmd_pipe  =
         "\\\\.\\pipe\\openrgb2-e2e-resp";
-    opts.command_pipe_name     = cmd_pipe;
-    opts.diagnostics_pipe_name =
+    const std::string diag_pipe =
         "\\\\.\\pipe\\openrgb2-e2e-resp-diag";
+    opts.command_pipe_name     = cmd_pipe;
+    opts.diagnostics_pipe_name = diag_pipe;
     opts.power_monitor   = false;   /* no OS events needed —
                                        the gate is covered by
                                        e2e_lifecycle_test    */
@@ -477,6 +481,35 @@ int main(int argc, char** argv)
     {
         CHECK(client.Request(ipc::MsgType::Ping, ipc::MsgType::Pong,
                              json::object(), 5000) >= 0);
+    }
+
+    /*---- diagnostics pipe: DIAG_GET round-trip + read-only -*\
+    | F12 regression coverage: the read-only diagnostics       |
+    | surface must answer over its own pipe (the real          |
+    | EngineHost provisions it at opts.diagnostics_pipe_name)  |
+    | while the engine is at full output — and must refuse     |
+    | command verbs with read_only before dispatch.            |
+    \*---------------------------------------------------------*/
+    {
+        PipeClient diag;
+        CHECK(diag.Connect(diag_pipe));
+        CHECK(diag.Request(ipc::MsgType::DiagGet,
+                           ipc::MsgType::Diagnostics,
+                           json::object(), 5000) >= 0);
+        /* A command verb on the diagnostics pipe is refused
+           read_only BEFORE dispatch — and the read-only gate
+           must not kill the session. */
+        const uint32_t id = ++diag.req_id;
+        CHECK(diag.SendRaw(ipc::MsgType::GetState, id,
+                           json::object()));
+        CHECK(diag.AwaitType(id, ipc::MsgType::Error, 5000));
+        const json eb = diag.last_reply.Body();
+        CHECK(eb.value("code", ~0u) ==
+              (uint32_t)ipc::ErrCode::ReadOnly);
+        CHECK(eb.value("error", std::string()) == "read_only");
+        CHECK(diag.Request(ipc::MsgType::DiagGet,
+                           ipc::MsgType::Diagnostics,
+                           json::object(), 5000) >= 0);
     }
 
     /*---- measurement ------------------------------------*/

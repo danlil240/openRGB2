@@ -34,6 +34,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -110,6 +111,14 @@ public:
 
 private:
     std::atomic<void*> handle_{ nullptr };
+    /* Pins the HANDLE across every Win32 call: Close() marks
+       handle_ null first (fast-path for new calls), then takes
+       io_mutex_ — an in-flight PeekNamedPipe/ReadFile/WriteFile
+       that already loaded the handle finishes on a still-valid
+       handle before CloseHandle can release (and Windows can
+       recycle) it. Fixes the use-after-close race (F01
+       suspect). */
+    std::mutex         io_mutex_;
 };
 
 /* Client-side connect (test fixtures, Milestone 4 helpers):

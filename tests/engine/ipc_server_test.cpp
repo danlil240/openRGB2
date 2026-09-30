@@ -22,11 +22,14 @@
 
 #include "fake_ipc_channel.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -58,6 +61,10 @@ public:
        session layer must convert it into a bounded ERROR. */
     bool throw_on_dispatch = false;
 
+    /* When non-zero, GetState replies carry a padding blob —
+       over kMaxBodyBytes it forces the oversized-reply path. */
+    size_t reply_pad = 0;
+
     IpcReply Dispatch(MsgType type,
                       const nlohmann::json& body) override
     {
@@ -77,8 +84,14 @@ public:
         }
         if(type == MsgType::GetState)
         {
+            nlohmann::json out =
+                nlohmann::json::object({{"state", true}});
+            if(reply_pad)
+            {
+                out["blob"] = std::string(reply_pad, 'x');
+            }
             return IpcReply::Success(MsgType::State,
-                nlohmann::json::object({{"state", true}}));
+                                     std::move(out));
         }
         if(type == MsgType::GetScene)
         {
@@ -802,6 +815,145 @@ int main()
                 CHECK(m.type == MsgType::Pong);
                 CHECK(m.request_id == 99);
                 ch->Close();
+            }
+        }
+        listener.Stop();
+        server.Stop();
+    }
+
+    /*---- oversized reply: bounded ERROR, not silent close --*\
+    | A reply body over kMaxBodyBytes used to fail            |
+    | EncodeMessage -> send() -> silent session close; the    |
+    | client saw an empty read error (qa F12 symptom shape). |
+    | Now the client gets ERROR(too_large) for its request    |
+    | id and the session survives.                           |
+    \*--------------------------------------------------------*/
+    {
+        ScriptedService svc;
+        svc.reply_pad = kMaxBodyBytes + 16;   /* encodes > cap */
+        IpcServer server(svc);
+        TestClient c;
+        server.Serve(c.MakeChannel(), ChannelKind::Command);
+        c.Hello();
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+
+        c.SendMsg(MsgType::GetState, 77, nlohmann::json::object());
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(IsError(m, ErrCode::TooLarge));
+        CHECK(m.request_id == 77);
+        CHECK(m.Body()["error"].get<std::string>() ==
+              "too_large");
+
+        /* session survives — a normal request still answers */
+        c.SendMsg(MsgType::Ping, 78, nlohmann::json::object());
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Pong);
+        CHECK(m.request_id == 78);
+    }
+
+    /*---- channel Close vs in-flight I/O storm (F01 suspect) -*\
+    | RecvSome/SendAll used to race Close() on a raw HANDLE:    |
+    | a close mid-call could free + recycle the handle under   |
+    | a live ReadFile/WriteFile (heap-corruption class). The   |
+    | channel now pins the handle across every Win32 call —   |
+    | this storm must produce only sane results, never a      |
+    | crash. Real pipe pair via listener + client connect.    |
+    \*---------------------------------------------------------*/
+    {
+        const std::string pipe =
+            "\\\\.\\pipe\\openrgb2-test-storm-" +
+            std::to_string(GetCurrentProcessId());
+        ScriptedService svc;
+        IpcServer server(svc);
+        NamedPipeListener listener(server, ChannelKind::Command,
+                                   pipe);
+        std::string err;
+        CHECK(listener.Start(err));
+        if(!listener.Running())
+        {
+            std::printf("storm pipe start failed: %s\n",
+                        err.c_str());
+        }
+        else
+        {
+            std::unique_ptr<IIpcChannel> ch =
+                ConnectNamedPipeChannel(pipe, 5000, err);
+            CHECK(ch != nullptr);
+            if(ch)
+            {
+                const std::vector<uint8_t> ping =
+                    EncodeMessage(MsgType::Ping, 7,
+                                  nlohmann::json::object());
+                std::atomic<bool> closing{ false };
+                std::atomic<bool> reader_stop{ false };
+                std::atomic<int>  bad{ 0 };
+
+                std::vector<std::thread> senders;
+                for(int i = 0; i < 4; ++i)
+                {
+                    senders.emplace_back([&]
+                    {
+                        for(int j = 0; j < 5000 &&
+                                       !closing.load(); ++j)
+                        {
+                            std::string e;
+                            const IpcIoResult r =
+                                ch->SendAll(ping.data(),
+                                            ping.size(), 250, e);
+                            /* A transport Error or a detail-less
+                               Closed both mean the race still
+                               leaks — only Ok/Timeout/Closed-
+                               with-detail are sane. */
+                            if(r == IpcIoResult::Error ||
+                               (r == IpcIoResult::Closed &&
+                                e.empty()))
+                            {
+                                ++bad;
+                            }
+                        }
+                    });
+                }
+                std::thread reader([&]
+                {
+                    MessageReader rd(*ch);
+                    Message       m;
+                    std::string   detail;
+                    while(!reader_stop.load())
+                    {
+                        if(rd.Read(m, 30, detail)
+                               != ReadResult::Ok &&
+                           detail.empty())
+                        {
+                            ++bad;   /* every failure must
+                                        carry a reason */
+                        }
+                    }
+                });
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(120));
+                ch->Close();                /* mid-storm close */
+                closing.store(true);
+                for(std::thread& t : senders)
+                {
+                    t.join();
+                }
+                reader_stop.store(true);
+                reader.join();
+
+                CHECK(bad.load() == 0);
+                /* Post-close I/O is a clean Closed + reason. */
+                std::string e2;
+                CHECK(ch->SendAll(ping.data(), ping.size(), 50,
+                                  e2) == IpcIoResult::Closed);
+                CHECK(!e2.empty());
+                uint8_t b[16];
+                size_t  got = 0;
+                e2.clear();
+                CHECK(ch->RecvSome(b, sizeof b, got, 50, e2)
+                      == IpcIoResult::Closed);
+                CHECK(!e2.empty());
+                CHECK(!ch->IsOpen());
             }
         }
         listener.Stop();

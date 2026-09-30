@@ -59,6 +59,24 @@ uint32_t GetU32(const uint8_t* p)
          | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* Channel outcome -> reader outcome. Always leaves `detail`
+   populated — callers surface it verbatim ("read failed:
+   timeout" vs "peer closed"; qa F12 showed an empty detail
+   on the diagnostics CLI when the channel reported a clean
+   Timeout/Closed without text). */
+ReadResult MapIo(IpcIoResult r, std::string& detail)
+{
+    if(detail.empty())
+    {
+        detail = r == IpcIoResult::Closed  ? "peer closed"
+               : r == IpcIoResult::Timeout ? "timeout"
+                                           : "transport error";
+    }
+    return r == IpcIoResult::Closed   ? ReadResult::Closed
+         : r == IpcIoResult::Timeout  ? ReadResult::Timeout
+                                     : ReadResult::TransportError;
+}
+
 } /* anonymous namespace */
 
 const std::vector<std::string>& EventKinds()
@@ -246,9 +264,7 @@ ReadResult MessageReader::Read(Message& msg, uint32_t deadline_ms,
             ReadExact(first4, 4, deadline_abs, detail);
         if(r != IpcIoResult::Ok)
         {
-            return r == IpcIoResult::Closed   ? ReadResult::Closed
-                 : r == IpcIoResult::Timeout  ? ReadResult::Timeout
-                                             : ReadResult::TransportError;
+            return MapIo(r, detail);
         }
         window = GetU32(first4);
     }
@@ -297,9 +313,7 @@ ReadResult MessageReader::Read(Message& msg, uint32_t deadline_ms,
             ch_->RecvSome(chunk, want, got, left, detail);
         if(r != IpcIoResult::Ok)
         {
-            return r == IpcIoResult::Closed   ? ReadResult::Closed
-                 : r == IpcIoResult::Timeout  ? ReadResult::Timeout
-                                            : ReadResult::TransportError;
+            return MapIo(r, detail);
         }
         for(size_t i = 0; i < got; ++i)
         {
@@ -334,9 +348,7 @@ header:
                                         detail);
         if(r != IpcIoResult::Ok)
         {
-            return r == IpcIoResult::Closed   ? ReadResult::Closed
-                 : r == IpcIoResult::Timeout  ? ReadResult::Timeout
-                                            : ReadResult::TransportError;
+            return MapIo(r, detail);
         }
     }
     msg.version    = GetU16(hdr + 0);
@@ -360,9 +372,7 @@ header:
                       detail);
         if(r != IpcIoResult::Ok)
         {
-            return r == IpcIoResult::Closed   ? ReadResult::Closed
-                 : r == IpcIoResult::Timeout  ? ReadResult::Timeout
-                                            : ReadResult::TransportError;
+            return MapIo(r, detail);
         }
     }
     else

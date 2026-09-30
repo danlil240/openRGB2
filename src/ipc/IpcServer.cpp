@@ -87,7 +87,12 @@ struct IpcServer::Session
     std::mutex                sub_mutex;
     std::set<std::string>     subscribed;
 
-    uint64_t                  resync_bytes = 0;
+    /* Live-session resync counter — atomic because Stats()
+       reads it on another thread while the reader may be
+       concurrently handing the total off to stats_ (the
+       handoff zeroes it under mutex_ so a dying session is
+       never double-counted). */
+    std::atomic<uint64_t>     resync_bytes{ 0 };
 };
 
 /*---------------------------------------------------------*\
@@ -410,7 +415,7 @@ IpcServerStats IpcServer::Stats() const
         }
         if(!s->dead.load())
         {
-            out.resync_bytes += s->resync_bytes;
+            out.resync_bytes += s->resync_bytes.load();
         }
     }
     return out;
@@ -526,12 +531,16 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
     };
 
     /* A dying session hands its resync total to the server
-       counter; Stats() adds live sessions' own counters. */
+       counter; Stats() adds live sessions' own counters. The
+       store of 0 under mutex_ makes the handoff atomic — a
+       Stats() between the add and dead=true can never
+       double-count this session. */
     auto account_resync = [&]()
     {
-        s->resync_bytes = rd.ResyncBytes();
+        const uint64_t n = rd.ResyncBytes();
         std::lock_guard<std::mutex> lock(mutex_);
-        stats_.resync_bytes += s->resync_bytes;
+        stats_.resync_bytes += n;
+        s->resync_bytes.store(0);
     };
 
     /*---- Handshake ---------------------------------------*\
@@ -624,8 +633,22 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
                             s->kind == ChannelKind::Diagnostics
                                 ? "diagnostics" : "command";
                         welcome["max_body_bytes"]     = kMaxBodyBytes;
-                        ok = send(EncodeMessage(MsgType::Welcome, 0,
-                                                   welcome));
+                        /* A welcome body that encodes over the
+                           bound gets a bounded ERROR rather
+                           than a silent handshake failure. */
+                        const std::vector<uint8_t> wbytes =
+                            EncodeMessage(MsgType::Welcome, 0,
+                                          welcome);
+                        if(wbytes.empty())
+                        {
+                            send_error(0, ErrCode::TooLarge,
+                                "welcome body exceeds the "
+                                "1 MiB bound");
+                        }
+                        else
+                        {
+                            ok = send(wbytes);
+                        }
                     }
                 }
             }
@@ -715,14 +738,27 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
         }
 
         /* Reply-path helper — every response is bounded and
-           counted. */
+           counted. When the serialized body exceeds
+           kMaxBodyBytes (EncodeMessage returns empty) the
+           client gets a bounded ERROR(too_large) instead of a
+           silent close — an empty read error was the qa F12
+           symptom shape. */
         auto reply = [&](MsgType rt, const nlohmann::json& body)
         {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 ++stats_.responses_out;
             }
-            return send(EncodeMessage(rt, msg.request_id, body));
+            std::vector<uint8_t> bytes =
+                EncodeMessage(rt, msg.request_id, body);
+            if(bytes.empty())
+            {
+                bytes = EncodeError(msg.request_id,
+                                    ErrCode::TooLarge,
+                                    "reply exceeds the 1 MiB "
+                                    "body bound");
+            }
+            return send(bytes);
         };
         auto reply_err = [&](ErrCode c, const std::string& m)
         {
@@ -983,8 +1019,20 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
                     std::lock_guard<std::mutex> lock(mutex_);
                     ++stats_.responses_out;
                 }
-                if(!send(EncodeMessage(MsgType::Error,
-                                       msg.request_id, ebody)))
+                /* A service can attach oversized detail fields —
+                   the same bounded TooLarge fallback as the
+                   success path, never a silent close. */
+                std::vector<uint8_t> ebytes =
+                    EncodeMessage(MsgType::Error, msg.request_id,
+                                  ebody);
+                if(ebytes.empty())
+                {
+                    ebytes = EncodeError(msg.request_id,
+                                         ErrCode::TooLarge,
+                                         "error reply exceeds the "
+                                         "1 MiB body bound");
+                }
+                if(!send(ebytes))
                 {
                     goto done;
                 }

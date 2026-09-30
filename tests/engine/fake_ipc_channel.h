@@ -63,7 +63,6 @@ public:
                          uint32_t deadline_ms,
                          std::string& err) override
     {
-        (void)err;
         got = 0;
         std::unique_lock<std::mutex> lock(st_->m);
         const auto deadline = std::chrono::steady_clock::now()
@@ -74,11 +73,17 @@ public:
             if(st_->cv_in.wait_until(lock, deadline)
                == std::cv_status::timeout)
             {
+                err = "timeout";
                 return IpcIoResult::Timeout;
             }
         }
         if(st_->inbound.empty())
         {
+            /* Distinguish a peer that vanished from a local
+               Close() — the production channel reports the
+               same split. */
+            err = st_->inbound_closed ? "peer closed"
+                                      : "channel closed";
             return IpcIoResult::Closed;
         }
         size_t n = st_->inbound.size() < max_len ? st_->inbound.size()
@@ -110,6 +115,7 @@ public:
                     left);
             if(ms.count() <= 0)
             {
+                err = "timeout";
                 return IpcIoResult::Timeout;
             }
             size_t n = 0;
@@ -137,11 +143,13 @@ public:
             if(st_->cv_out.wait_until(lock, deadline)
                == std::cv_status::timeout)
             {
+                err = "timeout";
                 return IpcIoResult::Timeout;
             }
         }
         if(st_->server_closed)
         {
+            err = "channel closed";
             return IpcIoResult::Closed;
         }
         if(st_->send_fails)
