@@ -206,13 +206,21 @@ int main()
                     "(active_mode %d)\n", rgb->GetActiveMode());
         return 1;
     }
-    for(int drain = 0; drain < 20; ++drain)
+    for(int drain = 0; drain < 5000; ++drain)
     {
+        /*-----------------------------------------------------*\
+        | The Direct upload is queued by the device thread —    |
+        | under load it can land after DeviceUpdateMode has     |
+        | already returned, so tight back-to-back StepAlls      |
+        | race it. Give the same bounded wait as the re-arm     |
+        | loop above (observed failure under full-suite load).  |
+        \*-----------------------------------------------------*/
         service.StepAll();
         if(service.GetStatus(mac, status) && status.frame_count != 0)
         {
             break;
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     if(!service.GetStatus(mac, status) || status.frame_count == 0)
     {
