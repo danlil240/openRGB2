@@ -323,22 +323,28 @@ Item {
                     objectName: "wsBundleButton"
                     /* Task 9: portable workspace bundle — inspect
                        + conflict-resolve an import, or stage the
-                       export download. Enabled whenever a managed
-                       draft exists; the dialog reports engine
-                       refusals itself. */
+                       export download. Gates on `available`, not
+                       `ready`: import is also the FIRST-workspace
+                       bootstrap (a fresh id + 0/0 revisions creates
+                       it), so it must be clickable before any
+                       managed draft exists. */
                     text: qsTr("Import / Export…")
                     enabled: typeof workspace !== "undefined"
-                             && workspace.ready
+                             && workspace.available
                     onClicked: bundleDlg.open()
                 }
                 AppButton {
                     objectName: "wsActionsButton"
                     /* Task 10: the remaining workspace file
                        actions — open/save-copy/reload/restore
-                       backup/reset/open folder. */
+                       backup/reset/open folder. `available` (not
+                       `managed`): the workspace list populates
+                       whenever the surface is connected, and Open
+                       is the path that adopts a managed workspace
+                       that isn't current — e.g. the first import. */
                     text: qsTr("Workspace…")
                     enabled: typeof workspace !== "undefined"
-                             && workspace.managed
+                             && workspace.available
                     onClicked: wsActionsDlg.open()
                 }
                 Text {

@@ -30,6 +30,13 @@ Popup {
         var c = ctl()
         return c !== null && c.managed === true
     }
+    /* Connected-but-unmanaged still supports the workspace list
+       + Open — that is how an imported workspace becomes current
+       on a fresh install. */
+    function connected() {
+        var c = ctl()
+        return c !== null && c.available === true
+    }
 
     width: 560; height: 560
     modal: true
@@ -76,7 +83,10 @@ Popup {
                 text: {
                     var c = dialog.ctl()
                     if (c === null || c.managed !== true)
-                        return qsTr("No managed workspace is active.")
+                        return (c !== null && c.workspaceList !== undefined
+                                && c.workspaceList.length > 0)
+                               ? qsTr("No managed workspace is active — open one below.")
+                               : qsTr("No managed workspace is active.")
                     var s = qsTr("'%1' (%2) · revision %3")
                         .arg(c.workspaceName || c.workspaceId)
                         .arg(c.workspaceId)
@@ -127,7 +137,7 @@ Popup {
                             AppButton {
                                 objectName: "wsOpen_" + modelData
                                 text: qsTr("Open")
-                                enabled: dialog.live()
+                                enabled: dialog.connected()
                                          && modelData !== dialog.ctl().workspaceId
                                 onClicked: dialog.ctl().openWorkspace(modelData)
                             }
