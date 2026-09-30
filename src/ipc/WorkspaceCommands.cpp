@@ -395,7 +395,11 @@ IpcReply WorkspaceCommands::HandleGet(uint64_t session_id,
     out["workspace_root"] = service_->Store().Root();
     const WorkspaceService::ExternalCheck chk =
         service_->CheckExternal();
-    out["external_change"] = chk.state;
+    /* Normalize: the wire enum is always "none"|"modified"|
+       "deleted" — an unmanaged/absent workspace is "none",
+       never "". */
+    out["external_change"] =
+        chk.state.empty() ? "none" : chk.state;
     if(!chk.detail.empty())
     {
         out["external_detail"] = chk.detail;

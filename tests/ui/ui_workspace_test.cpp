@@ -984,6 +984,79 @@ int main(int argc, char** argv)
               "other-client");
     }
 
+    std::printf("-- controller: foreign-open latch blocks a "
+                "stale-id fetch\n");
+    {
+        /* Task 10 fix round 1: while a foreign open is latched
+           (pending_switch_id_), a moved-revisions snapshot for
+           the OLD workspace — another client's commit landing
+           mid-switch — must not drive FetchDocument under the
+           stale id. Without the guard the download would adopt
+           under force_adopt_ and clean-Discard the staged
+           draft record the replace latch promised survives. */
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.ctl.setDebounceForTesting(10);
+        rig.engine.auto_complete_jobs = false;   /* hold reload */
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "keep"; return true; });
+        rig.ctl.NoteDraftEdited();       /* stage the shadow */
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        rig.ctl.FlushDrafts();
+        CHECK(!rig.ctl.Drafts().recordedIds().isEmpty());
+
+        /* Confirm the foreign open — the held reload job
+           keeps pending_switch_id_ latched on "shelf". */
+        rig.ctl.openWorkspace(QStringLiteral("shelf"));
+        CHECK(rig.ctl.replaceOffered());
+        rig.ctl.confirmReplace();
+        CHECK(rig.PumpUntil([&] {
+            return rig.engine.held_job != 0; }));
+        const int begins = rig.engine.download_begins;
+
+        /* The OLD id's revisions move mid-switch. */
+        rig.engine.doc["name"] = "other-client";
+        ++rig.engine.ws_rev;
+        rig.engine.SendEvent(rig.engine.Snapshot());
+        {
+            /* Pump a beat — a wrongly-issued transfer_begin
+               would reach the server inside this window. */
+            const auto until = std::chrono::steady_clock::now() +
+                               std::chrono::milliseconds(300);
+            while(std::chrono::steady_clock::now() < until)
+            {
+                ServeWs(rig.engine, 15);
+                QCoreApplication::processEvents(
+                    QEventLoop::AllEvents, 10);
+            }
+        }
+        CHECK(rig.engine.download_begins == begins);
+        CHECK(rig.ctl.dirty());
+        CHECK(rig.ctl.Session().Working().meta.name == "keep");
+        CHECK(rig.ctl.Drafts().Read(
+            QStringLiteral("ws0")).exists);
+
+        /* The switch resolves — the shelf snapshot drives the
+           one legitimate fetch; the ws0 record survives. */
+        rig.engine.ws_id  = "shelf";
+        rig.engine.ws_rev = 1;
+        rig.engine.doc    = CompactDoc("shelf-doc");
+        rig.engine.CompleteHeld("succeeded");
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.workspaceId() ==
+                       QLatin1String("shelf") &&
+                   rig.ctl.Session().HasWorking() &&
+                   rig.ctl.Session().Working().meta.name ==
+                       "shelf-doc"; }));
+        CHECK(rig.ctl.Drafts().Read(
+            QStringLiteral("ws0")).exists);
+    }
+
     std::printf("-- controller: edits during save stay dirty\n");
     {
         WsRig rig;

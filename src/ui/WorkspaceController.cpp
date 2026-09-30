@@ -149,19 +149,21 @@ void WorkspaceController::SetExternal(const QString& state,
     const QString s =
         (state == QLatin1String("modified") ||
          state == QLatin1String("deleted")) ? state : QString();
-    const bool was = !external_state_.isEmpty();
-    if(s == external_state_ && detail == external_detail_)
+    const QString prev = external_state_;
+    if(s == prev && detail == external_detail_)
     {
         return;
     }
     external_state_  = s;
     external_detail_ = detail;
     emit externalChanged();
-    if(!s.isEmpty() && !was)
+    if(!s.isEmpty() && s != prev)
     {
-        /* Reported ONCE per transition — detection never
-           applies, never saves, never touches hardware; the
-           notice is the whole mechanism (Task 10 hard rule). */
+        /* Reported ONCE per state transition — including an
+           escalation (modified -> deleted) which is its own
+           event. Detection never applies, never saves, never
+           touches hardware; the notice is the whole mechanism
+           (Task 10 hard rule). */
         emit notice(QStringLiteral(
             "Workspace '%1' files changed on disk (%2%3) — "
             "nothing was applied. Reload takes the disk copy; "
@@ -659,8 +661,14 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
 
 void WorkspaceController::FetchDocument()
 {
+    /* While a foreign open is latched, ws_id_ still names the
+       OLD workspace — a revs_moved snapshot for it (a commit
+       landing mid-switch) must NOT fetch: the download would
+       adopt under force_adopt_ and clean-Discard the staged
+       draft record the replace latch promised survives. The
+       resolving snapshot's ws_changed path refetches. */
     if(!available_ || ws_id_.isEmpty() || dl_.has_value() ||
-       dl_requested_)
+       dl_requested_ || !pending_switch_id_.isEmpty())
     {
         return;
     }
