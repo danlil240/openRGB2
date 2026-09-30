@@ -65,6 +65,13 @@ public:
        over kMaxBodyBytes it forces the oversized-reply path. */
     size_t reply_pad = 0;
 
+    /* DIAG_GET stand-ins for the real DiagnosticsJson cost +
+       ~70 KB reply: the delay keeps the pipe empty between
+       request and reply (the PeekNamedPipe-poll wedge window),
+       the pad makes the reply multi-fragment. */
+    uint32_t diag_delay_ms = 0;
+    size_t   diag_pad      = 0;
+
     IpcReply Dispatch(MsgType type,
                       const nlohmann::json& body) override
     {
@@ -79,8 +86,19 @@ public:
         }
         if(type == MsgType::DiagGet)
         {
+            if(diag_delay_ms)
+            {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(diag_delay_ms));
+            }
+            nlohmann::json out =
+                nlohmann::json::object({{"diag", true}});
+            if(diag_pad)
+            {
+                out["blob"] = std::string(diag_pad, 'x');
+            }
             return IpcReply::Success(MsgType::Diagnostics,
-                nlohmann::json::object({{"diag", true}}));
+                                     std::move(out));
         }
         if(type == MsgType::GetState)
         {
@@ -955,6 +973,134 @@ int main()
                 CHECK(!e2.empty());
                 CHECK(!ch->IsOpen());
             }
+        }
+        listener.Stop();
+        server.Stop();
+    }
+
+    /*---- real pipe: delayed reply under concurrent load ----*\
+    | Peek-poll wedge regression (qa pipefix): RecvSome used    |
+    | to PeekNamedPipe an EMPTY pipe at ~1 ms cadence while     |
+    | the server's reply WriteFile was still pending — on       |
+    | Windows that tight peek wedged the pending write until    |
+    | the server's own send deadline fired, and the client's    |
+    | 5 s read deadline lost the race ("read failed: timeout"). |
+    | The overlapped read path never touches the pipe between   |
+    | request and reply: this pins the functional contract — a  |
+    | ~1.5 s-delayed, multi-fragment DIAG_GET reply MUST land   |
+    | inside its deadline while a second session streams        |
+    | ping/pong traffic through the same server.                |
+    \*---------------------------------------------------------*/
+    {
+        const std::string pipe =
+            "\\\\.\\pipe\\openrgb2-test-slow-" +
+            std::to_string(GetCurrentProcessId());
+        ScriptedService svc;
+        svc.diag_delay_ms = 1500;      /* reply stays pending  */
+        svc.diag_pad      = 70 * 1024; /* ~Diagnostics size    */
+        IpcServer server(svc);
+        NamedPipeListener listener(server, ChannelKind::Command,
+                                   pipe);
+        std::string err;
+        CHECK(listener.Start(err));
+        if(!listener.Running())
+        {
+            std::printf("slow-reply pipe start failed: %s\n",
+                        err.c_str());
+        }
+        else
+        {
+            /* Concurrent traffic on a second session — requests
+               and replies flow while the diag reply is still
+               being computed. */
+            std::atomic<bool> noise_go{ true };
+            std::atomic<int>  noise_bad{ 0 };
+            std::thread noise([&]
+            {
+                std::string e2;
+                std::unique_ptr<IIpcChannel> c2 =
+                    ConnectNamedPipeChannel(pipe, 5000, e2);
+                if(!c2)
+                {
+                    ++noise_bad;
+                    return;
+                }
+                MessageReader rd2(*c2);
+                Message       m2;
+                std::string   det2;
+                const std::vector<uint8_t> hello2 =
+                    EncodeMessage(MsgType::Hello, 0,
+                        nlohmann::json::object(
+                            {{"min_version", 1},
+                             {"max_version", 1}}));
+                if(c2->SendAll(hello2.data(), hello2.size(),
+                               5000, e2) != IpcIoResult::Ok ||
+                   rd2.Read(m2, 5000, det2) != ReadResult::Ok)
+                {
+                    ++noise_bad;
+                    return;
+                }
+                const std::vector<uint8_t> ping =
+                    EncodeMessage(MsgType::Ping, 1,
+                                  nlohmann::json::object());
+                while(noise_go.load())
+                {
+                    if(c2->SendAll(ping.data(), ping.size(),
+                                   5000, e2) != IpcIoResult::Ok ||
+                       rd2.Read(m2, 5000, det2) != ReadResult::Ok)
+                    {
+                        ++noise_bad;
+                        break;
+                    }
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(5));
+                }
+                c2->Close();
+            });
+
+            std::unique_ptr<IIpcChannel> ch =
+                ConnectNamedPipeChannel(pipe, 5000, err);
+            CHECK(ch != nullptr);
+            if(ch)
+            {
+                Message m;
+                MessageReader rd(*ch);
+                std::string detail;
+                const std::vector<uint8_t> hello =
+                    EncodeMessage(MsgType::Hello, 0,
+                        nlohmann::json::object(
+                            {{"min_version", 1},
+                             {"max_version", 1}}));
+                CHECK(ch->SendAll(hello.data(), hello.size(),
+                                  5000, err) == IpcIoResult::Ok);
+                CHECK(rd.Read(m, 5000, detail) == ReadResult::Ok);
+                CHECK(m.type == MsgType::Welcome);
+
+                const std::vector<uint8_t> diag =
+                    EncodeMessage(MsgType::DiagGet, 42,
+                                  nlohmann::json::object());
+                const auto t0 =
+                    std::chrono::steady_clock::now();
+                CHECK(ch->SendAll(diag.data(), diag.size(),
+                                  5000, err) == IpcIoResult::Ok);
+                /* The wedge shape: the reply arrives ~1.5 s
+                   after the request with the pipe empty in
+                   between — this read must NOT time out. */
+                CHECK(rd.Read(m, 5000, detail) == ReadResult::Ok);
+                const auto ms =
+                    std::chrono::duration_cast<
+                        std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+                CHECK(m.type == MsgType::Diagnostics);
+                CHECK(m.request_id == 42);
+                CHECK(ms >= 1400);   /* the delay really ran  */
+                CHECK(ms < 5000);    /* and never wedged      */
+                ch->Close();
+            }
+            noise_go.store(false);
+            noise.join();
+            CHECK(noise_bad.load() == 0);
         }
         listener.Stop();
         server.Stop();

@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include "IpcChannel.h"
+
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -65,12 +67,85 @@ inline std::string LastErrorText(DWORD e)
     return s;
 }
 
-/* Puts a connected pipe end into nonblocking-wait byte mode
-   so every I/O can honor a deadline by polling. */
-inline bool SetNonblockingWait(HANDLE h)
+/* Maps a failed channel I/O call's Win32 error onto the
+   channel contract: peer teardown and locally-cancelled I/O
+   are clean Closed outcomes, anything else is a transport
+   Error carrying "<op>: <win32 text>". */
+inline IpcIoResult MapPipeError(DWORD e, const char* op,
+                                std::string& err)
 {
-    DWORD mode = PIPE_READMODE_BYTE | PIPE_NOWAIT;
-    return SetNamedPipeHandleState(h, &mode, nullptr, nullptr) != 0;
+    switch(e)
+    {
+    case ERROR_BROKEN_PIPE:
+    case ERROR_NO_DATA:
+    case ERROR_PIPE_NOT_CONNECTED:
+    case ERROR_PIPE_LISTENING:
+    case ERROR_INVALID_HANDLE:
+        err = "peer closed";
+        return IpcIoResult::Closed;
+    case ERROR_OPERATION_ABORTED:
+        /* CancelIoEx from our own Close() — a local close,
+           not a transport fault. */
+        err = "channel closed";
+        return IpcIoResult::Closed;
+    default:
+        err = std::string(op) + ": " + LastErrorText(e);
+        return IpcIoResult::Error;
+    }
+}
+
+/* Result of WaitOverlapped: the op completed, the deadline
+   elapsed, the channel's close event fired, or the wait
+   itself failed (err carries the reason). */
+enum class OvWait { Completed, Timeout, Closed, Error };
+
+/* Waits out an ERROR_IO_PENDING overlapped op until it
+   completes, the absolute deadline passes, or close_ev (the
+   channel's manual-reset close signal, optional) fires.
+   Anything but Completed cancels the op and DRAINS it with a
+   blocking GetOverlappedResult — the caller's OVERLAPPED and
+   I/O buffer are guaranteed dead before this returns, so
+   stack storage is safe to unwind. */
+inline OvWait WaitOverlapped(HANDLE h, OVERLAPPED& ov, HANDLE ev,
+                             HANDLE close_ev,
+                             uint64_t deadline_abs_ms,
+                             std::string& err)
+{
+    HANDLE       wait_set[2] = { ev, close_ev };
+    const DWORD  nwait       = close_ev ? 2 : 1;
+    OvWait       result      = OvWait::Completed;
+    for(;;)
+    {
+        const DWORD w = WaitForMultipleObjects(
+            nwait, wait_set, FALSE, RemainingMs(deadline_abs_ms));
+        if(w == WAIT_OBJECT_0)
+        {
+            /* The overlapped op completed — nothing pending,
+               nothing to drain. */
+            return OvWait::Completed;
+        }
+        if(w == WAIT_OBJECT_0 + 1)
+        {
+            err    = "channel closed";
+            result = OvWait::Closed;
+        }
+        else if(w == WAIT_TIMEOUT)
+        {
+            err    = "timeout";
+            result = OvWait::Timeout;
+        }
+        else
+        {
+            err = "WaitForMultipleObjects: " +
+                  LastErrorText(w == WAIT_FAILED ? GetLastError()
+                                                : w);
+            result = OvWait::Error;
+        }
+        CancelIoEx(h, &ov);
+        DWORD n = 0;
+        GetOverlappedResult(h, &ov, &n, TRUE);   /* drain */
+        return result;
+    }
 }
 
 } /* namespace pipe_detail */

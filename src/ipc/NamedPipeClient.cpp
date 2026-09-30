@@ -45,11 +45,25 @@ namespace ipc
 NamedPipeChannel::NamedPipeChannel(void* handle)
     : handle_(handle)
 {
+    /* Per-channel manual-reset event signaled once by Close():
+       overlapped waits include it so teardown wakes a parked
+       read/write instantly instead of riding out the caller's
+       deadline (Close's own CancelIoEx covers ops already
+       pending; the event also catches the narrow window where
+       a call loaded the handle but hasn't issued its op yet).
+       A creation failure degrades to deadline-only waits. */
+    close_event_ =
+        (void*)CreateEventW(nullptr, TRUE, FALSE, nullptr);
 }
 
 NamedPipeChannel::~NamedPipeChannel()
 {
     Close();
+    if(close_event_)
+    {
+        CloseHandle((HANDLE)close_event_);
+        close_event_ = nullptr;
+    }
 }
 
 bool NamedPipeChannel::IsOpen() const
@@ -60,21 +74,27 @@ bool NamedPipeChannel::IsOpen() const
 void NamedPipeChannel::Close()
 {
     /* Mark shutdown first — new I/O calls short-circuit on the
-       null handle and in-flight deadline polls exit on their
-       next iteration. Then take io_mutex_: a RecvSome/SendAll
-       that already loaded the handle is still inside its
-       Win32 call; waiting here guarantees CloseHandle never
-       releases (and the kernel never recycles) the handle out
-       from under it. CancelIoEx is a documented no-op for
-       synchronous handles but stays first — the order is the
-       correct one if the handle ever goes overlapped. */
+       null handle. Then signal + cancel BEFORE taking the
+       direction mutexes: an in-flight RecvSome/SendAll parked
+       in its overlapped wait wakes on close_event_ (or the
+       cancel) and unwinds promptly, so the locks below are
+       bounded by the cancel — never by a caller's deadline.
+       CloseHandle runs only once every Win32 call on the
+       handle has fully returned: the mutexes pin it across the
+       whole overlapped op, so the kernel can never recycle the
+       handle out from under a live ReadFile/WriteFile. */
     void* h = handle_.exchange(nullptr);
     if(!h)
     {
         return;
     }
-    std::lock_guard<std::mutex> lock(io_mutex_);
+    if(close_event_)
+    {
+        SetEvent((HANDLE)close_event_);
+    }
     CancelIoEx((HANDLE)h, nullptr);
+    std::lock_guard<std::mutex> rl(read_mutex_);
+    std::lock_guard<std::mutex> wl(write_mutex_);
     CloseHandle((HANDLE)h);
 }
 
@@ -84,65 +104,75 @@ IpcIoResult NamedPipeChannel::RecvSome(void* buf, size_t max_len,
                                        std::string& err)
 {
     got = 0;
-    const uint64_t deadline_abs =
-        pipe_detail::NowMs() + deadline_ms;
-    for(;;)
+    /* read_mutex_ pins the handle across the WHOLE overlapped
+       op — ReadFile, the deadline wait, GetOverlappedResult —
+       and serializes readers (channels are single-reader by
+       contract). It does NOT cover writes: the pipe is full
+       duplex and a pending read must never block the writer.
+       No PeekNamedPipe poll: the read itself pends until bytes
+       arrive or the deadline expires. */
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    void* hv = handle_.load();
+    if(!hv)
     {
-        {
-            /* io_mutex_ pins the handle across the Win32 calls —
-               the handle is re-loaded under the lock so a close
-               that already ran can never hand us a recycled
-               HANDLE. */
-            std::lock_guard<std::mutex> lock(io_mutex_);
-            void* h = handle_.load();
-            if(!h)
-            {
-                err = "channel closed";
-                return IpcIoResult::Closed;
-            }
-            DWORD avail = 0;
-            if(!PeekNamedPipe((HANDLE)h, nullptr, 0, nullptr,
-                              &avail, nullptr))
-            {
-                const DWORD e = GetLastError();
-                if(e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED
-                   || e == ERROR_NO_DATA || e == ERROR_PIPE_LISTENING
-                   || e == ERROR_INVALID_HANDLE)
-                {
-                    err = "peer closed";
-                    return IpcIoResult::Closed;
-                }
-                err = "PeekNamedPipe: " + pipe_detail::LastErrorText(e);
-                return IpcIoResult::Error;
-            }
-            if(avail > 0)
-            {
-                const DWORD want =
-                    (DWORD)((avail < max_len) ? avail : max_len);
-                DWORD n = 0;
-                if(!ReadFile((HANDLE)h, buf, want, &n, nullptr))
-                {
-                    const DWORD e = GetLastError();
-                    if(e == ERROR_BROKEN_PIPE || e == ERROR_NO_DATA
-                       || e == ERROR_PIPE_NOT_CONNECTED)
-                    {
-                        err = "peer closed";
-                        return IpcIoResult::Closed;
-                    }
-                    err = "ReadFile: " + pipe_detail::LastErrorText(e);
-                    return IpcIoResult::Error;
-                }
-                got = n;
-                return IpcIoResult::Ok;
-            }
-        }
-        if(pipe_detail::RemainingMs(deadline_abs) == 0)
-        {
-            err = "timeout";
-            return IpcIoResult::Timeout;
-        }
-        Sleep(1);
+        err = "channel closed";
+        return IpcIoResult::Closed;
     }
+    const HANDLE h = (HANDLE)hv;
+
+    /* Per-call event: direction mutexes already serialize the
+       waiters, but a private event means a late-completing
+       cancelled op can never leave a stale signal for the
+       NEXT call to consume. */
+    HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if(!ev)
+    {
+        err = "CreateEvent: " +
+              pipe_detail::LastErrorText(GetLastError());
+        return IpcIoResult::Error;
+    }
+    OVERLAPPED ov{};
+    ov.hEvent  = ev;
+    const DWORD want =
+        (DWORD)(max_len > 0x7FFFFFFF ? 0x7FFFFFFF : max_len);
+    DWORD n = 0;
+    if(!ReadFile(h, buf, want, &n, &ov))
+    {
+        const DWORD e = GetLastError();
+        if(e != ERROR_IO_PENDING)
+        {
+            CloseHandle(ev);
+            return pipe_detail::MapPipeError(e, "ReadFile", err);
+        }
+        const pipe_detail::OvWait wr = pipe_detail::WaitOverlapped(
+            h, ov, ev, (HANDLE)close_event_,
+            pipe_detail::NowMs() + deadline_ms, err);
+        if(wr != pipe_detail::OvWait::Completed)
+        {
+            CloseHandle(ev);
+            return wr == pipe_detail::OvWait::Timeout
+                       ? IpcIoResult::Timeout
+                       : (wr == pipe_detail::OvWait::Closed
+                              ? IpcIoResult::Closed
+                              : IpcIoResult::Error);
+        }
+        if(!GetOverlappedResult(h, &ov, &n, FALSE))
+        {
+            const DWORD ge = GetLastError();
+            CloseHandle(ev);
+            return pipe_detail::MapPipeError(ge, "ReadFile", err);
+        }
+    }
+    CloseHandle(ev);
+    if(n == 0)
+    {
+        /* A zero-byte read completion is the pipe's EOF —
+           the peer's write end is gone. */
+        err = "peer closed";
+        return IpcIoResult::Closed;
+    }
+    got = n;
+    return IpcIoResult::Ok;
 }
 
 IpcIoResult NamedPipeChannel::RecvExact(void* buf, size_t len,
@@ -182,63 +212,78 @@ IpcIoResult NamedPipeChannel::SendAll(const void* data, size_t len,
     size_t   sent = 0;
     const uint64_t deadline_abs =
         pipe_detail::NowMs() + deadline_ms;
+    /* write_mutex_ pins the handle across the whole send and
+       serializes writers (the session's reply path and event
+       writer can both reach here). A full pipe no longer busy-
+       polls: the WriteFile pends and the wait carries the
+       deadline. */
+    std::lock_guard<std::mutex> lock(write_mutex_);
     while(sent < len)
     {
+        void* hv = handle_.load();
+        if(!hv)
         {
-            /* Same handle pin as RecvSome: re-load under
-               io_mutex_ so Close() can never release the
-               handle mid-WriteFile. */
-            std::lock_guard<std::mutex> lock(io_mutex_);
-            void* h = handle_.load();
-            if(!h)
+            err = "channel closed";
+            return IpcIoResult::Closed;
+        }
+        const HANDLE h = (HANDLE)hv;
+        HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if(!ev)
+        {
+            err = "CreateEvent: " +
+                  pipe_detail::LastErrorText(GetLastError());
+            return IpcIoResult::Error;
+        }
+        OVERLAPPED ov{};
+        ov.hEvent  = ev;
+        const DWORD want =
+            (DWORD)((len - sent) > 0x7FFFFFFF ? 0x7FFFFFFF
+                                            : (len - sent));
+        DWORD n = 0;
+        if(!WriteFile(h, p + sent, want, &n, &ov))
+        {
+            const DWORD e = GetLastError();
+            if(e != ERROR_IO_PENDING)
             {
-                err = "channel closed";
-                return IpcIoResult::Closed;
+                CloseHandle(ev);
+                return pipe_detail::MapPipeError(e, "WriteFile",
+                                                 err);
             }
-            DWORD n = 0;
-            const DWORD want =
-                (DWORD)((len - sent) > 0x7FFFFFFF ? 0x7FFFFFFF
-                                                : (len - sent));
-            if(!WriteFile((HANDLE)h, p + sent, want, &n, nullptr))
+            const pipe_detail::OvWait wr =
+                pipe_detail::WaitOverlapped(
+                    h, ov, ev, (HANDLE)close_event_,
+                    deadline_abs, err);
+            if(wr != pipe_detail::OvWait::Completed)
             {
-                const DWORD e = GetLastError();
-                if(e == ERROR_PIPE_BUSY || e == ERROR_NO_DATA)
-                {
-                    /* Nonblocking-wait mode: no room right now —
-                       poll inside the deadline. */
-                }
-                else if(e == ERROR_BROKEN_PIPE
-                        || e == ERROR_PIPE_NOT_CONNECTED
-                        || e == ERROR_INVALID_HANDLE)
-                {
-                    err = "peer closed";
-                    return IpcIoResult::Closed;
-                }
-                else
-                {
-                    err = "WriteFile: " + pipe_detail::LastErrorText(e);
-                    return IpcIoResult::Error;
-                }
+                CloseHandle(ev);
+                return wr == pipe_detail::OvWait::Timeout
+                           ? IpcIoResult::Timeout
+                           : (wr == pipe_detail::OvWait::Closed
+                                  ? IpcIoResult::Closed
+                                  : IpcIoResult::Error);
             }
-            else
+            if(!GetOverlappedResult(h, &ov, &n, FALSE))
             {
-                sent += n;
-                if(sent >= len)
-                {
-                    return IpcIoResult::Ok;
-                }
-                if(n == 0)
-                {
-                    /* wrote nothing — wait for the peer to drain */
-                }
+                const DWORD ge = GetLastError();
+                CloseHandle(ev);
+                return pipe_detail::MapPipeError(ge, "WriteFile",
+                                                 err);
             }
         }
-        if(pipe_detail::RemainingMs(deadline_abs) == 0)
+        CloseHandle(ev);
+        if(n == 0)
         {
-            err = "timeout";
-            return IpcIoResult::Timeout;
+            /* A zero-progress write on a wait-mode pipe should
+               never happen; don't let it spin hot. */
+            if(pipe_detail::RemainingMs(deadline_abs) == 0)
+            {
+                err = "timeout";
+                return IpcIoResult::Timeout;
+            }
+            Sleep(1);
+            continue;
         }
-        Sleep(1);
+        sent += n;
     }
     return IpcIoResult::Ok;
 }
@@ -255,19 +300,19 @@ std::unique_ptr<IIpcChannel> ConnectNamedPipeChannel(
         pipe_detail::NowMs() + timeout_ms;
     for(;;)
     {
+        /* FILE_FLAG_OVERLAPPED is mandatory: RecvSome/SendAll
+           drive this handle with real OVERLAPPED ops — a
+           synchronous handle would make every "pending" wait
+           behave undefined (deadlock on timeout paths). */
         HANDLE h = CreateFileA(pipe_name.c_str(),
                                GENERIC_READ | GENERIC_WRITE,
                                0, nullptr, OPEN_EXISTING,
-                               0, nullptr);
+                               FILE_FLAG_OVERLAPPED, nullptr);
         if(h != INVALID_HANDLE_VALUE)
         {
-            if(!pipe_detail::SetNonblockingWait(h))
-            {
-                err = "SetNamedPipeHandleState: " +
-                      pipe_detail::LastErrorText(GetLastError());
-                CloseHandle(h);
-                return nullptr;
-            }
+            /* Byte + wait mode is the client default — nothing
+               else to set: deadline control comes from the
+               overlapped waits, not PIPE_NOWAIT polling. */
             return std::unique_ptr<IIpcChannel>(
                 new NamedPipeChannel((void*)h));
         }

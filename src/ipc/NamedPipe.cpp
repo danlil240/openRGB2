@@ -34,7 +34,68 @@ namespace ipc
 {
 
 using pipe_detail::LastErrorText;
-using pipe_detail::SetNonblockingWait;
+
+/*---------------------------------------------------------*\
+|| Accept-side connect wait                                  ||
+||                                                           ||
+|| ConnectNamedPipe on a FILE_FLAG_OVERLAPPED instance      ||
+|| must carry a real OVERLAPPED: it pends until a client    ||
+|| attaches. The wait polls the listener stop flag so a     ||
+|| pending connect unwinds even if Stop()'s self-connect    ||
+|| somehow never lands; a stop with the connect still       ||
+|| pending cancels + drains it (the OVERLAPPED is stack     ||
+|| storage — it must be dead before CloseHandle).           ||
+\*---------------------------------------------------------*/
+static bool WaitForClientConnect(HANDLE h,
+                                 const std::atomic<bool>& stop)
+{
+    HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if(!ev)
+    {
+        return false;
+    }
+    OVERLAPPED ov{};
+    ov.hEvent      = ev;
+    bool connected = false;
+    if(ConnectNamedPipe(h, &ov))
+    {
+        connected = true;
+    }
+    else
+    {
+        const DWORD e = GetLastError();
+        if(e == ERROR_PIPE_CONNECTED)
+        {
+            connected = true;   /* client beat us to it        */
+        }
+        else if(e == ERROR_IO_PENDING)
+        {
+            for(;;)
+            {
+                const DWORD w = WaitForSingleObject(ev, 100);
+                if(w == WAIT_OBJECT_0)
+                {
+                    DWORD done = 0;
+                    connected =
+                        GetOverlappedResult(h, &ov, &done,
+                                            FALSE) != 0;
+                    break;
+                }
+                if(w != WAIT_TIMEOUT || stop.load())
+                {
+                    /* Stop with the connect still pending (or a
+                       wait failure): cancel + drain. */
+                    CancelIoEx(h, &ov);
+                    DWORD done = 0;
+                    GetOverlappedResult(h, &ov, &done, TRUE);
+                    break;
+                }
+            }
+        }
+    }
+    CloseHandle(ev);
+    return connected;
+}
 
 /*---------------------------------------------------------*\
 || Restricted DACL                                          ||
@@ -171,8 +232,13 @@ struct NamedPipeListener::Impl
         }
         while(!stop.load())
         {
+            /* FILE_FLAG_OVERLAPPED: the accepted channel's
+               RecvSome/SendAll drive this handle with real
+               OVERLAPPED ops — a synchronous instance would
+               wedge those waits. */
             HANDLE h = CreateNamedPipeA(
-                name.c_str(), PIPE_ACCESS_DUPLEX,
+                name.c_str(),
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                 32 /* bounded instance cap */,
                 64 * 1024, 64 * 1024, 0,
@@ -185,19 +251,13 @@ struct NamedPipeListener::Impl
                 continue;
             }
 
-            const BOOL connected = ConnectNamedPipe(h, nullptr)
-                || (GetLastError() == ERROR_PIPE_CONNECTED);
+            const bool connected = WaitForClientConnect(h, stop);
             if(stop.load())
             {
                 CloseHandle(h);
                 break;
             }
             if(!connected)
-            {
-                CloseHandle(h);
-                continue;
-            }
-            if(!SetNonblockingWait(h))
             {
                 CloseHandle(h);
                 continue;
@@ -240,7 +300,8 @@ bool NamedPipeListener::Start(std::string& err)
        fails Start() instead of spinning silently. */
     HANDLE h = CreateNamedPipeA(
         impl_->name.c_str(),
-        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE |
+            FILE_FLAG_OVERLAPPED,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
         32, 64 * 1024, 64 * 1024, 0,
         (LPSECURITY_ATTRIBUTES)impl_->security.Raw());
@@ -252,17 +313,15 @@ bool NamedPipeListener::Start(std::string& err)
     }
     impl_->stop.store(false);
     impl_->running.store(true);
-    /* The accept thread parks in a blocking ConnectNamedPipe
-       on this first instance (PIPE_WAIT, so the connect wait
-       is real); once connected it proceeds identically to
-       AcceptLoop. */
+    /* The accept thread parks in an overlapped ConnectNamedPipe
+       wait on this first instance (released by a client attach
+       or Stop()'s self-connect); once connected it proceeds
+       identically to AcceptLoop. */
     impl_->thread = std::thread([impl = impl_, h]()
         {
-            const BOOL connected =
-                ConnectNamedPipe(h, nullptr)
-                || (GetLastError() == ERROR_PIPE_CONNECTED);
-            if(connected && !impl->stop.load() &&
-               SetNonblockingWait(h))
+            const bool connected =
+                WaitForClientConnect(h, impl->stop);
+            if(connected && !impl->stop.load())
             {
                 impl->server.Serve(std::unique_ptr<IIpcChannel>(
                         new NamedPipeChannel((void*)h)),

@@ -15,10 +15,12 @@
 ||   built by BuildRestrictedSddl() so the intent is       ||
 ||   testable offline.                                     ||
 ||                                                           ||
-||   Channel I/O is deadline-bounded (IIpcChannel): the    ||
-||   pipe runs in nonblocking-wait mode and reads/writes   ||
-||   poll inside the caller's deadline — a wedged peer     ||
-||   can never pin a session thread.                       ||
+||   Channel I/O is deadline-bounded (IIpcChannel): pipe   ||
+||   handles are opened FILE_FLAG_OVERLAPPED and every     ||
+||   read/write pends against a manual-reset event waited  ||
+||   with the caller's deadline — a wedged peer can never  ||
+||   pin a session thread, and no busy poll touches the    ||
+||   pipe between request and reply.                       ||
 ||                                                           ||
 ||   The HANDLE stays inside the .cpp — no Win32 types     ||
 ||   leak into this header or its dependents.              ||
@@ -83,14 +85,18 @@ private:
 
 /*---------------------------------------------------------*\
 || NamedPipeChannel — IIpcChannel over one connected pipe   ||
-|| HANDLE (server or client end). Nonblocking-wait mode;   ||
-|| all I/O honors the per-call deadline.                   ||
+|| HANDLE (server or client end). Overlapped I/O: each     ||
+|| call issues one ReadFile/WriteFile and waits on a       ||
+|| per-call event with the caller's deadline; timeout or   ||
+|| close cancels + drains the pending op.                  ||
 \*---------------------------------------------------------*/
 class NamedPipeChannel final : public IIpcChannel
 {
 public:
     /* Takes ownership of `handle` (a connected, duplex,
-       byte-mode pipe). */
+       byte-mode pipe opened with FILE_FLAG_OVERLAPPED —
+       every channel handle must support overlapped I/O or
+       the deadline waits cannot fire). */
     explicit NamedPipeChannel(void* handle);
     ~NamedPipeChannel() override;               /* Close() */
 
@@ -111,14 +117,25 @@ public:
 
 private:
     std::atomic<void*> handle_{ nullptr };
-    /* Pins the HANDLE across every Win32 call: Close() marks
-       handle_ null first (fast-path for new calls), then takes
-       io_mutex_ — an in-flight PeekNamedPipe/ReadFile/WriteFile
-       that already loaded the handle finishes on a still-valid
-       handle before CloseHandle can release (and Windows can
-       recycle) it. Fixes the use-after-close race (F01
-       suspect). */
-    std::mutex         io_mutex_;
+    /* Read/write pinning, per direction: RecvSome holds
+       read_mutex_ for the whole overlapped op (issue + wait +
+       GetOverlappedResult) and SendAll holds write_mutex_
+       likewise, so CloseHandle can never release (and Windows
+       recycle) the handle mid-op — the F01 discipline. The
+       directions use SEPARATE mutexes because the pipe is
+       full duplex: a pending read must never block a queued
+       write (sessions run concurrent reader/writer threads).
+       Close() signals close_event_ + CancelIoEx BEFORE taking
+       both mutexes, so a parked wait unwinds on the close —
+       not on its deadline. */
+    std::mutex         read_mutex_;
+    std::mutex         write_mutex_;
+    /* Manual-reset event (HANDLE stored as void*) signaled
+       once by Close(). Overlapped waits include it in their
+       wait set so teardown wakes instantly; a creation
+       failure leaves it null and waits just ride their
+       deadline. */
+    void*              close_event_ = nullptr;
 };
 
 /* Client-side connect (test fixtures, Milestone 4 helpers):
