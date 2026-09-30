@@ -174,7 +174,7 @@ Rectangle {
                                  .toFixed(2))
                        : ""
             }
-            TextField {
+            AppTextField {
                 id: colorField
                 objectName: "stopColorField"
                 Accessible.name: qsTr("gradient stop color")

@@ -72,7 +72,7 @@ Rectangle {
             Text {
                 objectName: "inspPrimitive"
                 text: insp.layerData.primitive || ""
-                color: Theme.text
+                color: Theme.textPrimary
             }
 
             Text { text: qsTr("Blend"); color: Theme.textSecondary }
@@ -153,7 +153,7 @@ Rectangle {
             }
 
             Text { text: qsTr("Targets"); color: Theme.textSecondary }
-            TextField {
+            AppTextField {
                 id: targetsField
                 objectName: "inspTargets"
                 Accessible.name: qsTr("layer targets")
@@ -241,7 +241,7 @@ Rectangle {
             Text { text: qsTr("Origin"); color: Theme.textSecondary }
             Repeater {
                 model: ["x", "y", "z"]
-                delegate: TextField {
+                delegate: AppTextField {
                     required property string modelData
                     objectName: "inspOrigin_" + modelData
                     Accessible.name: qsTr("layer origin %1").arg(modelData)
@@ -263,7 +263,7 @@ Rectangle {
             Text { text: qsTr("Direction"); color: Theme.textSecondary }
             Repeater {
                 model: ["x", "y", "z"]
-                delegate: TextField {
+                delegate: AppTextField {
                     required property string modelData
                     objectName: "inspDir_" + modelData
                     Accessible.name: qsTr("layer direction %1").arg(modelData)
@@ -314,7 +314,7 @@ Rectangle {
                                   .arg(Number(modelData.x).toFixed(2))
                                   .arg(Number(modelData.y).toFixed(2))
                                   .arg(Number(modelData.z).toFixed(2))
-                        color: Theme.text
+                        color: Theme.textPrimary
                         font.pixelSize: Theme.fontSizeSmall
                         Layout.fillWidth: true
                     }

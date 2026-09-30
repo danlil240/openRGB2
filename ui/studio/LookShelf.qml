@@ -63,7 +63,7 @@ Rectangle {
                 height: Theme.controlHeight
                 radius: Theme.radiusS
                 color: effectEdit.presetId === modelData.id
-                       ? Theme.surfaceAlt : Theme.panel
+                       ? Theme.surfaceAlt : Theme.bg
                 border.width: effectEdit.presetId === modelData.id ? 1 : 0
                 border.color: Theme.accent
 
@@ -75,7 +75,7 @@ Rectangle {
                     Text {
                         objectName: "lookName_" + modelData.id
                         text: modelData.name || modelData.id
-                        color: Theme.text
+                        color: Theme.textPrimary
                         font.pixelSize: Theme.fontSizeBody
                         Layout.fillWidth: true
                         elide: Text.ElideRight
@@ -121,7 +121,7 @@ Rectangle {
         RowLayout {
             width: parent.width
             spacing: Theme.spaceS
-            TextField {
+            AppTextField {
                 id: lookId
                 objectName: "lookSaveId"
                 Accessible.name: qsTr("new look id")
@@ -129,7 +129,7 @@ Rectangle {
                 enabled: shelf.ready
                 placeholderText: qsTr("look id [A-Za-z0-9_-]")
             }
-            TextField {
+            AppTextField {
                 id: lookName
                 objectName: "lookSaveName"
                 Accessible.name: qsTr("new look name")
@@ -201,12 +201,34 @@ Rectangle {
         modal: true
         standardButtons: Dialog.Ok | Dialog.Cancel
         anchors.centerIn: Overlay.overlay
+        /* F10: the stock Basic dialog renders a light header and
+           near-black button text on the dark chrome — theme the
+           three dressing points instead of reinventing the
+           dialog. */
+        background: Rectangle {
+            color: Theme.surface
+            radius: Theme.radiusM
+            border.color: Theme.borderStrong
+        }
+        header: Label {
+            text: resetDialog.title
+            color: Theme.textPrimary
+            font.pixelSize: Theme.fontSizeBody
+            font.weight: Font.DemiBold
+            padding: Theme.spaceM
+            background: Rectangle { color: "transparent" }
+        }
+        footer: DialogButtonBox {
+            standardButtons: resetDialog.standardButtons
+            background: Rectangle { color: "transparent" }
+            delegate: AppButton {}
+        }
         /* The brief's explicit notice — authored layers are
            replaced by the named look; the edit is undoable. */
         Text {
             width: 320
             wrapMode: Text.WordWrap
-            color: Theme.text
+            color: Theme.textPrimary
             font.pixelSize: Theme.fontSizeBody
             text: qsTr("The authored layer stack is replaced by the look “%1”. You can undo this edit.")
                       .arg(shelf.ready ? effectEdit.presetId : "")
@@ -225,10 +247,28 @@ Rectangle {
         modal: true
         standardButtons: Dialog.Ok | Dialog.Cancel
         anchors.centerIn: Overlay.overlay
+        background: Rectangle {
+            color: Theme.surface
+            radius: Theme.radiusM
+            border.color: Theme.borderStrong
+        }
+        header: Label {
+            text: applyDialog.title
+            color: Theme.textPrimary
+            font.pixelSize: Theme.fontSizeBody
+            font.weight: Font.DemiBold
+            padding: Theme.spaceM
+            background: Rectangle { color: "transparent" }
+        }
+        footer: DialogButtonBox {
+            standardButtons: applyDialog.standardButtons
+            background: Rectangle { color: "transparent" }
+            delegate: AppButton {}
+        }
         Text {
             width: 320
             wrapMode: Text.WordWrap
-            color: Theme.text
+            color: Theme.textPrimary
             font.pixelSize: Theme.fontSizeBody
             text: qsTr("Applying “%1” replaces the authored layer stack with the named look. You can undo this edit.")
                       .arg(applyDialog.lookName)

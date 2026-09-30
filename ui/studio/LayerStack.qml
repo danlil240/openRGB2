@@ -63,7 +63,7 @@ Rectangle {
                 height: Theme.controlHeight + Theme.spaceM
                 radius: Theme.radiusS
                 color: effectEdit.selectedLayer === index
-                       ? Theme.surfaceAlt : Theme.panel
+                       ? Theme.surfaceAlt : Theme.bg
                 border.width: effectEdit.selectedLayer === index ? 1 : 0
                 border.color: Theme.accent
 
@@ -83,7 +83,7 @@ Rectangle {
                     Text {
                         objectName: "layerName_" + index
                         text: model.primitive
-                        color: Theme.text
+                        color: Theme.textPrimary
                         font.pixelSize: Theme.fontSizeBody
                         Layout.preferredWidth: 90
                         elide: Text.ElideRight
