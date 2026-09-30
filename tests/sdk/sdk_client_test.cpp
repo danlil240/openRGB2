@@ -12,9 +12,12 @@
 #include "OpenRgbClient.h"
 #include "fake_sdk_server.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <thread>
 #include <vector>
 
 using namespace openrgb2;
@@ -469,6 +472,101 @@ static void TestMalformedServerReply()
     CHECK(!client->LastError().empty());
 }
 
+/*---------------------------------------------------------*\
+|||| F12 regression — the state/wire lock split. A state    ||
+|||| getter must NEVER wait behind in-flight wire I/O: the   ||
+|||| old single-mutex client held its lock across every     ||
+|||| request, so a delayed RefreshStatus stalled the        ||
+|||| diagnostics surface (the ~9 acquisitions in a          ||
+|||| DIAG_GET reply) past the CLI's 5 s read deadline.      ||
+||||                                                           ||
+|||| With the io_mutex_/mutex_ split the getters below take ||
+|||| only the state lock — they must return while the        ||
+|||| delayed refresh is still mid-wire.                     ||
+\*---------------------------------------------------------*/
+
+static void TestGettersNeverBlockBehindWireIo()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup(), Dimm() };
+
+    FakeStream* stream = nullptr;
+    auto client = MakeClient(server, &stream);
+    CHECK(client->Connect());
+
+    /* 300 ms per RecvExact: the refresh's count + 2x data
+       requests each do two receives — ~1.8 s of wire time
+       during which every state read must stay instant. */
+    stream->recv_delay_ms.store(300);
+
+    std::atomic<bool> refresh_running{ false };
+    std::atomic<bool> refresh_done{ false };
+    std::atomic<bool> refresh_ok{ false };
+    std::thread th([&]
+    {
+        refresh_running = true;
+        refresh_ok      = client->RefreshStatus();
+        refresh_done    = true;
+    });
+    while(!refresh_running.load())
+    {
+        std::this_thread::yield();
+    }
+    /* Let the refresh thread get inside its first delayed
+       receive before the getter burst. */
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    const auto t0 = Clock::now();
+    CHECK(client->State() == ConnectionState::Connected);
+    CHECK(client->ProtocolVersion() == 4);
+    CHECK(client->LastError().empty());
+    CHECK(client->ReconnectAttempt() == 0);
+    const std::vector<DeviceSnapshot> snaps = client->Snapshots();
+    CHECK(snaps.size() == 2);
+    DeviceSnapshot one;
+    CHECK(client->Snapshot(
+        DeviceKey{ "Lian Li:Lian Li SL Wireless", "W1",
+                   "hid:1", "" },
+        one));
+    int32_t mi = -1;
+    CHECK(client->ActiveMode(one.key, mi));
+    /* The consolidated read — one state-lock acquisition. */
+    const ConnectionSnapshotInfo cs = client->ConnectionSnapshot();
+    CHECK(cs.state == ConnectionState::Connected);
+    CHECK(cs.protocol_version == 4);
+    CHECK(cs.reconnect_attempt == 0);
+    CHECK(cs.last_error.empty());
+    CHECK(client->Stats().submitted == 0);
+
+    const double ms =
+        std::chrono::duration<double, std::milli>(
+            Clock::now() - t0).count();
+    /* Pre-fix this burst blocked for the full ~1.8 s wire
+       sequence; post-fix it is a handful of state reads. The
+       bound is generous on purpose — the point is the shape
+       (prompt vs seconds), not the microseconds. */
+    CHECK(ms < 1000.0);
+    /* The refresh really was still in flight — otherwise the
+       test proves nothing. */
+    CHECK(!refresh_done.load());
+
+    th.join();
+    CHECK(refresh_ok.load());
+    stream->recv_delay_ms.store(0);
+
+    /* Post-split wire behavior unchanged: the refresh was
+       in-place (generation stays 1 — pending frames stay
+       valid), the device list is intact, and SubmitLatest
+       still sends ONE UPDATELEDS for the whole controller. */
+    const std::vector<DeviceSnapshot> after = client->Snapshots();
+    CHECK(after.size() == 2);
+    CHECK(after[0].topology_generation == 1);
+    SubmitResult r =
+        client->SubmitLatest(MakeFrame(after[0], { 9, 9, 9 }));
+    CHECK(r.status == SubmitStatus::Accepted);
+    CHECK(server.CountEvents(kPktUpdateLEDs) == 1);
+}
+
 int main()
 {
     TestHandshakeCapsAt4();
@@ -482,6 +580,7 @@ int main()
     TestResizeZone();
     TestDisconnectedSubmit();
     TestMalformedServerReply();
+    TestGettersNeverBlockBehindWireIo();
     std::printf("sdk client: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

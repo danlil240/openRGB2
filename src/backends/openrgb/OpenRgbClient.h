@@ -25,10 +25,29 @@
 |||     connection state is surfaced through                 ||
 |||     DeviceSnapshot.connection.                           ||
 |||                                                           |
-|||   Threading: all public methods are mutex-protected and  ||
-|||   callable from any thread. Sends are serialized under   ||
-|||   the mutex — the per-controller delivery worker of      ||
-|||   Task 3.3 builds on this send path.                     ||
+|||   Threading: all public methods are callable from any   ||
+|||   thread under a TWO-mutex split (qa F12 — the old        ||
+|||   single mutex was held across multi-second wire I/O,     ||
+|||   starving every state reader behind reconnect churn):    ||
+|||                                                           ||
+|||   io_mutex_ — serializes ALL wire operations on           ||
+|||     stream_ (connect/handshake/enumerate/request-send     ||
+|||     sequences, liveness probes). A thread holding         ||
+|||     io_mutex_ owns the wire and is the only thread that   ||
+|||     may commit connection-state transitions.              ||
+|||   mutex_    — the STATE lock: short reads/commits of      ||
+|||     options_, protocol_version_, state_, last_error_,     ||
+|||     devices_, topology_generation_, the reconnect         ||
+|||     schedule, stats_. NEVER held across wire I/O — that   ||
+|||     is what unblocks the diagnostics surface (State/      ||
+|||     Snapshots/etc.) while a wire operation is in flight.  ||
+|||                                                           ||
+|||   LOCK ORDER: io_mutex_ -> mutex_. A thread holding       ||
+|||   io_mutex_ may briefly take mutex_ to snapshot or        ||
+|||   commit state; NO code may acquire io_mutex_ while       ||
+|||   holding mutex_ (getters never touch the wire). State    ||
+|||   commits under mutex_ are atomic per operation — a       ||
+|||   reader never sees a half-swapped device map.            ||
 |||                                                           |
 |||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 \*---------------------------------------------------------*/
@@ -62,6 +81,18 @@ struct OpenRgbClientOptions
     ReconnectBackoff backoff;
 };
 
+/* The connection state fields in ONE atomic read — used by
+   the IPC connection/diagnostics surfaces so a status read
+   never turns into four separate state-lock acquisitions
+   (let alone queue behind wire I/O). */
+struct ConnectionSnapshotInfo
+{
+    ConnectionState state             = ConnectionState::Disconnected;
+    uint32_t        protocol_version  = 0;    /* negotiated, <= 4 */
+    uint32_t        reconnect_attempt = 0;
+    std::string     last_error;
+};
+
 class OpenRgbClient final : public IFrameSink
 {
 public:
@@ -93,6 +124,14 @@ public:
     uint32_t        ProtocolVersion() const;   /* negotiated, <= 4 */
     std::string     LastError() const;
 
+    /* All four connection-state fields in ONE state-lock
+       acquisition (state + protocol_version +
+       reconnect_attempt + last_error) — the atomic read the
+       IPC connection/diagnostics surfaces consume. Never
+       touches io_mutex_; returns promptly while a wire
+       operation is in flight. */
+    ConnectionSnapshotInfo ConnectionSnapshot() const;
+
     /* Re-fetches controller count + data and rebuilds the
        DeviceKey map; bumps the topology generation so frames
        stamped with older generations are obsolete. Requires
@@ -109,7 +148,7 @@ public:
        place; a structural difference (device identity, zone
        layout, LED counts, device count — including an added
        or removed device, caught by the count) falls through
-       to the full EnumerateLocked path and bumps the
+       to the full EnumerateIo path and bumps the
        generation. False when disconnected or the fetch fails
        (connection marked broken). */
     bool RefreshStatus();
@@ -203,14 +242,24 @@ private:
                                  const std::vector<uint8_t>& body,
                                  uint32_t expected_reply_id);
     void DrainPending();
-    void Handshake();          /* version negotiation + client name */
+    /* Version negotiation + client name. Takes the wire
+       operation's options snapshot — options_ is never read
+       lock-free. */
+    void Handshake(const OpenRgbClientOptions& opts);
 
-    bool EnumerateLocked(std::string& err);
-    bool ConnectLocked(std::string& err);
-    void MarkBrokenLocked(const std::string& reason, TimePoint now);
-    void PollLocked(TimePoint now);
+    /*---- Wire operations -----------------------------------*\
+    | The *Io helpers run ONLY under io_mutex_ (one wire op  |
+    | at a time). They take mutex_ briefly for state reads/  |
+    | commits — lock order io_mutex_ -> mutex_, never the    |
+    | reverse (see the class-header threading note).         |
+    \*--------------------------------------------------------*/
+    bool EnumerateIo(std::string& err);
+    bool ConnectIo(std::string& err);
+    void MarkBrokenIo(const std::string& reason, TimePoint now);
+    void PollIo(TimePoint now);
 
-    mutable std::mutex   mutex_;
+    mutable std::mutex   io_mutex_;  /* wire serialization      */
+    mutable std::mutex   mutex_;     /* state reads/commits     */
     OpenRgbClientOptions options_;
     std::unique_ptr<IStreamTransport> stream_;
 

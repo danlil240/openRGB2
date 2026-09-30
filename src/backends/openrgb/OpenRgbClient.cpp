@@ -1,11 +1,14 @@
 /*---------------------------------------------------------*\
-||| OpenRgbClient.cpp                                         |
-|||                                                           |
-|||   TCP SDK client for the vendored OpenRGB backend.       ||
-|||   See OpenRgbClient.h.                                   ||
-|||                                                           |
-|||   SPDX-License-Identifier: GPL-2.0-or-later               ||
-\*---------------------------------------------------------*/
+|||| OpenRgbClient.cpp                                         |
+||||                                                           |
+||||   TCP SDK client for the vendored OpenRGB backend.       ||
+||||   See OpenRgbClient.h for the two-mutex locking          ||
+||||   contract (io_mutex_ serializes the wire; mutex_ only  ||
+||||   ever guards short state reads/commits — lock order     ||
+||||   io_mutex_ -> mutex_, never the reverse).               ||
+||||                                                           |
+||||   SPDX-License-Identifier: GPL-2.0-or-later               ||
+|\*---------------------------------------------------------*/
 
 #include "OpenRgbClient.h"
 
@@ -87,6 +90,17 @@ std::string OpenRgbClient::LastError() const
     return last_error_;
 }
 
+ConnectionSnapshotInfo OpenRgbClient::ConnectionSnapshot() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    ConnectionSnapshotInfo out;
+    out.state             = state_;
+    out.protocol_version  = protocol_version_;
+    out.reconnect_attempt = reconnect_attempt_;
+    out.last_error        = last_error_;
+    return out;
+}
+
 uint32_t OpenRgbClient::ReconnectAttempt() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -100,8 +114,9 @@ TimePoint OpenRgbClient::NextAttemptAt() const
 }
 
 /*---------------------------------------------------------*\
-||| Transport                                                 |
-\*---------------------------------------------------------*/
+|||| Transport — every helper below runs ONLY under          ||
+|||| io_mutex_.                                              ||
+|\*---------------------------------------------------------*/
 
 void OpenRgbClient::SendPacket(uint32_t dev_id, uint32_t pkt_id,
                                const std::vector<uint8_t>& body)
@@ -208,7 +223,7 @@ void OpenRgbClient::DrainPending()
     }
 }
 
-void OpenRgbClient::Handshake()
+void OpenRgbClient::Handshake(const OpenRgbClientOptions& opts)
 {
     /* Version negotiation: offer our cap; the backend replies with
        ITS version (6 on the vendored fork). Negotiated =
@@ -223,25 +238,35 @@ void OpenRgbClient::Handshake()
     }
     uint32_t server_version = 0;
     memcpy(&server_version, reply.data(), 4);
-    protocol_version_ = (server_version > kProtocolCap) ? kProtocolCap
-                                                        : server_version;
-    if(protocol_version_ == 0)
+    const uint32_t negotiated =
+        (server_version > kProtocolCap) ? kProtocolCap : server_version;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        protocol_version_ = negotiated;
+    }
+    if(negotiated == 0)
     {
         throw TransportError("backend does not support a usable "
                              "protocol version");
     }
 
     SendPacket(0, kPktSetClientName,
-               BuildClientNameRequest(options_.client_name));
+               BuildClientNameRequest(opts.client_name));
     DrainPending();
 }
 
 /*---------------------------------------------------------*\
-||| Lifecycle                                                 |
-\*---------------------------------------------------------*/
+|||| Lifecycle                                               ||
+|\*---------------------------------------------------------*/
 
-bool OpenRgbClient::EnumerateLocked(std::string& err)
+bool OpenRgbClient::EnumerateIo(std::string& err)
 {
+    uint32_t pv = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pv = protocol_version_;
+    }
+
     const std::vector<uint8_t> count_reply =
         Request(0, kPktControllerCount, {}, kPktControllerCount);
     if(count_reply.size() != 4)
@@ -252,16 +277,19 @@ bool OpenRgbClient::EnumerateLocked(std::string& err)
     uint32_t count = 0;
     memcpy(&count, count_reply.data(), 4);
 
+    /* Built entirely on the side; the committed map swaps in
+       atomically under mutex_ — a state reader never observes
+       a half-enumerated device list. */
     std::map<DeviceKey, DeviceRecord> devices;
     for(uint32_t i = 0; i < count; ++i)
     {
         const std::vector<uint8_t> data =
             Request(i, kPktControllerData,
-                    BuildControllerDataRequest(protocol_version_),
+                    BuildControllerDataRequest(pv),
                     kPktControllerData);
         SdkController c;
         if(!ParseControllerData(data.data(), data.size(),
-                                protocol_version_, c))
+                                pv, c))
         {
             err = "malformed controller data for device " +
                   std::to_string(i);
@@ -310,31 +338,45 @@ bool OpenRgbClient::EnumerateLocked(std::string& err)
     }
 
     /* Every enumeration is a topology generation: frames stamped
-       with an older generation are obsolete. */
-    ++topology_generation_;
-    for(auto& entry : devices)
+       with an older generation are obsolete. The generation bump
+       and the map swap commit in the SAME state-lock hold so a
+       reader can never pair the new generation with the old map
+       (or the reverse). */
     {
-        entry.second.snap.topology_generation = topology_generation_;
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++topology_generation_;
+        for(auto& entry : devices)
+        {
+            entry.second.snap.topology_generation = topology_generation_;
+        }
+        devices_ = std::move(devices);
     }
-    devices_ = std::move(devices);
     return true;
 }
 
-bool OpenRgbClient::ConnectLocked(std::string& err)
+bool OpenRgbClient::ConnectIo(std::string& err)
 {
+    /* One options snapshot per wire operation — SetOptions()
+       can never flip timeouts mid-sequence (the old lock gave
+       the same guarantee by serializing the whole call). */
+    OpenRgbClientOptions opts;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        opts = options_;
+        protocol_version_ = 0;
+    }
     stream_->Close();
-    protocol_version_ = 0;
 
     try
     {
-        if(!stream_->Connect(options_.host, options_.port,
-                            options_.connect_timeout_ms,
-                            options_.io_timeout_ms, err))
+        if(!stream_->Connect(opts.host, opts.port,
+                            opts.connect_timeout_ms,
+                            opts.io_timeout_ms, err))
         {
             return false;
         }
-        Handshake();
-        if(!EnumerateLocked(err))
+        Handshake(opts);
+        if(!EnumerateIo(err))
         {
             stream_->Close();
             return false;
@@ -347,18 +389,22 @@ bool OpenRgbClient::ConnectLocked(std::string& err)
         return false;
     }
 
-    state_             = ConnectionState::Connected;
-    reconnect_attempt_ = 0;
-    last_error_.clear();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_             = ConnectionState::Connected;
+        reconnect_attempt_ = 0;
+        last_error_.clear();
+    }
     return true;
 }
 
 bool OpenRgbClient::Connect()
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> io(io_mutex_);
     std::string err;
-    if(!ConnectLocked(err))
+    if(!ConnectIo(err))
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         state_      = ConnectionState::Disconnected;
         last_error_ = err;
         return false;
@@ -368,50 +414,85 @@ bool OpenRgbClient::Connect()
 
 void OpenRgbClient::Disconnect()
 {
+    /* Both locks, io order: the close is atomic against any
+       in-flight wire operation (a reconnect that already
+       started finishes before the socket is pulled). */
+    std::lock_guard<std::mutex> io(io_mutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     stream_->Close();
-    protocol_version_   = 0;
-    state_              = ConnectionState::Disconnected;
-    reconnect_attempt_  = 0;
+    protocol_version_  = 0;
+    state_             = ConnectionState::Disconnected;
+    reconnect_attempt_ = 0;
 }
 
 bool OpenRgbClient::Enumerate()
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if(state_ != ConnectionState::Connected)
+    std::lock_guard<std::mutex> io(io_mutex_);
     {
-        last_error_ = "not connected";
-        return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(state_ != ConnectionState::Connected)
+        {
+            last_error_ = "not connected";
+            return false;
+        }
     }
     std::string err;
     try
     {
-        if(!EnumerateLocked(err))
+        if(!EnumerateIo(err))
         {
+            std::lock_guard<std::mutex> lock(mutex_);
             last_error_ = err;
             return false;
         }
     }
     catch(const TransportError& e)
     {
-        MarkBrokenLocked(e.what(), Clock::now());
+        MarkBrokenIo(e.what(), Clock::now());
         return false;
     }
     return true;
 }
 
 /*---------------------------------------------------------*\
-||| Reconnect schedule                                        |
-\*---------------------------------------------------------*/
+|||| Reconnect schedule                                      ||
+|\*---------------------------------------------------------*/
 
 bool OpenRgbClient::RefreshStatus()
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if(state_ != ConnectionState::Connected)
+    std::lock_guard<std::mutex> io(io_mutex_);
+
+    /* Snapshot everything the wire phase needs — the io_mutex_
+       hold means no other thread can commit a topology change
+       mid-refresh, so this view stays consistent for the whole
+       call. */
+    struct KnownDevice
     {
-        last_error_ = "not connected";
-        return false;
+        DeviceKey                 key;
+        uint32_t                  index;
+        int32_t                   device_type;
+        std::vector<ZoneSnapshot> zones;
+    };
+    uint32_t                pv = 0;
+    std::vector<KnownDevice> known;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(state_ != ConnectionState::Connected)
+        {
+            last_error_ = "not connected";
+            return false;
+        }
+        pv = protocol_version_;
+        known.reserve(devices_.size());
+        for(const auto& entry : devices_)
+        {
+            known.push_back(KnownDevice{ entry.first,
+                                         entry.second.index,
+                                         entry.second.snap.device_type,
+                                         entry.second.snap.zones });
+        }
     }
+
     try
     {
         /* A device added or removed changes the server-side
@@ -426,16 +507,18 @@ bool OpenRgbClient::RefreshStatus()
                     kPktControllerCount);
         if(count_reply.size() != 4)
         {
+            std::lock_guard<std::mutex> lock(mutex_);
             last_error_ = "malformed controller count reply";
             return false;
         }
         uint32_t count = 0;
         memcpy(&count, count_reply.data(), 4);
-        if(count != devices_.size())
+        if(count != known.size())
         {
             std::string err;
-            if(!EnumerateLocked(err))
+            if(!EnumerateIo(err))
             {
+                std::lock_guard<std::mutex> lock(mutex_);
                 last_error_ = err;
                 return false;
             }
@@ -444,17 +527,18 @@ bool OpenRgbClient::RefreshStatus()
 
         bool structural = false;
         std::vector<std::pair<DeviceKey, SdkController>> fresh;
-        fresh.reserve(devices_.size());
-        for(const auto& entry : devices_)
+        fresh.reserve(known.size());
+        for(const KnownDevice& kd : known)
         {
             const std::vector<uint8_t> data =
-                Request(entry.second.index, kPktControllerData,
-                        BuildControllerDataRequest(protocol_version_),
+                Request(kd.index, kPktControllerData,
+                        BuildControllerDataRequest(pv),
                         kPktControllerData);
             SdkController c;
             if(!ParseControllerData(data.data(), data.size(),
-                                    protocol_version_, c))
+                                    pv, c))
             {
+                std::lock_guard<std::mutex> lock(mutex_);
                 last_error_ = "malformed controller data on refresh";
                 return false;
             }
@@ -462,9 +546,9 @@ bool OpenRgbClient::RefreshStatus()
                at an expected index means the topology moved —
                take the full re-enumeration path so the
                generation bump invalidates stale frames. */
-            if(MakeKey(c) != entry.first ||
-               (int32_t)c.type != entry.second.snap.device_type ||
-               c.zones.size() != entry.second.snap.zones.size())
+            if(MakeKey(c) != kd.key ||
+               (int32_t)c.type != kd.device_type ||
+               c.zones.size() != kd.zones.size())
             {
                 structural = true;
             }
@@ -473,28 +557,29 @@ bool OpenRgbClient::RefreshStatus()
                 for(size_t z = 0; z < c.zones.size(); ++z)
                 {
                     if(c.zones[z].leds_count !=
-                       entry.second.snap.zones[z].led_count ||
+                       kd.zones[z].led_count ||
                        c.zones[z].matrix_rows !=
-                       entry.second.snap.zones[z].matrix_rows ||
+                       kd.zones[z].matrix_rows ||
                        c.zones[z].matrix_cols !=
-                       entry.second.snap.zones[z].matrix_cols ||
+                       kd.zones[z].matrix_cols ||
                        c.zones[z].matrix_map !=
-                       entry.second.snap.zones[z].matrix_map)
+                       kd.zones[z].matrix_map)
                     {
                         structural = true;
                         break;
                     }
                 }
             }
-            fresh.emplace_back(entry.first, std::move(c));
+            fresh.emplace_back(kd.key, std::move(c));
         }
         if(structural)
         {
             /* Same path as Enumerate() — a genuine topology
                change must obsolete in-flight work. */
             std::string err;
-            if(!EnumerateLocked(err))
+            if(!EnumerateIo(err))
             {
+                std::lock_guard<std::mutex> lock(mutex_);
                 last_error_ = err;
                 return false;
             }
@@ -502,30 +587,40 @@ bool OpenRgbClient::RefreshStatus()
         }
         /* In-place refresh: mode/parameter state and the
            last-enumerated colors only — the generation (and
-           therefore every pending frame) stays valid. */
-        for(auto& pair : fresh)
+           therefore every pending frame) stays valid. Committed
+           in one state-lock hold. */
         {
-            DeviceRecord& rec    = devices_.at(pair.first);
-            SdkController& c     = pair.second;
-            rec.snap.active_mode = (int32_t)c.active_mode;
-            rec.modes            = c.modes;
-            rec.snap.modes.clear();
-            for(const SdkMode& m : c.modes)
+            std::lock_guard<std::mutex> lock(mutex_);
+            for(auto& pair : fresh)
             {
-                rec.snap.modes.push_back(m.name);
-            }
-            rec.snap.colors.clear();
-            rec.snap.colors.reserve(c.colors.size());
-            for(const uint32_t packed : c.colors)
-            {
-                rec.snap.colors.push_back(FromSceneColor(packed));
+                const auto it = devices_.find(pair.first);
+                if(it == devices_.end())
+                {
+                    continue;    /* defensive — devices_ cannot
+                                    change under the io hold  */
+                }
+                DeviceRecord& rec    = it->second;
+                SdkController& c     = pair.second;
+                rec.snap.active_mode = (int32_t)c.active_mode;
+                rec.modes            = c.modes;
+                rec.snap.modes.clear();
+                for(const SdkMode& m : c.modes)
+                {
+                    rec.snap.modes.push_back(m.name);
+                }
+                rec.snap.colors.clear();
+                rec.snap.colors.reserve(c.colors.size());
+                for(const uint32_t packed : c.colors)
+                {
+                    rec.snap.colors.push_back(FromSceneColor(packed));
+                }
             }
         }
         DrainPending();
     }
     catch(const TransportError& e)
     {
-        MarkBrokenLocked(e.what(), Clock::now());
+        MarkBrokenIo(e.what(), Clock::now());
         return false;
     }
     return true;
@@ -552,10 +647,14 @@ bool OpenRgbClient::ActiveMode(const DeviceKey& controller,
     return true;
 }
 
-void OpenRgbClient::MarkBrokenLocked(const std::string& reason,
-                                     TimePoint now)
+void OpenRgbClient::MarkBrokenIo(const std::string& reason,
+                                 TimePoint now)
 {
+    /* Caller holds io_mutex_ — the close cannot race another
+       wire operation. The state transition commits under
+       mutex_ afterwards (io -> state order). */
     stream_->Close();
+    std::lock_guard<std::mutex> lock(mutex_);
     protocol_version_  = 0;
     last_error_        = reason;
     state_             = ConnectionState::Reconnecting;
@@ -563,13 +662,25 @@ void OpenRgbClient::MarkBrokenLocked(const std::string& reason,
     next_attempt_      = now + options_.backoff.DelayFor(0);
 }
 
-void OpenRgbClient::PollLocked(TimePoint now)
+void OpenRgbClient::PollIo(TimePoint now)
 {
-    if(state_ == ConnectionState::Connected)
+    /* stream_->IsOpen()/PeerClosed() are wire-side probes —
+       they run under io_mutex_ (held by the caller), never
+       inside the mutex_ state sections. */
+    bool check_schedule = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(state_ != ConnectionState::Connected)
+        {
+            check_schedule = true;   /* Reconnecting/Disconnected */
+        }
+    }
+    if(!check_schedule)
     {
         if(stream_->IsOpen() && stream_->PeerClosed())
         {
-            MarkBrokenLocked("peer closed connection", now);
+            MarkBrokenIo("peer closed connection", now);
+            check_schedule = true;
         }
         else
         {
@@ -577,25 +688,30 @@ void OpenRgbClient::PollLocked(TimePoint now)
         }
     }
 
-    if(state_ != ConnectionState::Reconnecting)
     {
-        return;
-    }
-    if(reconnect_attempt_ >= options_.backoff.max_attempts)
-    {
-        /* Bounded: give up; snapshots keep reporting Disconnected
-           until an explicit Connect()/ReconnectNow(). */
-        state_ = ConnectionState::Disconnected;
-        return;
-    }
-    if(now < next_attempt_)
-    {
-        return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(state_ != ConnectionState::Reconnecting)
+        {
+            return;
+        }
+        if(reconnect_attempt_ >= options_.backoff.max_attempts)
+        {
+            /* Bounded: give up; snapshots keep reporting
+               Disconnected until an explicit
+               Connect()/ReconnectNow(). */
+            state_ = ConnectionState::Disconnected;
+            return;
+        }
+        if(now < next_attempt_)
+        {
+            return;
+        }
     }
 
     std::string err;
-    if(!ConnectLocked(err))
+    if(!ConnectIo(err))
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         ++reconnect_attempt_;
         next_attempt_ = now + options_.backoff.DelayFor(reconnect_attempt_);
         last_error_   = err;
@@ -604,26 +720,33 @@ void OpenRgbClient::PollLocked(TimePoint now)
 
 bool OpenRgbClient::Poll(TimePoint now)
 {
+    std::lock_guard<std::mutex> io(io_mutex_);
+    PollIo(now);
     std::lock_guard<std::mutex> lock(mutex_);
-    PollLocked(now);
     return state_ == ConnectionState::Connected;
 }
 
 bool OpenRgbClient::ReconnectNow()
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> io(io_mutex_);
     const TimePoint now = Clock::now();
     stream_->Close();
-    state_             = ConnectionState::Reconnecting;
-    reconnect_attempt_ = 0;
-    next_attempt_      = now;
-    PollLocked(now);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_             = ConnectionState::Reconnecting;
+        reconnect_attempt_ = 0;
+        next_attempt_      = now;
+    }
+    PollIo(now);
+    std::lock_guard<std::mutex> lock(mutex_);
     return state_ == ConnectionState::Connected;
 }
 
 /*---------------------------------------------------------*\
-||| Topology                                                  |
-\*---------------------------------------------------------*/
+|||| Topology — pure state reads (mutex_ only, never the    ||
+|||| wire): the diagnostics surface stays responsive while  ||
+|||| a wire operation is in flight.                         ||
+|\*---------------------------------------------------------*/
 
 std::vector<DeviceSnapshot> OpenRgbClient::Snapshots() const
 {
@@ -654,36 +777,45 @@ bool OpenRgbClient::Snapshot(const DeviceKey& controller,
 }
 
 /*---------------------------------------------------------*\
-||| IFrameSink — the direct-mode send path                    |
-\*---------------------------------------------------------*/
+|||| IFrameSink — the direct-mode send path                  ||
+|\*---------------------------------------------------------*/
 
 SubmitResult OpenRgbClient::SubmitLatest(const RgbFrame& frame)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
     const TimePoint now = Clock::now();
-    PollLocked(now);                      /* drive scheduled retries */
+    std::lock_guard<std::mutex> io(io_mutex_);
+    PollIo(now);                       /* drive scheduled retries */
 
-    const auto dev = devices_.find(frame.controller);
-    if(dev == devices_.end())
+    /* Validate against committed state in one state-lock hold.
+       Holding io_mutex_ means nothing can re-enumerate or
+       transition the connection between this read and the
+       send below — the resolved index stays valid. */
+    uint32_t dev_index = 0;
     {
-        ++stats_.rejected;
-        return SubmitResult::Reject("unknown controller");
-    }
-    if(state_ != ConnectionState::Connected)
-    {
-        ++stats_.rejected;
-        return SubmitResult::Reject("backend not connected");
-    }
-    if(frame.topology_generation != topology_generation_)
-    {
-        ++stats_.rejected;
-        return SubmitResult::Reject("stale topology generation");
-    }
-    const uint32_t led_count = dev->second.snap.LedCount();
-    if(frame.colors.size() != led_count || frame.colors.empty())
-    {
-        ++stats_.rejected;
-        return SubmitResult::Reject("LED count mismatch");
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto dev = devices_.find(frame.controller);
+        if(dev == devices_.end())
+        {
+            ++stats_.rejected;
+            return SubmitResult::Reject("unknown controller");
+        }
+        if(state_ != ConnectionState::Connected)
+        {
+            ++stats_.rejected;
+            return SubmitResult::Reject("backend not connected");
+        }
+        if(frame.topology_generation != topology_generation_)
+        {
+            ++stats_.rejected;
+            return SubmitResult::Reject("stale topology generation");
+        }
+        const uint32_t led_count = dev->second.snap.LedCount();
+        if(frame.colors.size() != led_count || frame.colors.empty())
+        {
+            ++stats_.rejected;
+            return SubmitResult::Reject("LED count mismatch");
+        }
+        dev_index = dev->second.index;
     }
 
     /* Complete-controller write: one UPDATELEDS packet covering
@@ -698,21 +830,25 @@ SubmitResult OpenRgbClient::SubmitLatest(const RgbFrame& frame)
 
     try
     {
-        SendPacket(dev->second.index, kPktUpdateLEDs,
+        SendPacket(dev_index, kPktUpdateLEDs,
                    BuildUpdateLEDsBody(colors));
     }
     catch(const TransportError& e)
     {
+        MarkBrokenIo(e.what(), now);
+        std::lock_guard<std::mutex> lock(mutex_);
         ++stats_.rejected;
-        MarkBrokenLocked(e.what(), now);
         return SubmitResult::Reject(std::string("transport error: ") +
                                     e.what());
     }
 
-    ++stats_.submitted;
-    /* Transport-completed = handed to the SDK socket, never
-       hardware confirmation. */
-    stats_.RecordTransportCompletion(now);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++stats_.submitted;
+        /* Transport-completed = handed to the SDK socket, never
+           hardware confirmation. */
+        stats_.RecordTransportCompletion(now);
+    }
     return SubmitResult::Accept();
 }
 
@@ -723,26 +859,31 @@ DeliveryStats OpenRgbClient::Stats() const
 }
 
 /*---------------------------------------------------------*\
-||| Mode / resize commands                                    |
-\*---------------------------------------------------------*/
+|||| Mode / resize commands                                  ||
+|\*---------------------------------------------------------*/
 
 bool OpenRgbClient::SetCustomMode(const DeviceKey& controller)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto dev = devices_.find(controller);
-    if(dev == devices_.end() || state_ != ConnectionState::Connected)
+    std::lock_guard<std::mutex> io(io_mutex_);
+    uint32_t dev_index = 0;
     {
-        last_error_ = "controller unavailable";
-        return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto dev = devices_.find(controller);
+        if(dev == devices_.end() || state_ != ConnectionState::Connected)
+        {
+            last_error_ = "controller unavailable";
+            return false;
+        }
+        dev_index = dev->second.index;
     }
     try
     {
-        SendPacket(dev->second.index, kPktSetCustomMode, {});
+        SendPacket(dev_index, kPktSetCustomMode, {});
         DrainPending();
     }
     catch(const TransportError& e)
     {
-        MarkBrokenLocked(e.what(), Clock::now());
+        MarkBrokenIo(e.what(), Clock::now());
         return false;
     }
     return true;
@@ -764,47 +905,53 @@ bool OpenRgbClient::SelectMode(const DeviceKey& controller,
                                const std::string& name,
                                const ModePatch& patch)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto dev = devices_.find(controller);
-    if(dev == devices_.end() || state_ != ConnectionState::Connected)
+    std::lock_guard<std::mutex> io(io_mutex_);
+    uint32_t             dev_index  = 0;
+    int32_t              mode_index = -1;
+    std::vector<uint8_t> raw;
     {
-        last_error_ = "controller unavailable";
-        return false;
-    }
-
-    /* Resolve the mode by NAME from enumeration — never by
-       hard-coded array index (plan section 4). */
-    int32_t mode_index = -1;
-    for(size_t i = 0; i < dev->second.modes.size(); ++i)
-    {
-        if(dev->second.modes[i].name == name)
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto dev = devices_.find(controller);
+        if(dev == devices_.end() || state_ != ConnectionState::Connected)
         {
-            mode_index = (int32_t)i;
-            break;
+            last_error_ = "controller unavailable";
+            return false;
         }
-    }
-    if(mode_index < 0)
-    {
-        last_error_ = "unsupported mode '" + name + "'";
-        return false;
-    }
 
-    std::vector<uint8_t> raw = dev->second.modes[mode_index].raw;
-    if(!PatchModeParams(raw, protocol_version_, patch))
-    {
-        last_error_ = "cannot patch mode parameters";
-        return false;
+        /* Resolve the mode by NAME from enumeration — never by
+           hard-coded array index (plan section 4). */
+        for(size_t i = 0; i < dev->second.modes.size(); ++i)
+        {
+            if(dev->second.modes[i].name == name)
+            {
+                mode_index = (int32_t)i;
+                break;
+            }
+        }
+        if(mode_index < 0)
+        {
+            last_error_ = "unsupported mode '" + name + "'";
+            return false;
+        }
+
+        raw = dev->second.modes[(size_t)mode_index].raw;
+        if(!PatchModeParams(raw, protocol_version_, patch))
+        {
+            last_error_ = "cannot patch mode parameters";
+            return false;
+        }
+        dev_index = dev->second.index;
     }
 
     try
     {
-        SendPacket(dev->second.index, kPktUpdateMode,
+        SendPacket(dev_index, kPktUpdateMode,
                    BuildUpdateModeBody(mode_index, raw));
         DrainPending();
     }
     catch(const TransportError& e)
     {
-        MarkBrokenLocked(e.what(), Clock::now());
+        MarkBrokenIo(e.what(), Clock::now());
         return false;
     }
     /* snap.active_mode is deliberately NOT patched here: it is
@@ -819,43 +966,47 @@ bool OpenRgbClient::ResizeZone(const DeviceKey& controller,
                                const std::string& zone_name,
                                int32_t new_size)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto dev = devices_.find(controller);
-    if(dev == devices_.end() || state_ != ConnectionState::Connected)
+    std::lock_guard<std::mutex> io(io_mutex_);
+    uint32_t dev_index  = 0;
+    int32_t  zone_index = -1;
     {
-        last_error_ = "controller unavailable";
-        return false;
-    }
-
-    int32_t zone_index = -1;
-    for(size_t i = 0; i < dev->second.snap.zones.size(); ++i)
-    {
-        if(dev->second.snap.zones[i].name == zone_name)
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto dev = devices_.find(controller);
+        if(dev == devices_.end() || state_ != ConnectionState::Connected)
         {
-            zone_index = (int32_t)i;
-            break;
+            last_error_ = "controller unavailable";
+            return false;
         }
-    }
-    if(zone_index < 0)
-    {
-        last_error_ = "unknown zone '" + zone_name + "'";
-        return false;
-    }
-    if(new_size < 0)
-    {
-        last_error_ = "invalid zone size";
-        return false;
+        for(size_t i = 0; i < dev->second.snap.zones.size(); ++i)
+        {
+            if(dev->second.snap.zones[i].name == zone_name)
+            {
+                zone_index = (int32_t)i;
+                break;
+            }
+        }
+        if(zone_index < 0)
+        {
+            last_error_ = "unknown zone '" + zone_name + "'";
+            return false;
+        }
+        if(new_size < 0)
+        {
+            last_error_ = "invalid zone size";
+            return false;
+        }
+        dev_index = dev->second.index;
     }
 
     try
     {
-        SendPacket(dev->second.index, kPktResizeZone,
+        SendPacket(dev_index, kPktResizeZone,
                    BuildResizeZoneBody(zone_index, new_size));
         DrainPending();
     }
     catch(const TransportError& e)
     {
-        MarkBrokenLocked(e.what(), Clock::now());
+        MarkBrokenIo(e.what(), Clock::now());
         return false;
     }
 
@@ -866,7 +1017,10 @@ bool OpenRgbClient::ResizeZone(const DeviceKey& controller,
        snapshots keep reporting their pre-change generation, so
        every subsequent SubmitLatest rejects as stale until the
        caller's Enumerate() refreshes zones and colors. */
-    ++topology_generation_;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++topology_generation_;
+    }
     return true;
 }
 

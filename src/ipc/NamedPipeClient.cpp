@@ -59,17 +59,23 @@ bool NamedPipeChannel::IsOpen() const
 
 void NamedPipeChannel::Close()
 {
+    /* Mark shutdown first — new I/O calls short-circuit on the
+       null handle and in-flight deadline polls exit on their
+       next iteration. Then take io_mutex_: a RecvSome/SendAll
+       that already loaded the handle is still inside its
+       Win32 call; waiting here guarantees CloseHandle never
+       releases (and the kernel never recycles) the handle out
+       from under it. CancelIoEx is a documented no-op for
+       synchronous handles but stays first — the order is the
+       correct one if the handle ever goes overlapped. */
     void* h = handle_.exchange(nullptr);
-    if(h)
+    if(!h)
     {
-        /* Cancel any in-flight blocking call before releasing
-           the handle (deadline polls exit on !handle_, but a
-           racing ReadFile must see invalid-handle, not a
-           recycled one — CancelIoEx + close is the safe order
-           for our synchronous-handle use). */
-        CancelIoEx((HANDLE)h, nullptr);
-        CloseHandle((HANDLE)h);
+        return;
     }
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    CancelIoEx((HANDLE)h, nullptr);
+    CloseHandle((HANDLE)h);
 }
 
 IpcIoResult NamedPipeChannel::RecvSome(void* buf, size_t max_len,
@@ -82,46 +88,57 @@ IpcIoResult NamedPipeChannel::RecvSome(void* buf, size_t max_len,
         pipe_detail::NowMs() + deadline_ms;
     for(;;)
     {
-        void* h = handle_.load();
-        if(!h)
         {
-            return IpcIoResult::Closed;
-        }
-        DWORD avail = 0;
-        if(!PeekNamedPipe((HANDLE)h, nullptr, 0, nullptr,
-                          &avail, nullptr))
-        {
-            const DWORD e = GetLastError();
-            if(e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED
-               || e == ERROR_NO_DATA || e == ERROR_PIPE_LISTENING
-               || e == ERROR_INVALID_HANDLE)
+            /* io_mutex_ pins the handle across the Win32 calls —
+               the handle is re-loaded under the lock so a close
+               that already ran can never hand us a recycled
+               HANDLE. */
+            std::lock_guard<std::mutex> lock(io_mutex_);
+            void* h = handle_.load();
+            if(!h)
             {
+                err = "channel closed";
                 return IpcIoResult::Closed;
             }
-            err = "PeekNamedPipe: " + pipe_detail::LastErrorText(e);
-            return IpcIoResult::Error;
-        }
-        if(avail > 0)
-        {
-            const DWORD want =
-                (DWORD)((avail < max_len) ? avail : max_len);
-            DWORD n = 0;
-            if(!ReadFile((HANDLE)h, buf, want, &n, nullptr))
+            DWORD avail = 0;
+            if(!PeekNamedPipe((HANDLE)h, nullptr, 0, nullptr,
+                              &avail, nullptr))
             {
                 const DWORD e = GetLastError();
-                if(e == ERROR_BROKEN_PIPE || e == ERROR_NO_DATA
-                   || e == ERROR_PIPE_NOT_CONNECTED)
+                if(e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED
+                   || e == ERROR_NO_DATA || e == ERROR_PIPE_LISTENING
+                   || e == ERROR_INVALID_HANDLE)
                 {
+                    err = "peer closed";
                     return IpcIoResult::Closed;
                 }
-                err = "ReadFile: " + pipe_detail::LastErrorText(e);
+                err = "PeekNamedPipe: " + pipe_detail::LastErrorText(e);
                 return IpcIoResult::Error;
             }
-            got = n;
-            return IpcIoResult::Ok;
+            if(avail > 0)
+            {
+                const DWORD want =
+                    (DWORD)((avail < max_len) ? avail : max_len);
+                DWORD n = 0;
+                if(!ReadFile((HANDLE)h, buf, want, &n, nullptr))
+                {
+                    const DWORD e = GetLastError();
+                    if(e == ERROR_BROKEN_PIPE || e == ERROR_NO_DATA
+                       || e == ERROR_PIPE_NOT_CONNECTED)
+                    {
+                        err = "peer closed";
+                        return IpcIoResult::Closed;
+                    }
+                    err = "ReadFile: " + pipe_detail::LastErrorText(e);
+                    return IpcIoResult::Error;
+                }
+                got = n;
+                return IpcIoResult::Ok;
+            }
         }
         if(pipe_detail::RemainingMs(deadline_abs) == 0)
         {
+            err = "timeout";
             return IpcIoResult::Timeout;
         }
         Sleep(1);
@@ -142,6 +159,7 @@ IpcIoResult NamedPipeChannel::RecvExact(void* buf, size_t len,
             pipe_detail::RemainingMs(deadline_abs);
         if(left == 0)
         {
+            err = "timeout";
             return IpcIoResult::Timeout;
         }
         size_t n = 0;
@@ -166,49 +184,58 @@ IpcIoResult NamedPipeChannel::SendAll(const void* data, size_t len,
         pipe_detail::NowMs() + deadline_ms;
     while(sent < len)
     {
-        void* h = handle_.load();
-        if(!h)
         {
-            return IpcIoResult::Closed;
-        }
-        DWORD n = 0;
-        const DWORD want =
-            (DWORD)((len - sent) > 0x7FFFFFFF ? 0x7FFFFFFF
-                                            : (len - sent));
-        if(!WriteFile((HANDLE)h, p + sent, want, &n, nullptr))
-        {
-            const DWORD e = GetLastError();
-            if(e == ERROR_PIPE_BUSY || e == ERROR_NO_DATA)
+            /* Same handle pin as RecvSome: re-load under
+               io_mutex_ so Close() can never release the
+               handle mid-WriteFile. */
+            std::lock_guard<std::mutex> lock(io_mutex_);
+            void* h = handle_.load();
+            if(!h)
             {
-                /* Nonblocking-wait mode: no room right now —
-                   poll inside the deadline. */
-            }
-            else if(e == ERROR_BROKEN_PIPE
-                    || e == ERROR_PIPE_NOT_CONNECTED
-                    || e == ERROR_INVALID_HANDLE)
-            {
+                err = "channel closed";
                 return IpcIoResult::Closed;
+            }
+            DWORD n = 0;
+            const DWORD want =
+                (DWORD)((len - sent) > 0x7FFFFFFF ? 0x7FFFFFFF
+                                                : (len - sent));
+            if(!WriteFile((HANDLE)h, p + sent, want, &n, nullptr))
+            {
+                const DWORD e = GetLastError();
+                if(e == ERROR_PIPE_BUSY || e == ERROR_NO_DATA)
+                {
+                    /* Nonblocking-wait mode: no room right now —
+                       poll inside the deadline. */
+                }
+                else if(e == ERROR_BROKEN_PIPE
+                        || e == ERROR_PIPE_NOT_CONNECTED
+                        || e == ERROR_INVALID_HANDLE)
+                {
+                    err = "peer closed";
+                    return IpcIoResult::Closed;
+                }
+                else
+                {
+                    err = "WriteFile: " + pipe_detail::LastErrorText(e);
+                    return IpcIoResult::Error;
+                }
             }
             else
             {
-                err = "WriteFile: " + pipe_detail::LastErrorText(e);
-                return IpcIoResult::Error;
-            }
-        }
-        else
-        {
-            sent += n;
-            if(sent >= len)
-            {
-                break;
-            }
-            if(n == 0)
-            {
-                /* wrote nothing — wait for the peer to drain */
+                sent += n;
+                if(sent >= len)
+                {
+                    return IpcIoResult::Ok;
+                }
+                if(n == 0)
+                {
+                    /* wrote nothing — wait for the peer to drain */
+                }
             }
         }
         if(pipe_detail::RemainingMs(deadline_abs) == 0)
         {
+            err = "timeout";
             return IpcIoResult::Timeout;
         }
         Sleep(1);
