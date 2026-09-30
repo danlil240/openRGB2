@@ -90,6 +90,15 @@ public:
        baseline + revisions are unchanged so the record never
        reads as engine state. Nothing is sent anywhere. */
     void LoadDraft(const studio::StudioDocument& draft);
+    /* Revision-only rebase: a resource_install/remove moves the
+       workspace's RESOURCE revision without touching the
+       document — the draft's commit base advances to match so
+       the next save doesn't resubmit a stale pair and hit a
+       phantom revision_conflict (QA F07). Counter-monotonic
+       only — a stale echo never rolls the base back. Documents,
+       working copy, and history are untouched. */
+    void RebaseRevisions(uint64_t workspace_revision,
+                         uint64_t resource_revision);
     /* Wholesale replacement staging (profile/library load):
        one snapshot undo record, labeled. */
     bool StageWorking(const studio::StudioDocument& doc,

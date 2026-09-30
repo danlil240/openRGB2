@@ -100,6 +100,21 @@ void WorkspaceEditSession::LoadDraft(
        draft work, never engine state. */
 }
 
+void WorkspaceEditSession::RebaseRevisions(
+    uint64_t workspace_revision, uint64_t resource_revision)
+{
+    /* Forward-only per counter: an out-of-order event can
+       never move the commit base backward. */
+    if(workspace_revision > base_rev_)
+    {
+        base_rev_ = workspace_revision;
+    }
+    if(resource_revision > res_rev_)
+    {
+        res_rev_ = resource_revision;
+    }
+}
+
 bool WorkspaceEditSession::StageWorking(
     const studio::StudioDocument& doc, const std::string& label)
 {

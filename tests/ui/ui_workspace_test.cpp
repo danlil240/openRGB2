@@ -171,6 +171,7 @@ struct WsEngine
     int           commits       = 0;
     nlohmann::json last_commit_doc;
     uint64_t      last_base_rev  = 0;
+    uint64_t      last_res_rev   = 0;
     int           download_begins = 0;
     int           upload_begins   = 0;
     int           import_commits  = 0;
@@ -210,6 +211,10 @@ struct WsEngine
             { "job_id",             id    },
             { "session_id",         1     },
             { "verb",               verb  },
+            /* The job's target workspace — the wire field a
+               foreign-workspace job must not move revisions
+               under (F07/F06 round). */
+            { "id",                 ws_id },
             { "state",              state },
             { "committed",          state == "succeeded" &&
                                     (verb == "commit" ||
@@ -490,6 +495,8 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
                                                nlohmann::json());
                 e.last_base_rev   =
                     body.value("base_revision", (uint64_t)0);
+                e.last_res_rev    =
+                    body.value("resource_revision", (uint64_t)0);
             }
             if(verb == "import_commit")
             {
@@ -982,6 +989,178 @@ int main(int argc, char** argv)
             return !rig.ctl.conflict() && !rig.ctl.dirty(); }));
         CHECK(rig.ctl.Session().Working().meta.name ==
               "other-client");
+    }
+
+    std::printf("-- controller: resource_install rebases the "
+                "draft base silently\n");
+    {
+        /* F07: a resource_install job bumps resource_revision
+           while the document bytes stand — the draft's commit
+           base must advance so the NEXT save doesn't resubmit
+           the stale pair and trip a phantom
+           revision_conflict. */
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "kept"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        CHECK(rig.ctl.dirty());
+        const int begins = rig.engine.download_begins;
+
+        /* The terminal install record reports {ws 1, res 2}
+           with committed:false — the controller rebases; no
+           document fetch is issued (the bytes never moved). */
+        ++rig.engine.res_rev;
+        rig.engine.SendEvent(rig.engine.JobRecord(
+            900, "resource_install", "succeeded"));
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.resourceRevision() == 2; }));
+        CHECK(rig.engine.download_begins == begins);
+        CHECK(rig.ctl.dirty());
+        CHECK(!rig.ctl.conflict());
+        CHECK(rig.ctl.Session().ResourceRevision() == 2);
+
+        /* The durable shadow re-staged with the rebased pair —
+           a recovered draft is not born stale. */
+        rig.ctl.FlushDrafts();
+        const WorkspaceDraftRecord rec =
+            rig.ctl.Drafts().Read(QStringLiteral("ws0"));
+        CHECK(rec.exists);
+        CHECK(rec.baseline_revision == 1);
+        CHECK(rec.resource_revision == 2);
+
+        /* The next save submits {1,2} and lands cleanly. */
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] {
+            return !rig.ctl.saving() &&
+                   rig.engine.commits == 1; }));
+        CHECK(rig.engine.last_base_rev == 1);
+        CHECK(rig.engine.last_res_rev == 2);
+        CHECK(!rig.ctl.conflict());
+        CHECK(rig.ctl.error().isEmpty());
+        CHECK(!rig.ctl.dirty());
+    }
+
+    std::printf("-- controller: a foreign-workspace job never "
+                "moves our revisions\n");
+    {
+        /* A terminal record carrying another workspace's id
+           reports THAT workspace's revisions — adopting them
+           would corrupt this session's commit base and drive
+           a bogus fetch. */
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "ours"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        const int begins = rig.engine.download_begins;
+
+        nlohmann::json fj =
+            rig.engine.JobRecord(901, "commit", "succeeded");
+        fj["id"]                = "other-ws";
+        fj["workspace_revision"] = 9;
+        fj["resource_revision"]  = 9;
+        rig.engine.SendEvent(fj);
+        {
+            /* Pump a beat — a wrongly-scoped fetch would reach
+               the server inside this window. */
+            const auto until = std::chrono::steady_clock::now() +
+                               std::chrono::milliseconds(300);
+            while(std::chrono::steady_clock::now() < until)
+            {
+                ServeWs(rig.engine, 15);
+                QCoreApplication::processEvents(
+                    QEventLoop::AllEvents, 10);
+            }
+        }
+        CHECK(rig.ctl.workspaceRevision() == 1);
+        CHECK(rig.ctl.resourceRevision() == 1);
+        CHECK(rig.ctl.Session().BaseRevision() == 1);
+        CHECK(rig.ctl.Session().ResourceRevision() == 1);
+        CHECK(rig.engine.download_begins == begins);
+        CHECK(!rig.ctl.conflict());
+        CHECK(rig.ctl.dirty());
+        CHECK(rig.ctl.Session().Working().meta.name == "ours");
+    }
+
+    std::printf("-- controller: reload after a failed save "
+                "clears the error\n");
+    {
+        /* F07: a rejected save leaves its error up; taking the
+           engine copy (reload -> adopted document) must clear
+           it — the resolution the user asked for landed. */
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.engine.fail_next_commit   = true;
+        rig.engine.commit_fail_detail = "revision_conflict";
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "mine"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] {
+            return !rig.ctl.saving() && rig.ctl.conflict() &&
+                   !rig.ctl.error().isEmpty(); }));
+
+        /* Hold the reload, then resolve it with the engine's
+           real terminal spelling — "succeeded". */
+        rig.engine.auto_complete_jobs = false;
+        rig.ctl.reload();
+        CHECK(rig.PumpUntil([&] {
+            return rig.engine.held_job != 0; }));
+        rig.engine.CompleteHeld("succeeded");
+        CHECK(rig.PumpUntil([&] {
+            return !rig.ctl.conflict() && !rig.ctl.dirty(); }));
+        CHECK(rig.ctl.error().isEmpty());
+    }
+
+    std::printf("-- controller: connected-but-unmanaged save "
+                "is honest, not 'unavailable'\n");
+    {
+        /* F06: the engine is LIVE but manages nothing (e.g. a
+           pre-fix restart). Save/reload must say so — the
+           remedy is re-opening the workspace, and the draft
+           stays local. */
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "kept"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+
+        /* The engine reports managed:false — the workspace id
+           is still known to the session. */
+        rig.engine.managed = false;
+        rig.engine.SendEvent(rig.engine.Snapshot());
+        CHECK(rig.PumpUntil([&] { return !rig.ctl.managed(); }));
+
+        rig.ctl.save();
+        CHECK(rig.ctl.error().contains(
+            QStringLiteral("reopen 'ws0'")));
+        CHECK(!rig.ctl.error().contains(
+            QStringLiteral("unavailable")));
+        rig.ctl.reload();
+        CHECK(rig.ctl.error().contains(
+            QStringLiteral("reopen 'ws0'")));
+        CHECK(rig.ctl.dirty());
     }
 
     std::printf("-- controller: foreign-open latch blocks a "

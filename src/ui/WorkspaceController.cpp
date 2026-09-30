@@ -577,6 +577,16 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
     const bool revs_moved  = ws_changed || ws != ws_rev_ ||
                              res != res_rev_;
     const bool sha_changed = sha != ws_sha256_;
+    /* A RESOURCE-only move: install/remove jobs advance the
+       library revision while the document (revision + content
+       hash) stands — the draft's commit base rebases silently
+       rather than fetching a byte-identical document and
+       flagging a conflict (F07). Covers the poll-before-event
+       ordering; the event ordering rebase lives in
+       OnJobEvent. */
+    const bool res_only_move =
+        managed_ && !ws_changed && ws == ws_rev_ &&
+        res > res_rev_ && (sha.isEmpty() || sha == ws_sha256_);
     ws_id_   = id;
     ws_name_ = snap.value(QStringLiteral("name")).toString();
     ws_rev_  = ws;
@@ -665,7 +675,14 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
         FetchDocument();
         return;
     }
-    if(revs_moved || sha_changed)
+    if(res_only_move)
+    {
+        session_.RebaseRevisions(ws, res);
+        /* The durable record re-stages the rebased pair — a
+           recovered draft must not be born stale. */
+        NoteDraftEdited();
+    }
+    else if(revs_moved || sha_changed)
     {
         /* The accepted workspace moved under the draft —
            fetch the new document; the session decides adopt
@@ -760,6 +777,10 @@ void WorkspaceController::AdoptFetchedDocument(
             SetConflict(true);
         }
     }
+    /* A successful adoption resolves whatever the error strip
+       last reported — take-engine-copy after a failed save
+       must not leave the stale "revision" message up (F07). */
+    SetError(QString(), QString());
     emit draftEdited();
     const bool r = session_.HasWorking();
     if(r != ready_cached_)
@@ -909,11 +930,28 @@ void WorkspaceController::discardDraft()
 
 void WorkspaceController::save()
 {
-    if(!available_ || !bridge_->connected() || !managed_)
+    if(!available_ || !bridge_->connected())
     {
         SetError(QStringLiteral("engine unavailable — the "
                                 "draft stays local"),
                  QStringLiteral("engine"));
+        emit saveFinished(false);
+        return;
+    }
+    if(!managed_)
+    {
+        /* A LIVE engine that manages nothing is not
+           "unavailable" — the draft needs its workspace
+           re-opened, not a reconnect. */
+        SetError(ws_id_.isEmpty()
+            ? QStringLiteral("no workspace is open on the "
+                             "engine — open one to continue; "
+                             "your draft stays local")
+            : QStringLiteral("no workspace is open on the "
+                             "engine — reopen '%1' to continue; "
+                             "your draft stays local")
+                  .arg(ws_id_),
+            QStringLiteral("engine"));
         emit saveFinished(false);
         return;
     }
@@ -1024,13 +1062,23 @@ void WorkspaceController::openWorkspace(const QString& id)
 
 void WorkspaceController::reload()
 {
-    if(!available_ || !bridge_->connected() || !managed_)
+    if(!available_ || !bridge_->connected())
     {
-        if(!available_)
-        {
-            SetError(QStringLiteral("engine unavailable"),
-                     QStringLiteral("engine"));
-        }
+        SetError(QStringLiteral("engine unavailable"),
+                 QStringLiteral("engine"));
+        return;
+    }
+    if(!managed_)
+    {
+        /* Connected but unmanaged — a reopen is the remedy,
+           not a reconnect. */
+        SetError(ws_id_.isEmpty()
+            ? QStringLiteral("no workspace is open on the "
+                             "engine — open one to continue")
+            : QStringLiteral("no workspace is open on the "
+                             "engine — reopen '%1' to continue")
+                  .arg(ws_id_),
+            QStringLiteral("engine"));
         return;
     }
     /* Dirty draft + no latched conflict: confirm before the
@@ -1105,13 +1153,21 @@ void WorkspaceController::DoReload(const QString& id)
 
 void WorkspaceController::restoreBackup()
 {
-    if(!available_ || !bridge_->connected() || !managed_)
+    if(!available_ || !bridge_->connected())
     {
-        if(!available_)
-        {
-            SetError(QStringLiteral("engine unavailable"),
-                     QStringLiteral("engine"));
-        }
+        SetError(QStringLiteral("engine unavailable"),
+                 QStringLiteral("engine"));
+        return;
+    }
+    if(!managed_)
+    {
+        SetError(ws_id_.isEmpty()
+            ? QStringLiteral("no workspace is open on the "
+                             "engine — open one to continue")
+            : QStringLiteral("no workspace is open on the "
+                             "engine — reopen '%1' to continue")
+                  .arg(ws_id_),
+            QStringLiteral("engine"));
         return;
     }
     if(session_.Dirty() && !conflict_)
@@ -1779,13 +1835,25 @@ void WorkspaceController::OnJobEvent(const QVariantMap& ev)
     {
         return;
     }
-    /* Revision truth updates from EVERY terminal record —
-       including jobs other clients ran. */
+    /* Revision truth updates from terminal records — scoped to
+       OUR managed workspace. The record carries the job's
+       target id: a job a client (this one or another) ran on
+       ANOTHER workspace reports that workspace's revisions —
+       adopting them would corrupt the commit base of the
+       workspace actually open here. Records without an id
+       (older engines) keep the previous behavior. */
+    const QString job_ws =
+        ev.value(QStringLiteral("id")).toString();
+    const bool foreign_ws = !job_ws.isEmpty() && job_ws != ws_id_;
     const quint64 ws  = JU64(ev, "workspace_revision");
     const quint64 res = JU64(ev, "resource_revision");
-    const bool revs_moved = ws > ws_rev_ || res > res_rev_;
-    if(ws > ws_rev_)   { ws_rev_ = ws; }
-    if(res > res_rev_) { res_rev_ = res; }
+    const bool revs_moved = !foreign_ws &&
+                            (ws > ws_rev_ || res > res_rev_);
+    if(!foreign_ws)
+    {
+        if(ws > ws_rev_)   { ws_rev_ = ws; }
+        if(res > res_rev_) { res_rev_ = res; }
+    }
 
     if(pending_job_id_ != 0 && job == pending_job_id_)
     {
@@ -1798,6 +1866,22 @@ void WorkspaceController::OnJobEvent(const QVariantMap& ev)
     {
         tracked_jobs_.erase(it);
         ResolveJob(ev);
+        return;
+    }
+    /* A resource-only move (look/type install or remove) bumps
+       resource_revision while the document bytes stand —
+       rebase the draft's commit base silently instead of
+       fetching + flagging a conflict (F07). */
+    const QString ev_verb =
+        ev.value(QStringLiteral("verb")).toString();
+    if(revs_moved && managed_ &&
+       (ev_verb == QLatin1String("resource_install") ||
+        ev_verb == QLatin1String("resource_remove")))
+    {
+        session_.RebaseRevisions(ws, res);
+        /* Re-stage the durable record with the rebased pair —
+           a crash-recovered draft must not be born stale. */
+        NoteDraftEdited();
         return;
     }
     /* Foreign job: a commit that is not ours moved the
@@ -1926,6 +2010,10 @@ void WorkspaceController::ResolveJob(const QVariantMap& st)
     }
     else if(verb == QLatin1String("reload"))
     {
+        /* A landed reload resolves whatever the strip last
+           showed (a failed save's "stale revision" must not
+           survive the fresh document it fetched — F07). */
+        SetError(QString(), QString());
         if(!pending_switch_id_.isEmpty() &&
            pending_switch_id_ != ws_id_)
         {
@@ -1963,6 +2051,7 @@ void WorkspaceController::ResolveJob(const QVariantMap& st)
         /* The backup committed forward — adopt its document
            wholesale (the user confirmed the replace) and let
            the next poll re-baseline the external compare. */
+        SetError(QString(), QString());
         force_adopt_ = true;
         FetchDocument();
         emit notice(QStringLiteral(
