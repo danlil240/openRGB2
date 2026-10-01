@@ -468,6 +468,9 @@ void WorkspaceController::OnEngineLost(const QString& reason)
             { QStringLiteral("errors"), QStringList{ lost } },
         }));
     }
+    /* Every import latch is now drained — the banner must not
+       survive the session that armed it. */
+    SettleImportStatus();
 }
 
 void WorkspaceController::OnWorkspaceChanged()
@@ -1343,7 +1346,10 @@ void WorkspaceController::inspectImport(const QString& name,
         bad(QStringLiteral("engine not connected"));
         return;
     }
-    pending_inspect_name_  = name;
+    pending_inspect_name_ = name;
+    /* A replaced pending token is never consumed — release it
+       instead of leaving it to idle-expire. */
+    ReleaseStagedToken(pending_inspect_token_);
     pending_inspect_token_.clear();
     if(!BeginUpload(QStringLiteral("inspect:") + name, bytes,
                     QStringLiteral("import_inspect"),
@@ -1453,6 +1459,9 @@ void WorkspaceController::confirmImport(const QVariantMap& choices,
     {
         emit importFinished(name, false,
             QStringLiteral("commit could not be sent"));
+        /* Queued entries still owe a terminal signal — keep
+           the queue moving exactly like a refused accept. */
+        PumpImportQueue();
         return;
     }
     import_req_names_[req] = name;
@@ -1461,6 +1470,9 @@ void WorkspaceController::confirmImport(const QVariantMap& choices,
 
 void WorkspaceController::cancelImport()
 {
+    /* The staged bundle will never be consumed — release the
+       token now instead of leaving it to idle-expire. */
+    ReleaseStagedToken(pending_inspect_token_);
     pending_inspect_token_.clear();
     pending_inspect_name_.clear();
 }
@@ -1566,18 +1578,57 @@ int WorkspaceController::importProfiles(ProfileLibrary* library)
 
 void WorkspaceController::PumpImportQueue()
 {
-    if(import_queue_.empty() || ul_.has_value())
+    while(!import_queue_.empty() && !ul_.has_value())
+    {
+        PendingImport imp = import_queue_.front();
+        import_queue_.pop_front();
+        if(BeginUpload(QStringLiteral("import:") + imp.name,
+                       imp.bytes,
+                       QStringLiteral("import_commit"),
+                       QVariantMap({
+                           { QStringLiteral("id"),
+                             SlugFor(imp.name) },
+                           { QStringLiteral("name"), imp.name },
+                       })))
+        {
+            return;
+        }
+        /* Refused before a byte moved — the entry still owes
+           the UI a terminal signal; drain the rest honestly
+           instead of dropping it silent. */
+        emit importFinished(imp.name, false,
+            available_
+                ? QStringLiteral("upload could not begin")
+                : QStringLiteral("engine not connected"));
+    }
+    SettleImportStatus();
+}
+
+void WorkspaceController::SettleImportStatus()
+{
+    if(status_text_ != QStringLiteral("Importing workspace…"))
     {
         return;
     }
-    PendingImport imp = import_queue_.front();
-    import_queue_.pop_front();
-    BeginUpload(QStringLiteral("import:") + imp.name,
-                imp.bytes, QStringLiteral("import_commit"),
-                QVariantMap({
-                    { QStringLiteral("id"),   SlugFor(imp.name) },
-                    { QStringLiteral("name"), imp.name },
-                }));
+    if(!import_queue_.empty() || ul_.has_value() ||
+       !import_req_names_.empty() || !import_names_.empty())
+    {
+        return;
+    }
+    SetStatus(session_.Dirty()
+        ? QStringLiteral("Unsaved changes")
+        : QStringLiteral("In sync with engine"));
+}
+
+void WorkspaceController::ReleaseStagedToken(const QString& token)
+{
+    if(token.isEmpty())
+    {
+        return;
+    }
+    SendCommand(QStringLiteral("transfer_cancel"),
+        QVariantMap({{ QStringLiteral("transfer_id"), token }}),
+        QStringLiteral("misc"));
 }
 
 void WorkspaceController::refreshList()
@@ -2403,6 +2454,10 @@ void WorkspaceController::OnUploadReply(const QString& stage,
                 QStringLiteral("job:") + u.verb);
             if(id <= 0)
             {
+                /* No job will ever consume the staged token —
+                   release it instead of letting it hold the
+                   slot until idle expiry. */
+                ReleaseStagedToken(token);
                 if(u.verb == QLatin1String("import_commit"))
                 {
                     emit importFinished(
@@ -2411,6 +2466,18 @@ void WorkspaceController::OnUploadReply(const QString& stage,
                         false,
                         QStringLiteral("commit could not be "
                                        "sent"));
+                }
+                else if(u.verb == QLatin1String("import_inspect"))
+                {
+                    /* The dead token must not linger as the
+                       pending commit source. */
+                    pending_inspect_token_.clear();
+                    emit importInspectionReady(QVariantMap({
+                        { QStringLiteral("valid"),  false },
+                        { QStringLiteral("errors"),
+                          QStringList{ QStringLiteral(
+                              "inspect job could not be sent") } },
+                    }));
                 }
                 SetError(QStringLiteral("staged upload could "
                                         "not be committed"),

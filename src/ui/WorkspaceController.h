@@ -366,6 +366,14 @@ private:
     void FetchDocument();
     void CheckRecoveryOffer();
     void PumpImportQueue();
+    /* Clears the "Importing workspace…" banner once nothing
+       import-shaped is outstanding (queue, upload, pending
+       accept, tracked job) — the banner must never outlive
+       the queue that armed it. */
+    void SettleImportStatus();
+    /* Fire-and-forget release for a staged upload token that
+       no job will ever consume. */
+    void ReleaseStagedToken(const QString& token);
 
     /*---- job bookkeeping ------------------------------------*/
     void OnJobEvent(const QVariantMap& ev);

@@ -791,10 +791,21 @@ size_t WorkspaceTransfer::LiveCount(uint64_t session_id) const
 
 size_t WorkspaceTransfer::LiveCountLocked(uint64_t session_id) const
 {
+    /* "Open" means actively streaming — a finish-verified
+       upload stays in the table only as the consumable staged
+       token a job references; it must not keep holding one of
+       the per-session live slots or a serial
+       upload->job->upload->job pipeline (the profile import
+       queue) stalls at the second entry. Staged DOWNLOADS
+       still count — their byte stream is open until the
+       client finishes or abandons it. Byte volume stays
+       bounded either way by staged_bytes_/idle expiry. */
     size_t n = 0;
     for(const auto& kv : transfers_)
     {
-        n += kv.second.session_id == session_id ? 1u : 0u;
+        const Transfer& t = kv.second;
+        n += (t.session_id == session_id &&
+              !(t.upload && t.staged)) ? 1u : 0u;
     }
     return n;
 }
