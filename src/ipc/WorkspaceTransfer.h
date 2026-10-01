@@ -26,9 +26,11 @@
 |||   Bounds (plan 3.3, verbatim): 192 KiB decoded bytes   ||
 |||   per chunk; 4 MiB per document/type/look JSON;        ||
 |||   16 MiB per asset; 64 MiB per imported bundle; at     ||
-|||   most 2 transfers per session; 128 MiB staged across  ||
-|||   the server; idle transfers expire after 60 s. Disk   ||
-|||   staging lives INSIDE the verified managed workspace  ||
+|||   most 2 OPEN transfers per session — a finish-          ||
+|||   verified upload keeps serving its staged token to    ||
+|||   jobs without holding a stream slot; 128 MiB staged   ||
+|||   across the server; idle transfers expire after 60 s.   ||
+|||   Disk staging lives INSIDE the verified managed       ||
 |||   root (<root>/transfers/) — clients never supply      ||
 |||   paths; server-generated opaque ids only.             ||
 |||                                                           ||

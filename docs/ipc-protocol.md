@@ -701,7 +701,10 @@ an older engine omits the field and consumers keep the previous
 Jobs and transfers are session-bound: session teardown cancels queued
 jobs and staged transfers; a commit already past the durable marker
 stays durable (the reconnecting client reconciles by
-revision/content_sha256). Document/type/look content moves ONLY
+revision/content_sha256). The per-session transfer bound counts OPEN
+(streaming) transfers — a `transfer_finish`-verified upload keeps
+serving its `staged` token to this session's jobs without holding a
+stream slot (idle expiry and `transfer_cancel` still reclaim it). Document/type/look content moves ONLY
 through transfers — the 1 MiB envelope bound is never expanded to fit
 a scene or a binary asset.
 

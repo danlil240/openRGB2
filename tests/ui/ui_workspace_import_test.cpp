@@ -548,6 +548,87 @@ int main(int argc, char** argv)
         }
     }
 
+    /*---- N03: the serial profile->workspace import queue over
+           ONE session. Three entries must all land — a
+           finish-verified upload is a staged token, not an
+           open transfer, so the third begin must never answer
+           transfer_limit — the banner settles when the queue
+           drains, a colliding entry fails identified, and the
+           editor stays usable throughout. */
+    std::printf("-- e2e: serial import queue (N03)\n");
+    {
+        int done = 0;
+        QStringList failed;
+        bool saw_banner = false;
+        const QString banner =
+            QStringLiteral("Importing workspace…");
+        QObject::connect(&rig.ctl,
+                         &WorkspaceController::statusTextChanged,
+                         &rig.ctl,
+                         [&] {
+                             if(rig.ctl.statusText() == banner)
+                             {
+                                 saw_banner = true;
+                             }
+                         });
+        QObject::connect(&rig.ctl,
+                         &WorkspaceController::importFinished,
+                         &rig.ctl,
+                         [&](const QString& n, bool ok,
+                             const QString& e) {
+                             ++done;
+                             if(!ok)
+                             {
+                                 failed << n + QLatin1String(": ")
+                                        + e;
+                             }
+                         });
+        const QString names[3] = {
+            QStringLiteral("queue one"),
+            QStringLiteral("queue two"),
+            QStringLiteral("queue three") };
+        for(const QString& n : names)
+        {
+            rig.ctl.importDocument(n,
+                QByteArray::fromStdString(
+                    WorkspaceDoc(n.toStdString()).dump(2)));
+        }
+        CHECK(rig.PumpUntil([&] { return done >= 3; }));
+        CHECK(failed.isEmpty());
+        if(!failed.isEmpty())
+        {
+            std::printf("  unexpected import failures: %s\n",
+                        failed.join(QLatin1String(", "))
+                            .toUtf8().constData());
+        }
+        /* The banner armed at job-accept must not outlive the
+           queue — it settles to the draft truth. */
+        CHECK(saw_banner);
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.statusText() != banner;
+        }));
+        /* Each commit adopts its workspace — the editor's
+           document fetch follows the active id, so the draft
+           must land on the LAST import and stay ready. */
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.workspaceId()
+                       == QLatin1String("queue-three") &&
+                   rig.ctl.ready();
+        }));
+        /* A re-run entry whose slug now exists fails
+           identified (the engine's revision check is the
+           authority) — and the editor is untouched. */
+        rig.ctl.importDocument(QStringLiteral("queue one"),
+            QByteArray::fromStdString(
+                WorkspaceDoc("queue one").dump(2)));
+        CHECK(rig.PumpUntil([&] { return done >= 4; }));
+        CHECK(failed.size() == 1);
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.statusText() != banner;
+        }));
+        CHECK(rig.ctl.ready());
+    }
+
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

@@ -1453,6 +1453,138 @@ int main()
         CHECK(str_.value("state", "") == "succeeded");
     }
 
+    /*---- N03: a finish-verified upload is a staged token, not
+           an open transfer — the serial profile->workspace
+           import queue stages MORE than the per-session live
+           bound without ever answering transfer_limit --------*/
+    {
+        Rig rig(g_tmp / "n03seq");
+        rig.Start();
+        TestClient c;
+        Welcome(c, *rig.server);
+
+        /* The QA failure: two finished (staged) uploads pinned
+           both live slots, so the third profile's
+           transfer_begin answered "too many open transfers".
+           Three sequential upload -> import_commit cycles must
+           all land. */
+        const std::string names[3] = {
+            "ice-aurora", "qa-renamed", "qa-profile-20261001" };
+        for(const std::string& nm : names)
+        {
+            const std::string tok =
+                Upload(c, seq, "bundle", WorkspaceDoc(nm).dump(2));
+            CHECK(!tok.empty());
+            if(tok.empty())
+            {
+                break;
+            }
+            const json r = WsCall(c, seq, json::object({
+                { "verb",   "import_commit" },
+                { "id",     nm              },
+                { "name",   nm              },
+                { "staged", tok             },
+            }));
+            CHECK(r.value("accepted", false));
+            const json st =
+                WaitJob(c, seq, r["job_id"].get<uint64_t>());
+            CHECK(st.value("state", "") == "succeeded");
+            CHECK(st.value("committed", false));
+        }
+        /* all three workspaces landed; the last import is the
+           adopted active one */
+        const json ls = WsCall(c, seq, json::object(
+            {{ "verb", "list" }}));
+        {
+            bool seen[3] = { false, false, false };
+            for(const json& w :
+                ls.value("workspaces", json::array()))
+            {
+                for(int i = 0; i < 3; ++i)
+                {
+                    if(w == names[i])
+                    {
+                        seen[i] = true;
+                    }
+                }
+            }
+            CHECK(seen[0] && seen[1] && seen[2]);
+        }
+        const json g = WsCall(c, seq, json::object(
+            {{ "verb", "get" }}));
+        CHECK(g.value("id", "") == "qa-profile-20261001");
+
+        /* the document download the UI runs to adopt the new
+           active workspace is a live transfer too — the
+           consumed upload tokens must never block it */
+        const json dl = WsCall(c, seq, json::object({
+            { "verb", "transfer_begin" },
+            { "direction", "download"  },
+            { "kind",      "document"  },
+            { "id",        names[2]    },
+        }));
+        CHECK(!dl.value("transfer_id", "").empty());
+        if(!dl.value("transfer_id", "").empty())
+        {
+            WsCall(c, seq, json::object({
+                { "verb",        "transfer_finish" },
+                { "transfer_id", dl["transfer_id"] },
+            }));
+        }
+
+        /* the bound still guards OPEN streams: one live upload
+           + one live download + a third stream refuses */
+        const std::string bytes = WorkspaceDoc("x").dump(2);
+        const json o1 = WsCall(c, seq, json::object({
+            { "verb", "transfer_begin" }, { "direction", "upload" },
+            { "kind", "document" },
+            { "length", (uint64_t)bytes.size() },
+            { "sha256", Sha256Hex(bytes) },
+        }));
+        CHECK(!o1.value("transfer_id", "").empty());
+        const json o2 = WsCall(c, seq, json::object({
+            { "verb", "transfer_begin" },
+            { "direction", "download"  },
+            { "kind",      "document"  },
+            { "id",        names[0]    },
+        }));
+        CHECK(!o2.value("transfer_id", "").empty());
+        WsCallErr(c, seq, json::object({
+            { "verb", "transfer_begin" }, { "direction", "upload" },
+            { "kind", "document" }, { "length", 4 },
+            { "sha256", Sha256Hex("1234") },
+        }), ErrCode::BadRequest, "transfer_limit");
+        /* release the two open streams before the next leg */
+        WsCall(c, seq, json::object({
+            { "verb",        "transfer_cancel"  },
+            { "transfer_id", o1["transfer_id"]  },
+        }));
+        WsCall(c, seq, json::object({
+            { "verb",        "transfer_cancel"  },
+            { "transfer_id", o2["transfer_id"]  },
+        }));
+
+        /* a staged token stays consumable across a SECOND job
+           of the same session — the inspect->confirm flow
+           imports through one upload */
+        const std::string tok =
+            Upload(c, seq, "bundle", WorkspaceDoc("twice").dump(2));
+        CHECK(!tok.empty());
+        const json ri = WsCall(c, seq, json::object({
+            { "verb", "import_inspect" }, { "staged", tok },
+        }));
+        const json sti =
+            WaitJob(c, seq, ri["job_id"].get<uint64_t>());
+        CHECK(sti.value("state", "") == "succeeded");
+        const json rc = WsCall(c, seq, json::object({
+            { "verb", "import_commit" }, { "id", "twice" },
+            { "staged", tok },
+        }));
+        const json stc =
+            WaitJob(c, seq, rc["job_id"].get<uint64_t>());
+        CHECK(stc.value("state", "") == "succeeded");
+    }
+
     /*---- Task 11: calibration_* session verbs ---------------*/
     {
         Rig rig(g_tmp / "cal");
