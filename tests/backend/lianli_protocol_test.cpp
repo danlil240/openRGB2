@@ -1027,7 +1027,165 @@ static void TestSharedLinkReconnect()
 }
 
 /*-------------------------------------------------------------*\
-|| 14. Effect loops: render layout + multi-frame upload header   ||
+|| 14. N01 regression: terminal states re-arm on new intent    ||
+||                                                             ||
+|| QA 2026-10-01 (N01): the wireless group froze on its last   ||
+|| frame (bright green) while the SDK still reported Direct    ||
+|| with black data and every engine write completed at the     ||
+|| socket. The runtime had reached a terminal state — Failed   ||
+|| (upload budget / layout debounce) or ForeignMaster — where  ||
+|| Tick early-returns forever: keep-alives stop, new desired   ||
+|| uploads are stored but never sent, and only a backend       ||
+|| restart (fresh runtime objects) recovered output. A new     ||
+|| desired upload is new intent — it must re-open the          ||
+|| boot -> search -> upload cycle. Observation still gates     ||
+|| every write, so a genuinely foreign or incompatible group   ||
+|| re-fails through the normal debounce path.                  ||
+\*-------------------------------------------------------------*/
+static void TestTerminalFailedRearmsOnNewDesired()
+{
+    FakeClock clk; FakeLink link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    rt.SetDesired(std::make_shared<RgbUpload>(MakeUpload()));
+    link.poll_fn = [] { return MakeDiscovery(); };   /* never acks */
+    RunFor(rt, clk, 30000);
+    CHECK(rt.State() == WirelessState::Failed,
+          "unacknowledged upload reaches terminal Failed");
+    int rgb_before   = link.rgb_sends;
+    int sends_before = link.send_calls;
+
+    /* Without new intent the wedge persists (documented semantics). */
+    RunFor(rt, clk, 5000);
+    CHECK(rt.State() == WirelessState::Failed && link.rgb_sends == rgb_before,
+          "Failed is terminal while intent is unchanged");
+
+    /* The next desired frame is new intent — re-arms the runtime. */
+    auto next = std::make_shared<RgbUpload>(MakeUpload(0x70));
+    rt.SetDesired(next);
+    link.poll_fn = [&] {
+        return MakeDiscovery(MAC_TARGET, MAC_MASTER,
+            link.rgb_sends > rgb_before ? next->EffectId().data() : nullptr);
+    };
+    RunFor(rt, clk, 3000);
+    CHECK(rt.State() != WirelessState::Failed,
+          "new desired re-arms a terminal Failed runtime");
+    CHECK(link.send_calls > sends_before,
+          "re-armed runtime resumes keep-alive/upload traffic");
+    CHECK(link.rgb_sends > rgb_before,
+          "re-armed runtime transmits the new upload");
+    CHECK(rt.Confirmed(), "re-armed runtime confirms the new upload");
+}
+
+static void TestForeignMasterRearmsOnNewDesired()
+{
+    FakeClock clk; FakeLink link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    link.poll_fn = [] { return MakeDiscovery(); };
+    rt.Tick();
+    clk.Advance(400); rt.Tick();
+    CHECK(rt.State() == WirelessState::Holding, "sighted -> holding");
+
+    link.poll_fn = [] { return MakeDiscovery(MAC_TARGET, MAC_FOREIGN); };
+    RunFor(rt, clk, 2000);
+    CHECK(rt.State() == WirelessState::ForeignMaster,
+          "consecutive foreign sightings reach ForeignMaster");
+    int sends_before = link.send_calls;
+    RunFor(rt, clk, 3000);
+    CHECK(rt.State() == WirelessState::ForeignMaster
+          && link.send_calls == sends_before,
+          "ForeignMaster is terminal while intent is unchanged");
+
+    /* Safety: if the transmitter itself changed, re-arming must NOT
+       write to it — the runtime re-wedges on the identity check done
+       during Boot before any RF traffic. */
+    int rgb_before = link.rgb_sends;
+    link.master_mac = MAC_FOREIGN;
+    rt.SetDesired(std::make_shared<RgbUpload>(MakeUpload(0x40)));
+    RunFor(rt, clk, 2000);
+    CHECK(rt.State() == WirelessState::ForeignMaster
+          && link.rgb_sends == rgb_before,
+          "re-arm with a different transmitter still refuses writes");
+
+    /* Same transmitter again + group reports our master: new intent
+       re-opens the search and recovers. */
+    link.master_mac = MAC_MASTER;
+    link.poll_fn = [] { return MakeDiscovery(); };
+    rt.SetDesired(std::make_shared<RgbUpload>(MakeUpload(0x70)));
+    RunFor(rt, clk, 2000);
+    CHECK(rt.State() != WirelessState::ForeignMaster,
+          "new desired re-arms a foreign-master wedge");
+    CHECK(link.rgb_sends > rgb_before,
+          "re-armed runtime transmits after foreign-master wedge");
+}
+
+static void TestForeignSightingsMustBeConsecutive()
+{
+    FakeClock clk; FakeLink link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    link.poll_fn = [] { return MakeDiscovery(); };
+    rt.Tick();
+    clk.Advance(400); rt.Tick();
+    CHECK(rt.State() == WirelessState::Holding, "sighted -> holding");
+
+    /* A torn RX row can carry the wrong master field — the same class
+       of corruption as the fan_count==0 rows seen on hardware. A miss
+       is not a sighting: foreign sightings must be CONSECUTIVE to
+       count toward a re-bind. */
+    int phase = 0;
+    link.poll_fn = [&]
+    {
+        return (++phase % 2 == 0) ? std::vector<uint8_t>{}
+                                  : MakeDiscovery(MAC_TARGET, MAC_FOREIGN);
+    };
+    RunFor(rt, clk, 3000);
+    CHECK(rt.State() != WirelessState::ForeignMaster,
+          "foreign sightings split by misses do not accumulate");
+    CHECK(rt.State() != WirelessState::Failed,
+          "interleaved misses never vote toward terminal failure");
+}
+
+static void TestIncompleteRecordFieldsAreMisses()
+{
+    FakeClock clk; FakeLink link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    auto up = std::make_shared<RgbUpload>(MakeUpload());
+    rt.SetDesired(up);
+    link.poll_fn = [&] { return MakeDiscovery(MAC_TARGET, MAC_MASTER,
+        link.rgb_sends > 0 ? up->EffectId().data() : nullptr); };
+    RunFor(rt, clk, 2000);
+    CHECK(rt.Confirmed(), "upload confirmed before incomplete rows");
+
+    /* A zeroed master field is a partially written row -> miss, not
+       a foreign-master vote. */
+    Mac zero{};
+    link.poll_fn = [&] { return MakeDiscovery(MAC_TARGET, zero); };
+    RunFor(rt, clk, 3000);
+    CHECK(rt.State() == WirelessState::Holding,
+          "zero-master rows are misses, not foreign sightings");
+
+    /* A receiver field of 0 cannot be addressed by UsbChunks — the
+       row is a miss and must never be adopted as the latest sighting,
+       otherwise the next send throws inside the service worker. */
+    link.poll_fn = [] { return MakeDiscovery(MAC_TARGET, MAC_MASTER,
+                                             nullptr, 8, 0); };
+    rt.SetDesired(std::make_shared<RgbUpload>(MakeUpload(0x70)));
+    bool threw = false;
+    for(int i = 0; i < 40 && !threw; i++)
+    {
+        clk.Advance(100);
+        try { rt.Tick(); } catch(...) { threw = true; }
+    }
+    CHECK(!threw, "receiver=0 sighting never reaches the RGB sender");
+    CHECK(rt.State() != WirelessState::Failed,
+          "receiver=0 row is a miss, not a failure");
+}
+
+/*-------------------------------------------------------------*\
+|| 15. Effect loops: render layout + multi-frame upload header   ||
 \*-------------------------------------------------------------*/
 static void TestEffectRendering()
 {
@@ -1192,6 +1350,10 @@ int main()
     TestLayoutMismatchDebounce();
     TestIncompleteDiscoveryRecord();
     TestSharedLinkReconnect();
+    TestTerminalFailedRearmsOnNewDesired();
+    TestForeignMasterRearmsOnNewDesired();
+    TestForeignSightingsMustBeConsecutive();
+    TestIncompleteRecordFieldsAreMisses();
     TestEffectRendering();
 
     printf("%d checks, %d failures\n", checks, failures);
