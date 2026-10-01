@@ -351,9 +351,11 @@ QVariantList LayoutController::WsItems() const
     /* Footprints are resolved-scene data — not stored in the
        compact doc and never invented. When the engine's APPLIED
        resolved scene is available, each item reports its union
-       body footprint (ox/oz = center offset from the instance
-       origin, which x/z still name so drags stay origin-true);
-       a draft that hasn't resolved — or no applied scene yet —
+       body footprint RE-ANCHORED into the draft frame (ox/oz =
+       center offset from the instance origin, which x/z still
+       name so drags stay origin-true — the N02 note below
+       covers why the raw applied matrices can't be used); a
+       draft that hasn't resolved — or no applied scene yet —
        keeps the honest 0 footprint. */
     studio::SceneDocument resolved;
     std::map<std::string, studio::Mat4> rw;
@@ -404,11 +406,31 @@ QVariantList LayoutController::WsItems() const
 
         /* Union of the subtree's resolved bodies: each object
            contributes its ResolvedBodySize box corners through
-           its world matrix. */
+           its world matrix.
+
+           N02: the footprint join must read in the DRAFT's
+           frame. The resolved scene is last-Save data — with
+           corners transformed by the APPLIED world matrix
+           directly, ox/oz (footprint center minus the draft
+           origin) silently cancelled every uncommitted move
+           and the canvas rect stayed pinned until Save. Every
+           resolved body under iid descends from iid's own
+           applied node, so re-anchoring each applied-world
+           transform through the instance's applied->draft
+           delta (wm * appliedWorld^-1) moves the footprint
+           with the draft — rotation included. */
         double minx = 0, maxx = 0, minz = 0, maxz = 0;
         bool   any  = false;
         if(have_res)
         {
+            const auto rit = rw.find(iid);
+            const bool anchored = rit != rw.end();
+            studio::Mat4  anchor;
+            if(anchored)
+            {
+                anchor = studio::Mat4Mul(
+                    wm, studio::RigidInverse(rit->second));
+            }
             const std::string prefix = iid + "/";
             for(const studio::SceneObject& o : resolved.objects)
             {
@@ -428,6 +450,9 @@ QVariantList LayoutController::WsItems() const
                 {
                     continue;
                 }
+                const studio::Mat4 dm = anchored
+                    ? studio::Mat4Mul(anchor, wit->second)
+                    : wit->second;
                 for(int i = 0; i < 8; ++i)
                 {
                     const studio::Vec3 c{
@@ -435,7 +460,7 @@ QVariantList LayoutController::WsItems() const
                         (i & 2) ? body.y * 0.5f : -body.y * 0.5f,
                         (i & 4) ? body.z * 0.5f : -body.z * 0.5f };
                     const studio::Vec3 p =
-                        studio::TransformPoint(wit->second, c);
+                        studio::TransformPoint(dm, c);
                     if(!any)
                     {
                         minx = maxx = p.x;

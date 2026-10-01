@@ -1326,6 +1326,144 @@ static void BridgeTests()
         ctl.setWorkspace(nullptr);
     }
 
+    /*---- N02: an uncommitted draft move must move the painted
+           2D footprint — no Save round-trip -----------------*/
+    std::printf("-- ws-mode draft footprint (N02)\n");
+    {
+        /* The reported defect: the canvas delegate draws at
+           o.x + o.ox (the world footprint center), but the
+           ws-mode items join mixed generations — x/z came from
+           the DRAFT document while ox/oz were measured against
+           the APPLIED resolved scene. The offset silently
+           cancelled every uncommitted move and the rect only
+           jumped when Save refreshed the resolved scene. */
+        WorkspaceController ws(&bridge);
+        ctl.setWorkspace(&ws);
+        studio::StudioDocument doc;
+        std::vector<std::string> perr;
+        CHECK(studio::FromJson(nlohmann::json::object({
+            { "schema_version", 3 },
+            { "name",           "desk" },
+            { "devices", nlohmann::json::object({
+                { "kbd", nlohmann::json::object({
+                    { "type", "kbd" }, { "x", 0.1 },
+                    { "y", 0.0 },    { "z", 0.2 } }) },
+                { "desk", nlohmann::json::object({
+                    { "type", "desk" }, { "x", -0.5 },
+                    { "y", 0.0 },     { "z", -0.3 } }) },
+            }) },
+            { "device_settings", nlohmann::json::object() },
+        }), doc, &perr));
+        ws.Session().LoadApplied(doc, 1, 1);
+        /* The engine's APPLIED resolved scene still carries the
+           stale placement (kbd at the origin, its body offset
+           +5cm x / -2cm z from the instance origin) — the same
+           generation skew a live draft move creates before
+           Save refreshes it. */
+        ctl.ModelForTesting().LoadApplied(nlohmann::json::object({
+            { "version", 2 },
+            { "name",    "desk" },
+            { "objects", nlohmann::json::array({
+                nlohmann::json::object({
+                    { "id",       "kbd" },
+                    { "kind",     "group" },
+                    { "position", V3(0.0, 0.0, 0.0) },
+                    { "rotation", V3(0.0, 0.0, 0.0) },
+                }),
+                nlohmann::json::object({
+                    { "id",        "kbd/body" },
+                    { "kind",      "device" },
+                    { "parent_id", "kbd" },
+                    { "position",  V3(0.05, 0.0, -0.02) },
+                    { "rotation",  V3(0.0, 0.0, 0.0) },
+                    { "size_m",    V3(0.4, 0.02, 0.1) },
+                }),
+                nlohmann::json::object({
+                    { "id",       "desk" },
+                    { "kind",     "group" },
+                    { "position", V3(-0.5, 0.0, -0.3) },
+                    { "rotation", V3(0.0, 0.0, 0.0) },
+                }),
+                nlohmann::json::object({
+                    { "id",        "desk/top" },
+                    { "kind",      "decor" },
+                    { "parent_id", "desk" },
+                    { "position",  V3(0.0, 0.0, 0.0) },
+                    { "rotation",  V3(0.0, 0.0, 0.0) },
+                    { "size_m",    V3(0.6, 0.03, 0.3) },
+                }),
+            }) },
+        }));
+
+        /* The footprint center the delegate paints:
+           o.x + o.ox / o.z + o.oz. */
+        auto footprint = [&](const char* id, double& cx,
+                             double& cz, double& w, double& d) {
+            for(const QVariant& v : ctl.items())
+            {
+                const QVariantMap m = v.toMap();
+                if(m.value(QStringLiteral("id")).toString() ==
+                   QLatin1String(id))
+                {
+                    cx = m.value(QStringLiteral("x")).toDouble()
+                       + m.value(QStringLiteral("ox")).toDouble();
+                    cz = m.value(QStringLiteral("z")).toDouble()
+                       + m.value(QStringLiteral("oz")).toDouble();
+                    w  = m.value(QStringLiteral("w")).toDouble();
+                    d  = m.value(QStringLiteral("d")).toDouble();
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        double cx = 0, cz = 0, w = 0, d = 0;
+        CHECK(footprint("kbd", cx, cz, w, d));
+        /* draft origin (0.1,0.2) + the body's local center
+           offset (0.05,-0.02) — NOT the applied (0.05,-0.02)
+           that the generation-split join used to paint. */
+        CHECK(std::fabs(cx - 0.15) < 1e-4);
+        CHECK(std::fabs(cz - 0.18) < 1e-4);
+        CHECK(std::fabs(w - 0.4) < 1e-4);
+        CHECK(std::fabs(d - 0.1) < 1e-4);
+
+        /* THE REGRESSION: the draft move repaints the
+           footprint immediately — Save only refreshes the
+           resolved scene. */
+        CHECK(ctl.moveObject(QStringLiteral("kbd"), 0.5, 0.45));
+        CHECK(ws.Session().Dirty());
+        CHECK(footprint("kbd", cx, cz, w, d));
+        CHECK(std::fabs(cx - 0.55) < 1e-4);
+        CHECK(std::fabs(cz - 0.43) < 1e-4);
+
+        /* Draft yaw re-anchors the footprint too: the
+           0.4 x 0.1 body turned 90deg reports w<->d swapped
+           and the center keeps the rotated local offset. */
+        CHECK(ctl.rotateObject(QStringLiteral("kbd"), 90.0));
+        CHECK(footprint("kbd", cx, cz, w, d));
+        CHECK(std::fabs(w - 0.1) < 1e-4);
+        CHECK(std::fabs(d - 0.4) < 1e-4);
+        CHECK(std::fabs(std::hypot(cx - 0.5, cz - 0.45)
+                        - std::hypot(0.05, 0.02)) < 1e-3);
+
+        /* Undo/redo walk the footprint over the same local
+           draft path — no engine round-trip. */
+        ctl.undo();
+        CHECK(footprint("kbd", cx, cz, w, d));
+        CHECK(std::fabs(w - 0.4) < 1e-4);
+        CHECK(std::fabs(d - 0.1) < 1e-4);
+        ctl.undo();
+        CHECK(footprint("kbd", cx, cz, w, d));
+        CHECK(std::fabs(cx - 0.15) < 1e-4);
+        CHECK(std::fabs(cz - 0.18) < 1e-4);
+        ctl.redo();
+        CHECK(footprint("kbd", cx, cz, w, d));
+        CHECK(std::fabs(cx - 0.55) < 1e-4);
+        CHECK(std::fabs(cz - 0.43) < 1e-4);
+
+        ctl.setWorkspace(nullptr);
+    }
+
     bridge.stop();
 }
 

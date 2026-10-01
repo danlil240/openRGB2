@@ -205,6 +205,30 @@ set_tests_properties(qml_workspace_save_test PROPERTIES
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${QT_BIN_DIR}")
 
+# N02 regression: the real LayoutPage.qml 2D canvas over a
+# scripted studio_workspace_v1 engine — a draft move via
+# layoutCtl.moveObject must repaint the canvasObj_<id>
+# delegate immediately (the footprint offset is draft-true,
+# never pinned to the applied resolved scene until Save).
+add_executable(qml_layout_drag_test qml_layout_drag_test.cpp)
+target_link_libraries(qml_layout_drag_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    openrgb2_ipc_wire
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+target_include_directories(qml_layout_drag_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(qml_layout_drag_test PRIVATE NDEBUG)
+set_target_properties(qml_layout_drag_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(qml_layout_drag_test)
+add_test(NAME qml_layout_drag_test COMMAND qml_layout_drag_test)
+set_tests_properties(qml_layout_drag_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
+
 # Task 4.7: the real DevicesPage.qml headless — the four rate
 # fields render with honest labels, unmeasured stays
 # unmeasured (never zeros), ownership absence is honest, and
