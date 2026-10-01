@@ -57,6 +57,7 @@ void WirelessRuntime::SetTarget(const Mac& mac, uint8_t fans)
 void WirelessRuntime::SetDesired(std::shared_ptr<const RgbUpload> upload)
 {
     desired        = std::move(upload);
+    RearmTerminal();
     /* Newest frame wins, but never bypass the RF upload budget. */
     const uint64_t now = clock.NowMs();
     next_resend_ms = now > next_stream_ms ? now : next_stream_ms;
@@ -85,6 +86,10 @@ void WirelessRuntime::ClearDesired()
 {
     desired.reset();
     rgb_clock.valid = false;
+    /* Mode changes route through here (service BeginMode). A wedged
+       runtime must re-observe too, so keep-alives resume once the
+       group reports our master again. */
+    RearmTerminal();
 }
 
 void WirelessRuntime::Cancel()
@@ -155,6 +160,31 @@ void WirelessRuntime::RetryTransport()
     rgb_clock.valid = false;
     next_rgb_clock_ms = 0;
     Enter(WirelessState::Boot);
+}
+
+void WirelessRuntime::RearmTerminal()
+{
+    /*---------------------------------------------------------*\
+    | N01 (QA 2026-10-01): a terminal wedge must not wait for  |
+    | process restart while new intent keeps arriving. In       |
+    | Failed (resend budget / layout debounce) or ForeignMaster |
+    | Tick early-returns forever — keep-alives stop, desired    |
+    | uploads are stored but never sent, and the fans hold      |
+    | their last frame while the SDK still reports Direct +     |
+    | black at the socket boundary. A new desired upload (or a  |
+    | mode change clearing it) is new intent: re-open the       |
+    | boot -> search -> upload cycle through the same reset     |
+    | used for transport reconnects. Observation still gates    |
+    | every write, so a genuinely foreign or incompatible       |
+    | group simply re-fails through the normal debounce path.   |
+    | A Failed runtime already inside a reconnect backoff       |
+    | keeps its schedule; Cancelled is never re-armed.          |
+    \*---------------------------------------------------------*/
+    if(state == WirelessState::ForeignMaster
+       || (state == WirelessState::Failed && !retry_transport))
+    {
+        RetryTransport();
+    }
 }
 
 void WirelessRuntime::RevalidateTransport(const char* err)
@@ -400,15 +430,20 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
     }
 
     /*---------------------------------------------------------*\
-    | A matching record with fan_count == 0 is an incomplete    |
-    | observation — the RX table can briefly expose a partially |
-    | written row under RF load (seen on hardware at stream     |
-    | start). A bound group always reports >= 1 fan, so zero    |
-    | means "row not yet reliable": treat it as a miss, keep    |
-    | the last good sighting until it goes stale, and never let |
-    | it vote toward a layout failure.                          |
+    | A matching record with missing/corrupt fields is an       |
+    | incomplete observation — the RX table can briefly expose  |
+    | a partially written row under RF load (seen on hardware   |
+    | at stream start). A bound group always reports >= 1 fan,  |
+    | a unicast master MAC, and a receiver slot >= 1 (UsbChunks |
+    | rejects receiver 0). Any field violating that means "row  |
+    | not yet reliable": treat it as a miss, keep the last good |
+    | sighting until it goes stale, and never let it vote       |
+    | toward foreign-master or layout failures.                 |
     \*---------------------------------------------------------*/
-    if(found != nullptr && found->fan_count == 0)
+    if(found != nullptr
+       && (found->fan_count == 0
+           || !IsValidUnicastMac(found->master)
+           || found->receiver == 0))
     {
         Diagnostics::Get().Trace("layout_incomplete", expected_fans,
                                  found->fan_count, found->mb_rgb_sync ? 1 : 0);
@@ -421,7 +456,10 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
 
     if(found == nullptr)
     {
+        /* A miss is not a sighting: it cannot extend a consecutive-
+           observation debounce (foreign master, layout) either. */
         layout_mismatch = 0;
+        master_mismatch = 0;
         /*---------------------------------------------------------*\
         | A stale sighting is not an observation — clear it so the  |
         | Tick state machine stops resending to a vanished device.  |

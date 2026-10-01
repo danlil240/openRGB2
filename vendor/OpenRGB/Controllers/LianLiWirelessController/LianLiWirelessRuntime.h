@@ -136,6 +136,9 @@ namespace LianLiWireless
         void TransportFailed(const char* err);
         void RevalidateTransport(const char* err);
         void RetryTransport();
+        /* N01: new intent re-arms a terminal wedge (Failed budget /
+           layout exhaustion, ForeignMaster). See implementation. */
+        void RearmTerminal();
 
         IWirelessLink&       link;
         IWirelessClock&      clock;
