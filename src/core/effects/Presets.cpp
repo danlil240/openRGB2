@@ -39,7 +39,7 @@ Vec3 RotateYaw(const Vec3& dir, float radians)
 |||| The effect-look registry                               ||
 ||||                                                           |
 ||||   presets/effects/<id>.effect.json is the source of    ||
-||||   truth for the nine shipped looks — no C++ builder    ||
+||||   truth for the shipped looks — no C++ builder    ||
 ||||   remains. The Qt bridge fills the defaults layer from ||
 ||||   bundled qrc resources at startup; the Qt-free side   ||
 ||||   (tests, tools) lazily probes the source-tree         ||
@@ -55,7 +55,7 @@ namespace
    it predictably. */
 const char* const kKnownOrder[] = {
     "aurora", "reactor", "comet", "chrome", "portal",
-    "embers", "shockwave", "keyripple", "ambient",
+    "embers", "shockwave", "keyripple", "ambient", "wave",
 };
 constexpr unsigned int kKnownCount =
     sizeof(kKnownOrder) / sizeof(kKnownOrder[0]);

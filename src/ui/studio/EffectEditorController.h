@@ -190,6 +190,19 @@ public:
     Q_INVOKABLE void setLayerStopColor(int index, int stop,
                                        const QColor& color);
 
+    /*---- directional flow (Wave card) ---------------------------
+       Drives every enabled `wave` layer of the effective stack
+       together (core EditorController::SetFlow — one undo record
+       per call). flowState() = {available, direction{x,y,z},
+       colors[hex], speed (m/s), wavelength (m), keyboardLayer
+       (index of a static layer targeting keyboard_body, -1 none),
+       keyboardOn}. */
+    Q_INVOKABLE QVariantMap flowState() const;
+    Q_INVOKABLE bool setFlowDirection(double x, double y, double z);
+    Q_INVOKABLE bool setFlowColors(const QStringList& colors);
+    Q_INVOKABLE bool setFlowSpeed(double metersPerSecond);
+    Q_INVOKABLE bool setFlowWavelength(double meters);
+
     /*---- path-point ops (comet) ---------------------------------*/
     Q_INVOKABLE void addLayerPathPoint(int index,
                                        double x, double y, double z);
@@ -271,6 +284,9 @@ private:
     /* Commit one edit through the shared session + refresh the
        model at the right granularity. */
     void ApplyOp(std::optional<studio::EditorEdit>&& e);
+    /* Wave-card op: refuses during a gesture, true when it made
+       a record. */
+    bool ApplyFlow(const studio::EditorController::FlowEdit& f);
     void RefreshModel();
     /* One draft doc-edit record for inputs.* fields. */
     bool CommitInputs(const std::string& label,

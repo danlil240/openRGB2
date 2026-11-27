@@ -337,6 +337,30 @@ public:
     std::optional<EditorEdit> SetLayerStopColor(size_t i, size_t stop,
                                               const ColorF& color);
 
+    /* Directional-flow op (the Wave card): ONE record that drives
+       every enabled `wave` layer together, so a look built from a
+       color flow plus a brightness swell keeps both moving the
+       same way. Unset fields are left alone.
+         direction  — non-zero, finite; normalized onto each layer
+                      (wave bands travel along +direction)
+         colors     — 2..5 stops, rewritten as evenly spaced stops
+                      on the FIRST wave layer (the palette wraps,
+                      so the loop is seamless); other layers keep
+                      their own palette
+         speed      — m/s of the first layer, > 0
+         wavelength — meters of the first layer, > 0
+       speed/wavelength rescale every wave layer by the same ratio
+       as the first, so a look's internal proportions survive.
+       No enabled wave layer -> refused with LastError(). */
+    struct FlowEdit
+    {
+        std::optional<Vec3>  direction;
+        std::vector<ColorF>  colors;      /* empty = unchanged */
+        std::optional<float> speed;
+        std::optional<float> wavelength;
+    };
+    std::optional<EditorEdit> SetFlow(const FlowEdit& f);
+
     /* Path-point ops (comet). */
     std::optional<EditorEdit> AddLayerPathPoint(size_t i,
                                                 const Vec3& p);

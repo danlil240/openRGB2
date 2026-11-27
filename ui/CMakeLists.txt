@@ -95,6 +95,7 @@ qt_add_qml_module(openrgb2_ui
         studio/LayerStack.qml
         studio/LookShelf.qml
         studio/PaletteEditor.qml
+        studio/WaveControls.qml
         ${_viewport_qml}
     SOURCES
         ${CMAKE_SOURCE_DIR}/src/ui/EngineBridge.h
