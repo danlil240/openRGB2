@@ -299,7 +299,15 @@ int main()
         put((uint16_t)MsgType::SetScene, 2); put(31, 4);
         put(kMaxBodyBytes + 1, 4);
         c.SendBytes(big);
-        c.SendRaw(std::string(256, '#'));   /* part of "body"  */
+        /* The declared body — with a smuggled PING (id 666)
+           inside that must NOT be answered: the body is
+           discarded by length, never rescanned for magic. */
+        const std::vector<uint8_t> smuggled =
+            EncodeMessage(MsgType::Ping, 666, nlohmann::json::object());
+        std::vector<uint8_t> body(16, '#');
+        body.insert(body.end(), smuggled.begin(), smuggled.end());
+        body.resize((size_t)kMaxBodyBytes + 1, '#');
+        c.SendBytes(body);
         c.SendMsg(MsgType::Ping, 32, nlohmann::json::object());
 
         CHECK(c.RecvMsg(m, 5000));
@@ -307,6 +315,150 @@ int main()
         CHECK(m.request_id == 31);
         CHECK(c.RecvMsg(m, 5000));
         CHECK(m.type == MsgType::Pong);   /* connection lives  */
+        CHECK(m.request_id == 32);        /* not the smuggled one */
+    }
+
+    /*---- too_large counts toward the rate window ------------*/
+    {
+        IpcServerOptions opts;
+        opts.rate_limit_per_sec = 2;
+        ScriptedService svc;
+        IpcServer server(svc, opts);
+        TestClient c;
+        server.Serve(c.MakeChannel(), ChannelKind::Command);
+        c.Hello();
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        /* Over-cap headers with a skippable (but still sent)
+           body: each one used to get a free TooLarge reply
+           outside the flood bound. */
+        for(uint32_t i = 0; i < 4; ++i)
+        {
+            std::vector<uint8_t> hdr;
+            auto put = [&](uint32_t v, int bytes)
+            { for(int k = 0; k < bytes; ++k)
+                  hdr.push_back((uint8_t)(v >> (8 * k))); };
+            put(kMagic, 4); put(kProtocolVersion, 2);
+            put((uint16_t)MsgType::SetScene, 2); put(200 + i, 4);
+            put(kMaxBodyBytes + 1, 4);
+            c.SendBytes(hdr);
+            c.SendBytes(std::vector<uint8_t>(
+                (size_t)kMaxBodyBytes + 1, '#'));
+        }
+        int too_large = 0, rate_limited = 0;
+        while(c.RecvMsg(m, 3000))
+        {
+            if(IsError(m, ErrCode::TooLarge))
+            {
+                ++too_large;
+            }
+            else if(IsError(m, ErrCode::RateLimited))
+            {
+                ++rate_limited;
+                break;
+            }
+        }
+        CHECK(too_large == 2);
+        CHECK(rate_limited == 1);
+        CHECK(WaitFor([&] { return c.State()->server_closed; }));
+    }
+
+    /*---- over-cap body beyond the skip bound: closes -------*/
+    {
+        ScriptedService svc;
+        IpcServer server(svc);
+        TestClient c;
+        server.Serve(c.MakeChannel(), ChannelKind::Command);
+        c.Hello();
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        std::vector<uint8_t> hdr;
+        auto put = [&](uint32_t v, int bytes)
+        { for(int k = 0; k < bytes; ++k)
+              hdr.push_back((uint8_t)(v >> (8 * k))); };
+        put(kMagic, 4); put(kProtocolVersion, 2);
+        put((uint16_t)MsgType::SetScene, 2); put(300, 4);
+        put(kMaxSkipBytes + 1, 4);
+        c.SendBytes(hdr);
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(IsError(m, ErrCode::TooLarge));
+        CHECK(m.request_id == 300);
+        CHECK(WaitFor([&] { return c.State()->server_closed; }));
+    }
+
+    /*---- deeply nested body: malformed, session survives ---*/
+    {
+        ScriptedService svc;
+        IpcServer server(svc);
+        TestClient c;
+        server.Serve(c.MakeChannel(), ChannelKind::Command);
+        c.Hello();
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        /* ~1 MiB of nesting in SUBSCRIBE's "events" and in a
+           dispatched verb body: rejected at parse time by the
+           depth cap — never deep-copied on the reader thread. */
+        const size_t depth = kMaxBodyBytes / 2 - 64;
+        const std::string nest =
+            std::string(depth, '[') + std::string(depth, ']');
+        const std::string sub = "{\"events\":" + nest + "}";
+        std::vector<uint8_t> frame;
+        auto put = [&](uint32_t v, int bytes)
+        { for(int k = 0; k < bytes; ++k)
+              frame.push_back((uint8_t)(v >> (8 * k))); };
+        put(kMagic, 4); put(kProtocolVersion, 2);
+        put((uint16_t)MsgType::Subscribe, 2); put(401, 4);
+        put((uint32_t)sub.size(), 4);
+        frame.insert(frame.end(), sub.begin(), sub.end());
+        c.SendBytes(frame);
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(IsError(m, ErrCode::Malformed));
+        CHECK(m.request_id == 401);
+
+        frame.clear();
+        const std::string lay = "{\"verb\":" + nest + "}";
+        put(kMagic, 4); put(kProtocolVersion, 2);
+        put((uint16_t)MsgType::LayoutCommand, 2); put(402, 4);
+        put((uint32_t)lay.size(), 4);
+        frame.insert(frame.end(), lay.begin(), lay.end());
+        c.SendBytes(frame);
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(IsError(m, ErrCode::Malformed));
+        CHECK(m.request_id == 402);
+
+        c.SendMsg(MsgType::Ping, 403, nlohmann::json::object());
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Pong);
+    }
+
+    /*---- idle session outlives the per-message deadline ----*/
+    {
+        IpcServerOptions opts;
+        opts.message_deadline_ms = 100;   /* per message        */
+        opts.idle_deadline_ms    = 5000;  /* first-byte wait    */
+        ScriptedService svc;
+        IpcServer server(svc, opts);
+        TestClient c;
+        server.Serve(c.MakeChannel(), ChannelKind::Command);
+        c.Hello();
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        /* Idle for several message deadlines: the session must
+           still be there (the deadline starts at a request's
+           first byte, not at the previous reply). */
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        CHECK(!c.State()->server_closed);
+        c.SendMsg(MsgType::Ping, 501, nlohmann::json::object());
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Pong);
+        /* ...but a request that STARTS and then stalls still
+           hits the per-message deadline. */
+        const std::vector<uint8_t> full =
+            EncodeMessage(MsgType::GetState, 502,
+                          nlohmann::json::object());
+        c.SendBytes(std::vector<uint8_t>(full.begin(),
+                                         full.begin() + 6));
+        CHECK(WaitFor([&] { return c.State()->server_closed; }));
     }
 
     /*---- truncated then peer close -------------------------*/
@@ -785,6 +937,42 @@ int main()
         PipeSecurityAttributes psa;
         CHECK(psa.Ok());
         CHECK(psa.Raw() != nullptr);
+    }
+
+    /*---- Stop() racing Sweep() on dying sessions -----------*\
+    | Emit() sweeps (joins) dead sessions on the caller's       |
+    | thread while Stop() joins every session: the two must     |
+    | never join the same thread concurrently.                  |
+    \*---------------------------------------------------------*/
+    for(int round = 0; round < 10; ++round)
+    {
+        ScriptedService svc;
+        IpcServer server(svc);
+        std::vector<std::unique_ptr<TestClient>> clients;
+        for(int i = 0; i < 6; ++i)
+        {
+            clients.push_back(std::make_unique<TestClient>());
+            server.Serve(clients.back()->MakeChannel(),
+                         ChannelKind::Command);
+        }
+        std::atomic<bool> go{ true };
+        std::thread emitter([&]
+        {
+            while(go.load())
+            {
+                server.Emit(IpcEvent{ "topology",
+                                      nlohmann::json::object() });
+            }
+        });
+        for(auto& c : clients)
+        {
+            c->CloseInbound();            /* sessions die       */
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(round));
+        server.Stop();
+        go.store(false);
+        emitter.join();
+        CHECK(server.SessionCount() == 0);
     }
 
     /*---- real pipe round-trip -------------------------------*/

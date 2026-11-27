@@ -428,6 +428,13 @@ void EngineService::SetEventSink(
     event_sink_ = std::move(sink);
 }
 
+void EngineService::SetEventInterest(
+    std::function<bool(const std::string&)> interest)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    event_interest_ = std::move(interest);
+}
+
 void EngineService::SetSessionEventSink(
     std::function<void(uint64_t, const IpcEvent&,
                        const std::string&)> sink)
@@ -1440,7 +1447,7 @@ IpcReply EngineService::Dispatch(MsgType type,
 
     case MsgType::SetPlaybackMode:
     {
-        if(!body.is_object() || !body.value("mode", nlohmann::json())
+        if(!body.is_object() || !FieldOrNull(body, "mode")
                                     .is_string())
         {
             return IpcReply::Fail(ErrCode::BadRequest,
@@ -1681,7 +1688,7 @@ IpcReply EngineService::Dispatch(MsgType type,
            wrong-typed verb. */
         const std::string verb =
             (body.is_object()
-             && body.value("verb", nlohmann::json()).is_string())
+             && FieldOrNull(body, "verb").is_string())
                 ? body["verb"].get<std::string>()
                 : std::string();
         if(verb.empty())
@@ -1701,7 +1708,7 @@ IpcReply EngineService::Dispatch(MsgType type,
     {
         const std::string verb =
             (body.is_object()
-             && body.value("verb", nlohmann::json()).is_string())
+             && FieldOrNull(body, "verb").is_string())
                 ? body["verb"].get<std::string>()
                 : std::string();
         if(verb.empty())
@@ -1732,7 +1739,7 @@ IpcReply EngineService::Dispatch(MsgType type,
         }
         const bool stop_backend =
             body.is_object() &&
-            body.value("stop_backend", nlohmann::json()).is_boolean() &&
+            FieldOrNull(body, "stop_backend").is_boolean() &&
             body["stop_backend"].get<bool>();
         nlohmann::json reply_body = nlohmann::json::object({
             { "shutting_down", true          },
@@ -1898,8 +1905,7 @@ IpcReply EngineService::HandleIdentify(const nlohmann::json& body)
 {
     /* {controller:<DeviceKey>, zone?:"<zone name>",
        led_index?:int, duration_ms?:int} */
-    if(!body.is_object() || !KeyFieldsOk(body.value("controller",
-                                                   nlohmann::json())))
+    if(!body.is_object() || !KeyFieldsOk(FieldOrNull(body, "controller")))
     {
         return IpcReply::Fail(ErrCode::BadRequest,
             "identify requires {controller:<DeviceKey>} with "
@@ -2073,7 +2079,7 @@ IpcReply EngineService::HandleLayoutMutateImpl(
     const std::string& verb, const nlohmann::json& body)
 {
     if(!body.is_object() ||
-       !body.value("object_id", nlohmann::json()).is_string() ||
+       !FieldOrNull(body, "object_id").is_string() ||
        body["object_id"].get<std::string>().empty())
     {
         return IpcReply::Fail(ErrCode::BadRequest,
@@ -2345,8 +2351,7 @@ IpcReply EngineService::HandleLayoutMutateImpl(
                 /* New binding: identity must come from a live
                    snapshot — missing topology is honest
                    Unavailable, never a guessed identity. */
-                if(!KeyFieldsOk(body.value("controller",
-                                           nlohmann::json())))
+                if(!KeyFieldsOk(FieldOrNull(body, "controller")))
                 {
                     return IpcReply::Fail(ErrCode::BadRequest,
                         "unknown binding '" + bid +
@@ -2443,7 +2448,7 @@ IpcReply EngineService::HandleLayoutMutateImpl(
 IpcReply EngineService::HandleAddObjects(const nlohmann::json& body)
 {
     if(!body.is_object() ||
-       !body.value("controllers", nlohmann::json()).is_array() ||
+       !FieldOrNull(body, "controllers").is_array() ||
        body["controllers"].empty())
     {
         return IpcReply::Fail(ErrCode::BadRequest,
@@ -2703,7 +2708,7 @@ IpcReply EngineService::HandleReactiveCommand(
             "reactive inputs are not wired on this engine");
     }
     if(!body.is_object() ||
-       !body.value("input", nlohmann::json()).is_string())
+       !FieldOrNull(body, "input").is_string())
     {
         return IpcReply::Fail(ErrCode::BadRequest,
             verb + " requires {input:\"audio\"|\"screen\"|\"key\"}");
@@ -2880,8 +2885,19 @@ void EngineService::PollFrameStatus(TimePoint now)
            since_last >= options_.frame_status_min_interval_ms)
         {
             last_frame_status_ = now;
-            Emit(event_kind::kFrameStatus,
-                 FrameStatusJson(LayoutSnapshots()));
+            std::function<bool(const std::string&)> interest;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                interest = event_interest_;
+            }
+            /* No subscriber: skip building the body at all — a
+               later SUBSCRIBE gets the current state from
+               SnapshotEventFor's initial push. */
+            if(!interest || interest(event_kind::kFrameStatus))
+            {
+                Emit(event_kind::kFrameStatus,
+                     FrameStatusJson(LayoutSnapshots()));
+            }
         }
         else
         {

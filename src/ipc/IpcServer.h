@@ -14,7 +14,8 @@
 ||   - max_connections live sessions; extras get a bounded │
 ||     ERROR(busy) and are closed                          ||
 ||   - message bodies capped (IpcProtocol.h), every read/  │
-||     write deadline-bounded                              │
+||     write deadline-bounded; an idle session (no request │
+||     byte for idle_deadline_ms) is closed                │
 ||   - per-session request rate cap; a flooding client is  │
 ||     answered ERROR(rate_limited) and closed             │
 ||   - per-session event queue, per-kind latest-wins       │
@@ -47,7 +48,11 @@ struct IpcServerOptions
     uint32_t max_queued_events   = 64;   /* per session             */
     uint32_t rate_limit_per_sec  = 128;  /* requests per session    */
     uint32_t hello_deadline_ms   = 5000; /* time allowed for HELLO  */
-    uint32_t message_deadline_ms = 5000; /* per complete message    */
+    uint32_t message_deadline_ms = 5000; /* per message, from its
+                                            first byte              */
+    uint32_t idle_deadline_ms    = 60000;/* max wait for the first
+                                            byte of the next request
+                                            (idle session close)    */
     uint32_t send_deadline_ms    = 5000; /* per outbound write      */
 };
 
@@ -89,6 +94,12 @@ public:
        including inside a Dispatch handler. */
     void    Emit(const IpcEvent& ev);
 
+    /* True when at least one live session subscribed to
+       `kind` — lets a producer skip BUILDING an event body
+       nobody will receive. Emit/EmitTo check it themselves
+       before encoding. */
+    bool    HasSubscriber(const std::string& kind) const;
+
     /* Targeted push to ONE session (studio-import Task 7 —
        the draft-preview feed is per-session state, never a
        broadcast). Delivers only when that session subscribed
@@ -111,6 +122,7 @@ private:
     struct Session;
 
     void   Sweep();               /* join + erase dead sessions   */
+    static void JoinSession(Session& s);   /* under s.join_mutex */
     void   ReaderMain(std::shared_ptr<Session> s);
     void   WriterMain(std::shared_ptr<Session> s);
 

@@ -152,13 +152,59 @@ const char* ErrCodeName(ErrCode c)
     return "?";
 }
 
+nlohmann::json ParseJsonBounded(const std::string& text, int max_depth)
+{
+    /* The callback sees every container start with its depth
+       (the number of enclosing containers). Past the cap the
+       container — and, once tripped, everything after it — is
+       discarded, so the over-deep part is never built; the
+       SAX parser itself is iterative. */
+    bool too_deep = false;
+    const nlohmann::json::parser_callback_t cb =
+        [&too_deep, max_depth](int depth,
+                               nlohmann::json::parse_event_t ev,
+                               nlohmann::json&) -> bool
+        {
+            if(too_deep)
+            {
+                return false;
+            }
+            if((ev == nlohmann::json::parse_event_t::object_start ||
+                ev == nlohmann::json::parse_event_t::array_start) &&
+               depth >= max_depth)
+            {
+                too_deep = true;
+                return false;
+            }
+            return true;
+        };
+    nlohmann::json j = nlohmann::json::parse(text, cb, false);
+    if(too_deep)
+    {
+        return nlohmann::json(nlohmann::json::value_t::discarded);
+    }
+    return j;
+}
+
+const nlohmann::json& FieldOrNull(const nlohmann::json& obj,
+                                  const char* key)
+{
+    static const nlohmann::json kNull;
+    if(!obj.is_object())
+    {
+        return kNull;
+    }
+    const auto it = obj.find(key);
+    return it == obj.end() ? kNull : *it;
+}
+
 nlohmann::json Message::Body() const
 {
     if(body_raw.empty())
     {
         return nlohmann::json::object();
     }
-    return nlohmann::json::parse(body_raw, nullptr, false);
+    return ParseJsonBounded(body_raw);
 }
 
 std::vector<uint8_t> EncodeMessage(MsgType type, uint32_t request_id,
@@ -204,182 +250,181 @@ uint64_t MessageReader::ResyncBytes() const
     return resync_bytes_;
 }
 
-IpcIoResult MessageReader::ReadExact(void* buf, size_t len,
-                                     uint64_t deadline_abs_ms,
-                                     std::string& err)
+IpcIoResult MessageReader::Fill(size_t want, uint64_t deadline_abs_ms,
+                                std::string& err)
 {
-    uint8_t* out = (uint8_t*)buf;
-    size_t   got = 0;
-
-    /* Drain carry_ first — resync leftovers. */
-    const size_t avail = carry_.size() - carry_pos_;
-    const size_t take  = avail < len ? avail : len;
-    if(take)
+    /* Compact first: consumed bytes never accumulate. */
+    if(pos_ > 0)
     {
-        memcpy(out, carry_.data() + carry_pos_, take);
-        carry_pos_ += take;
-        got        += take;
-        if(carry_pos_ == carry_.size())
-        {
-            carry_.clear();
-            carry_pos_ = 0;
-        }
+        buf_.erase(buf_.begin(), buf_.begin() + (ptrdiff_t)pos_);
+        pos_ = 0;
     }
-
-    while(got < len)
+    const uint32_t left = RemainingMs(deadline_abs_ms);
+    if(left == 0)
     {
-        const uint32_t left = RemainingMs(deadline_abs_ms);
-        if(left == 0)
-        {
-            return IpcIoResult::Timeout;
-        }
-        size_t n = 0;
-        const IpcIoResult r =
-            ch_->RecvSome(out + got, len - got, n, left, err);
-        if(r != IpcIoResult::Ok)
-        {
-            return r;
-        }
-        got += n;
+        return IpcIoResult::Timeout;
     }
-    return IpcIoResult::Ok;
+    /* At least a small chunk (fewer syscalls for small
+       messages), at most 64 KiB per call — bounds the
+       over-read past the current message. */
+    size_t chunk = want < 4096 ? 4096 : want;
+    if(chunk > 64 * 1024)
+    {
+        chunk = 64 * 1024;
+    }
+    const size_t old = buf_.size();
+    buf_.resize(old + chunk);
+    size_t got = 0;
+    const IpcIoResult r =
+        ch_->RecvSome(buf_.data() + old, chunk, got, left, err);
+    buf_.resize(old + (r == IpcIoResult::Ok ? got : 0));
+    return r;
 }
 
 ReadResult MessageReader::Read(Message& msg, uint32_t deadline_ms,
-                               std::string& detail)
+                               std::string& detail, uint32_t idle_ms)
 {
-    const uint64_t deadline_abs = NowMs() + deadline_ms;
-
-    /*---- 1. Magic hunt (resync) ---------------------------*\
-    | A synced stream hits magic on the first word at zero   |
-    | cost. Out of sync, the stream is scanned forward a     |
-    | sliding little-endian window — the next real message   |
-    | is recovered, garbage is skipped. Bounded by           |
-    | kMaxResyncBytes per Read call.                         |
-    \*---------------------------------------------------------*/
-    uint32_t window = 0;
+    if(poisoned_)
     {
-        uint8_t first4[4];
-        const IpcIoResult r =
-            ReadExact(first4, 4, deadline_abs, detail);
-        if(r != IpcIoResult::Ok)
-        {
-            return MapIo(r, detail);
-        }
-        window = GetU32(first4);
+        detail = "stream abandoned after an unskippable body";
+        return ReadResult::ResyncExceeded;
     }
+    /* The per-message clock starts at the first byte when an
+       idle bound is given and nothing of the next message is
+       buffered yet; otherwise it starts now. */
+    bool     started      = idle_ms == 0 || Avail() > 0 ||
+                            skip_left_ > 0;
+    uint64_t deadline_abs = NowMs() + (started ? deadline_ms
+                                               : idle_ms);
 
-    uint64_t scanned = 0;
-    while(window != kMagic)
+    const auto fill = [&](size_t want) -> IpcIoResult
     {
-        if(scanned >= kMaxResyncBytes)
+        const IpcIoResult r = Fill(want, deadline_abs, detail);
+        if(r == IpcIoResult::Ok && !started)
         {
-            detail = "no magic within resync bound";
-            return ReadResult::ResyncExceeded;
+            started      = true;
+            deadline_abs = NowMs() + deadline_ms;
         }
-        /* Carry first — leftovers staged by a previous resync
-           are stream bytes and must stay in order. They are
-           consumed one byte at a time so that when magic is
-           found, the unread tail of carry_ is exactly the
-           bytes that follow it in the stream. */
-        if(carry_pos_ < carry_.size())
-        {
-            window = (window >> 8)
-                   | ((uint32_t)carry_[carry_pos_++] << 24);
-            ++scanned;
-            ++resync_bytes_;
-            if(carry_pos_ == carry_.size())
-            {
-                carry_.clear();
-                carry_pos_ = 0;
-            }
-            continue;
-        }
-        carry_.clear();
-        carry_pos_ = 0;
+        return r;
+    };
 
-        uint8_t chunk[256];
-        const size_t want =
-            (size_t)std::min<uint64_t>(sizeof(chunk),
-                                       kMaxResyncBytes - scanned);
-        size_t got = 0;
-        const uint32_t left = RemainingMs(deadline_abs);
-        if(left == 0)
+    for(;;)
+    {
+        /*---- 0. Discard a TooLarge body by its length -------*/
+        if(skip_left_ > 0)
         {
-            detail = "deadline during resync";
-            return ReadResult::Timeout;
-        }
-        const IpcIoResult r =
-            ch_->RecvSome(chunk, want, got, left, detail);
-        if(r != IpcIoResult::Ok)
-        {
-            return MapIo(r, detail);
-        }
-        for(size_t i = 0; i < got; ++i)
-        {
-            window = (window >> 8) | ((uint32_t)chunk[i] << 24);
-            ++scanned;
-            ++resync_bytes_;
-            if(window == kMagic)
+            const size_t n = (size_t)std::min<uint64_t>(skip_left_,
+                                                        Avail());
+            pos_       += n;
+            skip_left_ -= n;
+            if(skip_left_ > 0)
             {
-                /* Bytes past the magic belong to the stream —
-                   stage them so ReadExact sees them first.
-                   carry_ is empty here (drained above). */
-                if(i + 1 < got)
+                const IpcIoResult r = fill((size_t)
+                    std::min<uint64_t>(skip_left_, 64 * 1024));
+                if(r != IpcIoResult::Ok)
                 {
-                    carry_.insert(carry_.end(), chunk + i + 1,
-                                  chunk + got);
+                    return MapIo(r, detail);
                 }
-                goto header;
+                continue;
             }
-            if(scanned >= kMaxResyncBytes)
+        }
+
+        /*---- 1. Magic hunt (resync) -------------------------*\
+        | A synced stream hits magic on the first word at zero  |
+        | cost. Out of sync, the buffer is scanned forward a    |
+        | byte at a time — the next real message is recovered,  |
+        | garbage is skipped. Bounded by kMaxResyncBytes per    |
+        | message (the count survives a Timeout).               |
+        \*------------------------------------------------------*/
+        while(Avail() >= 4 && GetU32(buf_.data() + pos_) != kMagic)
+        {
+            if(scanned_ >= kMaxResyncBytes)
             {
                 detail = "no magic within resync bound";
                 return ReadResult::ResyncExceeded;
             }
+            ++pos_;
+            ++scanned_;
+            ++resync_bytes_;
         }
-    }
-header:
-
-    /*---- 2. Header ----------------------------------------*/
-    uint8_t hdr[12];
-    {
-        const IpcIoResult r = ReadExact(hdr, sizeof(hdr), deadline_abs,
-                                        detail);
-        if(r != IpcIoResult::Ok)
+        if(scanned_ >= kMaxResyncBytes)
         {
-            return MapIo(r, detail);
+            detail = "no magic within resync bound";
+            return ReadResult::ResyncExceeded;
         }
-    }
-    msg.version    = GetU16(hdr + 0);
-    msg.type       = (MsgType)GetU16(hdr + 2);
-    msg.request_id = GetU32(hdr + 4);
-    const uint32_t body_len = GetU32(hdr + 8);
-
-    if(body_len > kMaxBodyBytes)
-    {
-        detail = "body_len " + std::to_string(body_len) +
-                 " exceeds cap " + std::to_string(kMaxBodyBytes);
-        return ReadResult::TooLarge;   /* body left for resync */
-    }
-
-    /*---- 3. Body ------------------------------------------*/
-    if(body_len)
-    {
-        msg.body_raw.resize(body_len);
-        const IpcIoResult r =
-            ReadExact(msg.body_raw.data(), body_len, deadline_abs,
-                      detail);
-        if(r != IpcIoResult::Ok)
+        if(Avail() < 4)
         {
-            return MapIo(r, detail);
+            const IpcIoResult r = fill(kHeaderBytes - Avail());
+            if(r != IpcIoResult::Ok)
+            {
+                if(r == IpcIoResult::Timeout && scanned_ > 0 &&
+                   detail.empty())
+                {
+                    detail = "deadline during resync";
+                }
+                return MapIo(r, detail);
+            }
+            continue;
         }
+
+        /*---- 2. Header --------------------------------------*/
+        if(Avail() < kHeaderBytes)
+        {
+            const IpcIoResult r = fill(kHeaderBytes - Avail());
+            if(r != IpcIoResult::Ok)
+            {
+                return MapIo(r, detail);
+            }
+            continue;
+        }
+        const uint8_t* hdr = buf_.data() + pos_ + 4;
+        msg.version    = GetU16(hdr + 0);
+        msg.type       = (MsgType)GetU16(hdr + 2);
+        msg.request_id = GetU32(hdr + 4);
+        const uint32_t body_len = GetU32(hdr + 8);
+
+        if(body_len > kMaxBodyBytes)
+        {
+            pos_     += kHeaderBytes;
+            scanned_  = 0;
+            msg.body_raw.clear();
+            detail = "body_len " + std::to_string(body_len) +
+                     " exceeds cap " + std::to_string(kMaxBodyBytes);
+            if(body_len <= kMaxSkipBytes)
+            {
+                skip_left_ = body_len;   /* dropped by length */
+            }
+            else
+            {
+                poisoned_ = true;
+                detail += "; beyond the skip bound";
+            }
+            return ReadResult::TooLarge;
+        }
+
+        /*---- 3. Body ----------------------------------------*/
+        if(Avail() < kHeaderBytes + (size_t)body_len)
+        {
+            const IpcIoResult r =
+                fill(kHeaderBytes + (size_t)body_len - Avail());
+            if(r != IpcIoResult::Ok)
+            {
+                return MapIo(r, detail);
+            }
+            continue;
+        }
+        const char* body =
+            (const char*)buf_.data() + pos_ + kHeaderBytes;
+        msg.body_raw.assign(body, body + body_len);
+        pos_     += kHeaderBytes + body_len;
+        scanned_  = 0;
+        if(pos_ == buf_.size())
+        {
+            buf_.clear();
+            pos_ = 0;
+        }
+        return ReadResult::Ok;
     }
-    else
-    {
-        msg.body_raw.clear();
-    }
-    return ReadResult::Ok;
 }
 
 } /* namespace ipc */

@@ -19,8 +19,11 @@
 ||   bodies are capped at kMaxBodyBytes; a lost-framing    ||
 ||   stream resynchronizes on the next magic within        ||
 ||   kMaxResyncBytes scanned bytes, then the session is    ||
-||   dropped. Every message read is deadline-bounded at    ||
-||   the channel layer.                                    ||
+||   dropped. An oversized body is skipped by its declared ||
+||   length (never rescanned for magic) up to              ||
+||   kMaxSkipBytes. Every message read is deadline-bounded ||
+||   at the channel layer; JSON bodies are parsed with a   ||
+||   nesting cap (kMaxJsonDepth).                          ||
 ||                                                           ||
 ||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 \*---------------------------------------------------------*/
@@ -49,6 +52,16 @@ constexpr uint16_t kProtocolVersion = 1;
 constexpr uint32_t kHeaderBytes     = 16;
 constexpr uint32_t kMaxBodyBytes    = 1u << 20;   /* 1 MiB body cap       */
 constexpr uint32_t kMaxResyncBytes  = 4u * kMaxBodyBytes;
+/* An over-cap body is discarded by its declared length when
+   body_len <= kMaxSkipBytes; beyond that the stream is closed
+   (skipping by length keeps a smuggled message inside an
+   oversized body from ever being parsed). */
+constexpr uint32_t kMaxSkipBytes    = kMaxResyncBytes;
+/* JSON nesting cap for every parsed wire body: deeper
+   documents parse as discarded (Malformed). nlohmann's copy/
+   dump paths recurse per level — an uncapped 1 MiB body of
+   '[' would overflow a session thread's stack. */
+constexpr int      kMaxJsonDepth    = 64;
 
 /* Stable event-kind tokens for SUBSCRIBE / EVENT bodies. */
 namespace event_kind
@@ -162,9 +175,24 @@ struct Message
     std::string body_raw;              /* raw UTF-8 JSON; "" = {} */
 
     /* Parsed body accessor — is_discarded() when body_raw is not
-       valid JSON. Callers treat a discarded parse as Malformed. */
+       valid JSON or nests deeper than kMaxJsonDepth. Callers
+       treat a discarded parse as Malformed. */
     nlohmann::json Body() const;
 };
+
+/* Bounded JSON parse: is_discarded() on invalid JSON or on
+   container nesting deeper than max_depth (the over-deep
+   part is never materialized). Use for every untrusted
+   document that reaches nlohmann's recursive copy/dump. */
+nlohmann::json ParseJsonBounded(const std::string& text,
+                                int max_depth = kMaxJsonDepth);
+
+/* Member lookup WITHOUT the deep copy json::value() makes (and
+   without its type_error on a non-object): a reference to the
+   member, or to a shared null when `obj` is not an object or
+   lacks `key`. */
+const nlohmann::json& FieldOrNull(const nlohmann::json& obj,
+                                  const char* key);
 
 /* Encodes one framed message. Empty vector when the serialized
    body exceeds kMaxBodyBytes (encode must be bounded too). */
@@ -190,11 +218,17 @@ enum class ReadResult
 {
     Ok,              /* msg filled                                */
     Closed,          /* orderly peer close                        */
-    Timeout,         /* deadline elapsed mid-message (truncated)  */
+    Timeout,         /* deadline elapsed before a whole message;
+                        bytes already received are KEPT — the
+                        next Read() resumes the same message      */
     TooLarge,        /* header parsed, body_len > cap; fields in
                         msg carry the offending header; the body
-                        is left for the next Read() to resync     */
-    ResyncExceeded,  /* no magic within kMaxResyncBytes — close   */
+                        is discarded by its declared length
+                        (body_len <= kMaxSkipBytes), never
+                        rescanned. Beyond the skip bound the
+                        reader is Poisoned(): close.              */
+    ResyncExceeded,  /* no magic within kMaxResyncBytes, or a
+                        poisoned reader — close                   */
     TransportError,  /* channel error; detail set                 */
 };
 
@@ -203,26 +237,46 @@ class MessageReader
 public:
     explicit MessageReader(IIpcChannel& channel);
 
-    /* deadline_ms bounds the ENTIRE message (magic hunt +
-       header + body) — a truncated message cannot stall the
-       session longer than the deadline. */
+    /* deadline_ms bounds the message (magic hunt + header +
+       body) — a truncated message cannot stall the session
+       longer than the deadline. A Timeout never loses data:
+       the bytes received so far stay buffered and the next
+       Read() continues the same message (a polling client can
+       use a short deadline safely).
+
+       idle_ms (0 = off): while NO byte of the next message has
+       arrived yet, wait up to idle_ms instead; the deadline_ms
+       clock then starts at the first byte. The server uses it
+       so an idle-but-alive session is not closed by the
+       per-message deadline. */
     ReadResult Read(Message& msg, uint32_t deadline_ms,
-                    std::string& detail);
+                    std::string& detail, uint32_t idle_ms = 0);
 
     /* Byte count consumed by resync scans (diagnostics). */
     uint64_t ResyncBytes() const;
 
+    /* True once an over-cap body exceeded kMaxSkipBytes — the
+       stream cannot be resynchronized safely; close it. */
+    bool     Poisoned() const { return poisoned_; }
+
 private:
     IIpcChannel* ch_;
 
-    /* Buffered reads: resync scans chunk-wise and push the
-       bytes past a found magic into carry_ so the next Read
-       starts exactly at the header. */
-    std::vector<uint8_t> carry_;
-    size_t             carry_pos_ = 0;
+    /* Unconsumed stream bytes: buf_[pos_..] is the start of the
+       next (possibly partial) message, or resync garbage. Never
+       more than one message (<= header + kMaxBodyBytes) plus
+       one read chunk. */
+    std::vector<uint8_t> buf_;
+    size_t             pos_ = 0;
+    uint64_t           skip_left_ = 0;   /* TooLarge body to drop */
+    uint64_t           scanned_   = 0;   /* resync for this msg  */
+    bool               poisoned_  = false;
 
-    IpcIoResult ReadExact(void* buf, size_t len, uint64_t deadline_abs_ms,
-                        std::string& err);
+    size_t      Avail() const { return buf_.size() - pos_; }
+    /* Appends at least one byte (up to a chunk) from the
+       channel; compacts consumed bytes first. */
+    IpcIoResult Fill(size_t want, uint64_t deadline_abs_ms,
+                     std::string& err);
     uint64_t    resync_bytes_ = 0;
 };
 
