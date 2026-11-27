@@ -2467,6 +2467,12 @@ EditorController::SetLayerStopColor(size_t i, size_t stop,
 /*---------------------------------------------------------*\
 || Directional flow (Wave card)                             ||
 \*---------------------------------------------------------*/
+bool EditorController::IsFlowLayer(const EffectLayer& l)
+{
+    return l.primitive == "wave" && l.space == CoordSpace::World
+        && l.targets.empty();
+}
+
 std::optional<EditorEdit>
 EditorController::SetFlow(const FlowEdit& f)
 {
@@ -2527,14 +2533,14 @@ EditorController::SetFlow(const FlowEdit& f)
     for(size_t i = 0; i < ws.effect.layers.size(); i++)
     {
         const EffectLayer& l = ws.effect.layers[i];
-        if(l.enabled && l.primitive == "wave")
+        if(l.enabled && IsFlowLayer(l))
         {
             waves.push_back(i);
         }
     }
     if(waves.empty())
     {
-        last_error = "this look has no wave layer";
+        last_error = "this look has no world-space wave layer";
         return UndoEffectOp(before);
     }
 

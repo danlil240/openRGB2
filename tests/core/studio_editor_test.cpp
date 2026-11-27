@@ -1793,6 +1793,73 @@ static void TestFlowEdit()
           "flow: refused on a look without wave layers");
 }
 
+/*---------------------------------------------------------*\
+||| SetFlow only drives untargeted world-space waves (audit  |
+||| C-4): a world direction written onto a local-space wave  |
+||| (Reactor's RAM wave) or a targeted one turns it into a   |
+||| uniform flash.                                           |
+\*---------------------------------------------------------*/
+static void TestFlowEditSpace()
+{
+    using namespace studio;
+    EffectLayer flow;
+    flow.primitive = "wave";
+    flow.speed = 0.1f;  flow.scale = 1.0f;
+    flow.palette = MakePalette({ MakeSceneColor(255, 0, 0),
+                                 MakeSceneColor(0, 0, 255) });
+    EffectLayer local = flow;
+    local.space = CoordSpace::Local;
+    local.speed = 0.08f;  local.scale = 0.1f;
+    EffectLayer targeted = flow;
+    targeted.targets = { "keyboard_body" };
+    targeted.speed = 0.3f;  targeted.scale = 0.25f;
+
+    CHECK(EditorController::IsFlowLayer(flow),
+          "flow space: untargeted world wave is a flow layer");
+    CHECK(!EditorController::IsFlowLayer(local),
+          "flow space: local-space wave is not a flow layer");
+    CHECK(!EditorController::IsFlowLayer(targeted),
+          "flow space: targeted wave is not a flow layer");
+
+    StudioDocument w = Fixture();
+    w.effect.layers = { local, targeted, flow };
+    EditorController ctl(w);
+
+    EditorController::FlowEdit d;
+    d.direction = Vec3{ 0.0f, 0.0f, -1.0f };
+    d.speed = 0.2f;
+    d.wavelength = 2.0f;
+    d.colors = { ColorF{ 0, 1, 0, 1 }, ColorF{ 1, 1, 0, 1 } };
+    CHECK(ctl.SetFlow(d).has_value(), "flow space: edit lands");
+    CHECK(NearVec(w.effect.layers[2].direction, { 0, 0, -1 })
+          && Near(w.effect.layers[2].speed, 0.2f)
+          && Near(w.effect.layers[2].scale, 2.0f)
+          && Near(w.effect.layers[2].palette.stops[0].color.g, 1.0f),
+          "flow space: the world wave takes the whole edit");
+    CHECK(NearVec(w.effect.layers[0].direction, { 1, 0, 0 })
+          && Near(w.effect.layers[0].speed, 0.08f)
+          && Near(w.effect.layers[0].scale, 0.1f)
+          && Near(w.effect.layers[0].palette.stops[0].color.r, 1.0f),
+          "flow space: local-space wave untouched");
+    CHECK(NearVec(w.effect.layers[1].direction, { 1, 0, 0 })
+          && Near(w.effect.layers[1].speed, 0.3f)
+          && Near(w.effect.layers[1].scale, 0.25f)
+          && Near(w.effect.layers[1].palette.stops[0].color.r, 1.0f),
+          "flow space: targeted wave untouched");
+
+    /* Reactor: only a local-space RAM wave and a keyboard-targeted
+       wave — nothing for the card to drive. */
+    StudioDocument w2 = Fixture();
+    w2.effect.layers = { local, targeted };
+    EditorController ctl2(w2);
+    EditorController::FlowEdit dir;
+    dir.direction = Vec3{ 0.0f, 0.0f, -1.0f };
+    CHECK(!ctl2.SetFlow(dir).has_value() && !ctl2.LastError().empty(),
+          "flow space: refused when only local/targeted waves exist");
+    CHECK(NearVec(w2.effect.layers[0].direction, { 1, 0, 0 }),
+          "flow space: refusal leaves the local wave alone");
+}
+
 static void TestEffectLayers()
 {
     using namespace studio;
@@ -2296,6 +2363,7 @@ int main()
     TestPresetSchemaRoundTrip();
     TestEffectLayers();
     TestFlowEdit();
+    TestFlowEditSpace();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

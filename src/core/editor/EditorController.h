@@ -338,7 +338,8 @@ public:
                                               const ColorF& color);
 
     /* Directional-flow op (the Wave card): ONE record that drives
-       every enabled `wave` layer together, so a look built from a
+       every enabled flow layer (IsFlowLayer: untargeted
+       world-space `wave`) together, so a look built from a
        color flow plus a brightness swell keeps both moving the
        same way. Unset fields are left alone.
          direction  — non-zero, finite; normalized onto each layer
@@ -351,7 +352,7 @@ public:
          wavelength — meters of the first layer, > 0
        speed/wavelength rescale every wave layer by the same ratio
        as the first, so a look's internal proportions survive.
-       No enabled wave layer -> refused with LastError(). */
+       No enabled flow layer -> refused with LastError(). */
     struct FlowEdit
     {
         std::optional<Vec3>  direction;
@@ -360,6 +361,13 @@ public:
         std::optional<float> wavelength;
     };
     std::optional<EditorEdit> SetFlow(const FlowEdit& f);
+    /* Is this layer one the Wave card drives? Untargeted
+       world-space `wave` layers only: the card's direction is a
+       desk (world) axis, so writing it onto a local-space layer
+       (Reactor's RAM wave) or onto a layer masked to a few
+       objects would turn it into a uniform flash. SetFlow and
+       the adapter's flowState().available share this test. */
+    static bool IsFlowLayer(const EffectLayer& l);
 
     /* Path-point ops (comet). */
     std::optional<EditorEdit> AddLayerPathPoint(size_t i,
