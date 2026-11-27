@@ -249,3 +249,18 @@ add_test(NAME ipc_workspace_test COMMAND ipc_workspace_test)
 set_tests_properties(ipc_workspace_test PROPERTIES
     LABELS engine
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Audit I-10 — openrgb2-ctl's CtlSession: `diag` follows --pipe,
+# job verbs wait in-session, upload -> commit and export ->
+# verified download composites over REAL named pipes against the
+# real EngineService + WorkspaceService.
+add_executable(engine_ctl_test engine_ctl_test.cpp)
+target_link_libraries(engine_ctl_test PRIVATE
+    openrgb2_engine
+    openrgb2_ipc
+    openrgb2_ctl)
+target_compile_definitions(engine_ctl_test PRIVATE NDEBUG)
+add_test(NAME engine_ctl_test COMMAND engine_ctl_test)
+set_tests_properties(engine_ctl_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})

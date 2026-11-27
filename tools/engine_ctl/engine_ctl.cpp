@@ -9,6 +9,10 @@
 ||   reply JSON, detach. `subscribe` holds a session to    ||
 ||   watch push events; attach/detach NEVER restarts       ||
 ||   hardware state (UI independence, plan section 6).      ||
+||   Session-bound work stays in ONE session (CtlSession,  ||
+||   audit I-10): `workspace` job verbs wait for their     ||
+||   terminal status, `workspace-upload` / `-export` run   ||
+||   transfer + job composites, `diag` uses <pipe>-diag.    ||
 ||                                                           ||
 ||   Also carries the smoke-test save/restore path:        ||
 ||   `sdk-save`/`sdk-restore` capture and re-apply each    ||
@@ -19,9 +23,11 @@
 ||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 \*---------------------------------------------------------*/
 
+#include "CtlSession.h"
 #include "IpcChannel.h"
 #include "IpcProtocol.h"
 #include "NamedPipe.h"
+#include "WorkspaceTransfer.h"
 
 #include "EngineTypes.h"
 #include "OpenRgbClient.h"
@@ -35,6 +41,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
@@ -53,13 +60,25 @@ void Usage(const char* argv0)
         "  ping | state | scene | snapshots | playback | stats\n"
         "  presets | quit [--stop-backend]\n"
         "  diag                       DIAG_GET on the diagnostics pipe\n"
+        "                             (<pipe>-diag, follows --pipe)\n"
         "  set-scene <file>           apply a SceneDocument JSON file\n"
         "  set-playback <mode> [control=playing|paused|stopped]\n"
         "                 [speed=N] [reverse] [color=#RRGGBB]\n"
-        "  workspace <verb> [json]    WORKSPACE_COMMAND {verb,args}\n"
-        "                             (get|list|catalog|validate|commit|\n"
-        "                              import_inspect|export|job_status|\n"
-        "                              transfer_*|preview_*)\n"
+        "  workspace <verb> [json]    WORKSPACE_COMMAND {verb,args}; a job\n"
+        "                             verb waits for its terminal status in\n"
+        "                             the same session (jobs, transfers and\n"
+        "                             staged tokens die with the session)\n"
+        "  workspace-upload <file> <kind> <verb> [json]\n"
+        "                             upload <file> as <kind> (document|\n"
+        "                             bundle|type|look|asset), then run\n"
+        "                             <verb> with {staged} in one session\n"
+        "                             (e.g. commit, import_inspect,\n"
+        "                             import_commit, validate)\n"
+        "  workspace-export <out-file> [id]\n"
+        "                             export job -> download -> verified\n"
+        "                             bundle written to <out-file>\n"
+        "  (preview_* is session-bound live state: it ends when the CLI\n"
+        "   exits, so it is not offered as a one-shot command)\n"
         "  subscribe [seconds]        SUBSCRIBE all; print EVENTs\n"
         "  raw <type-hex> [json]      arbitrary verb (escape hatch)\n"
         "\n"
@@ -70,122 +89,6 @@ void Usage(const char* argv0)
         "  sdk-restore <file>         re-apply the saved state\n",
         argv0, ipc::kCommandPipeName);
 }
-
-/*---------------------------------------------------------*\
-|| IPC client plumbing                                      ||
-\*---------------------------------------------------------*/
-class IpcClient
-{
-public:
-    bool Connect(const std::string& pipe, uint32_t timeout_ms,
-                 std::string& err)
-    {
-        channel_ = ipc::ConnectNamedPipeChannel(pipe, timeout_ms, err);
-        if(!channel_)
-        {
-            return false;
-        }
-        reader_ = std::make_unique<ipc::MessageReader>(*channel_);
-        const std::vector<uint8_t> hello = ipc::EncodeMessage(
-            ipc::MsgType::Hello, 0,
-            nlohmann::json::object({
-                { "client_name", "openrgb2-ctl" },
-                { "min_version", 1 },
-                { "max_version", 1 },
-            }));
-        if(hello.empty() ||
-           channel_->SendAll(hello.data(), hello.size(), 5000, err)
-               != ipc::IpcIoResult::Ok)
-        {
-            return false;
-        }
-        ipc::Message msg;
-        std::string detail;
-        if(reader_->Read(msg, 5000, detail) != ipc::ReadResult::Ok ||
-           msg.type != ipc::MsgType::Welcome)
-        {
-            err = "handshake failed: " + detail +
-                  " (reply type 0x" +
-                  ([&]{ char b[8]; std::snprintf(b, sizeof b, "%04x",
-                       (unsigned)msg.type); return std::string(b); })() +
-                  ")";
-            return false;
-        }
-        return true;
-    }
-
-    /* Sends one request; skips EVENT pushes until the matching
-       reply arrives. */
-    bool Request(ipc::MsgType type, const nlohmann::json& body,
-                 ipc::Message& reply, std::string& err,
-                 uint32_t deadline_ms = 5000)
-    {
-        const uint32_t id = ++req_id_;
-        const std::vector<uint8_t> wire =
-            ipc::EncodeMessage(type, id, body);
-        if(wire.empty())
-        {
-            err = "encode failed (body over 1 MiB bound)";
-            return false;
-        }
-        if(channel_->SendAll(wire.data(), wire.size(), deadline_ms,
-                             err) != ipc::IpcIoResult::Ok)
-        {
-            return false;
-        }
-        for(;;)
-        {
-            std::string detail;
-            const ipc::ReadResult rr =
-                reader_->Read(reply, deadline_ms, detail);
-            if(rr != ipc::ReadResult::Ok)
-            {
-                err = "read failed: " + detail;
-                return false;
-            }
-            if(reply.request_id == id)
-            {
-                return true;
-            }
-            /* An EVENT push between request and reply — surface
-               it and keep waiting for our reply. */
-            if(reply.type == ipc::MsgType::Event)
-            {
-                std::printf("EVENT %s\n",
-                            reply.Body().dump().c_str());
-            }
-        }
-    }
-
-    /* Sends one request without waiting for its reply (the
-       subscribe keepalive: the PONG arrives through Read). */
-    bool Send(ipc::MsgType type, const nlohmann::json& body,
-              std::string& err, uint32_t deadline_ms = 5000)
-    {
-        const std::vector<uint8_t> wire =
-            ipc::EncodeMessage(type, ++req_id_, body);
-        if(wire.empty())
-        {
-            err = "encode failed (body over 1 MiB bound)";
-            return false;
-        }
-        return channel_->SendAll(wire.data(), wire.size(),
-                                 deadline_ms, err)
-            == ipc::IpcIoResult::Ok;
-    }
-
-    /* Reads the next message (event pump for subscribe). */
-    ipc::ReadResult Read(ipc::Message& msg, uint32_t deadline_ms,
-                         std::string& detail)
-    {
-        return reader_->Read(msg, deadline_ms, detail);
-    }
-
-private:
-    std::unique_ptr<ipc::IIpcChannel>    channel_;
-    std::unique_ptr<ipc::MessageReader>  reader_;
-    uint32_t                             req_id_ = 0;
-};
 
 int PrintReply(const ipc::Message& reply)
 {
@@ -550,6 +453,98 @@ int main(int argc, char** argv)
         return rc;
     }
 
+    /*---- One-session workspace composites (audit I-10) -------*/
+    if(cmd == "workspace-upload" || cmd == "workspace-export")
+    {
+        const bool upload = cmd == "workspace-upload";
+        if((upload && args.size() < 4) || (!upload && args.size() < 2))
+        {
+            std::fprintf(stderr, "%s: missing arguments (see --help)\n",
+                         cmd.c_str());
+            return 2;
+        }
+        ctl::CtlSession session(stdout);
+        std::string err;
+        if(!session.Connect(pipe, 3000, err))
+        {
+            std::fprintf(stderr, "connect %s failed: %s\n",
+                         pipe.c_str(), err.c_str());
+            return 1;
+        }
+        constexpr uint32_t kJobTimeoutMs = 120000;
+        if(upload)
+        {
+            std::ifstream f(args[1], std::ios::binary);
+            if(!f)
+            {
+                std::fprintf(stderr, "cannot read %s\n",
+                             args[1].c_str());
+                return 1;
+            }
+            const std::string bytes(
+                (std::istreambuf_iterator<char>(f)),
+                std::istreambuf_iterator<char>());
+            nlohmann::json body = nlohmann::json::object();
+            if(args.size() >= 5)
+            {
+                body = nlohmann::json::parse(args[4], nullptr, false);
+                if(body.is_discarded() || !body.is_object())
+                {
+                    std::fprintf(stderr,
+                        "workspace-upload args must be a JSON object\n");
+                    return 1;
+                }
+            }
+            std::string staged;
+            if(!ctl::UploadBytes(session, args[2], bytes, staged, err))
+            {
+                std::fprintf(stderr, "upload failed: %s\n", err.c_str());
+                return 1;
+            }
+            body["verb"]   = args[3];
+            body["staged"] = staged;
+            nlohmann::json out;
+            const bool ok =
+                ctl::WorkspaceRun(session, body, kJobTimeoutMs, out, err);
+            if(!out.is_null())
+            {
+                std::printf("%s\n", out.dump(2).c_str());
+            }
+            if(!ok)
+            {
+                std::fprintf(stderr, "%s failed: %s\n",
+                             args[3].c_str(), err.c_str());
+                return 1;
+            }
+            return out.value("state", std::string("succeeded"))
+                       == "succeeded" ? 0 : 1;
+        }
+        std::string    bundle;
+        nlohmann::json status;
+        if(!ctl::ExportWorkspace(session, args.size() >= 3 ? args[2]
+                                                          : std::string(),
+                                 kJobTimeoutMs, bundle, status, err))
+        {
+            if(!status.is_null())
+            {
+                std::printf("%s\n", status.dump(2).c_str());
+            }
+            std::fprintf(stderr, "export failed: %s\n", err.c_str());
+            return 1;
+        }
+        std::ofstream out(args[1], std::ios::binary | std::ios::trunc);
+        if(!out ||
+           !out.write(bundle.data(), (std::streamsize)bundle.size()))
+        {
+            std::fprintf(stderr, "cannot write %s\n", args[1].c_str());
+            return 1;
+        }
+        std::printf("exported %zu bytes (sha256 %s) to %s\n",
+                    bundle.size(), ipc::Sha256Hex(bundle).c_str(),
+                    args[1].c_str());
+        return 0;
+    }
+
     /*---- IPC commands ----------------------------------------*/
     ipc::MsgType type;
     nlohmann::json body = nlohmann::json::object();
@@ -704,16 +699,38 @@ int main(int argc, char** argv)
         return 2;
     }
 
+    /* audit I-10: the diagnostics pipe pairs with --pipe. */
     const std::string target_pipe =
-        wants_diag_pipe ? ipc::kDiagnosticsPipeName : pipe;
+        wants_diag_pipe ? ctl::DiagPipeFor(pipe) : pipe;
 
-    IpcClient client;
+    ctl::CtlSession client(stdout);
     std::string err;
     if(!client.Connect(target_pipe, 3000, err))
     {
         std::fprintf(stderr, "connect %s failed: %s\n",
                      target_pipe.c_str(), err.c_str());
         return 1;
+    }
+
+    if(type == ipc::MsgType::WorkspaceCommand)
+    {
+        /* audit I-10: a job verb is waited out on THIS session —
+           exiting after the {accepted,job_id} acknowledgement
+           would cancel the queued job. */
+        nlohmann::json out;
+        const bool ok = ctl::WorkspaceRun(client, body, 120000, out, err);
+        if(!ok)
+        {
+            std::fprintf(stderr, "ERROR %s\n", err.c_str());
+            if(!out.is_null())
+            {
+                std::printf("%s\n", out.dump(2).c_str());
+            }
+            return 1;
+        }
+        std::printf("%s\n", out.dump(2).c_str());
+        const std::string state = out.value("state", std::string());
+        return state.empty() || state == "succeeded" ? 0 : 1;
     }
 
     ipc::Message reply;
