@@ -27,6 +27,11 @@ Popup {
 
     width: 560; height: 600
     modal: true
+    /* Audit Q-9: a modal popup must own keyboard focus — without
+       it typing went to the item behind the modal and Escape
+       (CloseOnEscape acts only while the popup has focus) never
+       closed it. The first field takes focus on open. */
+    focus: true
     closePolicy: Popup.CloseOnEscape
     padding: 0
     background: Rectangle {
@@ -49,7 +54,10 @@ Popup {
         renameMap = ({})
     }
 
-    onOpened: reset()
+    onOpened: {
+        reset()
+        pathField.forceActiveFocus()
+    }
 
     function readAndInspect() {
         var c = ctl()
