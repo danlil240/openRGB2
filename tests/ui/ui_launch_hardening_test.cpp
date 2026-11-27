@@ -10,7 +10,10 @@
 #include "LaunchHardening.h"
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QFile>
 #include <QFileInfo>
+#include <QTemporaryDir>
 #include <QProcess>
 
 #include <cstdio>
@@ -122,6 +125,65 @@ static void TestOwnershipParse()
           "parse: empty capture (e.g. log truncated) -> false");
 }
 
+/* Audit U-6: engine-reported folders reach the shell only as an
+   existing absolute local directory, opened by an absolute
+   explorer.exe. */
+static void TestShellFolder()
+{
+#ifdef Q_OS_WIN
+    QTemporaryDir tmp;
+    CHECK(tmp.isValid(), "shell: temp dir");
+    const QString dir = tmp.path();                 /* forward slashes */
+    QString native, why;
+    CHECK(ValidateShellFolder(dir, &native, &why)
+              && native == QDir::toNativeSeparators(QDir::cleanPath(dir))
+              && why.isEmpty(),
+          "shell: existing absolute dir accepted, native separators");
+    CHECK(ValidateShellFolder(QDir::toNativeSeparators(dir), &native,
+                              &why),
+          "shell: backslash form accepted");
+
+    QFile f(dir + QStringLiteral("/file.txt"));
+    CHECK(f.open(QIODevice::WriteOnly), "shell: fixture file");
+    f.close();
+
+    const QStringList refused = {
+        QString(),
+        QStringLiteral("relative\\dir"),
+        QStringLiteral("C:"),
+        QStringLiteral("C:relative"),
+        QStringLiteral("\\\\server\\share"),
+        QStringLiteral("//server/share"),
+        QStringLiteral("\\\\?\\C:\\Windows"),
+        QStringLiteral("\\\\.\\C:\\Windows"),
+        QStringLiteral("file:///C:/Windows"),
+        QStringLiteral("https://example.invalid/x"),
+        QStringLiteral("ms-settings:privacy"),
+        dir + QStringLiteral("/file.txt"),          /* a file       */
+        dir + QStringLiteral("/missing"),           /* not there    */
+        dir + QStringLiteral(":stream"),            /* ADS          */
+        dir + QStringLiteral("/a\"b"),
+        dir + QStringLiteral("/*"),
+    };
+    for(const QString& r : refused)
+    {
+        QString n = QStringLiteral("untouched"), w;
+        const bool ok = ValidateShellFolder(r, &n, &w);
+        const QByteArray label =
+            ("shell: refused '" + r + "'").toUtf8();
+        CHECK(!ok && !w.isEmpty(), label.constData());
+    }
+
+    const QString explorer = SystemExplorerPath();
+    CHECK(QFileInfo(explorer).isAbsolute()
+              && QFileInfo::exists(explorer)
+              && QFileInfo(explorer).fileName().compare(
+                     QStringLiteral("explorer.exe"),
+                     Qt::CaseInsensitive) == 0,
+          "shell: absolute system explorer.exe");
+#endif
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -131,6 +193,7 @@ int main(int argc, char** argv)
     TestRealChild();
 #endif
     TestOwnershipParse();
+    TestShellFolder();
     if(g_fail)
     {
         std::printf("%d check(s) failed\n", g_fail);

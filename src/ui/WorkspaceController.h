@@ -41,6 +41,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -185,8 +186,10 @@ public:
     Q_INVOKABLE void confirmReplace();
     Q_INVOKABLE void cancelReplace();
     /* Open the engine-reported managed workspace dir in the
-       OS shell — UI-side (QDesktopServices), the engine never
-       spawns anything. */
+       OS shell — UI-side, the engine never spawns anything.
+       Only an existing absolute local directory, opened with
+       the system explorer.exe (launch::ValidateShellFolder,
+       audit U-6); anything else sets error. */
     Q_INVOKABLE void openWorkspaceFolder();
     /* Reset draft edits back to the accepted baseline. */
     Q_INVOKABLE void resetEdits();
@@ -311,6 +314,11 @@ public:
     /* External-change poll interval (ms); <=0 disables. */
     void setExternalPollForTesting(int ms);
     int  PendingJobIdForTesting() const { return pending_job_id_; }
+    /* Replaces the explorer.exe launch in openWorkspaceFolder:
+       (absolute program, {native folder}) -> started. */
+    void setShellLauncherForTesting(
+        std::function<bool(const QString&, const QStringList&)>
+            launcher);
     /* Poll job_status for the tracked pending job — the
        lost-event reconcile path. */
     void PollPendingJobForTesting();
@@ -562,6 +570,8 @@ private:
     QString     external_state_;      /* ""|"modified"|"deleted" */
     QString     external_detail_;
     QString     ws_dir_;              /* engine-reported paths  */
+    std::function<bool(const QString&, const QStringList&)>
+                shell_launcher_;      /* test seam (U-6)        */
     QString     ws_root_;
     /* A draft-replacing action the user must confirm —
        replaceText carries source/destination + the conflict

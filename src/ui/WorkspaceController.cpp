@@ -24,14 +24,15 @@
 
 #include "EngineBridge.h"
 #include "JsonVariant.h"
+#include "LaunchHardening.h"
 #include "ProfileLibrary.h"
 
 #include "config/StudioConfig.h"
 
 #include <QCryptographicHash>
-#include <QDesktopServices>
 #include <QFile>
 #include <QMetaObject>
+#include <QProcess>
 #include <QUrl>
 
 namespace openrgb2
@@ -1323,8 +1324,55 @@ void WorkspaceController::openWorkspaceFolder()
                  QStringLiteral("engine"));
         return;
     }
-    /* UI-side only — the engine never spawns a shell. */
-    QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+    /* UI-side only — the engine never spawns a shell. Audit U-6:
+       the path is engine-supplied and the UI usually runs
+       elevated, so it never goes to QDesktopServices::openUrl
+       (which would follow URL schemes and shell associations).
+       Only an existing absolute local directory is accepted —
+       no UNC/device path, no scheme — and it opens in the
+       system explorer.exe by absolute path. */
+    QString native;
+    QString why;
+    if(!launch::ValidateShellFolder(dir, &native, &why))
+    {
+        SetError(QStringLiteral("refusing to open the reported "
+                                "workspace folder: %1").arg(why),
+                 QStringLiteral("engine"));
+        return;
+    }
+    const QString program = launch::SystemExplorerPath();
+    bool started = false;
+    if(shell_launcher_)
+    {
+        started = shell_launcher_(program, QStringList{ native });
+    }
+    else
+    {
+        QProcess p;
+        p.setProgram(program);
+#ifdef Q_OS_WIN
+        /* Quoted by hand: explorer splits an unquoted command
+           line on commas; a validated path holds no quote. */
+        p.setNativeArguments(QLatin1Char('"') + native +
+                             QLatin1Char('"'));
+#else
+        p.setArguments(QStringList{ native });
+#endif
+        p.setProcessEnvironment(launch::SanitizedChildEnvironment());
+        started = p.startDetached();
+    }
+    if(!started)
+    {
+        SetError(QStringLiteral("could not open the workspace "
+                                "folder"),
+                 QStringLiteral("input"));
+    }
+}
+
+void WorkspaceController::setShellLauncherForTesting(
+    std::function<bool(const QString&, const QStringList&)> launcher)
+{
+    shell_launcher_ = std::move(launcher);
 }
 
 void WorkspaceController::resetEdits()
