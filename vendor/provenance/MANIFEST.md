@@ -98,6 +98,23 @@ import are in [`dls-ui-import-hashes.txt`](dls-ui-import-hashes.txt).
   `studio_transform_test`, `studio_config_store_test`, `quickwidget_probe`)
 - `LED_CALIBRATION_E2E_REPORT_2026-09-18.md` (referenced by the plan's L11)
 
+## Changes to `vendor/OpenRGB/` after the import
+
+The vendored tree is no longer byte-identical to the import above. Changes
+made in this repository are recorded here. This record starts with
+`9c866ca`; the earlier post-import commits to `vendor/OpenRGB/` are not
+itemized here yet (`git log -- vendor/OpenRGB` lists them).
+
+| Commit | Files | Change | Reason |
+| --- | --- | --- | --- |
+| `9c866ca` (2026-11-28) | `Controllers/LogitechController/LogitechHIDPP20Controller/LogitechHIDPP20Controller.{cpp,h}` | `SetPerKey8080` sleeps `HIDPP20_8080_FRAME_GAP_MS` (2 ms) after every 0x8080 SetKeyColors frame | a G512 RGB (0xC33C, US) dropped the tail keys of a frame when the next one arrived too soon (F5–F12, PrtSc, `0` and `-` kept stale colours). The 2 ms value was found by trial on one G512. The pacing is open-loop: ACKs are not read, and every update repaints all keys (audit P-7) |
+
+Deploying a change here needs a backend rebuild
+(`vendor\OpenRGB\scripts\build-windows.bat`):
+`packaging\windows\build-and-deploy.ps1 -BuildBackend` builds the backend
+only when no `OpenRGB.exe` exists yet, so an existing backend build does not
+pick the change up.
+
 ## Licenses
 
 | Component | License | Notes |
