@@ -8,13 +8,15 @@ rem inside an argument corrupt this line, while "%*" would collapse
 rem the whole tail into ONE PowerShell argument (switches never bind).
 rem In a staged release the script is under scripts\. From this source
 rem directory, launch the staged release so its binaries/config stay
-rem together with that script.
+rem together with that script: the NEWEST staged package by last write
+rem time, the same pick stop-openrgb2.ps1 makes from here.
 set "ORGB2_START=%~dp0scripts\start-openrgb2.ps1"
 if exist "%ORGB2_START%" goto :orgb2_args
 set "ORGB2_START="
-for /d %%D in ("%~dp0..\..\build\package\OpenRGB2-*-win64") do (
-    if exist "%%~fD\scripts\start-openrgb2.ps1" (
-        set "ORGB2_START=%%~fD\scripts\start-openrgb2.ps1"
+set "ORGB2_PKG=%~dp0..\..\build\package"
+for /f "delims=" %%D in ('dir /b /ad /o-d /tw "%ORGB2_PKG%\OpenRGB2-*-win64" 2^>nul') do (
+    if exist "%ORGB2_PKG%\%%D\scripts\start-openrgb2.ps1" (
+        for %%F in ("%ORGB2_PKG%\%%D\scripts\start-openrgb2.ps1") do set "ORGB2_START=%%~fF"
         goto :orgb2_args
     )
 )
@@ -31,4 +33,8 @@ shift
 goto :orgb2_next
 :orgb2_run
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ORGB2_START%" %ORGB2_ARGS%
+rem Keep the script's exit code (3 = ownership refusal, 4 = elevated
+rem stack unverifiable) for callers -- pause would otherwise reset it.
+set "ORGB2_RC=%ERRORLEVEL%"
 pause
+exit /b %ORGB2_RC%
