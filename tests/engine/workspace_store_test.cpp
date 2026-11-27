@@ -446,14 +446,60 @@ static void TestCorruptMarkerRecovery()
     CHECK(!lr.error.empty());
     CHECK(lr.generation == 1);
     CHECK(lr.candidate->document.meta.name == "first");
+    /* Recovering through the backup must not destroy the newer,
+       intact generation the damaged marker used to name. */
+    CHECK(fs::exists(wsdir / "generations" / "gen-000002" /
+                     "manifest.json"));
 
     /* Both markers corrupt -> honest failure, never a guessed
-       blank workspace. */
+       blank workspace — and never a deleted one: every complete
+       generation stays on disk for recovery. */
     WriteText((wsdir / "active.lkg").string(), "also-bad");
     lr = store.Load("desk");
     CHECK(lr.status == WorkspaceStore::LoadStatus::Failed);
     CHECK(!lr.error.empty());
     CHECK(lr.candidate == nullptr);
+    CHECK(fs::exists(wsdir / "generations" / "gen-000001" /
+                     "manifest.json"));
+    CHECK(fs::exists(wsdir / "generations" / "gen-000002" /
+                     "manifest.json"));
+}
+
+/*---------------------------------------------------------*\
+||| T4b: a single-commit workspace whose only marker is      ||
+|||      damaged keeps its only generation on disk          ||
+\*---------------------------------------------------------*/
+static void TestCorruptOnlyMarkerKeepsGeneration()
+{
+    const fs::path types = g_tmp / "types-d2";
+    fs::create_directories(types);
+    WriteText((types / "mini-fan.device.json").string(),
+              TypeJson("mini-fan", 8, "base"));
+
+    WorkspaceStore::Deps deps;
+    deps.devices = RegistryWith(types.string());
+    const fs::path root = g_tmp / "ws4b";
+    WorkspaceStore store(root.string(), deps);
+    const fs::path wsdir = root / "desk";
+
+    WorkspaceCandidate cand;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("only", "mini-fan")),
+                        deps.devices, deps.effects, cand));
+    CHECK(store.Commit("desk", cand, std::string(), 0).ok);
+    CHECK(!fs::exists(wsdir / "active.lkg"));
+    const std::string good_marker = ReadText((wsdir / "active").string());
+
+    WriteText((wsdir / "active").string(), "garbage{{{");
+    WorkspaceStore::LoadResult lr = store.Load("desk");
+    CHECK(lr.status == WorkspaceStore::LoadStatus::Failed);
+    CHECK(fs::exists(wsdir / "generations" / "gen-000001" /
+                     "manifest.json"));
+
+    /* Repairing the marker by hand brings the workspace back. */
+    WriteText((wsdir / "active").string(), good_marker);
+    lr = store.Load("desk");
+    CHECK(lr.status == WorkspaceStore::LoadStatus::Loaded);
+    CHECK(lr.candidate && lr.candidate->document.meta.name == "only");
 }
 
 /*---------------------------------------------------------*\
@@ -653,10 +699,15 @@ static void TestGenerationBound()
     }
 
     CHECK(CountGenerationDirs(wsdir) <= WorkspaceStore::kMaxGenerations);
+    const size_t retained = CountGenerationDirs(wsdir);
+    CHECK(retained > 2);
     WorkspaceStore::LoadResult lr = store.Load("desk");
     CHECK(lr.status == WorkspaceStore::LoadStatus::Loaded);
     CHECK(lr.generation == (uint64_t)total);
     CHECK(lr.workspace_revision == (uint64_t)total);
+    /* Loading is read-mostly: the retained history survives it
+       (pruning belongs to commit, not to load). */
+    CHECK(CountGenerationDirs(wsdir) == retained);
 }
 
 /*---------------------------------------------------------*\
@@ -1336,7 +1387,11 @@ static void TestFailedCommitRetry()
     CHECK(store.Commit("desk", cand2, std::string(), 1).ok);
     lr = store.Load("desk");
     CHECK(lr.status == WorkspaceStore::LoadStatus::Loaded);
-    CHECK(lr.generation == 2);
+    /* The failed attempt's published-but-unreferenced generation
+       is kept (ids never recycle), so the retry takes the next
+       ordinal; the user-visible revision is what must be 2. */
+    CHECK(lr.workspace_revision == 2);
+    CHECK(lr.generation >= 2);
     CHECK(lr.candidate->document.meta.name == "second");
 }
 
@@ -1352,6 +1407,7 @@ int main()
     TestResourceSnapshotSurvivesRestart();
     TestInterruptedCommits();
     TestCorruptMarkerRecovery();
+    TestCorruptOnlyMarkerKeepsGeneration();
     TestDeniedWrites();
     TestResourceCollision();
     TestIncompleteGeneration();

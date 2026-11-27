@@ -143,6 +143,20 @@ static void WriteAll(const fs::path& p, const std::string& s)
     out << s;
 }
 
+/* The document name held by the durable draft record for `id`
+   — "" when there is no readable record. */
+static std::string DraftName(openrgb2::ui::WorkspaceDraftStore& s,
+                             const QString& id)
+{
+    const openrgb2::ui::WorkspaceDraftRecord rec = s.Read(id);
+    studio::StudioDocument d;
+    if(!rec.exists || !studio::FromJson(rec.document, d))
+    {
+        return std::string();
+    }
+    return d.meta.name;
+}
+
 /*---------------------------------------------------------*\
 ||| The REAL engine side — EngineService + WorkspaceService  ||
 ||| + IpcServer, served on the TestPipe's B channel.          ||
@@ -425,6 +439,14 @@ int main(int argc, char** argv)
     CHECK(rig.PumpUntil([&] { return !rig.ctl.dirty(); }));
     CHECK(rig.ctl.Session().Working().meta.name == "second");
     CHECK(rig.ctl.workspaceRevision() == 2);
+    /* The confirm text promised the replaced edits "stay in the
+       draft store, recoverable until you discard": the record
+       survives the adoption and is offered back. */
+    CHECK(DraftName(rig.ctl.Drafts(), QStringLiteral("desk")) ==
+          "drafted");
+    CHECK(rig.PumpUntil([&] { return rig.ctl.recoveryOffered(); }));
+    rig.ctl.discardDraft();
+    CHECK(!rig.ctl.Drafts().Read(QStringLiteral("desk")).exists);
 
     /*========================================================*\
     || F. Restore Backup — commits gen-000001 forward          ||
@@ -457,6 +479,12 @@ int main(int argc, char** argv)
     CHECK(rig.ctl.Session().Working().meta.name == "first");
     CHECK(fs::exists(wsdir / "generations" / "gen-000003" /
                      "document.json"));
+    /* Same promise as the reload ("they stay in the draft
+       store"): the replaced edits are offered back. */
+    CHECK(DraftName(rig.ctl.Drafts(), QStringLiteral("desk")) ==
+          "restore-test");
+    CHECK(rig.PumpUntil([&] { return rig.ctl.recoveryOffered(); }));
+    rig.ctl.discardDraft();
     /* The committed-forward generation re-baselines the
        compare — the corrupt gen2 stops being "the change". */
     CHECK(rig.PumpUntil([&] {
@@ -527,6 +555,31 @@ int main(int argc, char** argv)
     /* The abandoned "desk" draft is still on disk — never
        silently dropped by the switch. */
     CHECK(rig.ctl.Drafts().Read(QStringLiteral("desk")).exists);
+
+    /*========================================================*\
+    || G2. switching BACK to the abandoned workspace offers    ||
+    ||     its draft instead of deleting it on adoption        ||
+    \*========================================================*/
+    std::printf("-- switch back offers the abandoned draft\n");
+    CHECK(!rig.ctl.dirty());
+    rig.ctl.openWorkspace(QStringLiteral("desk"));
+    CHECK(!rig.ctl.replaceOffered());       /* shelf was clean */
+    CHECK(rig.PumpUntil([&] {
+        return rig.ctl.workspaceId() == QLatin1String("desk") &&
+               rig.ctl.Session().HasWorking() &&
+               rig.ctl.Session().Working().meta.name != "shelf-doc";
+    }));
+    CHECK(rig.PumpUntil([&] { return rig.ctl.recoveryOffered(); }));
+    CHECK(DraftName(rig.ctl.Drafts(), QStringLiteral("desk")) ==
+          "keep-me");
+    rig.ctl.discardDraft();
+    /* Back to shelf for the sections below. */
+    rig.ctl.openWorkspace(QStringLiteral("shelf"));
+    CHECK(rig.PumpUntil([&] {
+        return rig.ctl.workspaceId() == QLatin1String("shelf") &&
+               rig.ctl.Session().HasWorking() &&
+               rig.ctl.Session().Working().meta.name == "shelf-doc";
+    }));
 
     /*========================================================*\
     || H. crash recovery — staged record survives the session  ||

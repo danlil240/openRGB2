@@ -67,7 +67,11 @@ void WorkspaceEditSession::ApplyRemote(
        clean draft tracks the new document; a dirty draft is
        preserved verbatim against the moved baseline. */
     const bool was_dirty = Dirty();
-    baseline_ = doc;
+    baseline_     = doc;
+    /* The accepted document IS a baseline — also when it is the
+       first one under a draft recovered before any engine
+       document loaded. */
+    has_baseline_ = true;
     if(!was_dirty)
     {
         working_ = doc;

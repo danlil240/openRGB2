@@ -392,9 +392,16 @@ std::vector<std::pair<uint64_t, std::string>> GenerationDirs(
     return out;
 }
 
-/* Remove orphaned state inside the verified workspace dir:
-   a torn staging dir, marker temps, and generation dirs no
-   marker references. Never reaches outside `wsdir`. */
+/* Remove torn state inside the verified workspace dir: the
+   staging dir, marker temps, and generation dirs that no marker
+   references AND that were never published. Commit writes the
+   manifest last and publishes with one directory rename, so a
+   generation without manifest.json is torn by construction.
+   A complete generation is never removed here, even when no
+   readable marker names it: a damaged marker must not destroy
+   the data it pointed at, and the retained history is pruned
+   by Commit (PruneGenerations), not by Load. Never reaches
+   outside `wsdir`. */
 void CleanupOrphans(const fs::path& wsdir,
                     const std::set<std::string>& keep)
 {
@@ -407,9 +414,12 @@ void CleanupOrphans(const fs::path& wsdir,
     }
     for(const auto& kv : GenerationDirs(wsdir))
     {
-        if(keep.find(kv.second) == keep.end())
+        const fs::path gendir = wsdir / "generations" / kv.second;
+        std::error_code mec;
+        if(keep.find(kv.second) == keep.end() &&
+           !fs::exists(gendir / "manifest.json", mec) && !mec)
         {
-            fs::remove_all(wsdir / "generations" / kv.second, ec);
+            fs::remove_all(gendir, ec);
         }
     }
 }
@@ -1251,8 +1261,9 @@ WorkspaceStore::LoadResult WorkspaceStore::Load(
     const Marker primary = ReadMarker(wsdir / "active");
     const Marker backup  = ReadMarker(wsdir / "active.lkg");
 
-    /* Orphan cleanup BEFORE selection, inside the verified
-       root: torn staging, marker temps, unreferenced gens. */
+    /* Torn-state cleanup BEFORE selection, inside the verified
+       root: staging, marker temps, unpublished gens. Complete
+       generations survive whatever the markers say. */
     std::set<std::string> keep;
     if(primary.valid)
     {
