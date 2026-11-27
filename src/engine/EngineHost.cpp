@@ -53,6 +53,22 @@ Clock::duration BudgetFor(const DeviceSnapshot& snap)
     {
         return std::chrono::milliseconds(30);
     }
+    /* SMBus I2C GPUs (Gigabyte RGB Fusion 2 class): the firmware
+       fades toward each newly written direct color, and a new
+       color arriving before the fade completes restarts it — a
+       60 Hz stream of changing colors turns that into visible
+       flicker. 45 ms between writes lets each fade finish (the
+       playback mirror's ~47 ms cadence renders steadily; the
+       unpaced ~17 ms live stream does not — verified against an
+       AORUS RTX 5080 MASTER ICE with a packet-level wire trace).
+       OpenRGB device_type 2 = GPU. */
+    constexpr int32_t kDeviceTypeGpu = 2;
+
+    if(snap.device_type == kDeviceTypeGpu &&
+       snap.key.location.rfind("I2C:", 0) == 0)
+    {
+        return std::chrono::milliseconds(45);
+    }
     return Clock::duration::zero();
 }
 

@@ -116,6 +116,32 @@ set_tests_properties(bench_sdk_wire_test PROPERTIES
     LABELS backend
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Gigabyte RGB Fusion 2 Blackwell GPU packet regression (offline —
+# captures raw i2c block writes from the real controller; no hardware).
+set(BWGPU ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/Controllers/GigabyteRGBFusion2BlackwellGPUController)
+
+add_executable(blackwell_gpu_packet_test
+    blackwell_gpu_packet_test.cpp
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/RGBController/RGBController.cpp
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/i2c_smbus/i2c_smbus.cpp
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/StringUtils.cpp
+    ${BWGPU}/GigabyteRGBFusion2BlackwellGPUController.cpp
+    ${BWGPU}/RGBController_GigabyteRGBFusion2BlackwellGPU.cpp)
+
+target_include_directories(blackwell_gpu_packet_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB
+    ${BWGPU}
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/RGBController
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/i2c_smbus
+    ${DEPS}/json)
+
+target_compile_definitions(blackwell_gpu_packet_test PRIVATE NDEBUG)
+
+add_test(NAME blackwell_gpu_packet_test COMMAND blackwell_gpu_packet_test)
+set_tests_properties(blackwell_gpu_packet_test PROPERTIES
+    LABELS backend
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Skew-harness aggregation layer (pure math, header-only).
 add_executable(skew_stats_test
     skew_stats_test.cpp)
