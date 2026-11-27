@@ -153,6 +153,11 @@ struct WsEngine
     nlohmann::json doc      = CompactDoc();
     uint64_t      next_job  = 1;
     bool          auto_complete_jobs = true;
+    /* Audit U-7: the terminal job event can overtake the accept
+       reply on the wire (the job runs on a worker thread). */
+    bool          terminal_before_accept = false;
+    /* job_status answers {found:false} (record evicted). */
+    bool          job_status_not_found   = false;
     bool          fail_next_commit   = false;
     std::string   commit_fail_detail = "invalid_document";
     /* Count of import_commit jobs to fail before succeeding
@@ -514,11 +519,20 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
             {
                 ++e.reload_jobs;
             }
-            e.srv.SendMsg(MsgType::Ok, m.request_id,
-                nlohmann::json::object({
-                    { "accepted", true },
-                    { "job_id",   job  },
-                }));
+            const uint32_t accept_req = m.request_id;
+            auto send_accept = [&e, accept_req, job] {
+                e.srv.SendMsg(MsgType::Ok, accept_req,
+                    nlohmann::json::object({
+                        { "accepted", true },
+                        { "job_id",   job  },
+                    }));
+            };
+            const bool late_accept =
+                e.terminal_before_accept && e.auto_complete_jobs;
+            if(!late_accept)
+            {
+                send_accept();
+            }
             if(e.auto_complete_jobs)
             {
                 if(verb == "commit" && e.fail_next_commit)
@@ -565,11 +579,22 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
                 e.held_job  = job;
                 e.held_verb = verb;
             }
+            if(late_accept)
+            {
+                send_accept();
+            }
         }
         else if(verb == "job_status")
         {
             const uint64_t j =
                 body.value("job_id", (uint64_t)0);
+            if(e.job_status_not_found)
+            {
+                e.srv.SendMsg(MsgType::Ok, m.request_id,
+                    nlohmann::json::object({
+                        { "found", false }, { "job_id", j } }));
+                break;
+            }
             nlohmann::json st = e.JobRecord(
                 j, e.held_verb.empty() ? "commit" : e.held_verb,
                 e.held_job == j ? "running" : "succeeded");
@@ -1310,6 +1335,88 @@ int main(int argc, char** argv)
         CHECK(rig.ctl.Session().Working().meta.name ==
               "landed");
         CHECK(!rig.ctl.conflict());
+    }
+
+    /* Audit U-7: a terminal event that overtakes the accept
+       reply (unknown job id at the time) must still resolve the
+       save once the reply names it — never latch saving. */
+    std::printf("-- controller: terminal before accept "
+                "resolves the save (U-7)\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.engine.terminal_before_accept = true;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "early"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        const int begins = rig.engine.download_begins;
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] { return rig.engine.commits == 1; }));
+        CHECK(rig.PumpUntil([&] { return !rig.ctl.saving(); }, 3000));
+        rig.PumpUntil([&] { return false; }, 200);   /* drain */
+        CHECK(!rig.ctl.dirty());
+        CHECK(rig.ctl.error().isEmpty());
+        CHECK(rig.ctl.Session().BaseRevision() == 2);
+        /* Our own job: never treated as a foreign commit. */
+        CHECK(rig.engine.download_begins == begins);
+    }
+    std::printf("-- controller: lost terminal event — the "
+                "watchdog polls job_status (U-7)\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.ctl.setJobWatchdogForTesting(60);
+        rig.engine.auto_complete_jobs = false;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "lost"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] { return rig.engine.held_job != 0; }));
+        /* The job completes but its event never arrives. */
+        ++rig.engine.ws_rev;
+        rig.engine.held_job = 0;
+        CHECK(rig.PumpUntil([&] { return !rig.ctl.saving(); }, 4000));
+        CHECK(!rig.ctl.dirty());
+        CHECK(rig.ctl.Session().BaseRevision() == 2);
+        CHECK(rig.ctl.Session().Baseline().meta.name == "lost");
+    }
+    std::printf("-- controller: a job the engine no longer "
+                "knows fails honestly (U-7)\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.ctl.setJobWatchdogForTesting(60);
+        rig.engine.auto_complete_jobs = false;
+        rig.engine.job_status_not_found = true;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "gone"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        bool finished_ok = true;
+        int  finished    = 0;
+        QObject::connect(&rig.ctl, &WorkspaceController::saveFinished,
+                         [&](bool ok) { finished_ok = ok; ++finished; });
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] { return rig.engine.held_job != 0; }));
+        CHECK(rig.PumpUntil([&] { return !rig.ctl.saving(); }, 4000));
+        CHECK(finished == 1);
+        CHECK(!finished_ok);
+        CHECK(!rig.ctl.error().isEmpty());
+        CHECK(rig.ctl.dirty());   /* the draft is kept */
     }
 
     std::printf("-- controller: stale snapshot echo ignored\n");

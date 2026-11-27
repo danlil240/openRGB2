@@ -88,6 +88,12 @@ WorkspaceController::WorkspaceController(EngineBridge* bridge,
                         QStringLiteral("get"));
         }
     });
+    /* Audit U-7: outstanding jobs poll job_status on this
+       cadence, so a lost terminal event can never latch
+       saving / import / export. */
+    job_watchdog_.setSingleShot(false);
+    connect(&job_watchdog_, &QTimer::timeout,
+            this, &WorkspaceController::JobWatchdogTick);
     /* Draft records from a previous run predate any engine —
        offer recovery once local state exists. */
     QMetaObject::invokeMethod(
@@ -411,6 +417,7 @@ void WorkspaceController::OnEngineLost(const QString& reason)
         reconcile_pending_ = true;
         SetSaving(false);
         pending_job_id_ = 0;
+        pending_job_verb_.clear();
         SetError(QStringLiteral("connection lost during save: %1")
                      .arg(reason), QStringLiteral("connection"));
         emit saveFinished(false);
@@ -426,6 +433,9 @@ void WorkspaceController::OnEngineLost(const QString& reason)
     const QString lost = QStringLiteral("connection lost: %1")
                              .arg(reason);
     tracked_jobs_.clear();
+    early_terminals_.clear();
+    job_polls_.clear();
+    job_watchdog_.stop();
     if(!inflight_import.isEmpty())
     {
         emit importFinished(inflight_import, false, lost);
@@ -1835,10 +1845,13 @@ void WorkspaceController::OnReplyReceived(int id,
     else if(tag.startsWith(QLatin1String("job:")))
     {
         OnJobReply(id, tag.mid(4), body, ok, msg);
+        /* The last outstanding accept answered: terminals held
+           for unknown ids were not ours (audit U-7). */
+        DrainEarlyTerminals();
     }
-    else if(tag == QLatin1String("job_status"))
+    else if(tag.startsWith(QLatin1String("job_status:")))
     {
-        OnJobStatusReply(body, ok);
+        OnJobStatusReply(tag.mid(11).toULongLong(), body, ok);
     }
 }
 
@@ -1924,7 +1937,8 @@ void WorkspaceController::OnJobReply(int request_id,
     if(verb == QLatin1String("commit") ||
        verb == QLatin1String("save_copy"))
     {
-        pending_job_id_ = job;
+        pending_job_id_   = job;
+        pending_job_verb_ = verb;
     }
     else if(verb == QLatin1String("reload") ||
             verb == QLatin1String("restore_backup") ||
@@ -1939,41 +1953,88 @@ void WorkspaceController::OnJobReply(int request_id,
             SetStatus(QStringLiteral("Importing workspace…"));
         }
     }
+    else
+    {
+        return;
+    }
+    /* Audit U-7: the terminal may already have arrived (it can
+       overtake this reply) — resolve it now; otherwise the
+       watchdog guarantees a lost one is recovered from
+       job_status. */
+    ArmJobWatchdog();
+    TakeEarlyTerminal(job);
 }
 
-void WorkspaceController::OnJobStatusReply(const QVariantMap& body,
+void WorkspaceController::OnJobStatusReply(quint64 job,
+                                           const QVariantMap& body,
                                            bool ok)
 {
-    if(ok && body.value(QStringLiteral("found")).toBool())
+    job_polls_.erase(job);
+    if(!ok)
     {
-        const QString state =
-            body.value(QStringLiteral("state")).toString();
-        if(state == QLatin1String("succeeded") ||
-           state == QLatin1String("failed") ||
-           state == QLatin1String("cancelled"))
-        {
-            ResolveJob(body);
-        }
+        return;      /* transient — the next watchdog tick retries */
     }
+    if(!body.value(QStringLiteral("found")).toBool())
+    {
+        /* The engine no longer reports the job (its bounded
+           record table evicted it): no terminal can ever arrive.
+           Resolve it as failed rather than latch forever. */
+        QString verb;
+        if(job != 0 && job == pending_job_id_)
+        {
+            verb = pending_job_verb_;
+        }
+        else if(const auto it = tracked_jobs_.find(job);
+                it != tracked_jobs_.end())
+        {
+            verb = it->second;
+        }
+        if(verb.isEmpty() || !ClaimJob(job))
+        {
+            return;
+        }
+        ResolveJob(QVariantMap({
+            { QStringLiteral("job_id"),
+              QVariant::fromValue<qulonglong>(job) },
+            { QStringLiteral("verb"),  verb },
+            { QStringLiteral("state"), QStringLiteral("failed") },
+            { QStringLiteral("error"),
+              QStringLiteral("the engine no longer reports job %1 "
+                             "— its outcome is unknown; reload "
+                             "to check the workspace").arg(job) },
+        }));
+        return;
+    }
+    const QString state =
+        body.value(QStringLiteral("state")).toString();
+    if(state != QLatin1String("succeeded") &&
+       state != QLatin1String("failed") &&
+       state != QLatin1String("cancelled"))
+    {
+        return;      /* still queued/running */
+    }
+    if(job == 0)
+    {
+        job = JU64(body, "job_id");
+    }
+    /* Only a job still outstanding resolves here — when the
+       terminal event already resolved it, this poll is late
+       and must not resolve it twice. */
+    if(job != pending_job_id_ && !tracked_jobs_.count(job))
+    {
+        return;
+    }
+    NoteJobRevisions(body);
+    ClaimJob(job);
+    ResolveJob(body);
 }
 
 /*---------------------------------------------------------*\
 || job events + resolution                                   ||
 \*---------------------------------------------------------*/
 
-void WorkspaceController::OnJobEvent(const QVariantMap& ev)
+bool WorkspaceController::NoteJobRevisions(const QVariantMap& ev)
 {
-    const quint64 job   = JU64(ev, "job_id");
-    const QString state =
-        ev.value(QStringLiteral("state")).toString();
-    const bool terminal =
-        state == QLatin1String("succeeded") ||
-        state == QLatin1String("failed")    ||
-        state == QLatin1String("cancelled");
-    if(!terminal)
-    {
-        return;
-    }
     /* Revision truth updates from terminal records — scoped to
        OUR managed workspace. The record carries the job's
        target id: a job a client (this one or another) ran on
@@ -1993,20 +2054,85 @@ void WorkspaceController::OnJobEvent(const QVariantMap& ev)
         if(ws > ws_rev_)   { ws_rev_ = ws; }
         if(res > res_rev_) { res_rev_ = res; }
     }
+    return revs_moved;
+}
 
+bool WorkspaceController::ClaimJob(quint64 job)
+{
+    job_polls_.erase(job);
     if(pending_job_id_ != 0 && job == pending_job_id_)
     {
         pending_job_id_ = 0;
-        ResolveJob(ev);
-        return;
+        pending_job_verb_.clear();
+        return true;
     }
     const auto it = tracked_jobs_.find(job);
     if(it != tracked_jobs_.end())
     {
         tracked_jobs_.erase(it);
+        return true;
+    }
+    return false;
+}
+
+bool WorkspaceController::AwaitingJobAccept() const
+{
+    for(const auto& kv : pending_reqs_)
+    {
+        if(kv.second.startsWith(QLatin1String("job:")))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void WorkspaceController::OnJobEvent(const QVariantMap& ev)
+{
+    const quint64 job   = JU64(ev, "job_id");
+    const QString state =
+        ev.value(QStringLiteral("state")).toString();
+    const bool terminal =
+        state == QLatin1String("succeeded") ||
+        state == QLatin1String("failed")    ||
+        state == QLatin1String("cancelled");
+    if(!terminal)
+    {
+        return;
+    }
+    const bool revs_moved = NoteJobRevisions(ev);
+
+    if(ClaimJob(job))
+    {
         ResolveJob(ev);
         return;
     }
+    /* Audit U-7: the job runs on an engine worker, so its
+       terminal event can overtake the accept reply that tells
+       us the id. While any accept is outstanding an unknown id
+       may be ours — hold it (bounded) until the reply lands;
+       treating it as foreign latched saving/import/export
+       forever and refetched our own commit. */
+    if(AwaitingJobAccept())
+    {
+        if(early_terminals_.size() >= kMaxEarlyTerminals)
+        {
+            const auto oldest = early_terminals_.begin();
+            const EarlyTerminal stale = oldest->second;
+            early_terminals_.erase(oldest);
+            OnForeignJob(stale.ev, stale.revs_moved);
+        }
+        early_terminals_[job] = EarlyTerminal{ ev, revs_moved };
+        return;
+    }
+    OnForeignJob(ev, revs_moved);
+}
+
+void WorkspaceController::OnForeignJob(const QVariantMap& ev,
+                                       bool revs_moved)
+{
+    const quint64 ws  = JU64(ev, "workspace_revision");
+    const quint64 res = JU64(ev, "resource_revision");
     /* A resource-only move (look/type install or remove) bumps
        resource_revision while the document bytes stand —
        rebase the draft's commit base silently instead of
@@ -2030,6 +2156,81 @@ void WorkspaceController::OnJobEvent(const QVariantMap& ev)
        ev.value(QStringLiteral("committed")).toBool())
     {
         FetchDocument();
+    }
+}
+
+void WorkspaceController::TakeEarlyTerminal(quint64 job)
+{
+    const auto it = early_terminals_.find(job);
+    if(it == early_terminals_.end())
+    {
+        return;
+    }
+    const QVariantMap ev = it->second.ev;
+    early_terminals_.erase(it);
+    if(ClaimJob(job))
+    {
+        ResolveJob(ev);
+    }
+}
+
+void WorkspaceController::DrainEarlyTerminals()
+{
+    if(early_terminals_.empty() || AwaitingJobAccept())
+    {
+        return;
+    }
+    /* Every accept has answered and none named these ids —
+       they were another client's jobs after all. */
+    auto held = std::move(early_terminals_);
+    early_terminals_.clear();
+    for(const auto& kv : held)
+    {
+        OnForeignJob(kv.second.ev, kv.second.revs_moved);
+    }
+}
+
+void WorkspaceController::ArmJobWatchdog()
+{
+    if(job_watchdog_ms_ > 0 && !job_watchdog_.isActive())
+    {
+        job_watchdog_.start(job_watchdog_ms_);
+    }
+}
+
+void WorkspaceController::JobWatchdogTick()
+{
+    std::vector<quint64> jobs;
+    if(pending_job_id_ != 0)
+    {
+        jobs.push_back(pending_job_id_);
+    }
+    for(const auto& kv : tracked_jobs_)
+    {
+        jobs.push_back(kv.first);
+    }
+    if(jobs.empty() || !bridge_->connected())
+    {
+        job_watchdog_.stop();
+        return;
+    }
+    /* A terminal event that never arrived (dropped, or lost to
+       a race) is recovered from the job record; one poll per
+       job in flight at a time. */
+    for(const quint64 j : jobs)
+    {
+        if(job_polls_.count(j))
+        {
+            continue;
+        }
+        const int id = SendCommand(QStringLiteral("job_status"),
+            QVariantMap({{ QStringLiteral("job_id"),
+                           QVariant::fromValue<qulonglong>(j) }}),
+            QStringLiteral("job_status:%1").arg(j));
+        if(id > 0)
+        {
+            job_polls_.insert(j);
+        }
     }
 }
 
@@ -2633,6 +2834,15 @@ void WorkspaceController::setDebounceForTesting(int ms)
     drafts_.setDebounceForTesting(ms);
 }
 
+void WorkspaceController::setJobWatchdogForTesting(int ms)
+{
+    job_watchdog_ms_ = ms;
+    if(job_watchdog_.isActive())
+    {
+        job_watchdog_.start(ms);
+    }
+}
+
 void WorkspaceController::PollPendingJobForTesting()
 {
     if(pending_job_id_ == 0)
@@ -2643,7 +2853,7 @@ void WorkspaceController::PollPendingJobForTesting()
         QVariantMap({{ QStringLiteral("job_id"),
                        QVariant::fromValue<qulonglong>(
                            pending_job_id_) }}),
-        QStringLiteral("job_status"));
+        QStringLiteral("job_status:%1").arg(pending_job_id_));
 }
 
 /*---------------------------------------------------------*\
