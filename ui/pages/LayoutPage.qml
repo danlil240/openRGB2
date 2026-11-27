@@ -90,6 +90,9 @@ Item {
        reads are binding-tracked by QML). */
     property var itemList: []
     property var linkPairs: []
+    /* The selected object's emitter rows (calibration list). */
+    readonly property var selEmitters:
+        root.ctlUp ? layoutCtl.selectedEmitters : []
     property var view: ({ "s": 200, "ox": 20, "oz": 20,
                           "minX": 0, "minZ": 0 })
 
@@ -653,13 +656,24 @@ Item {
 
                             /* the scene objects — real document
                                order, real transforms */
+                            /* Audit Q-6: an INTEGER model — every
+                               edit re-emits itemsChanged and
+                               reassigns itemList; a JS-array model
+                               destroyed and recreated every delegate
+                               on each edit, dropping keyboard focus
+                               after one arrow-key nudge. With a
+                               count the delegates survive (only a
+                               count change rebuilds) and `o`
+                               re-reads its row in place. */
                             Repeater {
                                 objectName: "canvasItems"
-                                model: root.itemList
+                                model: root.itemList.length
                                 delegate: Item {
                                     id: d
                                     objectName: "canvasObj_" + o.id
-                                    property var o: modelData
+                                    required property int index
+                                    property var o:
+                                        root.itemList[index] || ({})
                                     property bool dragging: false
                                     /* Keyboard parity with drag
                                        (Task 4.8): Tab reaches the
@@ -1485,14 +1499,24 @@ Item {
                                 wrapMode: Text.WordWrap
                                 width: parent.width
                             }
+                            /* Audit Q-6: integer model over the
+                               page's emitter rows — a calibrate
+                               re-emits selectedChanged, and a
+                               list-valued model reset the view
+                               (scroll jumped to the top, the
+                               focused address field was destroyed).
+                               Delegates now survive and re-read
+                               their row. */
                             ListView {
+                                objectName: "calibrationList"
                                 width: parent.width
                                 height: Math.min(200, contentHeight)
                                 clip: true
-                                model: root.ctlUp
-                                       ? layoutCtl.selectedEmitters
-                                       : []
+                                model: root.selEmitters.length
                                 delegate: Column {
+                                    required property int index
+                                    readonly property var modelData:
+                                        root.selEmitters[index] || ({})
                                     width: ListView.view.width
                                     spacing: 2
                                     RowLayout {

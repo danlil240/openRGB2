@@ -42,7 +42,9 @@
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickItem>
+#include <QKeyEvent>
 #include <QQuickStyle>
+#include <QQuickWindow>
 #include <QTemporaryDir>
 #include <QVariantMap>
 
@@ -539,6 +541,78 @@ int main(int argc, char** argv)
                && std::fabs(mcz - 0.18) < 1e-4;
     }));
     CHECK(s.commits == 0);
+
+    /*---- audit Q-6: an edit must not rebuild the canvas -----
+       Every layout edit re-emits itemsChanged; pre-fix the
+       canvas Repeater's model was the freshly copied items
+       array, so each edit destroyed and recreated EVERY object
+       delegate — the focused object lost focus after the first
+       arrow-key nudge (keyboard nudging worked one step at a
+       time). The delegate must survive the edit (same object,
+       marked below) and keep focus, so a second arrow press
+       moves it again. */
+    {
+        QQuickWindow qwin;
+        qwin.resize(1440, 1200);
+        auto* page_item = qobject_cast<QQuickItem*>(page.get());
+        CHECK(page_item != nullptr);
+        QQuickItem* k0 = nullptr;
+        if(page_item != nullptr)
+        {
+            page_item->setParentItem(qwin.contentItem());
+            qwin.show();
+            qwin.requestActivate();
+            PumpBoth(s, [&] { return qwin.isExposed(); }, 3000);
+            k0 = CanvasObject(page.get(),
+                              QStringLiteral("canvasObj_kbd"));
+        }
+        CHECK(k0 != nullptr);
+        if(k0 != nullptr)
+        {
+            k0->setProperty("q6_mark", 1);
+            k0->forceActiveFocus();
+            CHECK(k0->hasActiveFocus());
+            const double x0 =
+                k0->property("o").toMap()
+                    .value(QStringLiteral("x")).toDouble();
+            auto kbdX = [&](double& x) {
+                QQuickItem* k = CanvasObject(
+                    page.get(), QStringLiteral("canvasObj_kbd"));
+                if(k == nullptr)
+                {
+                    return false;
+                }
+                x = k->property("o").toMap()
+                        .value(QStringLiteral("x")).toDouble();
+                return true;
+            };
+            double x = 0;
+            QKeyEvent r1(QEvent::KeyPress, Qt::Key_Right,
+                         Qt::NoModifier);
+            QCoreApplication::sendEvent(&qwin, &r1);
+            CHECK(PumpBoth(s, [&] {
+                return kbdX(x) && std::fabs(x - (x0 + 0.1)) < 1e-4;
+            }));
+            QQuickItem* k1 = CanvasObject(
+                page.get(), QStringLiteral("canvasObj_kbd"));
+            CHECK(k1 != nullptr
+                  && k1->property("q6_mark").toInt() == 1);
+            CHECK(k1 != nullptr && k1->hasActiveFocus());
+
+            /* the second press reaches the same object */
+            QKeyEvent r2(QEvent::KeyPress, Qt::Key_Right,
+                         Qt::NoModifier);
+            QCoreApplication::sendEvent(&qwin, &r2);
+            CHECK(PumpBoth(s, [&] {
+                return kbdX(x) && std::fabs(x - (x0 + 0.2)) < 1e-4;
+            }, 3000));
+            CHECK(s.commits == 0);
+        }
+        if(page_item != nullptr)
+        {
+            page_item->setParentItem(nullptr);
+        }
+    }
 
     bridge.stop();
     std::printf("qml_layout_drag_test: %d checks, "
