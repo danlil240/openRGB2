@@ -852,6 +852,39 @@ int main(int argc, char** argv)
             CHECK(!store2.Read(QStringLiteral("ws0")).exists);
         }
 
+        /* Audit U-8: continuous editing restarts the debounce on
+           every Stage — the maximum wait still writes the
+           record while the edits keep coming. */
+        {
+            QTemporaryDir mdir;
+            WorkspaceDraftStore store4;
+            store4.setRootForTesting(mdir.path());
+            store4.setDebounceForTesting(150);
+            store4.setMaxWaitForTesting(400);
+            bool written_while_editing = false;
+            const auto t0 = std::chrono::steady_clock::now();
+            while(std::chrono::steady_clock::now() - t0 <
+                  std::chrono::milliseconds(1500))
+            {
+                store4.Stage(QStringLiteral("ws4"), 1, 1,
+                             QString(), studio::ToJson(doc));
+                const auto t1 = std::chrono::steady_clock::now();
+                while(std::chrono::steady_clock::now() - t1 <
+                      std::chrono::milliseconds(40))
+                {
+                    QCoreApplication::processEvents(
+                        QEventLoop::AllEvents, 5);
+                }
+                if(QFileInfo::exists(mdir.path() +
+                       QStringLiteral("/ws4.draft.json")))
+                {
+                    written_while_editing = true;
+                    break;
+                }
+            }
+            CHECK(written_while_editing);
+        }
+
         /* Corrupt record: reported + set aside, never guessed. */
         {
             WorkspaceDraftStore store3;

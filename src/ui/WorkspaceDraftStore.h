@@ -16,7 +16,9 @@
 ||     "engine moved since" instead of guessing           ||
 ||   - Stage() is debounced (2 s) so a slider scrub does  ||
 ||     not rewrite the file per edit; Flush() writes the  ||
-||     pending record immediately (normal close)          ||
+||     pending record immediately (normal close); a 10 s  ||
+||     maximum wait bounds the delay while edits keep     ||
+||     restarting the debounce                            ||
 ||   - a record NEVER applies itself anywhere —           ||
 ||     WorkspaceController surfaces it as an explicit     ||
 ||     recover/discard offer only                         ||
@@ -79,6 +81,9 @@ public:
     void setRootForTesting(const QString& dir);
     void setClientIdForTesting(const QString& client_id);
     void setDebounceForTesting(int ms);
+    /* Maximum time a staged record may stay pending while
+       edits keep restarting the debounce (default 10 s). */
+    void setMaxWaitForTesting(int ms);
 
     /* Stage a draft snapshot for `workspace_id` — debounced;
        the pending record materializes on the timer or Flush().
@@ -117,8 +122,13 @@ private:
     QString root_;
     QString client_id_ = QStringLiteral("ui");
     int     debounce_ms_ = 2000;
+    int     max_wait_ms_ = 10000;
     QString last_error_;
     QTimer  debounce_;
+    /* Started by the first Stage of a pending batch and NOT
+       restarted by later ones: continuous editing still writes
+       at least every max_wait_ms_ (audit U-8). */
+    QTimer  max_wait_;
     /* Pending staged writes, workspace id -> record. */
     std::map<QString, WorkspaceDraftRecord> pending_;
 };
