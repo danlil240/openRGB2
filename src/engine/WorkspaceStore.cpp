@@ -448,6 +448,74 @@ void PruneGenerations(const fs::path& wsdir,
 }
 
 /*---------------------------------------------------------*\
+|||| Library-install rollback (audit I-13)                 ||
+\*---------------------------------------------------------*/
+
+/* Every regular file under the given dirs (recursive). Never
+   throws: a missing dir contributes nothing. */
+std::set<std::string> RegularFilesUnder(
+    const std::vector<fs::path>& dirs)
+{
+    std::set<std::string> out;
+    for(const fs::path& d : dirs)
+    {
+        std::error_code ec;
+        fs::recursive_directory_iterator it(d, ec), end;
+        for(; !ec && it != end; it.increment(ec))
+        {
+            std::error_code fec;
+            if(it->is_regular_file(fec))
+            {
+                out.insert(it->path().string());
+            }
+        }
+    }
+    return out;
+}
+
+/* Commit installs extracted types/looks/assets into the SHARED
+   managed library before its later fallible steps (re-
+   validation, resolve, staging writes, publish rename, marker).
+   The installers never overwrite — they only ADD files — so a
+   commit that fails afterwards removes exactly the files its
+   install added, and the library is as it was. Armed with the
+   pre-install listing; disarmed when the commit succeeds. */
+class LibraryInstallRollback
+{
+public:
+    LibraryInstallRollback(std::vector<fs::path> dirs,
+                           const bool& committed)
+        : dirs_(std::move(dirs))
+        , before_(RegularFilesUnder(dirs_))
+        , committed_(committed)
+    {
+    }
+    ~LibraryInstallRollback()
+    {
+        if(committed_)
+        {
+            return;
+        }
+        for(const std::string& f : RegularFilesUnder(dirs_))
+        {
+            if(before_.find(f) == before_.end())
+            {
+                std::error_code ec;
+                fs::remove(f, ec);
+            }
+        }
+    }
+    LibraryInstallRollback(const LibraryInstallRollback&) = delete;
+    LibraryInstallRollback& operator=(
+        const LibraryInstallRollback&) = delete;
+
+private:
+    std::vector<fs::path>  dirs_;
+    std::set<std::string>  before_;
+    const bool&            committed_;
+};
+
+/*---------------------------------------------------------*\
 |||| Manifest                                              ||
 \*---------------------------------------------------------*/
 
@@ -1726,6 +1794,19 @@ WorkspaceStore::CommitResult WorkspaceStore::Commit(
         candidate.extracted_types;
     std::vector<studio::EffectDocument> ex_fx    =
         candidate.extracted_effects;
+    /* Any failure from here until res.ok removes what the
+       install added (audit I-13); res outlives the guard. A
+       candidate that extracts nothing installs nothing — no
+       listing then. */
+    const bool installs = !ex_types.empty() || !ex_fx.empty() ||
+                          !candidate.extracted_assets.empty();
+    LibraryInstallRollback install_rollback(
+        installs ? std::vector<fs::path>{
+                       fs::path(LibraryDevicesDir()),
+                       fs::path(LibraryEffectsDir()),
+                       fs::path(LibraryAssetsDir()) }
+                 : std::vector<fs::path>{},
+        res.ok);
     {
         std::string ierr;
         if(!InstallDeviceTypes(LibraryDevicesDir(), deps_.devices,
