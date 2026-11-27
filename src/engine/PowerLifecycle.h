@@ -126,7 +126,11 @@ public:
        calls this). Events are queued and applied by Poll() on
        the engine's owner loop: freeze/restore transitions do
        blocking transport I/O and must never run inside a
-       window proc. */
+       window proc. One exception (audit E-7): a Suspend also
+       asserts the pipeline output gate and discards pending
+       frames before PostEvent returns — both non-blocking —
+       because the system may sleep as soon as the monitor's
+       window proc returns. */
     void PostEvent(Event e);
 
     /* Owner-loop hook (~500 ms): applies queued events in order,
@@ -153,6 +157,7 @@ public:
 private:
     void ApplyEvent(Event e);
     bool WantGate() const;
+    bool SuspendQueued() const;   /* under mutex_ */
     void ApplyGateAndCapture();
     void DropAllLanes();
     void DiffConnections();
@@ -164,9 +169,16 @@ private:
 
     mutable std::mutex      mutex_;
     std::deque<Event>       pending_;
+    /* Serializes "decide the gate + write it to the pipeline"
+       between Poll and PostEvent(Suspend). Taken before
+       mutex_, never the other way round. */
+    std::mutex              gate_mutex_;
 
     bool        display_on_       = true;
     bool        suspended_        = false;
+    /* A Suspend was posted and has not been applied yet: its
+       early gate (E-7) must hold until it is. */
+    bool        suspend_posted_   = false;
     bool        gated_            = false;
     bool        capture_paused_   = false;
     bool        power_hold_       = false;  /* we froze the loop  */
