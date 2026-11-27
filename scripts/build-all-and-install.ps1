@@ -37,13 +37,21 @@
          none does), as the invoking user.
 
     Default InstallDir = %LOCALAPPDATA%\Programs\OpenRGB2 -- the target
-    of the OpenRGB2 desktop icon.
+    of the OpenRGB2 desktop icon. The optional Windows sign-in task
+    refuses that location (its parent folder is yours, so the install
+    could be swapped out from above): for the sign-in task install
+    under an admin-only folder, e.g. -InstallDir
+    "$env:ProgramFiles\OpenRGB2" -- the elevated Deploy step creates it.
 
     Started from an already-elevated shell, every step runs in that
     shell (no UAC prompts; the build then runs elevated too).
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\build-all-and-install.ps1
+
+.EXAMPLE
+    # admin-only location (required for the Windows sign-in task)
+    powershell -ExecutionPolicy Bypass -File scripts\build-all-and-install.ps1 -InstallDir "$env:ProgramFiles\OpenRGB2"
 
 .EXAMPLE
     scripts\build-all-and-install.cmd          (double-clickable)
@@ -191,6 +199,12 @@ function Invoke-SweepPhase {
 }
 
 function Invoke-DeployPhase {
+    if(-not (Test-Path -LiteralPath $InstallDir)) {
+        # First install under an admin-only parent (e.g.
+        # %ProgramFiles%\OpenRGB2): only this elevated step can create it.
+        New-Item -ItemType Directory -Force $InstallDir | Out-Null
+        Info "created install dir (first install, elevated): $InstallDir"
+    }
     $stopScript = Join-Path $InstallDir "scripts\stop-openrgb2.ps1"
     if(Test-Path $stopScript) {
         Step "Stopping installed stack ($InstallDir)"
@@ -307,10 +321,16 @@ function Invoke-Main {
     # 4. elevated: stop the install, deploy, protect it               #
     #----------------------------------------------------------------#
     if(-not (Test-Path $InstallDir)) {
-        # Created as the invoking user, so update-openrgb2.ps1 knows
-        # whose state\ + profiles\local\ stay writable.
-        New-Item -ItemType Directory -Force $InstallDir | Out-Null
-        Info "created install dir (first install): $InstallDir"
+        # Created as the invoking user when the parent allows it; an
+        # admin-only parent (%ProgramFiles%) gets it from the elevated
+        # Deploy step instead. Either way -UserSid names whose state\ +
+        # profiles\local\ stay writable.
+        try {
+            New-Item -ItemType Directory -Force $InstallDir -ErrorAction Stop | Out-Null
+            Info "created install dir (first install): $InstallDir"
+        } catch [UnauthorizedAccessException] {
+            Info "install dir will be created by the elevated deploy step: $InstallDir"
+        }
     }
     $null = Invoke-Elevated "Deploy"
 

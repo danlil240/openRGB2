@@ -71,7 +71,14 @@
     "foreign listener" and a second engine was spawned.
 
     Logs: state\startup.log and state\shutdown.log (written by the
-    desktop UI) are rotated to <name>.1 once they exceed 1 MB.
+    desktop UI) are renamed to <name>.1 once they exceed 1 MB -- only
+    while no process holds them open (else skipped until a later
+    start); never truncated in place.
+
+    Output: every finding, CONFLICT / UNVERIFIABLE / refusal line goes
+    to the host (Write-Host), which is this process's STDOUT when run
+    with -File -- the desktop UI parses it from there. Callers must
+    capture stdout; the script does not write any log file itself.
 
     Exit codes: 0 started/attached, 1 fatal error (missing files),
     3 refused (conflicts without -TakeOver, or a foreign OpenRGB.exe
@@ -316,19 +323,26 @@ function Find-UnverifiableManaged {
     return ,@($ids | Sort-Object -Unique | Where-Object { Test-UnverifiableProcess $_ })
 }
 
-# Keep the desktop UI's logs bounded: past $MaxBytes the log is copied
-# to <log>.1 and truncated IN PLACE (the UI may hold it open as this
-# script's stdout, which blocks a rename but not a shared-write
-# truncate; its append-mode handle keeps writing at the new end).
-# Best effort -- a log that cannot be rotated is left alone.
+# Keep the desktop UI's logs bounded: past $MaxBytes the log is
+# RENAMED to <log>.1 (replacing the previous .1) -- never truncated in
+# place, so a reader that remembers an offset into the file is never
+# handed a shorter file under the same name. Only when nobody holds it:
+# an exclusive open must succeed first (a writer or reader that has it
+# open -- e.g. this script's own redirected stdout, or a transcript --
+# means rotation is skipped this time and retried next start). Best
+# effort -- a log that cannot be rotated is left alone, never lost.
 function Invoke-LogRotation([string]$Path, [long]$MaxBytes = 1MB) {
     try {
         $fi = Get-Item -LiteralPath $Path -ErrorAction Stop
         if($fi.Length -le $MaxBytes) { return }
-        Copy-Item -LiteralPath $Path -Destination "$Path.1" -Force
         $fs = [IO.File]::Open($Path, [IO.FileMode]::Open,
-            [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
-        try { $fs.SetLength(0) } finally { $fs.Dispose() }
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $fs.Dispose()
+        $old = "$Path.1"
+        if(Test-Path -LiteralPath $old) {
+            Remove-Item -LiteralPath $old -Force -ErrorAction Stop
+        }
+        [IO.File]::Move($Path, $old)
     } catch { }
 }
 

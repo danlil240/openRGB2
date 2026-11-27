@@ -73,10 +73,15 @@ function Confirm-TakeOver([string[]]$Conflicts) {
 
 try {
     New-Item -ItemType Directory -Force $stateDir | Out-Null
+    . (Join-Path $PSScriptRoot 'start-openrgb2.ps1')
+    # Rotate before the transcript opens the log: once it is held,
+    # Invoke-ManagedStart's own rotation must skip it.
+    if(Get-Command Invoke-LogRotation -ErrorAction SilentlyContinue) {
+        Invoke-LogRotation $log
+    }
     Start-Transcript -Path $log -Append -Force | Out-Null
     $transcriptStarted = $true
 
-    . (Join-Path $PSScriptRoot 'start-openrgb2.ps1')
     $first = Invoke-GuiManagedStart $false
     $exitCode = $first.code
     if($exitCode -eq 3 -and

@@ -41,7 +41,9 @@
         7. ELEVATED runs harden the install ACL: owner Administrators,
            inheritance broken, Administrators + SYSTEM full control,
            Users read/execute -- except state\ and profiles\local\,
-           which stay writable by the installing user (-UserSid). The
+           which stay writable by the installing user (-UserSid, else
+           resolved from the folder's ACL; ambiguous = refused before
+           any change, never the elevating account). The
            elevated UI and the elevated sign-in task run binaries and
            scripts from this folder, so a user-writable install is a
            silent elevation path. The .previous snapshot is protected
@@ -75,8 +77,11 @@ param(
 
     # SID of the user who keeps write access to state\ and
     # profiles\local\ after hardening. Default: the install dir's
-    # owner when that is not Administrators/SYSTEM, else the user
-    # already granted write on state\, else the current user.
+    # owner when that is a user account, else the one user account
+    # granted write on state\ (explicit or inherited; the install dir
+    # when state\ is missing). When that is not exactly one account an
+    # elevated update REFUSES (nothing changed) and asks for -UserSid --
+    # it never falls back to the elevating account.
     [string]$UserSid
 )
 
@@ -252,32 +257,94 @@ function Test-IsElevated {
     } catch { return $false }
 }
 
-# Who keeps write access to state\ + profiles\local\ after hardening.
-function Resolve-InstallUserSid([string]$InstallDir) {
-    $privileged = @("S-1-5-32-544","S-1-5-18","S-1-5-19","S-1-5-20","S-1-3-0")
-    $sidType = [Security.Principal.SecurityIdentifier]
-    try {
-        $owner = (Get-Acl -LiteralPath $InstallDir).GetOwner($sidType).Value
-        if($owner -and $privileged -notcontains $owner -and
-           -not $owner.StartsWith("S-1-5-80-")) { return $owner }
-    } catch { }
-    try {
-        $stateDir = Join-Path $InstallDir "state"
-        if(Test-Path -LiteralPath $stateDir) {
-            foreach($r in (Get-Acl -LiteralPath $stateDir).GetAccessRules(
-                               $true, $false, $sidType)) {
-                $sid = $r.IdentityReference.Value
-                if([string]$r.AccessControlType -eq "Allow" -and
-                   $privileged -notcontains $sid -and
-                   $sid -ne "S-1-5-32-545" -and
-                   ($r.FileSystemRights -band
-                    [Security.AccessControl.FileSystemRights]::WriteData)) {
-                    return $sid
-                }
-            }
+# True for a SID that can be "the installing user": a local, domain or
+# Entra ID account (S-1-5-21-* / S-1-12-1-*), excluding the built-in
+# Administrator account (RID 500) and the well-known domain admin
+# groups (512 Domain Admins, 518 Schema Admins, 519 Enterprise Admins).
+# Well-known groups and principals (Administrators, SYSTEM, LOCAL/
+# NETWORK SERVICE, CREATOR OWNER/GROUP, Users, Authenticated Users,
+# Everyone, services S-1-5-80-*, app packages S-1-15-*) never are.
+function Test-InstallUserCandidate([string]$Sid) {
+    if(-not $Sid) { return $false }
+    if(-not ($Sid.StartsWith("S-1-5-21-") -or $Sid.StartsWith("S-1-12-1-"))) {
+        return $false
+    }
+    $rid = $Sid.Substring($Sid.LastIndexOf('-') + 1)
+    return @("500","512","518","519") -notcontains $rid
+}
+
+# Who keeps write access to state\ + profiles\local\ after hardening:
+# the install folder's owner when that is a user account, else the ONE
+# user account granted write on state\ (or, when state\ is missing, on
+# the install folder) -- explicit AND inherited grants: a fresh
+# install's state\ only inherits its user's access from the folder
+# above. Returns $null when that is not exactly one account: the
+# caller refuses rather than guessing (the elevating account may be a
+# different admin than the user the install belongs to). -AclReader
+# is the offline-test seam (path -> FileSystemSecurity or $null).
+function Resolve-InstallUserSid {
+    param(
+        [string]$InstallDir,
+        [scriptblock]$AclReader = {
+            param($p)
+            if(Test-Path -LiteralPath $p) { Get-Acl -LiteralPath $p } else { $null }
         }
-    } catch { }
-    return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    )
+    $sidType = [Security.Principal.SecurityIdentifier]
+    # write/append data, plus GENERIC_ALL / GENERIC_WRITE
+    $writeMask = [int64](0x2 -bor 0x4 -bor 0x10000000 -bor 0x40000000)
+    $installAcl = $null
+    try { $installAcl = & $AclReader $InstallDir } catch { }
+    if($installAcl) {
+        $owner = $null
+        try { $owner = $installAcl.GetOwner($sidType).Value } catch { }
+        if(Test-InstallUserCandidate $owner) { return $owner }
+    }
+    $stateAcl = $null
+    try { $stateAcl = & $AclReader ([IO.Path]::Combine($InstallDir, "state")) } catch { }
+    foreach($acl in @($stateAcl, $installAcl)) {
+        if(-not $acl) { continue }
+        $found = @()
+        foreach($r in $acl.GetAccessRules($true, $true, $sidType)) {
+            if([string]$r.AccessControlType -ne "Allow") { continue }
+            if(([int]$r.PropagationFlags -band
+                [int][Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
+            $sid = $r.IdentityReference.Value
+            if(-not (Test-InstallUserCandidate $sid)) { continue }
+            if(([int64]$r.FileSystemRights -band $writeMask) -eq 0) { continue }
+            if($found -notcontains $sid) { $found += $sid }
+        }
+        if($found.Count -eq 1) { return $found[0] }
+        if($found.Count -gt 1) { return $null }    # ambiguous: never guess
+    }
+    return $null
+}
+
+# -UserSid when given (validated as a SID), else the resolver's
+# answer. Returns @{Sid; Error}: Sid $null = refuse ACL hardening.
+function Resolve-AclUserSid([string]$InstallDir, [string]$UserSid) {
+    if($UserSid) {
+        try {
+            $sid = (New-Object Security.Principal.SecurityIdentifier($UserSid)).Value
+            return [pscustomobject]@{ Sid = $sid; Error = "" }
+        } catch {
+            return [pscustomobject]@{ Sid = $null
+                Error = "-UserSid '$UserSid' is not a valid SID -- nothing was changed." }
+        }
+    }
+    $sid = Resolve-InstallUserSid $InstallDir
+    if($sid) { return [pscustomobject]@{ Sid = $sid; Error = "" } }
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    return [pscustomobject]@{ Sid = $null; Error = (
+        "cannot tell which user this install belongs to (the folder's " +
+        "owner is not a user account and state\ does not grant write " +
+        "to exactly one user) -- nothing was changed. This elevated " +
+        "update makes the install admin-only and keeps state\ + " +
+        "profiles\local\ writable for ONE user; it will not guess, " +
+        "because the elevating account may not be that user. Re-run " +
+        "with -UserSid <SID of the user who runs OpenRGB2> (from that " +
+        "user's non-elevated shell: whoami /user; this elevated " +
+        "account is $me), or with -SkipAclHardening.") }
 }
 
 function Invoke-Icacls([string[]]$IcaclsArgs) {
@@ -385,6 +452,18 @@ function Invoke-PackageUpdate {
         return 1
     }
 
+    # Whose state\ + profiles\local\ stay writable after step 7 --
+    # settled now, while refusing still changes nothing.
+    $hardenAcl = (-not $SkipAclHardening) -and (Test-IsElevated)
+    if($hardenAcl) {
+        $resolved = Resolve-AclUserSid $InstallDir $UserSid
+        if(-not $resolved.Sid) {
+            Write-Host "ERROR: $($resolved.Error)" -ForegroundColor Red
+            return 1
+        }
+        $UserSid = $resolved.Sid
+    }
+
     $oldManifest = Read-Manifest $InstallDir
     if($oldManifest) {
         $unsafe = Get-UnsafeManifestPaths $oldManifest
@@ -428,7 +507,7 @@ function Invoke-PackageUpdate {
         # The old snapshot is replaced only once the new one is whole.
         if(Test-Path -LiteralPath $backupDir) { Remove-Item -LiteralPath $backupDir -Recurse -Force }
         Move-Item -LiteralPath $tmpDir -Destination $backupDir
-        if(-not $SkipAclHardening -and (Test-IsElevated)) {
+        if($hardenAcl) {
             # Rollback restores from the snapshot -- an elevated
             # install must not keep a user-writable copy of itself.
             try { Set-InstallAcl $backupDir "" @() }
@@ -528,8 +607,7 @@ function Invoke-PackageUpdate {
     Remove-Item -LiteralPath $markerPath -Force
 
     #---- 7. protect the install from the user it runs elevated for ---
-    if(-not $SkipAclHardening -and (Test-IsElevated)) {
-        if(-not $UserSid) { $UserSid = Resolve-InstallUserSid $InstallDir }
+    if($hardenAcl) {
         Write-Host ("==> hardening install ACL (Administrators/SYSTEM full, " +
             "Users read/execute; state\ + profiles\local\ writable by " +
             "$UserSid)") -ForegroundColor Cyan
