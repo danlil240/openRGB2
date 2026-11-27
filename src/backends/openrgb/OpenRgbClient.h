@@ -61,6 +61,7 @@
 #include "SdkWire.h"
 #include "Transport.h"
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -191,7 +192,14 @@ public:
        or removed device, caught by the count) falls through
        to the full EnumerateIo path and bumps the
        generation. False when disconnected or the fetch fails
-       (connection marked broken). */
+       (connection marked broken).
+       The wire lock is taken per round trip, never across the
+       whole sweep (E-3): live frames go out between the count
+       and controller-data requests, so a refresh delays a
+       send by at most one status round trip. A concurrent
+       re-enumeration (reconnect, resize, another refresh) ends
+       the refresh early with true — the topology is already
+       fresh. */
     bool RefreshStatus();
 
     /* Last server-reported mode state for `controller` —
@@ -210,7 +218,10 @@ public:
        while Connected (a peer close starts the schedule), and
        performs the next due attempt while Reconnecting. After
        backoff.max_attempts failures the state latches to
-       Disconnected until Connect()/ReconnectNow(). */
+       Disconnected until Connect()/ReconnectNow(). Poll and
+       ReconnectNow are the ONLY reconnect drivers — the send
+       path (SubmitLatest, lane threads) never attempts one
+       (E-3); the owner loop polls. */
     bool            Poll(TimePoint now = Clock::now());
     bool            ReconnectNow();
     uint32_t        ReconnectAttempt() const;
@@ -233,7 +244,9 @@ public:
     | controller index, and sends ONE UPDATELEDS packet for     |
     | the whole controller. A transport failure breaks the      |
     | connection (Reconnecting) and returns Rejected —          |
-    | SubmitResult is never "displayed".                        |
+    | SubmitResult is never "displayed". While not Connected    |
+    | it rejects at once without touching the wire: reconnect   |
+    | attempts belong to Poll() (E-3).                          |
     \*---------------------------------------------------------*/
     SubmitResult  SubmitLatest(const RgbFrame& frame) override;
     DeliveryStats Stats() const override;
@@ -335,6 +348,13 @@ private:
     void PollIo(TimePoint now);
 
     mutable std::mutex   io_mutex_;  /* wire serialization      */
+    /* Frame sends waiting for io_mutex_ (E-3). std::mutex is not
+       fair: a refresh that releases and re-takes the wire lock
+       between round trips would win every race against a lane
+       blocked on it. The refresh yields while this is non-zero
+       (bounded — see YieldToSenders). */
+    std::atomic<uint32_t> send_waiters_{ 0 };
+    void YieldToSenders() const;
     mutable std::mutex   mutex_;     /* state reads/commits     */
     OpenRgbClientOptions options_;
     std::unique_ptr<IStreamTransport> stream_;
