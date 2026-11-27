@@ -12,6 +12,7 @@
 
 #include "OpenRgbClient.h"
 
+#include <chrono>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -129,8 +130,14 @@ void OpenRgbClient::SendPacket(uint32_t dev_id, uint32_t pkt_id,
     }
 }
 
-bool OpenRgbClient::RecvPacket(Packet& pkt, std::string& err)
+RecvResult OpenRgbClient::RecvPacket(Packet& pkt)
 {
+    /* Typed outcome: Ok, or a CLEAN Closed/Timeout — clean means
+       no byte of this packet was consumed (the transport's
+       RecvExact contract: a timeout after a partial read is an
+       Error). A timeout after the header arrived would leave
+       the rest of the body in the stream and desynchronize
+       every later reply, so it is a transport error here. */
     std::string io_err;
     const RecvResult hr =
         stream_->RecvExact(&pkt.header, sizeof(pkt.header), io_err);
@@ -140,9 +147,7 @@ bool OpenRgbClient::RecvPacket(Packet& pkt, std::string& err)
         {
             throw TransportError(io_err);
         }
-        err = (hr == RecvResult::Closed) ? "peer closed"
-                                        : "recv timed out";
-        return false;
+        return hr;
     }
     if(memcmp(pkt.header.magic, "ORGB", 4) != 0)
     {
@@ -157,22 +162,37 @@ bool OpenRgbClient::RecvPacket(Packet& pkt, std::string& err)
     {
         const RecvResult br =
             stream_->RecvExact(pkt.body.data(), pkt.body.size(), io_err);
-        if(br != RecvResult::Ok)
+        if(br == RecvResult::Error)
         {
-            if(br == RecvResult::Error)
-            {
-                throw TransportError(io_err);
-            }
-            err = (br == RecvResult::Closed) ? "peer closed"
-                                            : "recv timed out";
-            return false;
+            throw TransportError(io_err);
+        }
+        if(br == RecvResult::Closed)
+        {
+            return br;      /* the caller tears the wire down */
+        }
+        if(br == RecvResult::Timeout)
+        {
+            throw TransportError("recv timed out mid-packet");
         }
     }
     else
     {
         pkt.body.clear();
     }
-    return true;
+    if(pkt.header.pkt_id == kPktLianLiWirelessStatus)
+    {
+        NoteWirelessReplyIo();
+    }
+    return RecvResult::Ok;
+}
+
+namespace
+{
+    const char* RecvResultText(RecvResult r)
+    {
+        return (r == RecvResult::Closed) ? "peer closed"
+                                         : "recv timed out";
+    }
 }
 
 std::vector<uint8_t> OpenRgbClient::Request(uint32_t dev_id, uint32_t pkt_id,
@@ -187,11 +207,12 @@ std::vector<uint8_t> OpenRgbClient::Request(uint32_t dev_id, uint32_t pkt_id,
     Packet pkt;
     for(unsigned i = 0; i < 64; ++i)
     {
-        std::string err;
-        if(!RecvPacket(pkt, err))
+        const RecvResult r = RecvPacket(pkt);
+        if(r != RecvResult::Ok)
         {
             throw TransportError("waiting for reply to packet " +
-                                 std::to_string(pkt_id) + ": " + err);
+                                 std::to_string(pkt_id) + ": " +
+                                 RecvResultText(r));
         }
         if(pkt.header.pkt_id == expected_reply_id &&
            pkt.header.dev_id == dev_id)
@@ -216,7 +237,14 @@ void OpenRgbClient::DrainPending()
         {
             return;
         }
-        if(!RecvPacket(pkt, err))
+        const RecvResult r = RecvPacket(pkt);
+        if(r == RecvResult::Timeout)
+        {
+            /* Readable, yet no complete header within the io
+               timeout: a torn header is stuck in the stream. */
+            throw TransportError("recv timed out mid-packet");
+        }
+        if(r != RecvResult::Ok)
         {
             return;
         }
@@ -333,7 +361,10 @@ bool OpenRgbClient::EnumerateIo(std::string& err)
         }
 
         /* Identical name+serial+location is genuinely ambiguous
-           hardware — the first enumeration wins deterministically. */
+           hardware — the first enumeration wins deterministically.
+           The dropped duplicate still counts toward the server's
+           controller count (server_controller_count_ below), so
+           RefreshStatus compares like with like. */
         devices.emplace(rec.snap.key, std::move(rec));
     }
 
@@ -350,12 +381,16 @@ bool OpenRgbClient::EnumerateIo(std::string& err)
             entry.second.snap.topology_generation = topology_generation_;
         }
         devices_ = std::move(devices);
+        server_controller_count_ = count;
     }
     /* Probe the wireless-status extension on every enumeration:
        covers Connect(), Enumerate(), and the structural-
-       refresh path. A latched-unsupported probe is a no-op;
-       false means the wire broke mid-probe (already marked). */
-    if(!FetchWirelessStatusIo())
+       refresh path. An enumeration always re-probes, even a
+       latched-unsupported backend (a fork that was merely slow
+       on the first probe recovers here); the probe has its own
+       short deadline. false means the wire broke mid-probe
+       (already marked). */
+    if(!FetchWirelessStatusIo(/*force=*/true))
     {
         err = "wireless status probe broke the connection";
         return false;
@@ -376,7 +411,10 @@ bool OpenRgbClient::ConnectIo(std::string& err)
         /* A (re)connect may reach a different backend — the
            extension probe starts over. */
         wireless_status_   = WirelessStatusSnapshot{};
+        wireless_next_probe_ = TimePoint{};
     }
+    /* A fresh stream carries no unanswered probe replies. */
+    wireless_pending_ = 0;
     stream_->Close();
 
     try
@@ -486,6 +524,7 @@ bool OpenRgbClient::RefreshStatus()
         std::vector<ZoneSnapshot> zones;
     };
     uint32_t                pv = 0;
+    uint32_t                server_count = 0;
     std::vector<KnownDevice> known;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -495,6 +534,7 @@ bool OpenRgbClient::RefreshStatus()
             return false;
         }
         pv = protocol_version_;
+        server_count = server_controller_count_;
         known.reserve(devices_.size());
         for(const auto& entry : devices_)
         {
@@ -513,7 +553,11 @@ bool OpenRgbClient::RefreshStatus()
            sees a removal only indirectly through a shifted
            index. Re-fetch the count first: any difference
            takes the full re-enumeration path (generation bump
-           obsoletes stale frames + remaps positional ids). */
+           obsoletes stale frames + remaps positional ids).
+           Compared against the SERVER count recorded at
+           enumeration, not known.size(): duplicate-key
+           controllers collapse in the map, and comparing with
+           the map size would re-enumerate on every refresh. */
         const std::vector<uint8_t> count_reply =
             Request(0, kPktControllerCount, {},
                     kPktControllerCount);
@@ -525,7 +569,7 @@ bool OpenRgbClient::RefreshStatus()
         }
         uint32_t count = 0;
         memcpy(&count, count_reply.data(), 4);
-        if(count != known.size())
+        if(count != server_count)
         {
             std::string err;
             if(!EnumerateIo(err))
@@ -631,7 +675,7 @@ bool OpenRgbClient::RefreshStatus()
         DrainPending();
         /* Keep the wireless-status cache live on the refresh
            cadence — the N01 wedge surface ages in seconds. */
-        if(!FetchWirelessStatusIo())
+        if(!FetchWirelessStatusIo(/*force=*/false))
         {
             return false;
         }
@@ -670,63 +714,141 @@ bool OpenRgbClient::ActiveMode(const DeviceKey& controller,
 || (N01 observability).                                     ||
 \*---------------------------------------------------------*/
 
-bool OpenRgbClient::FetchWirelessStatusIo()
+void OpenRgbClient::NoteWirelessReplyIo()
+{
+    /* Every packet-4000 reply passes through RecvPacket, in
+       order. Replies to probes that timed out arrive late and
+       are counted off here — wherever they land (inside a
+       later probe, a Request() reply wait, DrainPending) — so
+       a probe never mistakes an older probe's reply for its
+       own (the stream stays synchronized). */
+    if(wireless_pending_ > 0)
+    {
+        --wireless_pending_;
+    }
+    /* Any reply proves the backend speaks the extension: a
+       fork that was merely slow on the first probe must not
+       stay latched unsupported for the whole connection. The
+       next refresh re-probes it. */
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(wireless_status_.probed && !wireless_status_.supported)
+    {
+        wireless_status_.supported = true;
+        wireless_next_probe_       = TimePoint{};
+    }
+}
+
+bool OpenRgbClient::FetchWirelessStatusIo(bool force, bool* fresh)
 {
     /* Runs under io_mutex_ (EnumerateIo / RefreshStatus / the
-       public wrapper). Gated on the stream, not state_:
+       public wrappers). Gated on the stream, not state_:
        ConnectIo reaches this through EnumerateIo BEFORE the
-       Connected commit. */
+       Connected commit. `fresh` (optional) reports whether
+       THIS call received and parsed a reply — a cached
+       snapshot must never be passed off as a new sample. */
+    if(fresh)
+    {
+        *fresh = false;
+    }
     if(!stream_->IsOpen())
     {
         return true;
     }
+    uint32_t probe_ms   = 0;
+    uint32_t reprobe_ms = 0;
+    const TimePoint start = Clock::now();
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if(wireless_status_.probed && !wireless_status_.supported)
+        probe_ms   = options_.wireless_probe_timeout_ms;
+        reprobe_ms = options_.wireless_reprobe_ms;
+        if(!force && wireless_status_.probed &&
+           !wireless_status_.supported &&
+           start < wireless_next_probe_)
         {
             /* Latched unsupported: a stock backend drops the
-               packet silently — re-probing would stall every
-               refresh by the io timeout for nothing. */
+               packet silently — re-probing on every refresh
+               would stall the wire (io_mutex_, so every
+               SubmitLatest) by the probe deadline for nothing.
+               Re-probed on the slow wireless_reprobe_ms
+               schedule, on every enumeration, and as soon as a
+               late reply shows the backend does speak the
+               extension. */
             return true;
         }
     }
 
     SendPacket(0, kPktLianLiWirelessStatus, {});
+    ++wireless_pending_;
 
-    /* Bounded reply wait — same 64-packet drop discipline as
-       Request(), but a timeout is INFORMATION (the packet is
-       unsupported), never a connection failure. */
+    /* Replies arrive in request order: this probe's reply is
+       the one that brings wireless_pending_ back to zero. One
+       OVERALL deadline (wireless_probe_timeout_ms, not the 4 s
+       io timeout per packet). Waiting is select()-based, so a
+       timeout consumes no bytes and the socket stays usable;
+       once bytes are readable a whole packet is read, and a
+       stall mid-packet is a transport error. A timeout is
+       INFORMATION (the packet is unsupported or slow), never a
+       connection failure. */
+    const TimePoint deadline =
+        start + std::chrono::milliseconds(probe_ms);
     Packet pkt;
     for(unsigned i = 0; i < 64; ++i)
     {
-        std::string err;
-        if(!RecvPacket(pkt, err))
+        const TimePoint now = Clock::now();
+        if(now >= deadline)
         {
-            if(err == "recv timed out")
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                wireless_status_.probed = true;
-                /* Only a never-answered probe latches
-                   unsupported; a timeout AFTER a successful
-                   fetch leaves the last data in place — it
-                   ages out via fetched_at instead of
-                   vanishing. */
-                if(!wireless_status_.have_data)
-                {
-                    wireless_status_.supported = false;
-                }
-                return true;
-            }
-            /* Closed/error on the wire is a real fault. */
-            MarkBrokenIo(err, Clock::now());
+            break;
+        }
+        const uint32_t left_ms = (uint32_t)
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - now).count();
+        bool        readable = false;
+        std::string err;
+        if(!stream_->WaitReadable(left_ms, readable, err))
+        {
+            throw TransportError(err);
+        }
+        if(!readable)
+        {
+            break;                              /* deadline hit */
+        }
+        const RecvResult r = RecvPacket(pkt);
+        if(r == RecvResult::Closed)
+        {
+            /* Closed on the wire is a real fault. */
+            MarkBrokenIo("peer closed", Clock::now());
             return false;
+        }
+        if(r == RecvResult::Timeout)
+        {
+            /* Readable, yet no whole header within the io
+               timeout — a torn header is stuck in the stream. */
+            throw TransportError("recv timed out mid-packet");
         }
         if(pkt.header.pkt_id == kPktLianLiWirelessStatus &&
            pkt.header.dev_id == 0)
         {
+            if(wireless_pending_ > 0)
+            {
+                continue;     /* an older probe's late reply */
+            }
             SdkWirelessStatus parsed;
-            const bool ok = ParseWirelessStatus(
+            bool ok = ParseWirelessStatus(
                 pkt.body.data(), pkt.body.size(), parsed);
+            /* {"detecting":true,...}: the backend answers promptly
+               while its first detection is still running —
+               supported, but no data yet. Not a sample (never
+               `fresh`, never overwrites the cache); the normal
+               refresh cadence asks again. */
+            if(ok && parsed.raw)
+            {
+                const auto dit = parsed.raw->find("detecting");
+                if(dit != parsed.raw->end() && dit->is_boolean() &&
+                   dit->get<bool>())
+                {
+                    ok = false;
+                }
+            }
             std::lock_guard<std::mutex> lock(mutex_);
             wireless_status_.probed    = true;
             wireless_status_.supported = true;
@@ -735,18 +857,30 @@ bool OpenRgbClient::FetchWirelessStatusIo()
                 wireless_status_.status     = std::move(parsed);
                 wireless_status_.fetched_at = Clock::now();
                 wireless_status_.have_data  = true;
+                if(fresh)
+                {
+                    *fresh = true;
+                }
             }
             return true;
         }
         /* Unrelated/async traffic — drop and keep waiting. */
     }
-    /* 64 unrelated packets: treat like a missing reply. */
+    /* Deadline or 64 unrelated packets: no reply to THIS probe.
+       Its reply may still arrive — wireless_pending_ keeps it
+       from being read as a later probe's answer. */
     {
         std::lock_guard<std::mutex> lock(mutex_);
         wireless_status_.probed = true;
+        /* Only a never-answered probe latches unsupported; a
+           timeout AFTER a successful fetch leaves the last data
+           in place — it ages out via fetched_at instead of
+           vanishing (and `fresh` stays false). */
         if(!wireless_status_.have_data)
         {
             wireless_status_.supported = false;
+            wireless_next_probe_ =
+                Clock::now() + std::chrono::milliseconds(reprobe_ms);
         }
     }
     return true;
@@ -757,7 +891,7 @@ bool OpenRgbClient::FetchWirelessStatus()
     std::lock_guard<std::mutex> io(io_mutex_);
     try
     {
-        return FetchWirelessStatusIo();
+        return FetchWirelessStatusIo(/*force=*/false);
     }
     catch(const TransportError& e)
     {
@@ -768,6 +902,8 @@ bool OpenRgbClient::FetchWirelessStatus()
 
 void OpenRgbClient::WirelessStatus(WirelessStatusSnapshot& out) const
 {
+    /* Cheap under the state lock: the raw backend document is
+       shared (shared_ptr<const json>), never deep-copied. */
     std::lock_guard<std::mutex> lock(mutex_);
     out = wireless_status_;
 }
@@ -776,12 +912,33 @@ bool OpenRgbClient::WirelessClockSample(const DeviceKey& controller,
                                         PlaybackClockSnapshot& out)
 {
     out = {};
-    if(!FetchWirelessStatus())
-    {
-        return false;
-    }
     WirelessStatusSnapshot snap;
-    WirelessStatus(snap);
+    {
+        std::lock_guard<std::mutex> io(io_mutex_);
+        bool fresh = false;
+        try
+        {
+            if(!FetchWirelessStatusIo(/*force=*/false, &fresh))
+            {
+                return false;
+            }
+        }
+        catch(const TransportError& e)
+        {
+            MarkBrokenIo(e.what(), Clock::now());
+            return false;
+        }
+        /* Only a reply received by THIS call is a sample: a
+           stalled backend (probe timed out, malformed reply)
+           leaves the cache in place, and re-stamping that as
+           current would feed old ticks to the playback clock
+           as if they were new. */
+        if(!fresh)
+        {
+            return false;
+        }
+        WirelessStatus(snap);
+    }
     if(!snap.have_data)
     {
         return false;
@@ -798,7 +955,9 @@ bool OpenRgbClient::WirelessClockSample(const DeviceKey& controller,
             (std::chrono::milliseconds::rep)g.clock.age_ms);
         out.valid      = true;
         out.ticks      = g.clock.ticks;
-        out.sampled_at = Clock::now() - age;
+        /* Anchored at the reply's arrival, not at "now": the
+           backend's age is relative to when it serialized. */
+        out.sampled_at = snap.fetched_at - age;
         /* Backend-side age at serialization + a conservative
            transport margin — the reading is only ever older
            than the backend reported. */

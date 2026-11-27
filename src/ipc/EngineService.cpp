@@ -1211,7 +1211,14 @@ nlohmann::json EngineService::BackendCountersJson() const
             { "supported", true  },
         });
     }
-    nlohmann::json out = snap.status.raw;
+    /* The one deep copy happens here, outside the client's
+       state lock (the snapshot shares the parsed document). */
+    nlohmann::json out = snap.status.raw ? *snap.status.raw
+                                         : nlohmann::json::object();
+    if(!out.is_object())
+    {
+        out = nlohmann::json::object();
+    }
     out["probed"]    = true;
     out["supported"] = true;
     out["fetched_age_ms"] =
