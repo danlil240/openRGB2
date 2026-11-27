@@ -51,6 +51,13 @@ struct IpcEvent
 {
     std::string    kind;
     nlohmann::json data = nlohmann::json::object();
+    /* Latest-wins partition inside the kind for IpcServer::Emit
+       (EmitTo takes its key as an argument): "" coalesces with
+       any queued keyless event of the kind; a key coalesces
+       only with the same key. A workspace job-terminal record
+       carries "job/<id>" so it never replaces — or is replaced
+       by — a snapshot or another job's record. */
+    std::string    coalesce_key;
 };
 
 struct IpcReply

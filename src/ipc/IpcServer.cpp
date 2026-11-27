@@ -106,6 +106,47 @@ struct IpcServer::Session
     std::atomic<uint64_t>     resync_bytes{ 0 };
 };
 
+namespace
+{
+
+/* High-rate telemetry kinds (~30 Hz) — the first to go when a
+   session's queue is full. Everything else (workspace job
+   records and snapshots, scene, playback, topology, ...) is
+   rare and a lost one leaves the client stale. */
+bool IsHighRateKey(const std::string& qkey)
+{
+    const std::string kind = qkey.substr(0, qkey.find('\x1f'));
+    return kind == event_kind::kPreview ||
+           kind == event_kind::kFrameStatus;
+}
+
+/* Overflow policy for one incoming event at a full queue
+   (out_mutex held). Evicts the OLDEST queued high-rate event;
+   when none is queued, a high-rate newcomer is refused rather
+   than displacing a low-rate event, and a low-rate newcomer
+   evicts the queue head (the previous behaviour). Returns
+   false when the newcomer must be dropped (audit I-8). */
+template<class Queue>
+bool MakeRoom(Queue& q, const std::string& incoming_qkey)
+{
+    for(auto it = q.begin(); it != q.end(); ++it)
+    {
+        if(IsHighRateKey(it->kind))
+        {
+            q.erase(it);
+            return true;
+        }
+    }
+    if(IsHighRateKey(incoming_qkey))
+    {
+        return false;
+    }
+    q.pop_front();
+    return true;
+}
+
+} /* anonymous namespace */
+
 /*---------------------------------------------------------*\
 || IpcServer                                                 ||
 \*---------------------------------------------------------*/
@@ -274,11 +315,18 @@ void IpcServer::Emit(const IpcEvent& ev)
     const Session::Bytes bytes =
         std::make_shared<const std::vector<uint8_t>>(std::move(encoded));
 
+    /* Latest-wins partitions on the event's coalesce key
+       inside the kind (same scheme as EmitTo). */
+    const std::string qkey =
+        ev.coalesce_key.empty()
+            ? ev.kind
+            : ev.kind + "\x1f" + ev.coalesce_key;
+
     for(const std::shared_ptr<Session>& s : targets)
     {
-        /*---- Bounded enqueue: latest-wins per kind, then     ----*\
-        | oldest-eviction at the cap. Drops are counted, never    |
-        | queued unboundedly.                                     |
+        /*---- Bounded enqueue: latest-wins per (kind, key),   ----*\
+        | then eviction at the cap — high-rate kinds first (see   |
+        | MakeRoom). Drops are counted, never queued unboundedly. |
         \*--------------------------------------------------------*/
         bool coalesced = false;
         bool dropped   = false;
@@ -286,7 +334,7 @@ void IpcServer::Emit(const IpcEvent& ev)
             std::lock_guard<std::mutex> lock(s->out_mutex);
             for(Session::OutMsg& m : s->out_queue)
             {
-                if(m.kind == ev.kind)
+                if(m.kind == qkey)
                 {
                     m.bytes   = bytes;    /* replace, don't grow   */
                     coalesced = true;
@@ -295,12 +343,16 @@ void IpcServer::Emit(const IpcEvent& ev)
             }
             if(!coalesced)
             {
+                bool room = true;
                 if(s->out_queue.size() >= options_.max_queued_events)
                 {
-                    s->out_queue.pop_front();
+                    room    = MakeRoom(s->out_queue, qkey);
                     dropped = true;
                 }
-                s->out_queue.push_back(Session::OutMsg{ ev.kind, bytes });
+                if(room)
+                {
+                    s->out_queue.push_back(Session::OutMsg{ qkey, bytes });
+                }
             }
         }
         s->out_cv.notify_one();
@@ -361,10 +413,11 @@ void IpcServer::EmitTo(uint64_t session_id, const IpcEvent& ev,
     const Session::Bytes bytes =
         std::make_shared<const std::vector<uint8_t>>(std::move(encoded));
     /* The coalesce key partitions latest-wins INSIDE the kind:
-       a queued chunk of a superseded sequence is replaced only
-       by the same (sequence,chunk) slot — never by a different
-       chunk, so a partial frame can never assemble across
-       sequences. */
+       a queued preview chunk is replaced only by the same chunk
+       SLOT of a newer frame (key frame/<chunk>) — never by a
+       different chunk. Chunks carry their sequence and the
+       client assembles strictly by sequence, so a partial
+       frame can never be painted across sequences. */
     const std::string qkey =
         coalesce_key.empty()
             ? ev.kind
@@ -385,13 +438,17 @@ void IpcServer::EmitTo(uint64_t session_id, const IpcEvent& ev,
         }
         if(!coalesced)
         {
+            bool room = true;
             if(target->out_queue.size() >= options_.max_queued_events)
             {
-                target->out_queue.pop_front();
+                room    = MakeRoom(target->out_queue, qkey);
                 dropped = true;
             }
-            target->out_queue.push_back(
-                Session::OutMsg{ qkey, bytes });
+            if(room)
+            {
+                target->out_queue.push_back(
+                    Session::OutMsg{ qkey, bytes });
+            }
         }
     }
     target->out_cv.notify_one();

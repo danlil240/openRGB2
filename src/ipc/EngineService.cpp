@@ -337,8 +337,13 @@ EngineService::EngineService(Engine& engine, Deps deps,
         deps_.workspace->SetJobEventHook(
             [this](const WorkspaceService::JobStatus& st)
             {
+                /* keyed per job: a terminal record never
+                   replaces — or is replaced by — the published
+                   snapshot queued just before it, or another
+                   job's record (audit I-8) */
                 Emit(event_kind::kWorkspace,
-                     JobStatusToJson(st));
+                     JobStatusToJson(st),
+                     "job/" + std::to_string(st.job_id));
             });
         /* The published snapshot rebroadcasts on every change —
            without it a session whose subscribe-time snapshot
@@ -451,7 +456,8 @@ void EngineService::SetServerStatsProvider(
 }
 
 void EngineService::Emit(const std::string& kind,
-                         const nlohmann::json& data)
+                         const nlohmann::json& data,
+                         const std::string& coalesce_key)
 {
     std::function<void(const IpcEvent&)> sink;
     {
@@ -460,7 +466,7 @@ void EngineService::Emit(const std::string& kind,
     }
     if(sink)
     {
-        sink(IpcEvent{ kind, data });
+        sink(IpcEvent{ kind, data, coalesce_key });
     }
 }
 

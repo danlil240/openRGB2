@@ -1605,10 +1605,16 @@ void WorkspaceCommands::PollPreviews(TimePoint now)
                 { "emitter_sent",   frame.emitter_sent   },
                 { "object_total",   frame.object_total   },
             });
+            /* Key on the chunk SLOT, not the sequence: a newer
+               frame's chunk k replaces a still-queued older
+               chunk k (latest-wins across sequences), so a slow
+               client's queue holds at most one frame's worth of
+               chunks. Each chunk carries its own sequence; the
+               client assembles strictly by sequence, so a mix of
+               old and new chunks never paints (audit I-8). */
             preview_deps_.emit(sid,
                 IpcEvent{ event_kind::kPreview, std::move(data) },
-                "frame/" + std::to_string(frame.sequence)
-                       + "/" + std::to_string(chunk));
+                "frame/" + std::to_string(chunk));
             ++chunk;
         }
     }

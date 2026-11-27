@@ -362,7 +362,8 @@ private:
     std::string         last_stats_sig_;
     TimePoint           last_frame_status_{};
 
-    void   Emit(const std::string& kind, const nlohmann::json& data);
+    void   Emit(const std::string& kind, const nlohmann::json& data,
+                const std::string& coalesce_key = std::string());
     /* Task 4.4 LAYOUT_COMMAND surface (docs/ipc-protocol.md
        §5): identify drives the mapper's bounded blink
        overlay; the other verbs mutate the applied scene

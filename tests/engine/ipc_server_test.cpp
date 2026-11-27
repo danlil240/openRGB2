@@ -611,6 +611,93 @@ int main()
         CHECK(events > 0);
     }
 
+    /*---- overflow keeps low-rate events (audit I-8) --------*/
+    {
+        /* A full queue evicts high-rate telemetry (preview
+           frames, frame_status) before anything else, and a
+           workspace job-terminal record (coalesce key
+           "job/<id>") neither replaces nor is replaced by the
+           published snapshot queued just before it. Before the
+           fix the job record overwrote the snapshot (latest-
+           wins per KIND) and then a burst of preview chunks
+           evicted the queue head — the job record. */
+        IpcServerOptions opts;
+        opts.max_queued_events = 4;
+        ScriptedService svc;
+        IpcServer server(svc, opts);
+        TestClient c;
+        server.Serve(c.MakeChannel(), ChannelKind::Command);
+        c.Hello();
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        c.SendMsg(MsgType::Subscribe, 61,
+                  nlohmann::json::object({{"events",
+                      nlohmann::json::array({
+                          event_kind::kTopology,
+                          event_kind::kWorkspace,
+                          event_kind::kPreview,
+                          event_kind::kFrameStatus })}}));
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Ok);
+        while(c.RecvMsg(m, 500)) {}   /* initial snapshots */
+
+        {
+            std::lock_guard<std::mutex> lock(c.State()->m);
+            c.State()->send_paused = true;
+        }
+        /* Wedge the writer on one event so everything after it
+           stays queued. */
+        server.Emit(IpcEvent{ event_kind::kTopology,
+                              nlohmann::json::object({{"wedge", 1}}) });
+        for(int i = 0; i < 200 && server.Stats().queued_events; ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        server.Emit(IpcEvent{ event_kind::kWorkspace,
+                              nlohmann::json::object({{"snap", 1}}) });
+        server.Emit(IpcEvent{ event_kind::kWorkspace,
+                              nlohmann::json::object({{"job_id", 7}}),
+                              "job/7" });
+        for(int i = 0; i < 20; ++i)
+        {
+            server.Emit(IpcEvent{ event_kind::kFrameStatus,
+                                  nlohmann::json::object({{"n", i}}) });
+            /* old-style per-sequence keys: distinct slots */
+            server.EmitTo(1, IpcEvent{ event_kind::kPreview,
+                              nlohmann::json::object({{"n", i}}) },
+                          "frame/" + std::to_string(i) + "/0");
+        }
+        CHECK(server.Stats().queued_events <= 4);
+        {
+            std::lock_guard<std::mutex> lock(c.State()->m);
+            c.State()->send_paused = false;
+        }
+        c.State()->cv_out.notify_all();
+        bool snap = false, job = false;
+        int  last_preview = -1;
+        while(c.RecvMsg(m, 1000))
+        {
+            if(m.type != MsgType::Event)
+            {
+                continue;
+            }
+            const nlohmann::json b = m.Body();
+            const nlohmann::json& d = b["data"];
+            if(b.value("kind", "") == "workspace")
+            {
+                snap |= d.value("snap", 0) == 1;
+                job  |= d.value("job_id", 0) == 7;
+            }
+            if(b.value("kind", "") == "preview")
+            {
+                last_preview = d.value("n", -1);
+            }
+        }
+        CHECK(snap);
+        CHECK(job);
+        CHECK(last_preview == 19);   /* the newest frame survives */
+    }
+
     /*---- diagnostics channel: read-only by construction ---*/
     {
         ScriptedService svc;

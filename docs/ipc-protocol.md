@@ -65,7 +65,7 @@ Bounds (plan section 6 — everything is bounded):
 | Write deadline | 5 s per outbound message |
 | Requests per second per connection | 128 (1 s windows; over-cap `too_large` messages count) |
 | Concurrent sessions per pipe | 8 (independent caps — a full command pipe cannot starve diagnostics) |
-| Queued events per session | 64 (per-kind latest-wins, oldest evicted) |
+| Queued events per session | 64 (latest-wins per kind + coalesce key; overflow evicts high-rate `preview`/`frame_status` first, else the oldest) |
 | Resync scan | ≤ 4 MiB skipped per message |
 | Over-cap body skip | `body_len` ≤ 4 MiB is discarded by its declared length; larger → close |
 | JSON nesting | ≤ 64 levels per body; deeper → `ERROR(malformed)` |
@@ -814,8 +814,11 @@ session's preview. Two record types:
   never presented as complete. Reassembly is strict: a client paints
   a frame only when all `chunks` of one `sequence` arrive intact;
   stale or partial sequences are dropped. Latest-wins coalescing in
-  the per-session queue keys on `frame/<sequence>/<chunk>`, so a
-  superseded frame never eats a newer chunk of the same slot.
+  the per-session queue keys on `frame/<chunk>`: a newer frame's
+  chunk replaces the still-queued chunk of the same index, so a slow
+  client's queue holds at most one frame's worth of chunks (a mix of
+  sequences in flight is resolved by the strict per-sequence
+  reassembly).
 
 Draft-preview `colors` and `frame_status` `colors` answer different
 questions — what the unsaved draft evaluates to vs. what transport
@@ -823,11 +826,16 @@ accepted for delivery — and are never interchangeable physical
 measurements.
 
 An `events` field that is neither `"all"` nor an array of strings, or any
-unknown kind name → `bad_request` (subscription unchanged). Queue overflow
-drops the oldest queued event (counted in `ipc.events_dropped`); a queued
-event of a kind is replaced by a newer one rather than appended (for
-`preview`, replacement additionally partitions on the coalesce key:
-`status` for status records, `frame/<sequence>/<chunk>` for chunks).
+unknown kind name → `bad_request` (subscription unchanged). A queued
+event of a kind is replaced by a newer one rather than appended;
+replacement additionally partitions on a coalesce key for `preview`
+(`status` for status records, `frame/<chunk>` for chunks) and for
+`workspace` (a job-terminal record is keyed `job/<job_id>`, so it never
+replaces or is replaced by the published-state snapshot or another job's
+record). Queue overflow evicts the oldest queued high-rate event
+(`preview`, `frame_status`); a high-rate event arriving at a queue with
+none queued is dropped itself, and any other event evicts the oldest
+queued event. Every drop or replacement counts in `ipc.events_dropped`.
 
 ## 8. Notes for implementers
 
