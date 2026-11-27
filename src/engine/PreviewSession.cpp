@@ -28,16 +28,36 @@ RgbColor PreviewScale(studio::SceneColor c, float brightness)
     return out;
 }
 
-/* True for objects the draft view paints: anything carrying
-   emitters. Linked copies follow their owner's frame exactly
-   like the renderer does; unverified/unbound Device objects
-   still show — the draft preview is where a user checks an
-   UNSAVED layout, so objects the output path skips (never
-   verified, binding unresolved) must appear here. */
-bool Previewable(const studio::SceneObject& o)
+/* The object whose emitters a preview object displays: itself,
+   or — for a Linked copy, which the resolver strips of its own
+   emitters — its output owner. */
+const studio::SceneObject& EmitterSource(
+    const studio::SceneDocument& doc, const studio::SceneObject& o)
 {
-    return !o.emitters.empty() &&
-           o.kind != studio::ObjectKind::Group;
+    if(o.kind == studio::ObjectKind::Linked)
+    {
+        const studio::SceneObject* owner =
+            studio::OutputOwner(doc, o.id);
+        if(owner != nullptr)
+        {
+            return *owner;
+        }
+    }
+    return o;
+}
+
+/* True for objects the draft view paints: anything carrying
+   emitters, directly or through its owner. Linked copies follow
+   their owner's frame exactly like the renderer does;
+   unverified/unbound Device objects still show — the draft
+   preview is where a user checks an UNSAVED layout, so objects
+   the output path skips (never verified, binding unresolved)
+   must appear here. */
+bool Previewable(const studio::SceneDocument& doc,
+                 const studio::SceneObject& o)
+{
+    return o.kind != studio::ObjectKind::Group &&
+           !EmitterSource(doc, o).emitters.empty();
 }
 
 } /* anonymous namespace */
@@ -216,9 +236,9 @@ bool PreviewSession::Sample(double scene_time_s,
     size_t emitter_total = 0;
     for(const studio::SceneObject& o : doc.objects)
     {
-        if(Previewable(o))
+        if(Previewable(doc, o))
         {
-            emitter_total += o.emitters.size();
+            emitter_total += EmitterSource(doc, o).emitters.size();
         }
     }
     const bool reduced =
@@ -234,10 +254,11 @@ bool PreviewSession::Sample(double scene_time_s,
 
     for(const studio::SceneObject& o : doc.objects)
     {
-        if(!Previewable(o))
+        if(!Previewable(doc, o))
         {
             continue;
         }
+        const studio::SceneObject& src = EmitterSource(doc, o);
         PreviewObjectColors pc;
         pc.object_id     = o.id;
         pc.parent_id     = o.parent_id;
@@ -247,7 +268,7 @@ bool PreviewSession::Sample(double scene_time_s,
         pc.size_m        = studio::ResolvedBodySize(o);
         pc.bound         = !o.binding.empty();
         pc.verified      = o.verified;
-        pc.emitter_total = o.emitters.size();
+        pc.emitter_total = src.emitters.size();
         switch(o.kind)
         {
         case studio::ObjectKind::Device: pc.kind = "device"; break;
@@ -258,12 +279,9 @@ bool PreviewSession::Sample(double scene_time_s,
 
         /* The evaluated frame is keyed by the OUTPUT owner —
            a linked copy displays its owner's evaluation. */
-        const studio::SceneObject* owner =
-            studio::OutputOwner(doc, o.id);
-        const std::string owner_id = owner ? owner->id : o.id;
-        const auto fit = eval.find(owner_id);
+        const auto fit = eval.find(src.id);
 
-        const size_t n = o.emitters.size();
+        const size_t n = src.emitters.size();
         if(reduced)
         {
             for(size_t e = 0; e < n; e += stride)
