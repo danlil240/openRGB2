@@ -13,6 +13,17 @@ if(WIN32)
         LABELS packaging
         TIMEOUT 30)
 
+    # Audit P-14: the staged manifest's backend pin comes from
+    # vendor/provenance/MANIFEST.md, not a string literal.
+    add_test(NAME package_stage_pin_test
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/stage_release_pin_tests.ps1
+            -StageScript ${CMAKE_SOURCE_DIR}/packaging/windows/stage-release.ps1
+            -RepoRoot ${CMAKE_SOURCE_DIR})
+    set_tests_properties(package_stage_pin_test PROPERTIES
+        LABELS packaging
+        TIMEOUT 30)
+
     add_test(NAME package_launcher_test
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
             -File ${CMAKE_CURRENT_SOURCE_DIR}/launcher_tests.ps1
