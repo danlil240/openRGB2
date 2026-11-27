@@ -1376,18 +1376,38 @@ static void TestZoneLayoutToPoints()
     z.layout.start_angle_deg = 90.0f;
     z.layout.face_y_m        = 0.01f;
     z.layout.reverse         = true;
+    /* Audit C-14: a ring/strip address is ALWAYS the instance's
+       addr_base + LED index, so the baked zone must keep that
+       relationship - explicit baked addresses (0..n-1) would win
+       over a per-instance addr_base and drive the wrong LEDs. */
+    const std::vector<Emitter> ring_at8 = GenerateZoneEmitters(z, "g", 8);
     CHECK(ZoneLayoutToPoints(z), "zp: ring converts");
     CHECK(z.layout.type == "points" && z.layout.points.size() == 4
-          && z.layout.addresses.size() == 4 && z.led_count == 4,
-          "zp: points + addresses baked, count synced");
+          && z.led_count == 4,
+          "zp: points baked, count synced");
+    CHECK(z.layout.addresses.empty(),
+          "zp: ring bakes no explicit addresses (addr_base + index)");
+    {
+        const std::vector<Emitter> b = GenerateZoneEmitters(z, "g", 8);
+        bool same = b.size() == ring_at8.size();
+        for(size_t i = 0; same && i < b.size(); i++)
+        {
+            same = b[i].address == ring_at8[i].address
+                && NearVec(b[i].local_pos, ring_at8[i].local_pos);
+        }
+        CHECK(same, "zp: baked ring honours a per-instance addr_base");
+    }
     /* address 0 sits at the start angle; reversed order walks
        counter-clockwise (ang = start - i*90). */
     CHECK(NearVec(z.layout.points[0], { 0.0f, 0.01f, -0.05f }),
           "zp: address 0 at start angle");
     CHECK(NearVec(z.layout.points[1], { 0.05f, 0.01f, 0.0f }),
           "zp: reverse step direction preserved");
-    CHECK(z.layout.addresses[0] == 0 && z.layout.addresses[3] == 3,
-          "zp: addresses pin the physical order");
+    {
+        const std::vector<Emitter> b = GenerateZoneEmitters(z, "", 0);
+        CHECK(b.size() == 4 && b[0].address == 0 && b[3].address == 3,
+              "zp: point order pins the physical order");
+    }
 
     /* strip — spacing 10 mm from origin (100,0,0) mm */
     DeviceZone s;
@@ -1395,7 +1415,15 @@ static void TestZoneLayoutToPoints()
     s.layout.type       = "strip";
     s.layout.spacing_m  = 0.01f;
     s.layout.origin     = { 0.1f, 0.0f, 0.0f };
+    const std::vector<Emitter> strip_at5 = GenerateZoneEmitters(s, "g", 5);
     CHECK(ZoneLayoutToPoints(s), "zp: strip converts");
+    {
+        const std::vector<Emitter> b = GenerateZoneEmitters(s, "g", 5);
+        CHECK(s.layout.addresses.empty() && b.size() == 3
+              && b[0].address == strip_at5[0].address
+              && b[2].address == strip_at5[2].address,
+              "zp: baked strip honours a per-instance addr_base");
+    }
     CHECK(NearVec(s.layout.points[1], { 0.11f, 0.0f, 0.0f }),
           "zp: strip pitch lands");
     CHECK(s.led_count == 3, "zp: strip count synced");
@@ -1412,7 +1440,18 @@ static void TestZoneLayoutToPoints()
     m.layout.pitch_z_m = 0.02f;
     m.layout.empty_cell = 0xFFFFFFFFu;
     m.layout.map       = { 0u, 0xFFFFFFFFu, 1u, 2u };
+    /* A static matrix's addresses are its map's cell values and
+       ignore addr_base, so they ARE baked explicitly - the baked
+       zone ignores addr_base exactly as the matrix did. */
+    const std::vector<Emitter> mx_at5 = GenerateZoneEmitters(m, "g", 5);
     CHECK(ZoneLayoutToPoints(m), "zp: static matrix converts");
+    {
+        const std::vector<Emitter> b = GenerateZoneEmitters(m, "g", 5);
+        CHECK(b.size() == 3 && mx_at5.size() == 3
+              && b[0].address == mx_at5[0].address
+              && b[2].address == mx_at5[2].address,
+              "zp: baked matrix keeps its cell addresses");
+    }
     CHECK(m.layout.points.size() == 3 && m.led_count == 3,
           "zp: only live cells baked");
     CHECK(m.layout.addresses[0] == 0 && m.layout.addresses[1] == 1
