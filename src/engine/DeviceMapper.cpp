@@ -383,10 +383,21 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
         if(st.generation != snap.topology_generation ||
            st.colors.size() != led_count)
         {
+            /* Only a real topology change restarts the sequence
+               space (the lane's guard resets with it). A
+               baseline reseed WITHIN the generation — the first
+               scene frame for a controller that so far only got
+               identify overlay frames (no colors booked) — must
+               continue the live space those frames already
+               spent, or the lane rejects every frame as
+               out-of-order until the scene catches up (E-4). */
+            if(st.generation != snap.topology_generation)
+            {
+                st.seq = 0;
+            }
             st.colors = snap.colors;
             st.colors.resize(led_count);   /* pad with black */
             st.generation = snap.topology_generation;
-            st.seq        = 0;
         }
         std::vector<RgbColor>& colors = st.colors;
 
@@ -557,10 +568,10 @@ void DeviceMapper::ApplyIdentify(std::vector<RgbFrame>& out,
                         f.colors.resize(led_count);
                         st.generation = snap.topology_generation;
                         /* st.seq is NOT reset here: overlay-only
-                           controllers book no generation tag, so
-                           this branch also runs mid-generation —
-                           and the blink frames already spent seqs
-                           in the lane's live space. Only a real
+                           controllers book no colors, so this
+                           branch also runs mid-generation — and
+                           the blink frames already spent seqs in
+                           the lane's live space. Only a real
                            topology change may restart sequences
                            (the lane's guard resets with it). */
                     }
@@ -605,10 +616,23 @@ void DeviceMapper::ApplyIdentify(std::vector<RgbFrame>& out,
                LIVE sequence space (emitted_) — the lane's
                out-of-order guard must see every frame it
                sends, identify or scene. */
+            /* Tag the entry with the generation its sequence
+               belongs to (no colors booked — the blink is not a
+               baseline): a stale entry from an older generation
+               restarts at 1 like the lane's guard, and a scene
+               frame in this generation continues the space
+               (E-4). */
+            Emitted& st = emitted_[it->first];
+            if(st.generation != snap.topology_generation)
+            {
+                st.generation = snap.topology_generation;
+                st.seq        = 0;
+                st.colors.clear();
+            }
             RgbFrame f;
             f.controller          = it->first;
             f.topology_generation = snap.topology_generation;
-            f.sequence            = ++emitted_[it->first].seq;
+            f.sequence            = ++st.seq;
             f.sample_time         = sample_time;
             f.colors.assign(snap.LedCount(), kDark);
             out.push_back(std::move(f));
