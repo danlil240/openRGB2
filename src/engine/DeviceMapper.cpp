@@ -39,12 +39,18 @@ studio::ControllerSnapshot ToControllerSnapshot(const DeviceSnapshot& snap)
     return cs;
 }
 
+/* Brightness is clamped to [0, 1] (NaN -> 0) before scaling:
+   documents validate it, but an out-of-range value must never
+   wrap a channel (1.5 * 200 & 0xFF = 44) or hit the undefined
+   float->unsigned conversion of a negative/huge product. */
 RgbColor ScaleColor(RgbColor c, float brightness)
 {
+    const float b = !(brightness > 0.0f) ? 0.0f
+                  : (brightness > 1.0f ? 1.0f : brightness);
     RgbColor out;
-    out.r = uint8_t((unsigned)(c.r * brightness) & 0xFFu);
-    out.g = uint8_t((unsigned)(c.g * brightness) & 0xFFu);
-    out.b = uint8_t((unsigned)(c.b * brightness) & 0xFFu);
+    out.r = uint8_t((unsigned)(c.r * b));
+    out.g = uint8_t((unsigned)(c.g * b));
+    out.b = uint8_t((unsigned)(c.b * b));
     return out;
 }
 

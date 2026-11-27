@@ -567,6 +567,24 @@ static void TestLongUptimePhase()
     }
 }
 
+/* Expanded-scene brightness follows the compact 0..1 contract. */
+static void TestSceneBrightnessRange()
+{
+    using namespace studio;
+    for(double b : { -0.1, 1.5 })
+    {
+        nlohmann::json j = { { "version", 1 }, { "brightness", b } };
+        SceneDocument doc;
+        std::vector<std::string> errs;
+        CHECK(!FromJson(j, doc, &errs), "scene brightness out of range rejected");
+    }
+    nlohmann::json ok = { { "version", 1 }, { "brightness", 0.25 } };
+    SceneDocument doc;
+    std::vector<std::string> errs;
+    CHECK(FromJson(ok, doc, &errs) && doc.brightness == 0.25f,
+          "scene brightness in range accepted");
+}
+
 static void TestNoiseAndMasks()
 {
     using namespace studio;
@@ -1705,6 +1723,7 @@ int main()
     TestWaveSpatial();
     TestPulseCometSpin();
     TestLongUptimePhase();
+    TestSceneBrightnessRange();
     TestNoiseAndMasks();
     TestEngineMirrorAndJson();
     TestPresetsAndRemix();
