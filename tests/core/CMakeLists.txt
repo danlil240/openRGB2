@@ -32,6 +32,13 @@ dls_suite(device_preset_test)
 dls_suite(studio_editor_test)
 dls_suite(effect_json_test)
 
+# The golden effect-fixture capture tool (not a test): regenerates
+# fixtures/effects/<id>.fixture.json for effect_json_test's parity
+# oracle. Built on demand only; see the header of the source file.
+add_executable(effect_fixture_gen EXCLUDE_FROM_ALL effect_fixture_gen.cpp)
+target_link_libraries(effect_fixture_gen PRIVATE openrgb2_studio_core)
+target_compile_definitions(effect_fixture_gen PRIVATE NDEBUG)
+
 # Studio-import Task 2 — the canonical workspace candidate
 # (parse/migrate/validate/resolve for every persisted form).
 dls_suite(workspace_candidate_test)
