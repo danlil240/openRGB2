@@ -596,6 +596,15 @@ token alongside the human `message`. Handlers only validate, enqueue,
 or read snapshots — every file-touching operation is a job on the
 workspace service's single bounded worker.
 
+Workspace ids are `[A-Za-z0-9_-]+` naming one directory under the
+managed root. The store's own directories (`library`, `assets`,
+`transfers`) and the Windows reserved device names (`CON`, `PRN`,
+`AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`) are refused in any letter
+case. Ids are case-insensitive on disk: an id that differs from an
+existing workspace only in case (`Desk` vs `desk`) neither reads nor
+writes that workspace — loads report it unusable and commits/installs
+fail with an error naming the existing id.
+
 Revisions are uint64 counters: `workspace_revision` moves on durable
 commit, `resource_revision` on resource-set change. Candidate verbs
 (`commit`, `save_copy`, `import_commit`) carry `base_revision` and
