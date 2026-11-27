@@ -199,10 +199,14 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+5"; onActivated: root.currentView = 4 }
     /* Ctrl+S saves the Lighting working copy — commits any
        focused field's uncommitted text first (same path as
-       the on-screen Save button). */
+       the on-screen Save button). In a managed workspace the
+       Layout view edits the SAME shared draft, so Ctrl+S
+       commits it from there too (audit Q-4); legacy layout
+       ops apply immediately and have nothing to save. */
     Shortcut {
         sequence: "Ctrl+S"
-        enabled: root.currentView === 1
+        enabled: (root.currentView === 1
+                  || (root.currentView === 2 && root.wsManaged))
                  && typeof sceneEdit !== "undefined"
                  && !sceneEdit.saving
         onActivated: lightingPage.commitPendingEdits()
