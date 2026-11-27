@@ -478,6 +478,25 @@ int main(int argc, char** argv)
     const double oldX = kbd->x();
     const double oldY = kbd->y();
 
+    /* The delegate's drag MouseArea must keep its grab — the
+       page-level Flickable otherwise steals the drag past its
+       threshold and scrolls the page instead of moving the
+       object. */
+    {
+        bool found = false;
+        for(QQuickItem* c : kbd->childItems())
+        {
+            if(QString::fromLatin1(c->metaObject()->className())
+                   .contains(QStringLiteral("MouseArea"))
+               && c->property("preventStealing").isValid())
+            {
+                found = true;
+                CHECK(c->property("preventStealing").toBool());
+            }
+        }
+        CHECK(found);
+    }
+
     /*---- THE REGRESSION ------------------------------------
        moveObject is exactly what the delegate's drag-release
        calls. The document/draft updates pre-fix too — what
