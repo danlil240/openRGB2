@@ -30,6 +30,7 @@
 #include <QJSValue>
 #include <QQmlComponent>
 #include <QQmlEngine>
+#include <QKeyEvent>
 #include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickWindow>

@@ -54,48 +54,6 @@ Popup {
     }
 
     onOpened: reset()
-    /* Audit Q-13: every close path — Escape, the Close button, a
-       click outside — releases a staged inspect the same way;
-       Escape used to close without cancelling. (cancelImport is a
-       no-op once the commit has consumed the stage.) */
-    onClosed: {
-        var c = ctl()
-        if (c !== null && phase !== "idle")
-            c.cancelImport()
-    }
-
-    /* "idle" and "done" are quiescent: after an import finishes,
-       another inspect and the export stay reachable without
-       reopening the dialog (audit Q-13). */
-    readonly property bool quiet: phase === "idle" || phase === "done"
-    readonly property bool canPick: quiet || phase === "report"
-
-    /* FileDialog hands back file:// URLs; the fields hold plain
-       local paths (the controller accepts both). */
-    function localPath(u) {
-        var s = String(u)
-        if (s.indexOf("file:///") === 0)
-            s = s.substring(8)
-        else if (s.indexOf("file://") === 0)
-            s = "//" + s.substring(7)      /* UNC host */
-        return decodeURIComponent(s)
-    }
-    FileDialog {
-        id: importPick
-        title: qsTr("Choose a workspace bundle")
-        fileMode: FileDialog.OpenFile
-        nameFilters: [qsTr("Workspace bundles (*.or2studio)"),
-                      qsTr("All files (*)")]
-        onAccepted: pathField.text = dialog.localPath(selectedFile)
-    }
-    FileDialog {
-        id: exportPick
-        title: qsTr("Export the workspace bundle")
-        fileMode: FileDialog.SaveFile
-        defaultSuffix: "or2studio"
-        nameFilters: [qsTr("Workspace bundles (*.or2studio)")]
-        onAccepted: exportPathField.text = dialog.localPath(selectedFile)
-    }
 
     function readAndInspect() {
         var c = ctl()
@@ -156,6 +114,49 @@ Popup {
         for (var i = 0; i < keys.length; i++)
             out[keys[i]] = renameMap[keys[i]]
         return out
+    }
+
+    /* Audit Q-13: every close path — Escape, the Close button, a
+       click outside — releases a staged inspect the same way;
+       Escape used to close without cancelling. (cancelImport is a
+       no-op once the commit has consumed the stage.) */
+    onClosed: {
+        var c = ctl()
+        if (c !== null && phase !== "idle")
+            c.cancelImport()
+    }
+
+    /* "idle" and "done" are quiescent: after an import finishes,
+       another inspect and the export stay reachable without
+       reopening the dialog (audit Q-13). */
+    readonly property bool quiet: phase === "idle" || phase === "done"
+    readonly property bool canPick: quiet || phase === "report"
+
+    /* FileDialog hands back file:// URLs; the fields hold plain
+       local paths (the controller accepts both). */
+    function localPath(u) {
+        var s = String(u)
+        if (s.indexOf("file:///") === 0)
+            s = s.substring(8)
+        else if (s.indexOf("file://") === 0)
+            s = "//" + s.substring(7)      /* UNC host */
+        return decodeURIComponent(s)
+    }
+    FileDialog {
+        id: importPick
+        title: qsTr("Choose a workspace bundle")
+        fileMode: FileDialog.OpenFile
+        nameFilters: [qsTr("Workspace bundles (*.or2studio)"),
+                      qsTr("All files (*)")]
+        onAccepted: pathField.text = dialog.localPath(selectedFile)
+    }
+    FileDialog {
+        id: exportPick
+        title: qsTr("Export the workspace bundle")
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "or2studio"
+        nameFilters: [qsTr("Workspace bundles (*.or2studio)")]
+        onAccepted: exportPathField.text = dialog.localPath(selectedFile)
     }
 
     Connections {
