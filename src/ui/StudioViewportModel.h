@@ -29,6 +29,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
 
@@ -153,13 +154,19 @@ private:
     int      dropped_frames_ = 0;
     QString  last_error_;
 
-    /* Latest-wins client side: every edit pushes ONE debounced
-       candidate; a refusal latches until the next edit. */
+    /* Latest-wins client side: a burst of edits pushes ONE
+       debounced candidate; a refusal latches until the next edit. */
     quint64  push_rev_       = 0;
     int      pending_req_    = 0;
     bool     refused_        = false;
     bool     begin_sent_     = false;
     int      debounce_ms_    = 120;
+    /* Trailing-edge debounce for draft pushes (one timer,
+       restarted per draft signal). */
+    QTimer   push_timer_;
+    /* The visibility the engine last received (begin or
+       visibility update) — reconciled when the begin reply lands. */
+    bool     sent_visible_   = true;
 
     /* Chunk reassembly — keyed by sequence; a newer sequence
        orphans the partial (counted as dropped). */

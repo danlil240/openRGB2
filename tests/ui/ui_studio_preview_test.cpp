@@ -519,6 +519,66 @@ int main(int argc, char** argv)
     }
 
     /*========================================================*\
+    || Visibility change while the begin is in flight         ||
+    \*========================================================*/
+    std::printf("-- hide before the begin reply is reconciled\n");
+    {
+        PvRig rig;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] { return rig.bridge.connected(); }));
+        /* LoadDraft sends preview_begin synchronously (visible);
+           the surface hides BEFORE the reply is processed. */
+        rig.LoadDraft(CompactDoc());
+        rig.vm->setVisible(false);
+        CHECK(rig.PumpUntil([&] { return rig.vm->previewActive(); }));
+        CHECK(rig.engine.last_begin.value("visible", false) == true);
+        /* The begin reply re-sends the CURRENT visibility. */
+        CHECK(rig.PumpUntil([&] {
+            return rig.engine.updates >= 1
+                   && rig.engine.last_update.value("visible", true)
+                          == false;
+        }));
+        /* Unchanged visibility is not re-sent. */
+        const int n = rig.engine.updates;
+        rig.vm->setVisible(false);
+        rig.PumpUntil([&] { return false; }, 150);
+        CHECK(rig.engine.updates == n);
+    }
+
+    /*========================================================*\
+    || A burst of edits coalesces into ONE preview push       ||
+    \*========================================================*/
+    std::printf("-- debounce coalesces a burst\n");
+    {
+        PvRig rig;
+        rig.vm->setDebounceMsForTesting(150);
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] { return rig.bridge.connected(); }));
+        rig.LoadDraft(CompactDoc());
+        CHECK(rig.PumpUntil([&] { return rig.vm->previewActive(); }));
+        /* Let the load's own debounced push land first. */
+        rig.PumpUntil([&] { return false; }, 400);
+        const int before = rig.engine.updates;
+        for(int i = 0; i < 8; ++i)
+        {
+            rig.ctl.Session().CommitDocEdit("rename",
+                [i](studio::StudioDocument& d)
+                {
+                    d.meta.name = "burst" + std::to_string(i);
+                    return true;
+                });
+            rig.ctl.NoteDraftEdited();
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        }
+        /* undo emits draftEdited + historyChanged — still one */
+        rig.ctl.undo();
+        rig.PumpUntil([&] { return false; }, 600);
+        CHECK(rig.engine.updates == before + 1);
+        CHECK(rig.engine.last_update["document"].value("name", "")
+              == "burst6");
+    }
+
+    /*========================================================*\
     || wantPreview off -> end; refusal -> lastError            ||
     \*========================================================*/
     std::printf("-- end + refusal honesty\n");
