@@ -275,6 +275,10 @@ private:
        the new topology lands in `snaps` this same poll. */
     void ReconcileZoneSizes(std::vector<DeviceSnapshot>& snaps);
 
+    /* Event-interest gate for host-side event producers (stub:
+       true until IpcServer::HasSubscriber is merged). */
+    bool EventInterest(const char* kind) const;
+
     EngineHostOptions        opts_;
     /* Built in Start() with opts_.instance_name — the option is
        a real seam: tests take a test-scoped guard name so a

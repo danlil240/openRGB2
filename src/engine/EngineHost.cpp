@@ -1313,6 +1313,9 @@ bool EngineHost::StartIpc()
         { ipc_server_->EmitTo(sid, ev, key); });
     service_->SetServerStatsProvider(
         [this]() { return ipc_server_->Stats(); });
+    /* TODO(merge): service_->SetEventInterest([this](const std::string& k){ return ipc_server_->HasSubscriber(k); });
+       (IPC-side API lands with the IPC worktree merge; until then
+       EventInterest() below is a stub that reports true.) */
 
     /* Both pipes share the restricted DACL (creating user +
        LocalSystem only). The diagnostics pipe is read-only
@@ -1723,6 +1726,16 @@ void EngineHost::ReprobeSdk(TimePoint now)
     sdk_->ReconnectNow();
 }
 
+/* The single cheap "is anyone subscribed to `kind`" check every
+   host-side event producer (frame_status here; preview bodies are
+   built inside EngineService) goes through, so a body nobody
+   subscribed to is never built.
+   TODO(merge): return ipc_server_ && ipc_server_->HasSubscriber(kind); */
+bool EngineHost::EventInterest(const char* /*kind*/) const
+{
+    return true;
+}
+
 void EngineHost::Run()
 {
     /* frame_status rides a fast tick beside the ~500 ms
@@ -1739,7 +1752,7 @@ void EngineHost::Run()
             PollOnce();
             next_maint = now + std::chrono::milliseconds(500);
         }
-        if(service_)
+        if(service_ && EventInterest("frame_status"))
         {
             service_->PollFrameStatus();
         }
