@@ -24,11 +24,33 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <new>
 #include <vector>
 #include <string>
 
 static int failures = 0;
 static int checks   = 0;
+
+/* Heap-allocation counter for the steady-state Evaluate test
+   (audit C-10): this executable replaces global operator new and
+   counts only while g_count_allocs is set. */
+static bool g_count_allocs = false;
+static long g_allocs       = 0;
+
+void* operator new(std::size_t n)
+{
+    if(g_count_allocs)
+    {
+        ++g_allocs;
+    }
+    if(void* p = std::malloc(n ? n : 1))
+    {
+        return p;
+    }
+    throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept              { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 
 #define CHECK(cond, name)                                              \
     do {                                                               \
@@ -974,6 +996,101 @@ static void TestPreparedMatchesPerSample()
         }
     }
     CHECK(mismatches == 0, "prepared engine path == per-sample EvalPrimitive");
+}
+
+/* Audit C-10: Evaluate cleared the frame map and rebuilt every
+   entry (a map node + a color vector per object) each tick, and
+   looked each object's output owner up with a linear scan of the
+   document (always the object itself for a Device). A steady-state
+   Evaluate into the previous tick's frame now reuses its entries
+   and allocates nothing, while still matching a fresh evaluation
+   and dropping entries for objects that stop being touched. */
+static void TestEvaluateReusesFrame()
+{
+    using namespace studio;
+    SceneDocument doc;
+    for(int k = 0; k < 6; k++)
+    {
+        SceneObject o;
+        o.id       = "o" + std::to_string(k);
+        o.kind     = ObjectKind::Device;
+        o.geometry = (k % 2) ? "fan_body" : "strip_body";
+        o.verified = true;
+        o.transform.position = { 0.15f * (float)k, 0.0f, 0.05f * (float)k };
+        o.emitters = (k % 2) ? layout::Ring(8, 0.06f, 0.0f, false, o.id)
+                             : layout::Strip(6, 0.04f, { 0, 0, 0 }, o.id);
+        doc.objects.push_back(o);
+    }
+    doc.object_colors["o1"]       = MakeSceneColor(10, 20, 30);
+    doc.emitter_colors["o2"][3]   = MakeSceneColor(200, 100, 50);
+
+    const Palette pal = MakePalette({ MakeSceneColor(255, 0, 0),
+                                      MakeSceneColor(0, 0, 255) });
+    std::vector<EffectLayer> layers;
+    {
+        EffectLayer L; L.primitive = "wave"; L.scale = 0.7f; L.speed = 0.2f;
+        L.density = 1.0f; L.palette = pal; L.opacity = 0.8f;
+        layers.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "comet"; L.speed = 0.4f; L.scale = 0.3f;
+        L.path = { { 0, 0, 0 }, { 0.8f, 0, 0 }, { 0.8f, 0, 0.3f } };
+        L.palette = pal; L.blend = BlendMode::Add; layers.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "noise"; L.scale = 2.0f; L.speed = 0.3f;
+        L.density = 0.4f; L.palette = pal; L.blend = BlendMode::Screen;
+        layers.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "gradient"; L.targets = { "o1" };
+        L.palette = pal; L.opacity = 0.5f; layers.push_back(L);
+    }
+
+    EffectEngine engine;
+    engine.SetLayers(layers);
+    const std::map<std::string, Mat4> world = ResolveWorldMatrices(doc);
+    FrameColors frame;
+    engine.Evaluate(doc, world, 1.0, frame);    /* entries created */
+    engine.Evaluate(doc, world, 1.1, frame);    /* warm            */
+
+    g_allocs       = 0;
+    g_count_allocs = true;
+    engine.Evaluate(doc, world, 1.2, frame);
+    g_count_allocs = false;
+    char msg[96];
+    std::snprintf(msg, sizeof(msg),
+                  "steady-state Evaluate allocates nothing (%ld)", g_allocs);
+    CHECK(g_allocs == 0, msg);
+
+    FrameColors fresh;
+    engine.Evaluate(doc, world, 1.2, fresh);
+    CHECK(frame == fresh && frame.size() == 6,
+          "reused frame equals a fresh evaluation");
+
+    /* Only o1 touched now: every other entry must go. */
+    EffectLayer only = layers[3];
+    engine.SetLayers({ only });
+    engine.Evaluate(doc, world, 1.3, frame);
+    CHECK(frame.size() == 1 && frame.count("o1") == 1,
+          "entries of untouched objects are dropped");
+
+    /* An object that leaves the document, and one that becomes a
+       Linked copy, lose their entries; a grown object resizes. */
+    engine.SetLayers(layers);
+    engine.Evaluate(doc, world, 1.4, frame);
+    SceneDocument doc2 = doc;
+    doc2.objects.erase(doc2.objects.begin() + 4);            /* o4 gone   */
+    doc2.objects[0].kind      = ObjectKind::Linked;          /* o0 linked */
+    doc2.objects[0].mirror_of = "o2";
+    doc2.objects[1].emitters  = layout::Ring(12, 0.06f, 0.0f, false, "o1");
+    const std::map<std::string, Mat4> world2 = ResolveWorldMatrices(doc2);
+    engine.Evaluate(doc2, world2, 1.5, frame);
+    FrameColors fresh2;
+    engine.Evaluate(doc2, world2, 1.5, fresh2);
+    CHECK(frame == fresh2 && frame.count("o4") == 0
+          && frame.count("o0") == 0 && frame["o1"].size() == 12,
+          "document changes sweep and resize reused entries");
 }
 
 /* Expanded-scene brightness follows the compact 0..1 contract. */
@@ -2136,6 +2253,7 @@ int main()
     TestLongUptimePhase();
     TestPhaseContinuity();
     TestPreparedMatchesPerSample();
+    TestEvaluateReusesFrame();
     TestSceneBrightnessRange();
     TestNoiseAndMasks();
     TestEngineMirrorAndJson();

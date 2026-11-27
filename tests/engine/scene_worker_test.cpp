@@ -304,6 +304,49 @@ static void TestSpeedEditContinuity()
     }
 }
 
+/* Audit C-10: the worker hands each tick's frame buffers back to
+   Evaluate. Every tick must still equal a fresh evaluation, and
+   an object that stops being touched (or leaves the document)
+   must not keep a stale entry from the reused buffers. */
+static void TestFrameBufferReuse()
+{
+    SceneWorker worker;
+    std::vector<EvaluatedFrame> frames;
+    worker.SetFrameCallback([&frames](const EvaluatedFrame& f)
+    {
+        frames.push_back(f);
+    });
+    const TimePoint epoch = Clock::now();
+    worker.SetEpoch(epoch);
+
+    auto two = std::make_shared<studio::SceneDocument>();
+    two->objects.push_back(OneLedDevice("a", 0.1f));
+    two->objects.push_back(OneLedDevice("b", 0.6f));
+    std::vector<studio::EffectLayer> only_a = WaveLayers();
+    only_a[0].targets = { "a" };
+
+    worker.SubmitScene(two, WaveLayers(), 1);
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(100)));
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(116)));
+    worker.SubmitScene(two, only_a, 2);
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(132)));
+    auto one = std::make_shared<studio::SceneDocument>();
+    one->objects.push_back(OneLedDevice("b", 0.6f));
+    worker.SubmitScene(one, WaveLayers(), 3);
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(148)));
+
+    CHECK(frames.size() == 4);
+    if(frames.size() == 4)
+    {
+        CHECK(frames[0].colors == Reference(*two, WaveLayers(), 0.100));
+        CHECK(frames[1].colors == Reference(*two, WaveLayers(), 0.116));
+        CHECK(frames[2].colors == Reference(*two, only_a, 0.132)
+              && frames[2].colors.count("b") == 0);
+        CHECK(frames[3].colors == Reference(*one, WaveLayers(), 0.148)
+              && frames[3].colors.count("a") == 0);
+    }
+}
+
 static void TestNoScene()
 {
     SceneWorker worker;
@@ -559,6 +602,7 @@ int main()
     TestOutputGate();
     TestWorldCachePerScene();
     TestSpeedEditContinuity();
+    TestFrameBufferReuse();
     TestInputSlot();
     TestReentrantInputProvider();
     TestStepFaultIsContained();

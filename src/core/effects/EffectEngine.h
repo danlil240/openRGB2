@@ -49,7 +49,10 @@ public:
        frame entry — downstream falls back to painted colors.
        Linked copies are skipped: they display their owner's frame.
        `input` carries reactive signals (audio onsets, key events,
-       screen grid); nullptr disables reactive primitives. */
+       screen grid); nullptr disables reactive primitives.
+       `frame` is overwritten, but its existing entries are reused
+       (no reallocation): pass the previous tick's map back to make
+       a steady-state tick allocation-free (audit C-10). */
     void Evaluate(const SceneDocument& doc, double t, FrameColors& frame,
                   const InputState* input = nullptr) const;
 

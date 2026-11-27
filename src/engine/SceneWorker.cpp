@@ -254,6 +254,10 @@ bool SceneWorker::Step(TimePoint now)
                     *active_scene_.scene.doc);
                 world_dirty_  = false;
             }
+            /* Audit C-10: evaluate into last tick's buffers. The
+               callback only reads the frame (synchronously), so
+               the colors come back to the scratch afterwards. */
+            frame.colors.swap(frame_scratch_);
             engine_.Evaluate(*active_scene_.scene.doc, active_world_,
                              frame.scene_time_s,
                              frame.colors, input);
@@ -261,6 +265,10 @@ bool SceneWorker::Step(TimePoint now)
         if(cb)
         {
             cb(frame);
+        }
+        if(evaluate)
+        {
+            frame_scratch_.swap(frame.colors);
         }
     }
     catch(const std::exception& e)
