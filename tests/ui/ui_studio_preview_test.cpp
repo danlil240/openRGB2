@@ -456,6 +456,13 @@ int main(int argc, char** argv)
         const QVariantMap first =
             rig.vm->objects()[0].toMap();
         CHECK(first.value("indices").toList().size() == 1);
+        /* colorsFor: id-indexed, sparse indices expand dense. */
+        const QVariantList dense =
+            rig.vm->colorsFor("fan0", 3).toList();
+        CHECK(dense.size() == 3);
+        CHECK(dense.value(0).toString() == "#123456");
+        CHECK(dense.value(1).toString() == "#000000");
+        CHECK(!rig.vm->colorsFor("nope", 3).isValid());
 
         /* Transport-accepted output is a DIFFERENT store —
            draft colors never merge into frame_status and vice

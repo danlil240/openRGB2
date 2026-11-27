@@ -165,7 +165,49 @@ void StudioViewportModel::ClearFrame()
     emitter_sent_  = 0;
     reduced_       = false;
     objects_.clear();
+    object_index_.clear();
     partials_.clear();
+}
+
+QVariant StudioViewportModel::colorsFor(const QString& objectId,
+                                        int emitterCount) const
+{
+    if(!active_)
+    {
+        return QVariant();
+    }
+    const auto it = object_index_.constFind(objectId);
+    if(it == object_index_.constEnd())
+    {
+        return QVariant();
+    }
+    const QVariantMap o = objects_.at(*it).toMap();
+    const QVariantList cols = o.value(QStringLiteral("colors")).toList();
+    const QVariant idxv = o.value(QStringLiteral("indices"));
+    if(idxv.isValid())
+    {
+        const QVariantList idxs = idxv.toList();
+        if(idxs.size() == cols.size())
+        {
+            QVariantList out;
+            const int n = qMax(0, emitterCount);
+            out.reserve(n);
+            for(int k = 0; k < n; ++k)
+            {
+                out.append(QStringLiteral("#000000"));
+            }
+            for(int j = 0; j < idxs.size(); ++j)
+            {
+                const int at = idxs[j].toInt();
+                if(at >= 0 && at < n)
+                {
+                    out[at] = cols[j];
+                }
+            }
+            return out;
+        }
+    }
+    return cols;
 }
 
 /*---------------------------------------------------------*\
@@ -462,6 +504,13 @@ void StudioViewportModel::OnPreviewEvent(const QVariantMap& data)
         emitter_sent_  = p.envelope.value(
             QStringLiteral("emitter_sent")).toInt();
         objects_       = merged;
+        object_index_.clear();
+        for(int i = 0; i < objects_.size(); ++i)
+        {
+            object_index_.insert(objects_[i].toMap()
+                                     .value(QStringLiteral("id"))
+                                     .toString(), i);
+        }
         partials_.erase(seq);
         emit previewChanged();
     }

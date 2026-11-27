@@ -29,6 +29,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QHash>
 #include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
@@ -114,6 +115,15 @@ public:
        "preview now"). */
     Q_INVOKABLE void refreshNow();
 
+    /* The last complete frame's colors for one object id, dense
+       per emitter (a reduced frame's sparse `indices` expand with
+       unmapped emitters "#000000"); undefined when the preview is
+       inactive or has no record for the id. O(1) via an id index —
+       the 3D viewport asks once per object per frame, so it must
+       not copy/scan the whole `objects` list each time. */
+    Q_INVOKABLE QVariant colorsFor(const QString& objectId,
+                                   int emitterCount) const;
+
     /* Test seam — the debounce interval for draft pushes. */
     void setDebounceMsForTesting(int ms);
 
@@ -151,6 +161,7 @@ private:
     int      emitter_total_  = 0;
     int      emitter_sent_   = 0;
     QVariantList objects_;
+    QHash<QString, int> object_index_;   /* id -> objects_ row */
     int      dropped_frames_ = 0;
     QString  last_error_;
 
