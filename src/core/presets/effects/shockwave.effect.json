@@ -30,7 +30,7 @@
     {
       "primitive": "level",
       "blend": "screen",
-      "opacity": 0.5,
+      "opacity": 0.25,
       "palette": [
         { "pos": 0.0, "color": "#001E28" },
         { "pos": 1.0, "color": "#28DCC8" }

@@ -91,9 +91,10 @@ void EffectEngine::Evaluate(const SceneDocument& doc,
                     continue;
                 }
                 touched  = true;
-                ColorF r = EvalPrimitive(layer, in);
-                r.a     *= layer.opacity;
-                acc      = BlendOver(acc, r, layer.blend);
+                /* r.a already carries layer.opacity — every
+                   primitive applies it (BlendOver's contract). */
+                const ColorF r = EvalPrimitive(layer, in);
+                acc = BlendOver(acc, r, layer.blend);
             }
             colors[i] = ToSceneColor(acc);
         }

@@ -494,6 +494,99 @@ static void TestPulseCometSpin()
     CHECK(frame["ring"][0] != frame["ring"][2], "spin spoke contrast");
 }
 
+/* Layer opacity is LINEAR coverage: a white layer at opacity 0.5
+   over black lands at half brightness — not 0.25 (opacity applied
+   twice, once in the primitive and again in the engine). The
+   global intensity scale folds into opacity, so it is linear too. */
+static void TestLayerOpacityLinear()
+{
+    using namespace studio;
+
+    EffectLayer white;
+    white.primitive = "static";
+    white.palette   = MakePalette({ MakeSceneColor(255, 255, 255) });
+    white.opacity   = 0.5f;
+
+    SceneDocument doc;
+    doc.objects.push_back(OneLedDevice("led", 0.0f));
+
+    EffectEngine engine;
+    engine.SetLayers({ white });
+    FrameColors frame;
+    engine.Evaluate(doc, 0.0, frame);
+    CHECK(std::abs(RedOf(frame["led"][0]) - 128) <= 1,
+          "opacity 0.5 -> half brightness");
+
+    white.opacity = 1.0f;
+    std::vector<EffectLayer> scaled = { white };
+    ApplyGlobalParams(scaled, 1.0f, 0.5f);
+    engine.SetLayers(scaled);
+    engine.Evaluate(doc, 0.0, frame);
+    CHECK(std::abs(RedOf(frame["led"][0]) - 128) <= 1,
+          "intensity 0.5 -> half brightness");
+
+    white.opacity = 0.25f;
+    engine.SetLayers({ white });
+    engine.Evaluate(doc, 0.0, frame);
+    CHECK(std::abs(RedOf(frame["led"][0]) - 64) <= 1,
+          "opacity 0.25 -> quarter brightness");
+}
+
+static studio::SceneObject OneLedAt(const std::string& id, float x, float y)
+{
+    studio::SceneObject o = OneLedDevice(id, x);
+    o.transform.position.y = y;
+    return o;
+}
+
+/* A comet running BACKWARD (negative speed) is the same comet
+   mirrored: bright head, tail trailing on the side it came from,
+   dark elsewhere. A negative fmod used to make every LED past the
+   head read as "ahead of the head by a negative distance" and
+   light at full strength. */
+static void TestCometReverse()
+{
+    using namespace studio;
+
+    /* Closed square path, 4 m around: the x-axis edge is s 0..1,
+       the left edge (0,1)->(0,0) is s 3..4. */
+    EffectLayer comet;
+    comet.primitive = "comet";
+    comet.path = { { 0, 0, 0 }, { 1, 0, 0 }, { 1, 1, 0 }, { 0, 1, 0 } };
+    comet.speed   = -0.5f;                 /* t=1s: head at s = 3.5 */
+    comet.scale   = 0.4f;                  /* tail length (m)        */
+    comet.palette = MakePalette({ MakeSceneColor(255, 255, 255),
+                                  MakeSceneColor(0, 0, 0) });
+    comet.opacity = 1.0f;
+
+    SceneDocument doc;
+    doc.objects.push_back(OneLedAt("head",  0.0f, 0.50f));  /* s 3.50 */
+    doc.objects.push_back(OneLedAt("tail",  0.0f, 0.42f));  /* s 3.58 */
+    doc.objects.push_back(OneLedAt("past",  0.0f, 0.05f));  /* s 3.95 */
+    doc.objects.push_back(OneLedAt("ahead", 0.0f, 0.80f));  /* s 3.20 */
+    doc.objects.push_back(OneLedAt("far",   0.5f, 0.00f));  /* s 0.50 */
+
+    EffectEngine engine;
+    engine.SetLayers({ comet });
+    FrameColors frame;
+    engine.Evaluate(doc, 1.0, frame);
+    CHECK(RedOf(frame["head"][0]) > 200, "reverse comet head bright");
+    CHECK(RedOf(frame["tail"][0]) > 10 &&
+          RedOf(frame["tail"][0]) < RedOf(frame["head"][0]),
+          "reverse comet tail trails behind the head");
+    CHECK(RedOf(frame["past"][0]) == 0, "reverse comet beyond tail dark");
+    CHECK(RedOf(frame["ahead"][0]) == 0, "reverse comet ahead dark");
+    CHECK(RedOf(frame["far"][0]) == 0, "reverse comet far side dark");
+
+    /* A negative phase on a forward comet wraps the same way. */
+    comet.speed = 0.0f;
+    comet.phase = -0.125f;                 /* head at s = -0.5 -> 3.5 */
+    engine.SetLayers({ comet });
+    engine.Evaluate(doc, 0.0, frame);
+    CHECK(RedOf(frame["head"][0]) > 200, "negative phase head wraps");
+    CHECK(RedOf(frame["far"][0]) == 0, "negative phase far side dark");
+}
+
 /* Long-uptime phase precision: the scene clock is seconds since the
    worker started and is never re-based, so after days of uptime the
    time-driven phase must still be resolved to sub-frame precision.
@@ -1722,6 +1815,8 @@ int main()
     TestPaletteAndBlend();
     TestWaveSpatial();
     TestPulseCometSpin();
+    TestLayerOpacityLinear();
+    TestCometReverse();
     TestLongUptimePhase();
     TestSceneBrightnessRange();
     TestNoiseAndMasks();

@@ -330,11 +330,24 @@ static ColorF EvalComet(const EffectLayer& L, const EvalInput& in)
         out.a = 0.0f;
         return out;
     }
-    /* period is the path length, reduced in double (see Wrap1) */
-    const float head   = (float)std::fmod(in.t * L.speed
-                                          + (double)L.phase * total,
-                                          (double)total);
-    const float behind = std::fmod(head - s + total, total);
+    /* period is the path length, reduced in double (see Wrap1);
+       a negative speed or phase wraps into [0, total) too */
+    double head_d = std::fmod(in.t * L.speed + (double)L.phase * total,
+                              (double)total);
+    if(head_d < 0.0)
+    {
+        head_d += total;
+    }
+    const float head = (float)head_d;
+    /* Distance BEHIND the head, measured against the direction of
+       travel: a reversed comet trails on the larger-arc side. */
+    float behind = (L.speed < 0.0f)
+                 ? std::fmod(s - head + total, total)
+                 : std::fmod(head - s + total, total);
+    if(behind < 0.0f)
+    {
+        behind += total;
+    }
     const float tail   = L.scale > 1e-4f ? L.scale : 0.3f;
     const float u      = behind / tail;             /* 0 = head */
     const float inten  = (u < 1.0f) ? std::exp(-4.0f * u) : 0.0f;

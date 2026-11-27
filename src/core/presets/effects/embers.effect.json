@@ -13,7 +13,7 @@
       "speed": { "remix": [0.5, 0.9] },
       "density": { "remix": [0.35, 0.55] },
       "seed": { "remix_u32": [0, 4294967295] },
-      "opacity": 0.95,
+      "opacity": 0.9025,
       "palette": [
         { "pos": 0.0, "color": "#200400" },
         { "pos": 0.45, "color": "#8C2000" },
@@ -29,7 +29,7 @@
       "speed": { "remix": [0.8, 1.4] },
       "density": { "remix": [0.88, 0.94] },
       "seed": { "remix_u32": [0, 4294967295] },
-      "opacity": 0.85,
+      "opacity": 0.7225,
       "palette": [
         { "pos": 0.0, "color": "#FFD040" },
         { "pos": 0.6, "color": "#FFF0A0" }
