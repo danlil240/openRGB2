@@ -12,11 +12,15 @@
 #include "effects/EffectJson.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <set>
 #include <sstream>
 #include <utility>
+
+#include <process.h>    /* _getpid */
 
 namespace openrgb2
 {
@@ -485,6 +489,60 @@ std::string SuggestImportId(const std::string& base,
             return id;
         }
     }
+}
+
+/* Per-job scratch dir under the managed root. The name is unique
+   per job (pid + counter + clock): a fixed `.export-stage` could be
+   held open by an AV scanner/indexer after the previous job's
+   remove_all, and the next job's remove_all + create_directories
+   then silently reused (or failed on) the old tree. Stale siblings
+   of the same base (an hour old, or the legacy fixed name) are
+   swept best-effort first — never a failure. `ec` reports only the
+   create of the NEW dir. */
+fs::path MakeStageDir(const fs::path& root, const std::string& base,
+                      std::error_code& ec)
+{
+    {
+        const auto now = fs::file_time_type::clock::now();
+        std::error_code iec;
+        fs::directory_iterator it(root, iec), end;
+        std::vector<fs::path> stale;
+        for(; !iec && it != end; it.increment(iec))
+        {
+            const std::string name = it->path().filename().string();
+            const bool legacy = name == base;
+            if(!legacy && name.compare(0, base.size() + 1,
+                                       base + "-") != 0)
+            {
+                continue;
+            }
+            std::error_code tec;
+            const auto mtime = it->last_write_time(tec);
+            if(legacy ||
+               (!tec && now - mtime > std::chrono::hours(1)))
+            {
+                stale.push_back(it->path());
+            }
+        }
+        for(const fs::path& p : stale)
+        {
+            std::error_code rec;
+            fs::remove_all(p, rec);
+        }
+    }
+    static std::atomic<uint64_t> seq{ 0 };
+    const fs::path dir = (root / (base + "-" +
+        std::to_string(_getpid()) + "-" +
+        std::to_string(++seq) + "-" +
+        std::to_string((uint64_t)std::chrono::steady_clock::now()
+                           .time_since_epoch().count())))
+        .lexically_normal();
+    ec.clear();
+    if(!fs::create_directories(dir, ec) && !ec)
+    {
+        ec = std::make_error_code(std::errc::file_exists);
+    }
+    return dir;
 }
 
 } /* anonymous namespace */
@@ -2069,12 +2127,9 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
            alongside, assets copied from <root>/assets — into a
            scratch dir under the managed root, then the whole
            tree packs into the wire `files` map. */
-        const fs::path edir =
-            (fs::path(store_.Root()) / ".export-stage")
-                .lexically_normal();
         std::error_code ec;
-        fs::remove_all(edir, ec);
-        fs::create_directories(edir, ec);
+        const fs::path edir =
+            MakeStageDir(fs::path(store_.Root()), ".export-stage", ec);
         std::vector<std::string> errors;
         unsigned int types_written = 0, assets_copied = 0;
         const bool ok =
@@ -2427,14 +2482,15 @@ WorkspaceService::Result WorkspaceService::ImportStagedJson(
                         staged["files"].is_object();
     if(packed)
     {
+        std::error_code ec;
         const fs::path sdir =
-            (fs::path(store_.Root()) / ".import-stage")
-                .lexically_normal();
+            MakeStageDir(fs::path(store_.Root()), ".import-stage", ec);
         const fs::path sin  = sdir / "in";
         const fs::path sout = sdir / "out";
-        std::error_code ec;
-        fs::remove_all(sdir, ec);
-        fs::create_directories(sin, ec);
+        if(!ec)
+        {
+            fs::create_directories(sin, ec);
+        }
         auto wipe = [&]
         {
             std::error_code x;

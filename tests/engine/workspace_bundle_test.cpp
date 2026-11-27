@@ -62,6 +62,24 @@ static std::string P(const std::string& rel)
 {
     return (g_tmp / rel).string();
 }
+/* Scratch stage dirs left under a managed root (any name starting
+   with `base`) — the per-job stages must all be cleaned up. */
+static int CountStageDirs(const fs::path& root, const std::string& base)
+{
+    int n = 0;
+    std::error_code ec;
+    fs::directory_iterator it(root, ec), end;
+    for(; !ec && it != end; it.increment(ec))
+    {
+        if(it->path().filename().string().compare(
+               0, base.size(), base) == 0)
+        {
+            ++n;
+        }
+    }
+    return n;
+}
+
 static void Write(const fs::path& path, const std::string& s)
 {
     fs::create_directories(path.parent_path());
@@ -758,11 +776,15 @@ static void TestPackedServiceFlow()
         CHECK(st.applied);        /* commit adopts + applies */
     }
 
-    /* Export -> packed wire bundle staged for download. */
+    /* Export -> packed wire bundle staged for download. A
+       legacy fixed-name stage left by an older build is swept;
+       the per-job stage is removed afterwards. */
+    Write(fs::path(P("t3-svc-a")) / ".export-stage" / "junk.txt", "x");
     json bundle;
     {
         const auto st = a.Run(json::object({
             { "verb", "export" } }));
+        CHECK(CountStageDirs(P("t3-svc-a"), ".export-stage") == 0);
         CHECK(st.state == WorkspaceService::JobState::Succeeded);
         if(st.state != WorkspaceService::JobState::Succeeded)
         {
@@ -818,6 +840,7 @@ static void TestPackedServiceFlow()
         CHECK(st.state == WorkspaceService::JobState::Succeeded);
         CHECK(st.result.value("valid", false));
         CHECK(st.result.value("conflicts", json()).empty());
+        CHECK(CountStageDirs(P("t3-svc-b"), ".import-stage") == 0);
         /* The workspace's serialized bytes never armed anything
            on the importing side either — inspect commits
            nothing. */
