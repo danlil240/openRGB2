@@ -907,13 +907,16 @@ int main()
     {
         std::string sddl, err;
         CHECK(BuildRestrictedSddl(sddl, err));
-        CHECK(sddl.find("D:P(A;;GA;;;") == 0);
+        /* Network logons are DENIED first (the creating user
+           over SMB included), then the two allow ACEs. */
+        CHECK(sddl.find("D:P(D;;GA;;;NU)(A;;GA;;;") == 0);
         CHECK(sddl.find("(A;;GA;;;SY)") != std::string::npos);
         /* no broad-identity ACEs — not default-open */
         CHECK(sddl.find("S-1-1-0") == std::string::npos); /*Everyone*/
         CHECK(sddl.find(";;;BU")  == std::string::npos);  /* Users   */
         CHECK(sddl.find(";;;AN")  == std::string::npos);  /* Anon    */
-        CHECK(sddl.find(";;;NU")  == std::string::npos);  /* Network */
+        CHECK(sddl.find("(A;;GA;;;NU)") == std::string::npos); /* no
+                                                    Network allow */
         /* the DACL names the CURRENT user explicitly */
         {
             HANDLE tok = nullptr;
@@ -937,6 +940,46 @@ int main()
         PipeSecurityAttributes psa;
         CHECK(psa.Ok());
         CHECK(psa.Raw() != nullptr);
+    }
+
+    /*---- client-side server verification --------------------*\
+    | A pipe owned by this user passes VerifyPipeServer (the   |
+    | listener-backed round trips below exercise it through    |
+    | ConnectNamedPipeChannel too).                            |
+    \*---------------------------------------------------------*/
+    {
+        const std::string pipe =
+            "\\\\.\\pipe\\openrgb2-test-verify-" +
+            std::to_string(GetCurrentProcessId());
+        PipeSecurityAttributes psa;
+        HANDLE srv = CreateNamedPipeA(
+            pipe.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT |
+                PIPE_REJECT_REMOTE_CLIENTS,
+            1, 4096, 4096, 0,
+            (LPSECURITY_ATTRIBUTES)psa.Raw());
+        CHECK(srv != INVALID_HANDLE_VALUE);
+        if(srv != INVALID_HANDLE_VALUE)
+        {
+            HANDLE cli = CreateFileA(
+                pipe.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+                nullptr, OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT |
+                    SECURITY_IDENTIFICATION,
+                nullptr);
+            CHECK(cli != INVALID_HANDLE_VALUE);
+            if(cli != INVALID_HANDLE_VALUE)
+            {
+                std::string verr;
+                CHECK(VerifyPipeServer((void*)cli, verr));
+                if(!verr.empty())
+                {
+                    std::printf("verify: %s\n", verr.c_str());
+                }
+                CloseHandle(cli);
+            }
+            CloseHandle(srv);
+        }
     }
 
     /*---- Stop() racing Sweep() on dying sessions -----------*\

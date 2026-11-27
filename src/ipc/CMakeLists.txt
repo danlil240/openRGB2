@@ -18,6 +18,11 @@ target_include_directories(openrgb2_ipc_wire PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies/json)
 target_link_libraries(openrgb2_ipc_wire PUBLIC Threads::Threads)
+if(WIN32)
+    # advapi32: the client's server verification (token user SID,
+    # pipe owner from the object's security descriptor).
+    target_link_libraries(openrgb2_ipc_wire PUBLIC advapi32)
+endif()
 
 add_library(openrgb2_ipc STATIC
     IpcServer.cpp

@@ -138,10 +138,14 @@ bool BuildRestrictedSddl(std::string& sddl_out, std::string& err)
     }
 
     /* D:P = protected DACL (no inheritance). GA = GENERIC_ALL.
-       Only the owner SID and LocalSystem (SY) get ACEs —
+       Only the owner SID and LocalSystem (SY) get allow ACEs —
        deliberately NO Everyone (WD/S-1-1-0), Builtin\Users
-       (BU), Anonymous (AN), or Network (NU) access. */
-    sddl_out = "D:P(A;;GA;;;" + sid + ")(A;;GA;;;SY)";
+       (BU) or Anonymous (AN) access. The leading DENY for
+       Network (NU, S-1-5-2 — present in every network-logon
+       token) keeps the creating user's OWN account from
+       reaching the pipe over SMB; PIPE_REJECT_REMOTE_CLIENTS
+       on every instance enforces the same at the pipe layer. */
+    sddl_out = "D:P(D;;GA;;;NU)(A;;GA;;;" + sid + ")(A;;GA;;;SY)";
     return true;
 }
 
@@ -202,6 +206,26 @@ bool PipeSecurityAttributes::Ok() const
 || NamedPipeListener                                         ||
 \*---------------------------------------------------------*/
 
+/* One listening instance with the restricted DACL. Local
+   clients only: PIPE_REJECT_REMOTE_CLIENTS refuses SMB
+   connections at the pipe layer (the DACL's NU deny is the
+   second line). FILE_FLAG_OVERLAPPED: the accepted channel's
+   RecvSome/SendAll drive this handle with real OVERLAPPED
+   ops — a synchronous instance would wedge those waits. */
+static HANDLE CreatePipeInstance(const std::string& name, bool first,
+                                 PipeSecurityAttributes& security)
+{
+    return CreateNamedPipeA(
+        name.c_str(),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED |
+            (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT |
+            PIPE_REJECT_REMOTE_CLIENTS,
+        32 /* bounded instance cap */,
+        64 * 1024, 64 * 1024, 0,
+        (LPSECURITY_ATTRIBUTES)security.Raw());
+}
+
 struct NamedPipeListener::Impl
 {
     IpcServer&           server;
@@ -218,53 +242,58 @@ struct NamedPipeListener::Impl
     {
     }
 
-    void AcceptLoop()
+    /* `cur` is the first instance (FILE_FLAG_FIRST_PIPE_INSTANCE,
+       created in Start()); every later instance is an
+       additional instance of the already-owned name. Never
+       create an instance without the restricted DACL — no
+       default-open fallback.
+
+       The NEXT listening instance is created BEFORE the
+       current one is handed to Serve() or closed, so the name
+       never drops to zero instances while the listener runs —
+       otherwise another account could re-create the name
+       (FILE_FLAG_FIRST_PIPE_INSTANCE) with its own DACL in
+       that window and capture the next client. */
+    void AcceptLoop(HANDLE cur)
     {
-        /* The first instance (FILE_FLAG_FIRST_PIPE_INSTANCE)
-           is created in Start(); every later instance is an
-           additional instance of the already-owned name.
-           Never create an instance without the restricted
-           DACL — no default-open fallback. */
-        if(!security.Ok())
-        {
-            running.store(false);
-            return;
-        }
         while(!stop.load())
         {
-            /* FILE_FLAG_OVERLAPPED: the accepted channel's
-               RecvSome/SendAll drive this handle with real
-               OVERLAPPED ops — a synchronous instance would
-               wedge those waits. */
-            HANDLE h = CreateNamedPipeA(
-                name.c_str(),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                32 /* bounded instance cap */,
-                64 * 1024, 64 * 1024, 0,
-                (LPSECURITY_ATTRIBUTES)security.Raw());
-            if(h == INVALID_HANDLE_VALUE)
+            if(cur == INVALID_HANDLE_VALUE)
             {
-                /* Transient failure — retry on a bounded
-                   cadence; never spins hot. */
-                Sleep(50);
-                continue;
+                cur = CreatePipeInstance(name, false, security);
+                if(cur == INVALID_HANDLE_VALUE)
+                {
+                    /* Transient failure — retry on a bounded
+                       cadence; never spins hot. */
+                    Sleep(50);
+                    continue;
+                }
             }
 
-            const bool connected = WaitForClientConnect(h, stop);
+            const bool connected = WaitForClientConnect(cur, stop);
             if(stop.load())
             {
-                CloseHandle(h);
                 break;
             }
-            if(!connected)
+            /* May fail (instance cap, resources): then the loop
+               top retries — the window only reopens in that
+               failure case. */
+            HANDLE next = CreatePipeInstance(name, false, security);
+            if(connected)
             {
-                CloseHandle(h);
-                continue;
+                server.Serve(std::unique_ptr<IIpcChannel>(
+                                 new NamedPipeChannel((void*)cur)),
+                             kind);
             }
-            server.Serve(std::unique_ptr<IIpcChannel>(
-                             new NamedPipeChannel((void*)h)),
-                         kind);
+            else
+            {
+                CloseHandle(cur);
+            }
+            cur = next;
+        }
+        if(cur != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(cur);
         }
         running.store(false);
     }
@@ -298,13 +327,7 @@ bool NamedPipeListener::Start(std::string& err)
     }
     /* Probe the first instance synchronously so a taken name
        fails Start() instead of spinning silently. */
-    HANDLE h = CreateNamedPipeA(
-        impl_->name.c_str(),
-        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE |
-            FILE_FLAG_OVERLAPPED,
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-        32, 64 * 1024, 64 * 1024, 0,
-        (LPSECURITY_ATTRIBUTES)impl_->security.Raw());
+    HANDLE h = CreatePipeInstance(impl_->name, true, impl_->security);
     if(h == INVALID_HANDLE_VALUE)
     {
         err = "CreateNamedPipe " + impl_->name + ": " +
@@ -315,23 +338,10 @@ bool NamedPipeListener::Start(std::string& err)
     impl_->running.store(true);
     /* The accept thread parks in an overlapped ConnectNamedPipe
        wait on this first instance (released by a client attach
-       or Stop()'s self-connect); once connected it proceeds
-       identically to AcceptLoop. */
+       or Stop()'s self-connect). */
     impl_->thread = std::thread([impl = impl_, h]()
         {
-            const bool connected =
-                WaitForClientConnect(h, impl->stop);
-            if(connected && !impl->stop.load())
-            {
-                impl->server.Serve(std::unique_ptr<IIpcChannel>(
-                        new NamedPipeChannel((void*)h)),
-                    impl->kind);
-            }
-            else
-            {
-                CloseHandle(h);
-            }
-            impl->AcceptLoop();
+            impl->AcceptLoop(h);
         });
     return true;
 }
