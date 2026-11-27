@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <process.h>
 #include <fstream>
 #include <string>
 #include <thread>
@@ -154,7 +155,7 @@ static void TestManagedConfig()
     std::error_code ec;
     const std::filesystem::path dir =
         std::filesystem::temp_directory_path(ec) /
-        "openrgb2-owncfg-test";
+        ("openrgb2-owncfg-test-" + std::to_string(_getpid()));
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir, ec);
 
@@ -220,7 +221,7 @@ static void TestManagedConfig()
        persisted into OpenRGB.json. */
     const std::filesystem::path exedir =
         std::filesystem::temp_directory_path(ec) /
-        "openrgb2-owncfg-exedir";
+        ("openrgb2-owncfg-exedir-" + std::to_string(_getpid()));
     std::filesystem::remove_all(exedir, ec);
     std::filesystem::create_directories(
         exedir / "plugins" / "system", ec);
@@ -283,7 +284,7 @@ static void TestManagedConfig()
 \*---------------------------------------------------------*/
 static void TestSingleInstance()
 {
-    const std::string name = "Local\\openrgb2-ownership-test";
+    const std::string name = ("Local\\openrgb2-ownership-test-" + std::to_string(_getpid()));
     std::string err;
 
     SingleInstanceGuard first(name);

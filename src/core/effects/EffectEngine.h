@@ -12,6 +12,10 @@
 #pragma once
 
 #include "EffectTypes.h"
+#include "../scene/SceneGraph.h"
+
+#include <map>
+#include <string>
 
 namespace studio
 {
@@ -31,6 +35,14 @@ public:
        `input` carries reactive signals (audio onsets, key events,
        screen grid); nullptr disables reactive primitives. */
     void Evaluate(const SceneDocument& doc, double t, FrameColors& frame,
+                  const InputState* input = nullptr) const;
+
+    /* Same, with the document's world matrices precomputed
+       (ResolveWorldMatrices(doc)) — the 60 Hz caller resolves
+       them once per applied document instead of every tick. */
+    void Evaluate(const SceneDocument& doc,
+                  const std::map<std::string, Mat4>& world, double t,
+                  FrameColors& frame,
                   const InputState* input = nullptr) const;
 
 private:

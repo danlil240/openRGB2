@@ -17,6 +17,16 @@ static constexpr float TAU = 6.28318530717958647692f;
 static float Frac(float v) { return v - std::floor(v); }
 static float Clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
 
+/* Time-driven phase terms are reduced in DOUBLE before they are
+   narrowed to float. `in.t` is seconds since the scene clock's
+   epoch and grows without bound with uptime; `(float)(t * speed)`
+   keeps only ~24 bits, so after a few days the phase advances in
+   visible steps (at t = 10 days a float ulp is ~0.06 s). Every
+   primitive below is 1-periodic in its phase (cos(TAU u) and
+   Palette::Sample's Frac), so wrapping t*speed into [0, 1) first
+   is exact in value and keeps full sub-frame resolution. */
+static double Wrap1(double v) { return v - std::floor(v); }
+
 /*---------------------------------------------------------*\
 ||| Color conversion                                        |
 \*---------------------------------------------------------*/
@@ -123,10 +133,19 @@ static float HashFloat(int x, int y, int z, unsigned int seed)
 
 static float Smooth(float v) { return v * v * (3.0f - 2.0f * v); }
 
-float Noise3(const Vec3& p, unsigned int seed)
+/* Value noise at a double-precision point: the lattice cell comes
+   from a double floor (wrapped to 32 bits for the hash, so a far
+   drift offset never overflows), the in-cell fraction keeps full
+   precision. For float inputs this is bit-identical to the old
+   float-only Noise3 (p - floor(p) is exact in float). */
+static float NoiseAt(double px, double py, double pz, unsigned int seed)
 {
-    const int x0 = (int)std::floor(p.x), y0 = (int)std::floor(p.y), z0 = (int)std::floor(p.z);
-    const float fx = Smooth(p.x - (float)x0), fy = Smooth(p.y - (float)y0), fz = Smooth(p.z - (float)z0);
+    const double fx0 = std::floor(px), fy0 = std::floor(py), fz0 = std::floor(pz);
+    const unsigned int x0 = (unsigned int)(long long)fx0;
+    const unsigned int y0 = (unsigned int)(long long)fy0;
+    const unsigned int z0 = (unsigned int)(long long)fz0;
+    const float fx = Smooth((float)(px - fx0)), fy = Smooth((float)(py - fy0)),
+                fz = Smooth((float)(pz - fz0));
 
     float v[2][2][2];
     for(int dz = 0; dz < 2; dz++)
@@ -135,7 +154,8 @@ float Noise3(const Vec3& p, unsigned int seed)
         {
             for(int dx = 0; dx < 2; dx++)
             {
-                v[dz][dy][dx] = HashFloat(x0 + dx, y0 + dy, z0 + dz, seed);
+                v[dz][dy][dx] = HashFloat((int)(x0 + dx), (int)(y0 + dy),
+                                           (int)(z0 + dz), seed);
             }
         }
     }
@@ -154,6 +174,11 @@ float Noise3(const Vec3& p, unsigned int seed)
         }
     }
     return out;
+}
+
+float Noise3(const Vec3& p, unsigned int seed)
+{
+    return NoiseAt(p.x, p.y, p.z, seed);
 }
 
 /*---------------------------------------------------------*\
@@ -204,7 +229,8 @@ static ColorF EvalWave(const EffectLayer& L, const EvalInput& in)
 {
     const Vec3  p   = SamplePos(L, in);
     const Vec3  dir = Normalize(L.direction);
-    const float u   = Dot(p, dir) / L.scale - (float)(in.t * L.speed) / L.scale + L.phase;
+    const float u   = Dot(p, dir) / L.scale
+                      - (float)Wrap1(in.t * L.speed / L.scale) + L.phase;
     /* band shape: density >1 thins the bands, <1 widens, 0 = full sweep */
     const float band = 0.5f - 0.5f * std::cos(TAU * u);
     ColorF out = L.palette.Sample(u);
@@ -216,7 +242,8 @@ static ColorF EvalPulse(const EffectLayer& L, const EvalInput& in)
 {
     const Vec3  p = SamplePos(L, in);
     const Vec3  d { p.x - L.origin.x, p.y - L.origin.y, p.z - L.origin.z };
-    const float u = (Length(d) - (float)(in.t * L.speed)) / L.scale + L.phase;
+    const float u = Length(d) / L.scale
+                    - (float)Wrap1(in.t * L.speed / L.scale) + L.phase;
     const float band = 0.5f - 0.5f * std::cos(TAU * u);
     ColorF out = L.palette.Sample(u);
     out.a = std::pow(band, L.density > 0.0f ? L.density : 1.0f) * L.opacity;
@@ -227,7 +254,7 @@ static ColorF EvalGradient(const EffectLayer& L, const EvalInput& in)
 {
     const Vec3  p   = SamplePos(L, in);
     const Vec3  dir = Normalize(L.direction);
-    const float u   = Dot(p, dir) * L.scale + (float)(in.t * L.speed) + L.phase;
+    const float u   = Dot(p, dir) * L.scale + (float)Wrap1(in.t * L.speed) + L.phase;
     ColorF out = L.palette.Sample(u);
     out.a = L.opacity;
     return out;
@@ -237,7 +264,7 @@ static ColorF EvalSpin(const EffectLayer& L, const EvalInput& in)
 {
     const Vec3  p = SamplePos(L, in);
     const float a = std::atan2(p.z - L.origin.z, p.x - L.origin.x);
-    const float u = (a / TAU) * L.scale - (float)(in.t * L.speed) + L.phase;
+    const float u = (a / TAU) * L.scale - (float)Wrap1(in.t * L.speed) + L.phase;
     ColorF out = L.palette.Sample(u);
     out.a = L.opacity;
     return out;
@@ -303,7 +330,10 @@ static ColorF EvalComet(const EffectLayer& L, const EvalInput& in)
         out.a = 0.0f;
         return out;
     }
-    const float head   = std::fmod((float)(in.t * L.speed) + L.phase * total, total);
+    /* period is the path length, reduced in double (see Wrap1) */
+    const float head   = (float)std::fmod(in.t * L.speed
+                                          + (double)L.phase * total,
+                                          (double)total);
     const float behind = std::fmod(head - s + total, total);
     const float tail   = L.scale > 1e-4f ? L.scale : 0.3f;
     const float u      = behind / tail;             /* 0 = head */
@@ -316,10 +346,14 @@ static ColorF EvalComet(const EffectLayer& L, const EvalInput& in)
 static ColorF EvalNoise(const EffectLayer& L, const EvalInput& in)
 {
     const Vec3 p = SamplePos(L, in);
-    const Vec3 q { p.x * L.scale + L.direction.x * (float)(in.t * L.speed),
-                   p.y * L.scale + L.direction.y * (float)(in.t * L.speed),
-                   p.z * L.scale + L.direction.z * (float)(in.t * L.speed) };
-    const float n = Noise3(q, L.seed);
+    /* Noise is not periodic, so the drift offset cannot be wrapped;
+       instead the sample point stays in double and NoiseAt splits it
+       into an integer lattice cell + float fraction (see Wrap1). */
+    const double off = in.t * L.speed;
+    const float n = NoiseAt((double)p.x * L.scale + L.direction.x * off,
+                            (double)p.y * L.scale + L.direction.y * off,
+                            (double)p.z * L.scale + L.direction.z * off,
+                            L.seed);
     /* density gates coverage: 0 = everywhere, ~0.9 = sparse sparks */
     const float lo  = 1.0f - 0.9f * Clamp01(L.density);
     float cov = (n - lo) / (1.0f - lo + 1e-6f);
@@ -363,7 +397,7 @@ static ColorF EvalRipple(const EffectLayer& L, const EvalInput& in)
         {
             continue;
         }
-        const float age = (float)(in.t - e.t);
+        const float age = (float)(in.t - e.t);   /* difference in double */
         if(age < 0.0f)
         {
             continue;   /* event predates a play_t reset */

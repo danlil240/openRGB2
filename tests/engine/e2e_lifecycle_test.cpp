@@ -64,6 +64,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <process.h>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -571,7 +572,7 @@ static int TestBody(const std::filesystem::path& self_exe)
     std::error_code ec;
     const std::filesystem::path tmpdir =
         std::filesystem::temp_directory_path(ec) /
-        "openrgb2-lifecycle-state";
+        ("openrgb2-lifecycle-state-" + std::to_string(_getpid()));
     std::filesystem::create_directories(tmpdir, ec);
     std::filesystem::remove(tmpdir / "engine-state.json", ec);
 
@@ -612,15 +613,15 @@ static int TestBody(const std::filesystem::path& self_exe)
     /* Saved for the UI-session rows — opts is moved into the
        host below. */
     const std::string cmd_pipe =
-        "\\\\.\\pipe\\openrgb2-e2e-lifecycle";
+        ("\\\\.\\pipe\\openrgb2-e2e-lifecycle-" + std::to_string(_getpid()));
     opts.command_pipe_name  = cmd_pipe;
     opts.diagnostics_pipe_name =
-        "\\\\.\\pipe\\openrgb2-e2e-lifecycle-diag";
+        ("\\\\.\\pipe\\openrgb2-e2e-lifecycle-diag-" + std::to_string(_getpid()));
     opts.power_monitor      = false; /* events are injected  */
     opts.reactive_inputs    = false;
     opts.scan_owners        = true;
     opts.single_instance    = true;
-    opts.instance_name      = "Local\\openrgb2-engine-lifecycle-test";
+    opts.instance_name      = ("Local\\openrgb2-engine-lifecycle-test-" + std::to_string(_getpid()));
     /* Deterministic start: a leftover last-scene.json in this
        fixed temp dir would restore a scene the test never
        applied. */

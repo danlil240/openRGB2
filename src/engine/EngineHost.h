@@ -275,6 +275,10 @@ private:
        the new topology lands in `snaps` this same poll. */
     void ReconcileZoneSizes(std::vector<DeviceSnapshot>& snaps);
 
+    /* Event-interest gate for host-side event producers (stub:
+       true until IpcServer::HasSubscriber is merged). */
+    bool EventInterest(const char* kind) const;
+
     EngineHostOptions        opts_;
     /* Built in Start() with opts_.instance_name — the option is
        a real seam: tests take a test-scoped guard name so a
@@ -336,6 +340,12 @@ private:
     };
     std::map<std::string, ZoneResizeAttempts>  zone_resize_tries_;
     bool                                     started_ = false;
+    /* Set once Start() gets past its precondition checks: a
+       Start() that fails midway (after IPC listeners, the power
+       monitor, the calibration worker or reactive sources are
+       up) must still be torn down by Stop() before members
+       destruct, so Stop() keys off this, not started_. */
+    bool                                     start_attempted_ = false;
     OrderlyShutdown::Result                  shutdown_result_;
     bool                                     stopped_ = false;
 };

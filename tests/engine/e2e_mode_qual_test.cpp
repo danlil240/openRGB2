@@ -48,6 +48,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <process.h>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -323,7 +324,7 @@ static int TestBody()
     std::error_code ec;
     const std::filesystem::path tmpdir =
         std::filesystem::temp_directory_path(ec) /
-        "openrgb2-modequal-state";
+        ("openrgb2-modequal-state-" + std::to_string(_getpid()));
     std::filesystem::create_directories(tmpdir, ec);
     std::filesystem::remove(tmpdir / "engine-state.json", ec);
 
@@ -338,7 +339,7 @@ static int TestBody()
     opts.reactive_inputs    = false;
     opts.scan_owners        = false;
     opts.single_instance    = true;
-    opts.instance_name      = "Local\\openrgb2-engine-modequal-test";
+    opts.instance_name      = ("Local\\openrgb2-engine-modequal-test-" + std::to_string(_getpid()));
     /* Deterministic start: a leftover last-scene.json in this
        fixed temp dir would restore a scene and void Phase A's
        no-scene assumptions. */

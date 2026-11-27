@@ -752,6 +752,7 @@ bool EngineHost::Start(std::string& err)
         err = "already started";
         return false;
     }
+    start_attempted_ = true;
 
     /* 1. Single instance (plan section 4): exactly one engine
        owns the managed configuration. Refusing to start is the
@@ -1016,18 +1017,24 @@ bool EngineHost::Start(std::string& err)
        submissions to the suppressed wireless group still run
        so the lane's rejection — never a silent drop — is
        exercised on every tick. */
+    /* While the power lifecycle gates output (display off /
+       suspend) every mapped frame would only be rejected at the
+       pipeline: skip evaluation + mapping instead of running
+       them at 60 Hz just to inflate the `rejected` counters. */
+    engine_.Worker().SetOutputGate(
+        [this]() { return pipeline_->OutputPaused(); });
     engine_.Worker().SetFrameCallback(
         [this](const EvaluatedFrame& eval)
         {
             ++frames_;
             const bool owns = playback_->PlaybackOwnsWired();
-            for(const RgbFrame& frame : mapper_.MapFrame(eval))
+            for(RgbFrame& frame : mapper_.MapFrame(eval))
             {
                 if(owns && !playback_->OwnsGroup(frame.controller))
                 {
                     continue;
                 }
-                engine_.SubmitLatest(frame);
+                engine_.SubmitLatest(std::move(frame));
             }
             playback_->Tick(eval.sample_time);
         });
@@ -1216,8 +1223,10 @@ bool EngineHost::Start(std::string& err)
                     return;
                 }
                 std::string serr;
-                if(!profile_->SaveSceneSnapshot(
-                       studio::ToJson(doc).dump(2) + "\n", serr))
+                /* Hand the JSON over as-is: the store
+                   serializes it once, no dump-then-reparse. */
+                if(!profile_->SaveSceneSnapshotJson(
+                       studio::ToJson(doc), serr))
                 {
                     Log("last-scene snapshot save failed: " +
                         serr);
@@ -1304,6 +1313,9 @@ bool EngineHost::StartIpc()
         { ipc_server_->EmitTo(sid, ev, key); });
     service_->SetServerStatsProvider(
         [this]() { return ipc_server_->Stats(); });
+    /* TODO(merge): service_->SetEventInterest([this](const std::string& k){ return ipc_server_->HasSubscriber(k); });
+       (IPC-side API lands with the IPC worktree merge; until then
+       EventInterest() below is a stub that reports true.) */
 
     /* Both pipes share the restricted DACL (creating user +
        LocalSystem only). The diagnostics pipe is read-only
@@ -1714,6 +1726,16 @@ void EngineHost::ReprobeSdk(TimePoint now)
     sdk_->ReconnectNow();
 }
 
+/* The single cheap "is anyone subscribed to `kind`" check every
+   host-side event producer (frame_status here; preview bodies are
+   built inside EngineService) goes through, so a body nobody
+   subscribed to is never built.
+   TODO(merge): return ipc_server_ && ipc_server_->HasSubscriber(kind); */
+bool EngineHost::EventInterest(const char* /*kind*/) const
+{
+    return true;
+}
+
 void EngineHost::Run()
 {
     /* frame_status rides a fast tick beside the ~500 ms
@@ -1730,7 +1752,7 @@ void EngineHost::Run()
             PollOnce();
             next_maint = now + std::chrono::milliseconds(500);
         }
-        if(service_)
+        if(service_ && EventInterest("frame_status"))
         {
             service_->PollFrameStatus();
         }
@@ -1748,7 +1770,10 @@ const OrderlyShutdown::Result& EngineHost::Stop()
         return shutdown_result_;
     }
     stopped_ = true;
-    if(!started_)
+    /* A partial Start() (it returned false after spawning some
+       threads) still runs the full sequence — every step is a
+       no-op for a piece that never came up. */
+    if(!start_attempted_)
     {
         return shutdown_result_;
     }
@@ -1774,6 +1799,17 @@ const OrderlyShutdown::Result& EngineHost::Stop()
                  std::chrono::milliseconds(2000),
                  [this]
                  { if(ipc_server_) ipc_server_->Stop(); });
+    /* Calibration worker joins once no IPC verb can reach it
+       and BEFORE frame production / the delivery lanes / the
+       transport stop: its Stop() releases a live session's lane
+       suppression and playback hold through pipeline_ and
+       playback_, and its worker's change hook calls into
+       service_ — which destructs before calibration_ (member
+       order), so the worker must be gone by then. */
+    shutdown.Add("calibration",
+                 std::chrono::milliseconds(2000),
+                 [this]
+                 { if(calibration_) calibration_->Stop(); });
     /* Workspace job worker joins BEFORE frame production and
        the IPC service stop — an in-flight commit's apply_scene
        seam reaches service_ + engine_, so no workspace job may
@@ -1798,7 +1834,7 @@ const OrderlyShutdown::Result& EngineHost::Stop()
        default); lanes join sequentially. */
     shutdown.Add("delivery-pipeline",
                  std::chrono::milliseconds(12000),
-                 [this] { pipeline_->Stop(); });
+                 [this] { if(pipeline_) pipeline_->Stop(); });
     shutdown.Add("sdk-transport",
                  std::chrono::milliseconds(1000),
                  [this] { if(sdk_) sdk_->Disconnect(); });

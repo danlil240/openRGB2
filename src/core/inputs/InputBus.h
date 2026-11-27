@@ -48,6 +48,11 @@ public:
        (seconds) are dropped. */
     InputState Snapshot(double max_age) const;
 
+    /* True when Snapshot() would return an all-default state
+       (no events, no screen grid, zero audio level) — lets a
+       60 Hz caller skip building one. */
+    bool Idle() const;
+
     void ClearEvents();
     void ClearAll();
 

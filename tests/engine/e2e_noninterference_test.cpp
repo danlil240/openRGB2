@@ -44,6 +44,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <process.h>
 #include <memory>
 #include <string>
 #include <system_error>
@@ -294,7 +295,7 @@ static EngineHostOptions MakeOpts(
     opts.reactive_inputs    = false;
     opts.scan_owners        = false;
     opts.single_instance    = true;
-    opts.instance_name      = "Local\\openrgb2-engine-nonint-test";
+    opts.instance_name      = ("Local\\openrgb2-engine-nonint-test-" + std::to_string(_getpid()));
     /* Deterministic start: a leftover last-scene.json beside this
        state file would restore a scene the test never applied. */
     opts.scene_restore      = false;
@@ -519,7 +520,7 @@ static int TestBody()
     std::error_code ec;
     const std::filesystem::path tmpdir =
         std::filesystem::temp_directory_path(ec) /
-        "openrgb2-nonint-state";
+        ("openrgb2-nonint-state-" + std::to_string(_getpid()));
     std::filesystem::create_directories(tmpdir, ec);
     const std::string state_path =
         (tmpdir / "engine-state.json").generic_string();

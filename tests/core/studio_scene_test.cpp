@@ -23,6 +23,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <vector>
 #include <string>
 
 static int failures = 0;
@@ -490,6 +492,97 @@ static void TestPulseCometSpin()
     CHECK(frame["ring"].size() == 8, "spin fills ring");
     CHECK(frame["ring"][0] == frame["ring"][4], "spin spoke periodicity");
     CHECK(frame["ring"][0] != frame["ring"][2], "spin spoke contrast");
+}
+
+/* Long-uptime phase precision: the scene clock is seconds since the
+   worker started and is never re-based, so after days of uptime the
+   time-driven phase must still be resolved to sub-frame precision.
+   With speeds whose period divides 10 days exactly, a frame at
+   t + 10 days must match the frame at t (the old float narrowing of
+   t*speed rounded to ~1/32 there and stepped visibly). */
+static void TestLongUptimePhase()
+{
+    using namespace studio;
+
+    const double kTenDays = 10.0 * 86400.0;
+    const Palette bw = MakePalette({ MakeSceneColor(0, 0, 0),
+                                     MakeSceneColor(255, 255, 255) });
+
+    std::vector<EffectLayer> layers;
+    {
+        EffectLayer L; L.primitive = "wave";
+        L.direction = { 1, 0, 0 }; L.scale = 1.0f; L.speed = 0.5f;
+        L.density = 0.0f; L.palette = bw; layers.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "pulse";
+        L.origin = { 0, 0, 0 }; L.scale = 0.5f; L.speed = 0.25f;
+        L.density = 1.0f; L.palette = bw; L.opacity = 1.0f;
+        layers.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "gradient";
+        L.direction = { 1, 0, 0 }; L.scale = 1.0f; L.speed = 0.5f;
+        L.palette = bw; L.opacity = 1.0f; layers.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "spin";
+        L.scale = 1.0f; L.speed = 0.5f; L.palette = bw;
+        L.opacity = 1.0f; layers.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "comet";
+        L.path = { { 0, 0, 0 }, { 1.0f, 0, 0 } };   /* 2 m loop */
+        L.speed = 0.5f; L.scale = 0.4f; L.palette = bw;
+        L.opacity = 1.0f; layers.push_back(L);
+    }
+
+    SceneDocument doc;
+    doc.objects.push_back(OneLedDevice("a", 0.1f));
+    doc.objects.push_back(OneLedDevice("b", 0.37f));
+    doc.objects.push_back(OneLedDevice("c", 0.81f));
+
+    EffectEngine engine;
+    for(const EffectLayer& L : layers)
+    {
+        engine.SetLayers({ L });
+        int worst = 0;
+        for(int k = 0; k < 12; k++)
+        {
+            const double t = 0.3 + k / 60.0;
+            FrameColors early, late;
+            engine.Evaluate(doc, t, early);
+            engine.Evaluate(doc, t + kTenDays, late);
+            for(const char* id : { "a", "b", "c" })
+            {
+                const int d = std::abs(RedOf(early[id][0]) - RedOf(late[id][0]));
+                worst = d > worst ? d : worst;
+            }
+        }
+        char msg[96];
+        std::snprintf(msg, sizeof(msg),
+                      "%s phase holds after 10 days (worst %d LSB)",
+                      L.primitive.c_str(), worst);
+        CHECK(worst <= 1, msg);
+    }
+}
+
+/* Expanded-scene brightness follows the compact 0..1 contract. */
+static void TestSceneBrightnessRange()
+{
+    using namespace studio;
+    for(double b : { -0.1, 1.5 })
+    {
+        nlohmann::json j = { { "version", 1 }, { "brightness", b } };
+        SceneDocument doc;
+        std::vector<std::string> errs;
+        CHECK(!FromJson(j, doc, &errs), "scene brightness out of range rejected");
+    }
+    nlohmann::json ok = { { "version", 1 }, { "brightness", 0.25 } };
+    SceneDocument doc;
+    std::vector<std::string> errs;
+    CHECK(FromJson(ok, doc, &errs) && doc.brightness == 0.25f,
+          "scene brightness in range accepted");
 }
 
 static void TestNoiseAndMasks()
@@ -1629,6 +1722,8 @@ int main()
     TestPaletteAndBlend();
     TestWaveSpatial();
     TestPulseCometSpin();
+    TestLongUptimePhase();
+    TestSceneBrightnessRange();
     TestNoiseAndMasks();
     TestEngineMirrorAndJson();
     TestPresetsAndRemix();

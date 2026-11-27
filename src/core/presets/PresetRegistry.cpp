@@ -191,22 +191,66 @@ static std::string BasenameType(const std::string& path)
     return std::string();
 }
 
+bool WorkspaceAssetsDir(const std::string& preset_dir,
+                        std::filesystem::path& out)
+{
+    namespace fs = std::filesystem;
+    fs::path d = fs::path(preset_dir).lexically_normal();
+    if(!d.empty() && d.filename().empty())
+    {
+        d = d.parent_path();            /* trailing separator */
+    }
+    auto lower = [](std::string s)
+    {
+        for(char& c : s)
+        {
+            if(c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        }
+        return s;
+    };
+    if(lower(d.filename().string()) != "devices")
+    {
+        return false;
+    }
+    const fs::path kind = d.parent_path();
+    const std::string kind_name = kind.filename().string();
+    if(kind_name.empty() || kind_name == "." || kind_name == "..")
+    {
+        return false;
+    }
+    out = (kind.parent_path() / "assets").lexically_normal();
+    return true;
+}
+
 /* Type files live at <workspace>/presets/devices/<id>.device.json;
    referenced assets live at <workspace>/assets/. Missing assets
    are REPORTED but the type still registers — a dangling icon or
    model path must not kill every instance of the type. Returns
-   false when any referenced file is absent. */
+   false when any referenced file is absent — including when the
+   type dir is not workspace-shaped, so no assets root exists to
+   resolve against (never a lexical guess outside the tree). */
 static bool CheckAssetRefs(const DevicePreset& p,
                            const std::filesystem::path& devices_dir,
                            const std::string& source,
                            std::vector<std::string>* errors)
 {
     bool ok = true;
-    const std::filesystem::path assets =
-        (devices_dir / ".." / ".." / "assets").lexically_normal();
+    std::filesystem::path assets;
+    const bool rooted = WorkspaceAssetsDir(devices_dir.string(), assets);
     std::error_code ec;
     for(const std::string& ref : PresetAssetRefs(p))
     {
+        if(!rooted)
+        {
+            ok = false;
+            if(errors)
+            {
+                errors->push_back(source + ": asset '" + ref
+                                  + "' unresolvable — type dir is not"
+                                    " <workspace>/<kind>/devices");
+            }
+            continue;
+        }
         if(!std::filesystem::exists(assets / ref, ec))
         {
             ok = false;
@@ -229,9 +273,17 @@ bool PresetRegistry::LoadDirectory(const std::string& dir,
     {
         return true;   /* no preset dir = only defaults; not an error */
     }
-    for(const auto& entry : std::filesystem::directory_iterator(dir, ec))
+    /* Explicit increment(ec): a range-for's operator++ (and the
+       no-ec is_regular_file) THROW on a transient FS error, and
+       BuildDeviceRegistry runs this from EngineHost::Start with
+       no try — the scan error is reported instead. */
+    std::error_code iec;
+    std::filesystem::directory_iterator it(dir, iec), end;
+    for(; !iec && it != end; it.increment(iec))
     {
-        if(!entry.is_regular_file())
+        const std::filesystem::directory_entry& entry = *it;
+        std::error_code fec;
+        if(!entry.is_regular_file(fec))
         {
             continue;
         }
@@ -277,6 +329,15 @@ bool PresetRegistry::LoadDirectory(const std::string& dir,
         {
             ok = false;
             file_errors[path] = "missing asset reference";
+        }
+    }
+    if(iec)
+    {
+        ok = false;
+        if(errors)
+        {
+            errors->push_back(dir + ": directory scan failed ("
+                              + iec.message() + ")");
         }
     }
     /* Dependency validation can only run once the whole directory

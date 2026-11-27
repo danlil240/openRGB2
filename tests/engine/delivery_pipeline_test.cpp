@@ -441,6 +441,45 @@ static void TestTopologyChange()
     CHECK(transport->DeliveredCount(w.key) == 2);
 }
 
+/* A send in flight ACROSS a topology change must not re-arm the
+   delivered state RegisterDevice just reset: the old-generation
+   completion used to record has_sent/last_sent_seq/last_colors,
+   so the new generation's first frames (fresh low sequence, or
+   the same colors) were suppressed as stale/unchanged. */
+static void TestSendAcrossTopologyChange()
+{
+    auto transport = std::make_shared<FakeTransport>();
+    DeliveryPipeline pipe(transport);
+    DeviceSnapshot w = Wireless();
+    pipe.RegisterDevice(w);
+
+    const RgbColor red{ 100, 0, 0 };
+    transport->Block(w.key);
+    CHECK(pipe.SubmitLatest(MakeFrame(w, 50, red)).status ==
+          SubmitStatus::Accepted);
+    std::thread drainer([&] { pipe.DrainDue(w.key); });
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while(transport->BlockedEntries() == 0 &&
+          std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(1ms);
+    }
+    CHECK(transport->BlockedEntries() == 1);
+
+    w.topology_generation = 2;
+    pipe.RegisterDevice(w);        /* resets delivered state */
+    transport->Release();
+    drainer.join();
+    CHECK(transport->DeliveredCount(w.key) == 1);
+
+    /* New generation, fresh low sequence, same colors as the
+       straddling send: must transmit, not be suppressed. */
+    CHECK(pipe.SubmitLatest(MakeFrame(w, 1, red)).status ==
+          SubmitStatus::Accepted);
+    CHECK(pipe.DrainDue(w.key) == 1);
+    CHECK(transport->DeliveredCount(w.key) == 2);
+}
+
 /* SyncDevices removes lanes whose controllers vanished. */
 static void TestSyncDevices()
 {
@@ -735,6 +774,7 @@ int main()
     TestIndependentBudgets();
     TestValidationAndStats();
     TestTopologyChange();
+    TestSendAcrossTopologyChange();
     TestSyncDevices();
     TestReliablePriority();
     TestNoTransport();

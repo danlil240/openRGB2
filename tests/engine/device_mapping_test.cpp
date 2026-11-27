@@ -1078,6 +1078,40 @@ static void TestBrightnessScalesMappedOnly()
     CHECK(f->colors[32] == kEnumerated);  /* unmapped untouched */
 }
 
+/* Out-of-range brightness clamps instead of wrapping: 1.5 used
+   to give (unsigned)(200*1.5) & 0xFF = 44; negative was UB. */
+static void TestBrightnessClamps()
+{
+    struct Case { float b; RgbColor want; };
+    const Case cases[] = {
+        { 1.5f,  RGB(200, 100, 50) },
+        { -2.0f, RGB(0, 0, 0) },
+        { 1e30f, RGB(200, 100, 50) },
+    };
+    for(const Case& c : cases)
+    {
+        auto doc = std::make_shared<studio::SceneDocument>();
+        doc->brightness = c.b;
+        doc->bindings = {
+            Binding("b-h1", "X870E", "", "", "ARGB_V2_1", 8),
+        };
+        doc->objects = { DevObj("o-h1", "b-h1", 0, 8) };
+
+        DeviceMapper mapper;
+        mapper.SetScene(doc);
+        const DeviceSnapshot mb = Motherboard();
+        mapper.SyncDevices({ mb });
+        const std::vector<RgbFrame> frames = mapper.MapFrame(
+            EvalAll(*doc, { { "o-h1", SC(200, 100, 50) } }));
+        const RgbFrame* f = FrameFor(frames, mb.key);
+        CHECK(f != nullptr);
+        if(f)
+        {
+            CHECK(AllEqual(f->colors, 0, 8, c.want));
+        }
+    }
+}
+
 int main()
 {
     TestWirelessGroupBatchesToOneWrite();
@@ -1093,6 +1127,7 @@ int main()
     TestAutoVerifyOnResolve();
     TestZeroBrightnessEmitsBlackFrame();
     TestBrightnessScalesMappedOnly();
+    TestBrightnessClamps();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -41,6 +41,7 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <process.h>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -1342,7 +1343,7 @@ static void TestFailedCommitRetry()
 int main()
 {
     g_tmp = fs::temp_directory_path() /
-            "openrgb2_workspace_store_test";
+            ("openrgb2_workspace_store_test_" + std::to_string(_getpid()));
     std::error_code ec;
     fs::remove_all(g_tmp, ec);
     fs::create_directories(g_tmp);

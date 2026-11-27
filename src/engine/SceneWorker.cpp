@@ -30,6 +30,12 @@ void SceneWorker::SetIdleFrameHook(IdleFrameHook hook)
     idle_frame_hook_ = std::move(hook);
 }
 
+void SceneWorker::SetOutputGate(OutputGate gate)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    output_gate_ = std::move(gate);
+}
+
 void SceneWorker::SubmitScene(
     std::shared_ptr<const studio::SceneDocument> doc,
     std::vector<studio::EffectLayer> layers,
@@ -139,12 +145,17 @@ bool SceneWorker::Step(TimePoint now)
        so capturing it under the lock and calling it here
        keeps latest-wins semantics identical. */
     InputProvider provider;
+    OutputGate    gate;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         provider = input_provider_;
+        gate     = output_gate_;
     }
+    /* The gate is read outside the lock for the same reason as
+       the provider (it takes the pipeline's own mutex). */
+    const bool gated = gate && gate();
     std::shared_ptr<const studio::InputState> pulled_input;
-    if(provider)
+    if(provider && !gated)
     {
         pulled_input = provider();
     }
@@ -160,6 +171,7 @@ bool SceneWorker::Step(TimePoint now)
             pending_scene_     = SceneState{};
             has_pending_scene_ = false;
             engine_.SetLayers(active_scene_.scene.layers);
+            world_dirty_ = true;
         }
         if(has_pending_input_)
         {
@@ -170,9 +182,13 @@ bool SceneWorker::Step(TimePoint now)
         /* Pull input: the provider (ReactiveInputs) owns the
            per-tick state when wired — pause/disable takes
            effect on the very next tick. */
-        if(provider)
+        if(provider && !gated)
         {
             active_input_ = std::move(pulled_input);
+        }
+        if(gated)
+        {
+            return false;   /* output gated: no evaluate/map */
         }
 
         evaluate = active_scene_.scene.doc != nullptr;
@@ -224,7 +240,15 @@ bool SceneWorker::Step(TimePoint now)
                     PositionStudioInput(*input, active_scene_.scene));
                 input = positioned.get();
             }
-            engine_.Evaluate(*active_scene_.scene.doc,
+            if(world_dirty_)
+            {
+                /* Once per applied document, inside the fault
+                   containment below. */
+                active_world_ = studio::ResolveWorldMatrices(
+                    *active_scene_.scene.doc);
+                world_dirty_  = false;
+            }
+            engine_.Evaluate(*active_scene_.scene.doc, active_world_,
                              frame.scene_time_s,
                              frame.colors, input);
         }

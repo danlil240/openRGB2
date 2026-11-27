@@ -39,12 +39,18 @@ studio::ControllerSnapshot ToControllerSnapshot(const DeviceSnapshot& snap)
     return cs;
 }
 
+/* Brightness is clamped to [0, 1] (NaN -> 0) before scaling:
+   documents validate it, but an out-of-range value must never
+   wrap a channel (1.5 * 200 & 0xFF = 44) or hit the undefined
+   float->unsigned conversion of a negative/huge product. */
 RgbColor ScaleColor(RgbColor c, float brightness)
 {
+    const float b = !(brightness > 0.0f) ? 0.0f
+                  : (brightness > 1.0f ? 1.0f : brightness);
     RgbColor out;
-    out.r = uint8_t((unsigned)(c.r * brightness) & 0xFFu);
-    out.g = uint8_t((unsigned)(c.g * brightness) & 0xFFu);
-    out.b = uint8_t((unsigned)(c.b * brightness) & 0xFFu);
+    out.r = uint8_t((unsigned)(c.r * b));
+    out.g = uint8_t((unsigned)(c.g * b));
+    out.b = uint8_t((unsigned)(c.b * b));
     return out;
 }
 
@@ -214,8 +220,11 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
        mapped addresses resolve by deterministic document
        precedence (last write wins). */
     stats_ = MapStats{};
-    std::map<DeviceKey, std::vector<std::pair<uint32_t, RgbColor>>>
-        writes;
+    for(auto& kv : write_scratch_)
+    {
+        kv.second.used = false;
+        kv.second.writes.clear();
+    }
     for(const studio::SceneObject& obj : doc_->objects)
     {
         ++stats_.objects_total;
@@ -241,8 +250,17 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
             continue;
         }
         const ZonePlacement& zone = rit->second.zone;
-        auto&            queue = writes[zone.controller];
+        WriteQueue&      wq    = write_scratch_[zone.controller];
+        wq.used = true;
+        auto&            queue = wq.writes;
         bool             wrote = false;
+        /* Hoisted: one evaluated-frame lookup per object; the
+           painted fallback (EmitterColor's owner scan + map
+           finds) runs only for an emitter with no evaluated
+           color. */
+        const auto fit = eval.colors.find(obj.id);
+        const std::vector<studio::SceneColor>* evaluated =
+            fit != eval.colors.end() ? &fit->second : nullptr;
         for(size_t e = 0; e < obj.emitters.size(); ++e)
         {
             const int addr = obj.emitters[e].address;
@@ -250,13 +268,10 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
             {
                 continue;
             }
-            studio::SceneColor c =
-                studio::EmitterColor(*doc_, obj.id, (int)e);
-            const auto fit = eval.colors.find(obj.id);
-            if(fit != eval.colors.end() && e < fit->second.size())
-            {
-                c = fit->second[e];
-            }
+            const studio::SceneColor c =
+                (evaluated && e < evaluated->size())
+                    ? (*evaluated)[e]
+                    : studio::EmitterColor(*doc_, obj.id, (int)e);
             queue.emplace_back(zone.start_idx + (uint32_t)addr,
                                ScaleColor(FromSceneColor(c),
                                           doc_->brightness));
@@ -268,8 +283,12 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
         }
     }
 
-    for(const auto& kv : writes)
+    for(const auto& kv : write_scratch_)
     {
+        if(!kv.second.used)
+        {
+            continue;
+        }
         const DeviceKey&      key  = kv.first;
         const auto            sit  = snapshots_.find(key);
         if(sit == snapshots_.end())
@@ -290,23 +309,22 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
         /* Baseline: the last frame emitted for THIS topology
            generation, else the enumerated colors — unmapped
            LEDs keep their colors (plan section 4). */
+        /* The baseline is updated IN PLACE and copied once into
+           the emitted frame (it used to be copied out, written,
+           copied into the frame and moved back). */
         Emitted& st = emitted_[key];
-        std::vector<RgbColor> colors;
         const uint32_t led_count = snap.LedCount();
-        if(st.generation == snap.topology_generation &&
-           st.colors.size() == led_count)
+        if(st.generation != snap.topology_generation ||
+           st.colors.size() != led_count)
         {
-            colors = st.colors;
-        }
-        else
-        {
-            colors = snap.colors;
-            colors.resize(led_count);   /* pad with black */
+            st.colors = snap.colors;
+            st.colors.resize(led_count);   /* pad with black */
             st.generation = snap.topology_generation;
             st.seq        = 0;
         }
+        std::vector<RgbColor>& colors = st.colors;
 
-        for(const auto& w : kv.second)
+        for(const auto& w : kv.second.writes)
         {
             if(w.first < colors.size())
             {
@@ -320,7 +338,6 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
         frame.sequence            = ++st.seq;
         frame.sample_time         = eval.sample_time;
         frame.colors              = colors;
-        st.colors                 = std::move(colors);
         out.push_back(std::move(frame));
     }
     stats_.objects_writable = writable_objects_;
