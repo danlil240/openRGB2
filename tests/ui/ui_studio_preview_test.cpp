@@ -27,7 +27,12 @@
 
 #include "test_pipe.h"
 
-#include <QCoreApplication>
+#include <QGuiApplication>
+#include <QQmlComponent>
+#include <QQmlContext>
+#include <QQmlEngine>
+#include <QQuickItem>
+#include <QQuickStyle>
 #include <QTemporaryDir>
 #include <QVariantList>
 #include <QVariantMap>
@@ -307,7 +312,9 @@ struct PvRig
 
 int main(int argc, char** argv)
 {
-    QCoreApplication app(argc, argv);
+    qputenv("QT_QPA_PLATFORM", "offscreen");
+    QGuiApplication app(argc, argv);
+    QQuickStyle::setStyle(QStringLiteral("Basic"));
 
     /*========================================================*\
     || Draft -> preview_begin -> frame chunks                 ||
@@ -478,6 +485,135 @@ int main(int argc, char** argv)
               == "#123456");
         CHECK(rig.bridge.frameStatus()["colors"]
                   .toList()[0].toString() == "#ABCDEF");
+    }
+
+    /*========================================================*\
+    || Audit Q-5: a stable, colorless row list for QML        ||
+    \*========================================================*/
+    /* The QML surfaces used `objects` (every color of every
+       object) as a Repeater model and scanned it per object, so
+       each pushed frame rebuilt the Lighting draft cards and
+       copied the whole list once per Layout delegate. objectRows
+       carries id/kind/bound/emitter_total only and notifies ONLY
+       when that set changes — a new frame with the same objects
+       repaints through colorsFor() without touching the model. */
+    std::printf("-- objectRows stable across frames (Q-5)\n");
+    {
+        PvRig rig;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] { return rig.bridge.connected(); }));
+        rig.LoadDraft(CompactDoc());
+        CHECK(rig.PumpUntil([&] { return rig.vm->previewActive(); }));
+
+        int rows_changed = 0;
+        QObject::connect(rig.vm.get(),
+                         &StudioViewportModel::objectRowsChanged,
+                         [&] { ++rows_changed; });
+
+        rig.engine.SendPreviewEvent(FrameChunk(
+            1, 1, 0, 1, json::array({
+                Obj("fan0", json::array({ "#FF0000", "#00FF00" })),
+                Obj("fan1", json::array({ "#0000FF", "#FFFFFF" })) }),
+            false, 4, 4, 2));
+        CHECK(rig.PumpUntil([&] { return rig.vm->sequence() == 1; }));
+        CHECK(rows_changed == 1);
+
+        /* The real Lighting draft cards over this feed. */
+        QQmlEngine qeng;
+        qeng.rootContext()->setContextProperty(
+            QStringLiteral("viewport"), rig.vm.get());
+        QQmlComponent comp(&qeng, QUrl(QStringLiteral(
+            "qrc:/qt/qml/OpenRGB2/UI/pages/LightingPage.qml")));
+        CHECK(!comp.isError());
+        if(comp.isError())
+        {
+            std::printf("%s\n",
+                        comp.errorString().toUtf8().constData());
+        }
+        std::unique_ptr<QObject> page(
+            comp.isError() ? nullptr
+                           : comp.create(qeng.rootContext()));
+        CHECK(page != nullptr);
+        QObject* rep = page
+            ? page->findChild<QObject*>(
+                  QStringLiteral("draftRepeater"))
+            : nullptr;
+        CHECK(rep != nullptr);
+        auto card = [&](int i) -> QQuickItem* {
+            QQuickItem* it = nullptr;
+            if(rep != nullptr)
+            {
+                QMetaObject::invokeMethod(rep, "itemAt",
+                    Q_RETURN_ARG(QQuickItem*, it), Q_ARG(int, i));
+            }
+            return it;
+        };
+        auto stripFirst = [&](QQuickItem* c) -> QString {
+            if(c == nullptr)
+            {
+                return QString();
+            }
+            for(QQuickItem* ch : c->childItems())
+            {
+                if(ch->objectName() == QLatin1String("draftStrip"))
+                {
+                    return ch->property("colors").toList()
+                               .value(0).toString();
+                }
+            }
+            return QString();
+        };
+        CHECK(rep != nullptr
+              && rep->property("count").toInt() == 2);
+        QQuickItem* c1 = card(1);
+        CHECK(c1 != nullptr);
+        if(c1 != nullptr)
+        {
+            c1->setProperty("q5_mark", 1);
+        }
+        CHECK(stripFirst(c1).compare(QStringLiteral("#0000FF"),
+                                     Qt::CaseInsensitive) == 0);
+        const QVariantList rows = rig.vm->objectRows();
+        CHECK(rows.size() == 2);
+        if(rows.size() == 2)
+        {
+            const QVariantMap r0 = rows[0].toMap();
+            CHECK(r0.value("id").toString() == "fan0");
+            CHECK(r0.value("emitter_total").toInt() == 2);
+            CHECK(!r0.contains("colors"));
+        }
+
+        /* same objects, new colors: no row notification, but
+           colorsFor answers the NEW frame */
+        rig.engine.SendPreviewEvent(FrameChunk(
+            2, 1, 0, 1, json::array({
+                Obj("fan0", json::array({ "#111111", "#222222" })),
+                Obj("fan1", json::array({ "#333333", "#444444" })) }),
+            false, 4, 4, 2));
+        CHECK(rig.PumpUntil([&] { return rig.vm->sequence() == 2; }));
+        CHECK(rows_changed == 1);
+        CHECK(rig.vm->colorsFor("fan1", 2).toList().value(0)
+                  .toString() == "#333333");
+        /* the card survived the frame (no rebuild) and its strip
+           repainted from the new frame */
+        QCoreApplication::processEvents();
+        QQuickItem* c1b = card(1);
+        CHECK(c1b != nullptr
+              && c1b->property("q5_mark").toInt() == 1);
+        CHECK(stripFirst(c1b).compare(QStringLiteral("#333333"),
+                                      Qt::CaseInsensitive) == 0);
+
+        /* the object set changes -> one notification */
+        rig.engine.SendPreviewEvent(FrameChunk(
+            3, 1, 0, 1, json::array({
+                Obj("fan0", json::array({ "#111111", "#222222" })) }),
+            false, 2, 2, 1));
+        CHECK(rig.PumpUntil([&] { return rig.vm->sequence() == 3; }));
+        CHECK(rows_changed == 2);
+        CHECK(rig.vm->objectRows().size() == 1);
+        QCoreApplication::processEvents();
+        CHECK(rep != nullptr
+              && rep->property("count").toInt() == 1);
     }
 
     /*========================================================*\

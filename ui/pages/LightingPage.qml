@@ -1765,24 +1765,44 @@ Item {
                         width: parent.width
                         spacing: Theme.spaceM
 
+                        /* Audit Q-5: the model is the colorless
+                           objectRows (notified only when the object
+                           set changes) behind an integer count, so a
+                           pushed frame never rebuilds these cards;
+                           each strip pulls its own colors by id
+                           (O(1) in C++), re-read per frame through
+                           the sequence dependency. */
                         Repeater {
-                            model: (typeof viewport !== "undefined"
-                                    && viewport.previewActive)
-                                   ? (viewport.objects || []) : []
+                            id: draftRepeater
+                            objectName: "draftRepeater"
+                            readonly property var rows:
+                                (typeof viewport !== "undefined"
+                                 && viewport.previewActive)
+                                ? viewport.objectRows : []
+                            model: rows.length
                             Column {
+                                id: draftRow
+                                required property int index
+                                readonly property var row:
+                                    draftRepeater.rows[index] || ({})
                                 spacing: Theme.spaceXS
                                 Text {
-                                    text: modelData.id +
-                                          (modelData.kind === "linked"
+                                    text: draftRow.row.id +
+                                          (draftRow.row.kind === "linked"
                                            ? " (linked)" :
-                                           (!modelData.bound
+                                           (!draftRow.row.bound
                                             ? " (unbound)" : ""))
                                     color: Theme.textSecondary
                                     font.pixelSize: Theme.fontSizeSmall
                                 }
                                 FrameStrip {
                                     objectName: "draftStrip"
-                                    colors: modelData.colors || []
+                                    colors: viewport.sequence >= 0
+                                            ? (viewport.colorsFor(
+                                                   draftRow.row.id,
+                                                   draftRow.row.emitter_total
+                                                   || 0) || [])
+                                            : []
                                 }
                             }
                         }

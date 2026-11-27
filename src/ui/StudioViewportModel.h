@@ -81,6 +81,13 @@ class StudioViewportModel : public QObject
        COMPLETE sequence, dropped whole when stale/partial. */
     Q_PROPERTY(QVariantList objects READ objects
                    NOTIFY previewChanged)
+    /* [{id,kind,bound,emitter_total}] of the last complete frame,
+       NO colors, notified only when that set changes (audit Q-5).
+       The stable model QML lists use: a frame with the same
+       objects repaints through colorsFor() and never rebuilds the
+       delegates nor copies every object's colors into JS. */
+    Q_PROPERTY(QVariantList objectRows READ objectRows
+                   NOTIFY objectRowsChanged)
     Q_PROPERTY(int droppedFrames READ droppedFrames
                    NOTIFY previewChanged)
     Q_PROPERTY(QString lastError READ lastError
@@ -106,6 +113,7 @@ public:
     int         emitterTotal()   const { return emitter_total_; }
     int         emitterSent()    const { return emitter_sent_; }
     QVariantList objects()       const { return objects_; }
+    QVariantList objectRows()    const { return object_rows_; }
     int         droppedFrames()  const { return dropped_frames_; }
     QString     lastError()      const { return last_error_; }
 
@@ -129,6 +137,7 @@ public:
 
 signals:
     void previewChanged();
+    void objectRowsChanged();
     void wantPreviewChanged();
     void visibleChanged();
     void lastErrorChanged();
@@ -143,6 +152,7 @@ private:
     void OnReply(int request_id, const QString& type_name,
                  const QVariantMap& body);
     void ClearFrame();
+    void SyncObjectRows();
     void SetError(const QString& msg);
 
     EngineBridge*        bridge_;
@@ -162,6 +172,7 @@ private:
     int      emitter_sent_   = 0;
     QVariantList objects_;
     QHash<QString, int> object_index_;   /* id -> objects_ row */
+    QVariantList object_rows_;           /* see objectRows */
     int      dropped_frames_ = 0;
     QString  last_error_;
 

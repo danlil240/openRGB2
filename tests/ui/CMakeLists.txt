@@ -124,16 +124,21 @@ set_tests_properties(ui_workspace_test PROPERTIES
 # drops, reduced labeling, status pauses, refusal honesty,
 # reconnect re-begin, and the hard separation from the
 # transport-accepted frame_status feed).
+# Audit Q-5 adds the real LightingPage draft cards over the same
+# feed, so the suite also links the QML module + Qt Quick.
 add_executable(ui_studio_preview_test ui_studio_preview_test.cpp)
 target_link_libraries(ui_studio_preview_test PRIVATE
     openrgb2_ui
+    openrgb2_uiplugin
     openrgb2_ipc_wire
-    openrgb2_studio_core)
+    openrgb2_studio_core
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
 target_include_directories(ui_studio_preview_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src/ui)
 target_compile_definitions(ui_studio_preview_test PRIVATE NDEBUG)
 set_target_properties(ui_studio_preview_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(ui_studio_preview_test)
 add_test(NAME ui_studio_preview_test COMMAND ui_studio_preview_test)
 set_tests_properties(ui_studio_preview_test PROPERTIES
     LABELS ui
