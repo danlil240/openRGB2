@@ -191,7 +191,7 @@ public:
                                        const QColor& color);
 
     /*---- directional flow (Wave card) ---------------------------
-       Drives every enabled untargeted world-space `wave` layer
+       Drives every untargeted world-space `wave` layer
        (EditorController::IsFlowLayer) of the effective stack
        together (core EditorController::SetFlow — one undo record
        per call). flowState() = {available, direction{x,y,z},

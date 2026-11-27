@@ -15,6 +15,7 @@
 #include "scene/SceneResolver.h"      /* ResolveScene               */
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 
 namespace openrgb2
@@ -1272,10 +1273,11 @@ QVariantMap EffectEditorController::flowState() const
     for(int i = 0; i < (int)layers.size(); i++)
     {
         const studio::EffectLayer& l = layers[i];
-        /* Same predicate as the core SetFlow: the card is only
-           offered when it has a layer to drive (audit C-4). */
-        if(first < 0 && l.enabled
-           && studio::EditorController::IsFlowLayer(l))
+        /* Same predicate and the same first layer as the core
+           SetFlow (enabled or not): the card is only offered when
+           it has a layer to drive, and shows the layer its colour
+           edits land on (audit C-4, C-5). */
+        if(first < 0 && studio::EditorController::IsFlowLayer(l))
         {
             first = i;
         }
@@ -1296,7 +1298,9 @@ QVariantMap EffectEditorController::flowState() const
     }
     const studio::EffectLayer& w = layers[first];
     m["direction"]  = VecMap(w.direction);
-    m["speed"]      = w.speed;
+    /* A magnitude, like the card's slider: SetFlow rescales by
+       |speed| and keeps a backwards layer's sign. */
+    m["speed"]      = std::fabs(w.speed);
     m["wavelength"] = w.scale;
     QStringList colors;
     for(const studio::PaletteStop& s : w.palette.stops)

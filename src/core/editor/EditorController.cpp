@@ -2532,8 +2532,12 @@ EditorController::SetFlow(const FlowEdit& f)
     std::vector<size_t> waves;
     for(size_t i = 0; i < ws.effect.layers.size(); i++)
     {
-        const EffectLayer& l = ws.effect.layers[i];
-        if(l.enabled && IsFlowLayer(l))
+        /* Disabled flow layers are driven too, and the palette
+           target is the first flow layer in stack order whether
+           or not it is enabled: toggling a layer must not move the
+           card's colours onto another layer, nor leave a disabled
+           one pointing the old way when it comes back. */
+        if(IsFlowLayer(ws.effect.layers[i]))
         {
             waves.push_back(i);
         }
@@ -2544,41 +2548,75 @@ EditorController::SetFlow(const FlowEdit& f)
         return UndoEffectOp(before);
     }
 
+    /* The card's speed is a magnitude: rescale by |speed0| so a
+       first layer running backwards keeps every layer's sign. A
+       stationary first layer gives no ratio: it alone takes the
+       new value and the other layers keep theirs (rather than all
+       being flattened to one speed). Wavelength likewise. */
     EffectLayer& first = ws.effect.layers[waves.front()];
-    const float speed0 = first.speed;
+    const float speed0 = std::fabs(first.speed);
     const float scale0 = first.scale;
     for(size_t i : waves)
     {
         EffectLayer& l = ws.effect.layers[i];
+        const bool is_first = (i == waves.front());
         if(f.direction)
         {
             l.direction = dir;
         }
         if(f.speed)
         {
-            l.speed = (speed0 > 0.0f) ? l.speed * (*f.speed / speed0)
-                                      : *f.speed;
+            if(speed0 > 0.0f)
+            {
+                l.speed *= *f.speed / speed0;
+            }
+            else if(is_first)
+            {
+                l.speed = *f.speed;
+            }
         }
         if(f.wavelength)
         {
-            l.scale = (scale0 > 0.0f)
-                    ? l.scale * (*f.wavelength / scale0)
-                    : *f.wavelength;
+            if(scale0 > 0.0f)
+            {
+                l.scale *= *f.wavelength / scale0;
+            }
+            else if(is_first)
+            {
+                l.scale = *f.wavelength;
+            }
         }
     }
     if(!f.colors.empty())
     {
-        Palette p;
+        std::vector<PaletteStop>& stops = first.palette.stops;
         const size_t n = f.colors.size();
-        for(size_t k = 0; k < n; k++)
+        if(n == stops.size())
         {
-            PaletteStop s;
-            s.pos   = (float)k / (float)n;
-            s.color = f.colors[k];
-            s.color.a = 1.0f;
-            p.stops.push_back(s);
+            /* Same count = a swatch recolour: keep the authored
+               stop positions (Aurora's 0/.35/.65/.85) and alpha. */
+            for(size_t k = 0; k < n; k++)
+            {
+                stops[k].color.r = f.colors[k].r;
+                stops[k].color.g = f.colors[k].g;
+                stops[k].color.b = f.colors[k].b;
+            }
         }
-        first.palette = p;
+        else
+        {
+            /* A swatch added or removed: evenly spaced stops (the
+               palette wraps, so the loop stays seamless). */
+            Palette p;
+            for(size_t k = 0; k < n; k++)
+            {
+                PaletteStop s;
+                s.pos   = (float)k / (float)n;
+                s.color = f.colors[k];
+                s.color.a = 1.0f;
+                p.stops.push_back(s);
+            }
+            first.palette = p;
+        }
     }
     return FinishEffectEdit(before, "edit wave");
 }

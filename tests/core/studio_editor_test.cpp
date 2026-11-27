@@ -1860,6 +1860,105 @@ static void TestFlowEditSpace()
           "flow space: refusal leaves the local wave alone");
 }
 
+/*---------------------------------------------------------*\
+||| SetFlow colour/stop/speed handling (audit C-5).          |
+\*---------------------------------------------------------*/
+static void TestFlowEditStops()
+{
+    using namespace studio;
+    EffectLayer flow;
+    flow.primitive = "wave";
+    flow.speed = 0.2f;  flow.scale = 0.5f;
+    /* Aurora's uneven stops. */
+    flow.palette.stops = {
+        PaletteStop{ 0.0f,  ColorF{ 0.0f, 0.8f, 0.7f, 1.0f } },
+        PaletteStop{ 0.35f, ColorF{ 0.4f, 0.25f, 0.9f, 1.0f } },
+        PaletteStop{ 0.65f, ColorF{ 0.0f, 0.1f, 0.2f, 0.5f } },
+        PaletteStop{ 0.85f, ColorF{ 0.0f, 0.35f, 0.4f, 1.0f } } };
+    EffectLayer swell = flow;
+    swell.speed = 0.4f;  swell.scale = 1.0f;
+    swell.palette = MakePalette({ MakeSceneColor(255, 255, 255) });
+
+    /* Recolouring one swatch keeps every stop position (and the
+       stops' alpha); only a count change re-spaces evenly. */
+    {
+        StudioDocument w = Fixture();
+        w.effect.layers = { flow, swell };
+        EditorController ctl(w);
+        EditorController::FlowEdit c;
+        for(const PaletteStop& s : flow.palette.stops)
+        {
+            c.colors.push_back(s.color);
+        }
+        c.colors[1] = ColorF{ 1, 0, 0, 1 };
+        CHECK(ctl.SetFlow(c).has_value(), "flow stops: recolor lands");
+        const auto& st = w.effect.layers[0].palette.stops;
+        CHECK(st.size() == 4 && Near(st[0].pos, 0.0f)
+              && Near(st[1].pos, 0.35f) && Near(st[2].pos, 0.65f)
+              && Near(st[3].pos, 0.85f),
+              "flow stops: same count keeps the stop positions");
+        CHECK(Near(st[1].color.r, 1.0f) && Near(st[1].color.g, 0.0f),
+              "flow stops: the edited swatch changed");
+        CHECK(Near(st[2].color.a, 0.5f),
+              "flow stops: same count keeps stop alpha");
+
+        c.colors.push_back(ColorF{ 0, 1, 0, 1 });
+        CHECK(ctl.SetFlow(c).has_value(), "flow stops: add lands");
+        CHECK(st.size() == 5 && Near(st[1].pos, 0.2f)
+              && Near(st[4].pos, 0.8f),
+              "flow stops: a count change re-spaces evenly");
+    }
+
+    /* A disabled flow layer still is the palette target and still
+       follows the direction — toggling a layer must not move the
+       card onto another layer. */
+    {
+        StudioDocument w = Fixture();
+        EffectLayer off = flow;
+        off.enabled = false;
+        w.effect.layers = { off, swell };
+        EditorController ctl(w);
+        EditorController::FlowEdit d;
+        d.direction = Vec3{ 0, 0, -1 };
+        d.colors = { ColorF{ 1, 0, 0, 1 }, ColorF{ 0, 0, 1, 1 } };
+        CHECK(ctl.SetFlow(d).has_value(), "flow disabled: edit lands");
+        CHECK(NearVec(w.effect.layers[0].direction, { 0, 0, -1 })
+              && NearVec(w.effect.layers[1].direction, { 0, 0, -1 }),
+              "flow disabled: disabled wave follows the direction");
+        CHECK(w.effect.layers[0].palette.stops.size() == 2
+              && w.effect.layers[1].palette.stops.size() == 1,
+              "flow disabled: palette stays on the first flow layer");
+    }
+
+    /* A stationary first layer has no ratio: it takes the new
+       speed and the others keep theirs (never flattened). A
+       negative first speed rescales by its magnitude, keeping
+       every layer's sign. */
+    {
+        StudioDocument w = Fixture();
+        EffectLayer still = flow;
+        still.speed = 0.0f;
+        w.effect.layers = { still, swell };
+        EditorController ctl(w);
+        EditorController::FlowEdit s;
+        s.speed = 0.3f;
+        CHECK(ctl.SetFlow(s).has_value(), "flow speed0=0: edit lands");
+        CHECK(Near(w.effect.layers[0].speed, 0.3f)
+              && Near(w.effect.layers[1].speed, 0.4f),
+              "flow speed0=0: other waves keep their speed");
+
+        StudioDocument w2 = Fixture();
+        EffectLayer back = flow;
+        back.speed = -0.2f;
+        w2.effect.layers = { back, swell };
+        EditorController ctl2(w2);
+        CHECK(ctl2.SetFlow(s).has_value(), "flow speed0<0: edit lands");
+        CHECK(Near(w2.effect.layers[0].speed, -0.3f)
+              && Near(w2.effect.layers[1].speed, 0.6f),
+              "flow speed0<0: rescale by magnitude, signs kept");
+    }
+}
+
 static void TestEffectLayers()
 {
     using namespace studio;
@@ -2364,6 +2463,7 @@ int main()
     TestEffectLayers();
     TestFlowEdit();
     TestFlowEditSpace();
+    TestFlowEditStops();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
