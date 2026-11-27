@@ -35,13 +35,11 @@ ReactiveInputs::ReactiveInputs(Deps deps)
     {
         /* Input events must be stamped on the SCENE clock —
            EvalRipple ages them as `in.t - e.t` against the
-           worker's epoch, so the bus shares the provider. */
-        std::function<double()> now = deps_.now;
-        bus_.SetNow(
-            [now]()
-            {
-                return static_cast<float>(now());
-            });
+           worker's epoch, so the bus shares the provider.
+           Kept in double end to end: a float stamp quantises to
+           ~0.06 s after days of uptime, which reorders events
+           against `in.t` and trips EvalRipple's `age < 0` skip. */
+        bus_.SetNow(deps_.now);
     }
 
     if(deps_.source_factory)
