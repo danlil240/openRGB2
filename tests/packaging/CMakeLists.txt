@@ -38,6 +38,20 @@ if(WIN32)
         LABELS packaging
         TIMEOUT 30)
 
+    # Audit P-2: the REAL stage-release.ps1 against fake inputs and a
+    # fake windeployqt -- re-staging keeps a run-in-place package's
+    # state\ and profiles\local\, and never wipes a non-package dir.
+    add_executable(fake_windeployqt fake_windeployqt.cpp)
+    target_compile_features(fake_windeployqt PRIVATE cxx_std_17)
+    add_test(NAME package_stage_release_state_test
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/stage_release_state_tests.ps1
+            -StageScript ${CMAKE_SOURCE_DIR}/packaging/windows/stage-release.ps1
+            -FakeWindeployqt $<TARGET_FILE:fake_windeployqt>)
+    set_tests_properties(package_stage_release_state_test PROPERTIES
+        LABELS packaging
+        TIMEOUT 300)
+
     add_test(NAME package_lifecycle_test
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
             -File ${CMAKE_CURRENT_SOURCE_DIR}/package_lifecycle_tests.ps1
