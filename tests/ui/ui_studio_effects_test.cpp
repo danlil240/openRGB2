@@ -396,6 +396,42 @@ int main(int argc, char** argv)
         CHECK(!rig.ctl.hasInlineLayers());
     }
 
+    std::printf("-- Ctrl+Z mid-scrub is refused; a reset cancels "
+                "the scrub (audit C-6)\n");
+    {
+        Rig rig;
+        rig.LoadDoc(CompactDoc("aurora"));
+        rig.ctl.setLayerOpacity(0, 0.5);          /* record 1 */
+        rig.ctl.beginLayerGesture();
+        rig.ctl.setLayerField(0, "speed", 3.0);
+        rig.ctl.undo();                           /* held slider */
+        CHECK(rig.ctl.gestureActive());
+        CHECK(rig.UndoCount() == 1);
+        rig.ctl.commitLayerGesture("speed scrub");
+        CHECK(rig.UndoCount() == 2);
+        rig.ctl.undo();
+        /* One undo takes back the scrub only. */
+        CHECK(rig.ctl.hasInlineLayers());
+        CHECK(std::fabs(rig.Working().effect.layers[0].opacity
+                        - 0.5f) < 1e-4);
+        CHECK(std::fabs(rig.Working().effect.layers[0].speed
+                        - 3.0f) > 1e-3);
+
+        /* Discarding the draft mid-scrub cancels the gesture and
+           tells QML. */
+        QSignalSpy gest(&rig.ctl,
+                        &EffectEditorController::gestureChanged);
+        rig.ctl.beginLayerGesture();
+        rig.ctl.setLayerField(0, "speed", 4.0);
+        gest.clear();
+        rig.ws.resetEdits();
+        CHECK(!rig.ctl.gestureActive());
+        CHECK(gest.count() >= 1);
+        CHECK(!rig.ctl.hasInlineLayers());
+        rig.ctl.commitLayerGesture("late release");
+        CHECK(rig.UndoCount() == 0);
+    }
+
     std::printf("-- selectPreset: stack cleared + fresh seed, "
                 "undoable\n");
     {

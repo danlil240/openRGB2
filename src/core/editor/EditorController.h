@@ -287,6 +287,13 @@ public:
     std::optional<EditorEdit> CommitLayerGesture(
         const std::string& label = "edit layers");
     void CancelLayerGesture();
+    /* Cancel whichever gesture is open (transform or layer),
+       restoring its begin snapshot. Session entry points that
+       replace or rewind the document (load, remote move, draft
+       recovery, discard, whole-document edits) call this BEFORE
+       touching ws, so a stale snapshot can never be restored
+       over, or recorded against, the new document. */
+    void CancelGestures();
 
     /* Stack-level ops. `primitive` must be one of the JSON grammar
        names ("static" | "gradient" | "wave" | "pulse" | "comet" |

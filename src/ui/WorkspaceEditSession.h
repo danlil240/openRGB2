@@ -147,6 +147,12 @@ public:
     bool SetMeta(
         const std::function<bool(studio::WorkspaceMeta&)>& mutate);
 
+    /* Refused (false) while an effect-layer gesture is open — the
+       release would otherwise record the undone edit back. A
+       transform gesture is cancelled first. Every entry point
+       that replaces the draft (LoadApplied, ApplyRemote,
+       LoadDraft, Discard, CommitDocEdit/StageWorking) cancels
+       both gesture kinds before touching it. */
     bool Undo();
     bool Redo();
     /* working = baseline; clears history + any live gesture —
