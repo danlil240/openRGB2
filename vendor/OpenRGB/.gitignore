@@ -76,6 +76,8 @@ ui_*.h
 *.jsc
 Makefile*
 *build-*
+# ...but not the upstream build recipes (tracked by the fork)
+!scripts/build-*
 *.qm
 *.prl
 
