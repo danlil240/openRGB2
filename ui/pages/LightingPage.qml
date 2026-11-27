@@ -1007,21 +1007,43 @@ Item {
                                 Layout.fillWidth: true
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0; to: 100; stepSize: 1
-                                /* One commit per gesture (release),
-                                   not one undo record per pixel of
-                                   drag; keyboard steps (no press)
-                                   commit immediately. */
-                                function commitValue() {
+                                /* One commit per gesture, not one undo
+                                   record per pixel of drag. A gesture
+                                   is a pointer drag OR a step-key
+                                   press (Slider sets `pressed` while
+                                   the key is down), so both commit on
+                                   RELEASE - and only a real release
+                                   while enabled (AppSlider
+                                   gestureCommitted); disabling it
+                                   mid-drag cancels and the handle
+                                   snaps back to modelValue. The %
+                                   label tracks the handle live. No
+                                   live engine preview during the
+                                   drag: every SceneEditController
+                                   setter is an undo-history commit. */
+                                function commitValue(v) {
                                     if(root.editorUp)
-                                        sceneEdit.setBrightness(value / 100)
+                                        sceneEdit.setBrightness(v / 100)
                                 }
-                                onMoved: if(!pressed) commitValue()
-                                onPressedChanged: if(!pressed) commitValue()
+                                onGestureCommitted: v => commitValue(v)
+                                /* moved without a gesture (e.g. an
+                                   accessibility action) commits at
+                                   once. */
+                                onMoved: if(!pressed) commitValue(value)
+                                /* The model value: the Binding re-syncs the
+                                   handle to it, and a cancelled gesture
+                                   (AppSlider) snaps back to it. */
+                                modelValue: root.editorUp
+                                       ? sceneEdit.brightness * 100 : 0
+                                /* Not while the user holds it: a
+                                   model change mid-drag must not
+                                   yank the handle away. */
                                 Binding {
                                     target: brightSlider
                                     property: "value"
-                                    value: root.editorUp
-                                           ? sceneEdit.brightness * 100 : 0
+                                    when: !brightSlider.pressed
+                                    restoreMode: Binding.RestoreNone
+                                    value: brightSlider.modelValue
                                 }
                             }
                             Text {
@@ -1049,17 +1071,23 @@ Item {
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0.05; to: 4.0; stepSize: 0.05
                                 /* Commit on release (see brightness). */
-                                function commitValue() {
+                                function commitValue(v) {
                                     if(root.editorUp)
-                                        sceneEdit.setEffectSpeed(value)
+                                        sceneEdit.setEffectSpeed(v)
                                 }
-                                onMoved: if(!pressed) commitValue()
-                                onPressedChanged: if(!pressed) commitValue()
+                                onGestureCommitted: v => commitValue(v)
+                                onMoved: if(!pressed) commitValue(value)
+                                /* The model value: the Binding re-syncs the
+                                   handle to it, and a cancelled gesture
+                                   (AppSlider) snaps back to it. */
+                                modelValue: root.editorUp
+                                       ? sceneEdit.effectSpeed : 1.0
                                 Binding {
                                     target: fxSpeedSlider
                                     property: "value"
-                                    value: root.editorUp
-                                           ? sceneEdit.effectSpeed : 1.0
+                                    when: !fxSpeedSlider.pressed
+                                    restoreMode: Binding.RestoreNone
+                                    value: fxSpeedSlider.modelValue
                                 }
                             }
                             Text {
@@ -1087,17 +1115,23 @@ Item {
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0; to: 1.0; stepSize: 0.01
                                 /* Commit on release (see brightness). */
-                                function commitValue() {
+                                function commitValue(v) {
                                     if(root.editorUp)
-                                        sceneEdit.setEffectIntensity(value)
+                                        sceneEdit.setEffectIntensity(v)
                                 }
-                                onMoved: if(!pressed) commitValue()
-                                onPressedChanged: if(!pressed) commitValue()
+                                onGestureCommitted: v => commitValue(v)
+                                onMoved: if(!pressed) commitValue(value)
+                                /* The model value: the Binding re-syncs the
+                                   handle to it, and a cancelled gesture
+                                   (AppSlider) snaps back to it. */
+                                modelValue: root.editorUp
+                                       ? sceneEdit.effectIntensity : 1.0
                                 Binding {
                                     target: fxIntSlider
                                     property: "value"
-                                    value: root.editorUp
-                                           ? sceneEdit.effectIntensity : 1.0
+                                    when: !fxIntSlider.pressed
+                                    restoreMode: Binding.RestoreNone
+                                    value: fxIntSlider.modelValue
                                 }
                             }
                             Text {
@@ -1526,26 +1560,36 @@ Item {
                                         from: 25; to: 200; stepSize: 1
                                         enabled: inputRow.usable
                                         onMoved: sensTimer.restart()
+                                        /* Cancelled drag: the Binding
+                                           re-syncs the handle; push
+                                           that value to the live
+                                           wire too. */
+                                        onGestureCancelled: sensTimer.restart()
                                         /* Persist the authored
                                            value into the draft on
                                            RELEASE only — one undo
                                            record per drag, not one
                                            per 150 ms timer tick. */
-                                        onPressedChanged: {
-                                            if(!pressed
-                                               && typeof effectEdit !== "undefined"
+                                        onGestureCommitted: v => {
+                                            if(typeof effectEdit !== "undefined"
                                                && effectEdit.ready)
                                                 effectEdit.setInputSensitivity(
-                                                    Math.round(value))
+                                                    Math.round(v))
                                         }
+                                        /* The model value: the Binding re-syncs the
+                                           handle to it, and a cancelled gesture
+                                           (AppSlider) snaps back to it. */
+                                        modelValue: inputRow.present
+                                               ? Math.round(
+                                                   inputRow.st.sensitivity
+                                                   * 100)
+                                               : 100
                                         Binding {
                                             target: sensSlider
                                             property: "value"
-                                            value: inputRow.present
-                                                   ? Math.round(
-                                                       inputRow.st.sensitivity
-                                                       * 100)
-                                                   : 100
+                                            when: !sensSlider.pressed
+                                            restoreMode: Binding.RestoreNone
+                                            value: sensSlider.modelValue
                                         }
                                     }
                                     Text {
@@ -1641,19 +1685,24 @@ Item {
                                 Accessible.name: qsTr("ripple decay")
                                 Layout.fillWidth: true
                                 from: 50; to: 300; stepSize: 5
-                                onPressedChanged: {
-                                    if(!pressed
-                                       && typeof effectEdit !== "undefined"
+                                onGestureCommitted: v => {
+                                    if(typeof effectEdit !== "undefined"
                                        && effectEdit.ready)
                                         effectEdit.setDecayPct(
-                                            Math.round(value))
+                                            Math.round(v))
                                 }
+                                /* The model value: the Binding re-syncs the
+                                   handle to it, and a cancelled gesture
+                                   (AppSlider) snaps back to it. */
+                                modelValue: typeof effectEdit !== "undefined"
+                                       && effectEdit.ready
+                                       ? effectEdit.decayPct : 100
                                 Binding {
                                     target: decaySlider
                                     property: "value"
-                                    value: typeof effectEdit !== "undefined"
-                                           && effectEdit.ready
-                                           ? effectEdit.decayPct : 100
+                                    when: !decaySlider.pressed
+                                    restoreMode: Binding.RestoreNone
+                                    value: decaySlider.modelValue
                                 }
                             }
                             Text {

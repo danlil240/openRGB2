@@ -7,7 +7,9 @@
 |||   JSON in, one JSON reply line out. Started ONLY by     ||
 |||   `--qa` / `OPENRGB2_QA` — the app never opens a port   ||
 |||   on its own, and the listener binds 127.0.0.1 so the   ||
-|||   surface cannot leave the machine.                     ||
+|||   surface cannot leave the machine. main.cpp REFUSES it ||
+|||   in an elevated or --managed UI (LaunchHardening.h):   ||
+|||   medium-integrity code must never drive an admin UI.   ||
 |||                                                           ||
 |||   Ops: ping, state, tree, find, click, clickxy, set,    ||
 |||   get, geom, type, key, scroll, shot, wait, eval.       ||

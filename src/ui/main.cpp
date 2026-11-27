@@ -13,6 +13,7 @@
 
 #include "DiagnosticsController.h"
 #include "EngineBridge.h"
+#include "LaunchHardening.h"
 #include "LayoutController.h"
 #include "QaServer.h"
 #include "SceneEditController.h"
@@ -97,59 +98,19 @@ void ShowRestored(QQuickWindow* window)
     window->requestActivate();
 }
 
-#ifdef Q_OS_WIN
-/* Elevation probe usable before QApplication exists. Unknown
-   counts as elevated: the caller only uses it to drop
-   user-controlled search paths, which is safe either way. */
-bool ProcessIsElevated()
-{
-    HANDLE token = nullptr;
-    TOKEN_ELEVATION elevation{};
-    DWORD bytes = 0;
-    const bool known =
-        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)
-        && GetTokenInformation(token, TokenElevation, &elevation,
-                               sizeof(elevation), &bytes);
-    if(token)
-        CloseHandle(token);
-    return !known || elevation.TokenIsElevated;
-}
-#endif
-
-/* An elevated UI must not load modules from locations a
-   medium-integrity process controls: these variables are
-   inherited from the (non-elevated) user environment and steer
-   Qt's plugin / QML import / platform-plugin search, which would
-   let unelevated code inject a plugin into the elevated process.
-   Cleared before Qt loads anything (QApplication, styles, QML). */
-void ScrubModuleSearchEnv()
-{
-    static const char* const kVars[] = {
-        "QT_PLUGIN_PATH",
-        "QML_IMPORT_PATH",
-        "QML2_IMPORT_PATH",
-        "QT_QPA_PLATFORM_PLUGIN_PATH",
-        "QT_QUICK_CONTROLS_STYLE_PATH",
-        "QT_QPA_PLATFORMTHEME",
-        "QT_STYLE_OVERRIDE",
-        "QT_QUICK_CONTROLS_STYLE",
-    };
-    for(const char* v : kVars)
-    {
-        qunsetenv(v);
-    }
-}
-
 } /* anonymous namespace */
 
 int main(int argc, char** argv)
 {
-#ifdef Q_OS_WIN
-    if(ProcessIsElevated())
+    /* An elevated UI must not load modules from locations a
+       medium-integrity process controls: Qt's plugin / QML-import
+       / style search vars are inherited from the (non-elevated)
+       user environment. Cleared before Qt loads anything. */
+    const bool elevated = openrgb2::ui::launch::ProcessIsElevated();
+    if(elevated)
     {
-        ScrubModuleSearchEnv();
+        openrgb2::ui::launch::ScrubModuleSearchEnv();
     }
-#endif
     /* --pipe <name> overrides the well-known command pipe —
        used by manual verification against a fixture engine. */
     QString pipe;
@@ -158,7 +119,8 @@ int main(int argc, char** argv)
     bool background = false;
     /* --qa[=port] (or OPENRGB2_QA=1, optional OPENRGB2_QA_PORT)
        starts the loopback QA automation socket. Off by
-       default — the shipped UI never opens a port. */
+       default — the shipped UI never opens a port, and an
+       elevated or managed UI refuses it (see DecideQa below). */
     bool qa_enabled =
         qEnvironmentVariableIsSet("OPENRGB2_QA") &&
         qEnvironmentVariable("OPENRGB2_QA") != "0";
@@ -203,6 +165,25 @@ int main(int argc, char** argv)
         else if(std::strcmp(argv[i], "--background") == 0)
         {
             background = true;
+        }
+    }
+
+    /* Never serve QA from an elevated / managed UI: OPENRGB2_QA
+       is settable by any non-elevated process (HKCU\Environment)
+       and the token file is readable at medium integrity, so the
+       socket would let unelevated code drive an admin process.
+       Decided before anything else reads qa_enabled, so a refused
+       request behaves exactly like no request. */
+    {
+        const auto qa_decision = openrgb2::ui::launch::DecideQa(
+            qa_enabled, managed, elevated);
+        if(qa_decision == openrgb2::ui::launch::QaDecision::RefusedElevated
+           || qa_decision == openrgb2::ui::launch::QaDecision::RefusedManaged)
+        {
+            std::fprintf(stderr, "%s\n",
+                openrgb2::ui::launch::QaRefusalMessage(qa_decision)
+                    .toUtf8().constData());
+            qa_enabled = false;
         }
     }
 
@@ -538,7 +519,8 @@ int main(int argc, char** argv)
                 const QString state_dir = QDir(install_dir).filePath(
                     QStringLiteral("state"));
                 QDir().mkpath(state_dir);
-                shutdown.setProgram(QStringLiteral("powershell.exe"));
+                /* System powershell.exe, sanitised env, hidden. */
+                openrgb2::ui::launch::PrepareHiddenPowerShell(shutdown);
                 shutdown.setArguments({QStringLiteral("-NoProfile"),
                     QStringLiteral("-NonInteractive"),
                     QStringLiteral("-ExecutionPolicy"),
@@ -549,14 +531,6 @@ int main(int argc, char** argv)
                 shutdown.setProcessChannelMode(QProcess::MergedChannels);
                 shutdown.setStandardOutputFile(QDir(state_dir).filePath(
                     QStringLiteral("shutdown.log")), QIODevice::Append);
-#ifdef Q_OS_WIN
-                shutdown.setCreateProcessArgumentsModifier(
-                    [](QProcess::CreateProcessArguments* args) {
-                        args->flags |= CREATE_NO_WINDOW;
-                        args->startupInfo->dwFlags |= STARTF_USESHOWWINDOW;
-                        args->startupInfo->wShowWindow = SW_HIDE;
-                    });
-#endif
                 shutdown.start();
             });
             QObject::connect(&shutdown,
@@ -635,7 +609,11 @@ int main(int argc, char** argv)
        shown. Exit 4 = an elevated stack this process cannot verify. */
     QProcess startup;
     bool     startup_takeover = false;
-    qint64   startup_log_offset = 0;
+    /* This run's output, captured from the child's stdout (and
+       appended to startup.log here). Parsing what was captured —
+       not re-reading the log from a remembered offset — survives
+       the script's in-place log rotation (truncate to 0 > 1 MB). */
+    QByteArray startup_output;
     bool     takeover_ask_pending = false;
     QStringList takeover_conflicts;
     if(managed)
@@ -655,20 +633,33 @@ int main(int argc, char** argv)
             QDir().mkpath(state_dir);
             const QString log = QDir(state_dir).filePath(
                 QStringLiteral("startup.log"));
-            startup.setProgram(QStringLiteral("powershell.exe"));
+            /* System powershell.exe, sanitised env (no CLR profiler /
+               user PSModulePath / Qt search vars), hidden window. */
+            openrgb2::ui::launch::PrepareHiddenPowerShell(startup);
             startup.setWorkingDirectory(install_dir);
             startup.setProcessChannelMode(QProcess::MergedChannels);
-#ifdef Q_OS_WIN
-            startup.setCreateProcessArgumentsModifier(
-                [](QProcess::CreateProcessArguments* args) {
-                    args->flags |= CREATE_NO_WINDOW;
-                    args->startupInfo->dwFlags |= STARTF_USESHOWWINDOW;
-                    args->startupInfo->wShowWindow = SW_HIDE;
-                });
-#endif
+            /* Tee each chunk to startup.log (opened per chunk in
+               append mode, so an in-place truncate by the script
+               just restarts the file) and to this run's capture
+               (bounded; the conflict banner ends a short run). */
+            auto drain_startup = [&startup, &startup_output, log] {
+                const QByteArray chunk = startup.readAllStandardOutput();
+                if(chunk.isEmpty())
+                    return;
+                QFile f(log);
+                if(f.open(QIODevice::WriteOnly | QIODevice::Append))
+                    f.write(chunk);
+                constexpr qsizetype kMaxCapture = 1024 * 1024;
+                startup_output += chunk;
+                if(startup_output.size() > kMaxCapture)
+                    startup_output.remove(
+                        0, startup_output.size() - kMaxCapture);
+            };
+            QObject::connect(&startup, &QProcess::readyReadStandardOutput,
+                             &app, drain_startup);
             auto run_start = [&startup, &startup_takeover,
-                              &startup_log_offset, script, install_dir,
-                              log](bool take_over) {
+                              &startup_output, script,
+                              install_dir](bool take_over) {
                 if(startup.state() != QProcess::NotRunning)
                     return;
                 startup_takeover = take_over;
@@ -683,9 +674,7 @@ int main(int argc, char** argv)
                 args << QStringLiteral("-HideWindows")
                      << QStringLiteral("-NoUI");
                 startup.setArguments(args);
-                /* This run's output = the log bytes past here. */
-                startup_log_offset = QFileInfo(log).size();
-                startup.setStandardOutputFile(log, QIODevice::Append);
+                startup_output.clear();
                 startup.start();
             };
             /* Shown once the window can host it (now, or on the first
@@ -729,9 +718,11 @@ int main(int argc, char** argv)
             QObject::connect(&startup,
                 qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
                 &app, [log, window, &tray, tray_available,
-                       &startup_takeover, &startup_log_offset,
+                       &startup_takeover, &startup_output, drain_startup,
                        &takeover_conflicts, &takeover_ask_pending,
                        ask_takeover](int code, QProcess::ExitStatus status) {
+                /* Pick up anything readyRead has not delivered yet. */
+                drain_startup();
                 if(status == QProcess::NormalExit && code == 0)
                     return;
                 if(status == QProcess::NormalExit && code == 4)
@@ -745,24 +736,12 @@ int main(int argc, char** argv)
                                     "administrator.\n\nDetails: %1").arg(log));
                     return;
                 }
-                QString out;
                 if(status == QProcess::NormalExit && code == 3
-                   && !startup_takeover)
+                   && !startup_takeover
+                   && openrgb2::ui::launch::ParseOwnershipConflict(
+                          QString::fromLocal8Bit(startup_output),
+                          &takeover_conflicts))
                 {
-                    QFile f(log);
-                    if(f.open(QIODevice::ReadOnly)
-                       && f.seek(startup_log_offset))
-                        out = QString::fromLocal8Bit(f.readAll());
-                }
-                if(out.contains(QLatin1String("OWNERSHIP CONFLICT")))
-                {
-                    takeover_conflicts.clear();
-                    for(const QString& line :
-                        out.split(QLatin1Char('\n')))
-                    {
-                        if(line.contains(QLatin1String("ownership CONFLICT:")))
-                            takeover_conflicts << line.trimmed();
-                    }
                     if(window->isVisible())
                     {
                         ask_takeover();

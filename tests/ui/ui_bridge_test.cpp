@@ -584,6 +584,8 @@ int main(int argc, char** argv)
         srv.SendMsg(MsgType::Event, 0,
                     frame({ "#111111", "#222222", "#333333" }, 0.5));
         srv.SendMsg(MsgType::Event, 0,
+                    frame({ "#ABCDEF", "#222222", "#333333" }, 0.5));
+        srv.SendMsg(MsgType::Event, 0,
             nlohmann::json::object({
                 { "kind", "scene" },
                 { "data", nlohmann::json::object({
@@ -595,11 +597,31 @@ int main(int argc, char** argv)
         CHECK(fs_signals == 0);
         CHECK(model->rowCount() == 2);
 
+        /* Re-shown with NO new push (static / uploaded / power-
+           gated output: the engine only emits on change): the
+           newest parked frame_status repaints at once. */
         bridge.setFrameFeedActive(true);
-        srv.SendMsg(MsgType::Event, 0,
-                    frame({ "#111111", "#222222", "#333333" }, 0.5));
         CHECK(PumpUntil([&] { return model->rowCount() == 3; }));
+        CHECK(fs_signals == 1);
+        CHECK(model->data(model->index(0, 0),
+                          ui::FrameFeedModel::ColorsRole)
+                  .toList().value(0).toString() == "#ABCDEF");
         CHECK(inserted == 2);
+
+        /* The parked event is consumed: a second hide/show with
+           nothing new repaints nothing; live pushes still flow. */
+        bridge.setFrameFeedActive(false);
+        bridge.setFrameFeedActive(true);
+        PumpUntil([] { return false; }, 100);
+        CHECK(fs_signals == 1);
+        srv.SendMsg(MsgType::Event, 0,
+                    frame({ "#123456", "#222222", "#333333" }, 0.5));
+        CHECK(PumpUntil([&] {
+            return model->data(model->index(0, 0),
+                               ui::FrameFeedModel::ColorsRole)
+                       .toList().value(0).toString() == "#123456";
+        }));
+        CHECK(fs_signals == 2);
         bridge.stop();
     }
 

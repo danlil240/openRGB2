@@ -159,17 +159,33 @@ void EngineBridge::WorkerMain()
         h.onEvent = [this](const nlohmann::json& j)
         {
             /* frame_status arrives at up to ~30 Hz; while no
-               window can show it, drop it here so neither the
-               body copy nor the JSON->QVariant conversion nor any
-               QML binding work happens. */
-            if(!frame_feed_active_.load(std::memory_order_relaxed)
-               && j.is_object())
+               window can show it, park only the newest one here
+               so neither the JSON->QVariant conversion nor any
+               QML binding work happens. setFrameFeedActive(true)
+               applies the parked one — the engine emits only on
+               change, so nothing else would repaint it. */
+            if(j.is_object())
             {
                 const auto k = j.find("kind");
                 if(k != j.end() && k->is_string()
                    && k->get_ref<const std::string&>()
                           == ipc::event_kind::kFrameStatus)
                 {
+                    /* Park-or-post under frame_mu_, the same lock
+                       setFrameFeedActive posts the parked event
+                       under: frame_status posts stay in arrival
+                       order across a hide/show. */
+                    std::lock_guard<std::mutex> lock(frame_mu_);
+                    if(!frame_feed_active_.load())
+                    {
+                        if(parked_frame_status_)
+                            *parked_frame_status_ = j;
+                        else
+                            parked_frame_status_ =
+                                std::make_unique<nlohmann::json>(j);
+                        return;
+                    }
+                    Post([this, j] { ApplyEvent(j); });
                     return;
                 }
             }
@@ -879,9 +895,22 @@ bool        EngineBridge::frameFeedActive() const
 
 void EngineBridge::setFrameFeedActive(bool active)
 {
-    if(frame_feed_active_.exchange(active) == active)
     {
-        return;
+        std::lock_guard<std::mutex> lock(frame_mu_);
+        if(frame_feed_active_.exchange(active) == active)
+        {
+            return;
+        }
+        /* false -> true: repaint the current frame_status. Posted
+           under the lock the worker posts frame_status under, so
+           it queues after anything posted before the hide and
+           before anything newer. */
+        if(active && parked_frame_status_)
+        {
+            std::shared_ptr<const nlohmann::json> parked(
+                std::move(parked_frame_status_));
+            Post([this, parked] { ApplyEvent(*parked); });
+        }
     }
     emit frameFeedActiveChanged();
 }

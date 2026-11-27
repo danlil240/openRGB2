@@ -1,5 +1,7 @@
 #include "StartupTaskController.h"
 
+#include "LaunchHardening.h"
+
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -12,6 +14,7 @@
 
 namespace openrgb2::ui
 {
+using launch::PrepareHiddenPowerShell;
 
 StartupTaskController::StartupTaskController(const QString& installDir,
                                              QObject* parent)
@@ -100,7 +103,10 @@ void StartupTaskController::Run(const QString& mode)
     busy_ = true;
     error_.clear();
     emit stateChanged();
-    process_.setProgram(QStringLiteral("powershell.exe"));
+    /* System powershell.exe, sanitised env (no CLR profiler /
+       user PSModulePath / Qt search vars), hidden window: this
+       runs from the (usually elevated) UI. */
+    PrepareHiddenPowerShell(process_);
     process_.setArguments({QStringLiteral("-NoProfile"),
         QStringLiteral("-NonInteractive"),
         QStringLiteral("-ExecutionPolicy"),
@@ -109,14 +115,6 @@ void StartupTaskController::Run(const QString& mode)
         QStringLiteral("-Mode"), mode,
         QStringLiteral("-InstallDir"), install_dir_});
     process_.setWorkingDirectory(install_dir_);
-#ifdef Q_OS_WIN
-    process_.setCreateProcessArgumentsModifier(
-        [](QProcess::CreateProcessArguments* args) {
-            args->flags |= CREATE_NO_WINDOW;
-            args->startupInfo->dwFlags |= STARTF_USESHOWWINDOW;
-            args->startupInfo->wShowWindow = SW_HIDE;
-        });
-#endif
     process_.start();
 }
 
