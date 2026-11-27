@@ -7,7 +7,7 @@ section 4 ("Process ownership").
 
 | Process | Owns | Started by |
 | --- | --- | --- |
-| `OpenRGB.exe` (vendored, `vendor/OpenRGB/release/`) | **all RGB hardware** — the sole hardware owner. USB/HID/SMBus access lives here and nowhere else | Externally, with `--server --server-host 127.0.0.1 --server-port 6744 --noautoconnect --localconfig`, its private configuration directory as working dir. The engine never spawns it (managed startup is a Milestone-6 packaging item) |
+| `OpenRGB.exe` (vendored, `vendor/OpenRGB/release/`) | **all RGB hardware** — the sole hardware owner. USB/HID/SMBus access lives here and nowhere else | Externally, with `--server --server-host 127.0.0.1 --server-port 6744 --noautoconnect --localconfig`, its private configuration directory as working dir. The engine never spawns it: the managed launcher `packaging/windows/start-openrgb2.ps1` (Milestone 6, shipped as `scripts\start-openrgb2.ps1`) does |
 | `openrgb2-engine.exe` | the scene clock, delivery pipeline, playback-mode state machine, IPC surface | User/launcher. **Attaches** to the backend over the SDK; never touches hardware directly |
 | UI (Milestone 4) | nothing | attaches/detaches to the engine's named pipes freely — closing it never stops output |
 | `openrgb2-ctl` | nothing | one-shot IPC/SDK driver used for M3 verification |
@@ -73,5 +73,6 @@ section 4 ("Process ownership").
   `--backend-exe` exactly (the same verified-own standard
   `stop-openrgb2.ps1` enforces; a foreign or unverifiable process is
   reported and left running, and nothing is ever hard-killed).
-- Never spawns the backend (Milestone 6 adds managed startup).
+- Never spawns the backend — the managed launcher
+  (`packaging/windows/start-openrgb2.ps1`, Milestone 6) does.
 - Never touches FanControl, PWM, pump/fan speed, PawnIO, or sensors.

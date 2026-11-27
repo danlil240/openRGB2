@@ -101,8 +101,10 @@ camera/photodiode exists on this rig.
   transport property, not an engine stall; live 60 FPS over this
   transport is unreachable and is an open release criterion —
   see `docs/benchmarks/wireless-result.md`).
-- **Uploaded playback:** three presets (Spectrum Cycle, Rainbow Wave,
-  Breathing) run as device-side loops off the MCU clock; ~60 fps
+- **Uploaded playback:** nine presets ship (Spectrum Cycle, Rainbow
+  Wave, Breathing, four Perimeter and two Stack modes —
+  `src/engine/PlaybackPresets.cpp`); the qualification legs ran the
+  first three. They run as device-side loops off the MCU clock; ~60 fps
   nominal loop rate after frame-count quantization. Device-side
   evidence: `rgb_clock` ticks ≈1600/s nominal, `upload: active` held
   the whole leg.

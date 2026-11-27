@@ -87,7 +87,12 @@ import are in [`dls-ui-import-hashes.txt`](dls-ui-import-hashes.txt).
   the shared `WorkspaceEditSession`), and the `DeviceTree` / `DeviceLibrary` /
   `TransformInspector` QML surfaces now live in `src/ui/studio/` +
   `ui/studio/`, covered by `tests/ui/ui_studio_objects_test.cpp`.
-  `EffectLayerModel` and the Task-6/8/9 panels remain deferred.
+  Tasks 6, 8 and 9 landed too: `EffectLayerModel`, `EffectEditorController`
+  and the layer/palette/look panels (`LayerStack`, `PaletteEditor`,
+  `LookShelf`, `EffectEditor`, `EffectInspector`; Task 6, `dd3d0e8`), the
+  Quick3D Layout viewport (`ui/studio/viewport/StudioViewport.qml`; Task 8,
+  `a12e420`), and device-type authoring (`DevicePresetController`,
+  `DevicePresetEditor`; Task 9, `86c2e9d`).
 - ~~Platform reactive inputs (AudioLoopback, KeyHook, ScreenSampler)
   (milestone 4)~~ — **done**: Windows WASAPI loopback, WH_KEYBOARD_LL key
   hook, and GDI screen sampling now exist as Qt-free implementations in
