@@ -833,6 +833,149 @@ static void TestPhaseContinuity()
     }
 }
 
+/* Audit C-9: the engine evaluates through per-layer prepared
+   invariants and per-frame terms. Its frames must equal, bit for
+   bit, a per-sample EvalPrimitive composite of the same stack and
+   drives — across every primitive, local/world space, targets,
+   disabled layers, blends, comet paths of 0..4 points, large t,
+   and a ReplaceLayers to a stack of a different size. */
+static void TestPreparedMatchesPerSample()
+{
+    using namespace studio;
+    RemixRng rng(9001u);
+    const char* prims[] = { "wave", "pulse", "gradient", "spin", "comet",
+                            "noise", "ripple", "screenfield", "level",
+                            "static" };
+    SceneDocument doc;
+    for(int k = 0; k < 4; k++)
+    {
+        SceneObject o;
+        o.id       = "o" + std::to_string(k);
+        o.kind     = ObjectKind::Device;
+        o.geometry = (k % 2) ? "fan_body" : "strip_body";
+        o.verified = true;
+        o.transform.position = { rng.Range(-0.5f, 0.5f), 0.0f,
+                                 rng.Range(-0.5f, 0.5f) };
+        o.emitters = (k % 2) ? layout::Ring(8, 0.06f, 30.0f, k == 3, o.id)
+                             : layout::Strip(6, 0.04f, { 0, 0, 0 }, o.id);
+        doc.objects.push_back(o);
+    }
+    InputState in;
+    in.audio_level = 0.5f;
+    InputEvent ev; ev.t = 99.5; ev.source = "key"; ev.has_pos = true;
+    ev.pos = { 0.1f, 0.0f, 0.1f };
+    in.events.push_back(ev);
+    in.screen_cols = 2; in.screen_rows = 2;
+    in.screen_cells = { ColorF{ 1, 0, 0, 1 }, ColorF{ 0, 1, 0, 1 },
+                        ColorF{ 0, 0, 1, 1 }, ColorF{ 1, 1, 0, 1 } };
+    const std::map<std::string, Mat4> world = ResolveWorldMatrices(doc);
+
+    auto random_stack = [&](int n)
+    {
+        std::vector<EffectLayer> out;
+        for(int i = 0; i < n; i++)
+        {
+            EffectLayer L;
+            L.primitive = prims[rng.Next() % 10];
+            L.space   = (rng.Next() % 2) ? CoordSpace::Local : CoordSpace::World;
+            L.blend   = (BlendMode)(rng.Next() % 3);
+            L.opacity = rng.Range(0.2f, 1.0f);
+            L.speed   = rng.Range(-0.8f, 0.8f);
+            L.scale   = rng.Range(0.05f, 2.0f);
+            L.phase   = rng.Range(-1.0f, 1.0f);
+            L.density = rng.Range(0.0f, 2.0f);
+            L.origin  = { rng.Range(-0.3f, 0.3f), 0.0f, rng.Range(-0.3f, 0.3f) };
+            L.direction = { rng.Range(-1, 1), rng.Range(-1, 1), rng.Range(-1, 1) };
+            const int np = (int)(rng.Next() % 5);
+            for(int q = 0; q < np; q++)
+            {
+                L.path.push_back({ rng.Range(-0.6f, 0.6f), 0.0f,
+                                   rng.Range(-0.6f, 0.6f) });
+            }
+            L.palette = MakePalette({ MakeSceneColor(rng.Next() & 255, 40, 200),
+                                      MakeSceneColor(10, rng.Next() & 255, 90) });
+            if(rng.Next() % 5 == 0) L.targets = { "o1", "strip_body" };
+            if(rng.Next() % 7 == 0) L.enabled = false;
+            L.seed = rng.Next();
+            out.push_back(L);
+        }
+        return out;
+    };
+    /* Reference: per-sample EvalPrimitive with the drives the engine
+       would hold, composited exactly like Evaluate (no painted
+       colors in this document, so the base is black). */
+    auto reference = [&](const std::vector<EffectLayer>& layers,
+                         const std::vector<LayerDrive>& drives, double t)
+    {
+        FrameColors f;
+        for(const SceneObject& o : doc.objects)
+        {
+            std::vector<SceneColor> colors(o.emitters.size());
+            bool touched = false;
+            for(size_t i = 0; i < o.emitters.size(); i++)
+            {
+                EvalInput ei;
+                ei.local   = o.emitters[i].local_pos;
+                ei.world   = TransformPoint(world.at(o.id), ei.local);
+                ei.object  = &o;
+                ei.emitter = &o.emitters[i];
+                ei.t       = t;
+                ei.input   = &in;
+                ColorF acc = ToColorF(0);
+                for(size_t k = 0; k < layers.size(); k++)
+                {
+                    if(!layers[k].enabled
+                       || !LayerMatches(layers[k], o, o.emitters[i]))
+                    {
+                        continue;
+                    }
+                    touched = true;
+                    acc = BlendOver(acc, EvalPrimitive(layers[k], ei, drives[k]),
+                                    layers[k].blend);
+                }
+                colors[i] = ToSceneColor(acc);
+            }
+            if(touched)
+            {
+                f[o.id] = colors;
+            }
+        }
+        return f;
+    };
+
+    int mismatches = 0;
+    for(int trial = 0; trial < 60; trial++)
+    {
+        const std::vector<EffectLayer> a = random_stack(1 + (int)(rng.Next() % 4));
+        std::vector<EffectLayer> b = random_stack(1 + (int)(rng.Next() % 4));
+        for(size_t k = 0; k < a.size() && k < b.size(); k++)
+        {
+            b[k].primitive = a[k].primitive;   /* drives carry over */
+        }
+        const double t0 = (trial % 3 == 0) ? 864000.25 : 100.0 + trial;
+        EffectEngine engine;
+        engine.SetLayers(a);
+        FrameColors got;
+        engine.Evaluate(doc, world, t0, got, &in);
+        if(got != reference(a, std::vector<LayerDrive>(a.size()), t0))
+        {
+            ++mismatches;
+        }
+        engine.ReplaceLayers(b, t0 + 0.5);
+        std::vector<LayerDrive> d(b.size());
+        for(size_t k = 0; k < a.size() && k < b.size(); k++)
+        {
+            d[k] = ContinueDrive(a[k], LayerDrive{}, b[k], t0 + 0.5);
+        }
+        engine.Evaluate(doc, world, t0 + 0.75, got, &in);
+        if(got != reference(b, d, t0 + 0.75))
+        {
+            ++mismatches;
+        }
+    }
+    CHECK(mismatches == 0, "prepared engine path == per-sample EvalPrimitive");
+}
+
 /* Expanded-scene brightness follows the compact 0..1 contract. */
 static void TestSceneBrightnessRange()
 {
@@ -1992,6 +2135,7 @@ int main()
     TestCometReverse();
     TestLongUptimePhase();
     TestPhaseContinuity();
+    TestPreparedMatchesPerSample();
     TestSceneBrightnessRange();
     TestNoiseAndMasks();
     TestEngineMirrorAndJson();

@@ -101,7 +101,54 @@ struct LayerDrive
     double nz     = 0.0;
 };
 
-/* Evaluate one primitive — returns color + coverage (a). */
+/*---------------------------------------------------------*\
+|||| Prepared evaluation (audit C-9). The per-LED hot path   |
+|||| used to string-compare the primitive name, re-normalise |
+|||| the direction, allocate the comet's segment table and   |
+|||| recompute the time phase for EVERY emitter.             |
+||||                                                         |
+||||   PreparedLayer — layer-only invariants, built once per |
+||||                   SetLayers/ReplaceLayers              |
+||||   LayerFrame    — layer + time terms, built once per    |
+||||                   layer per Evaluate                    |
+||||                                                         |
+|||| EvalPrepared(L, P, F, in) is bit-identical to           |
+|||| EvalPrimitive(L, in, drive) for the same t and drive.  |
+\*---------------------------------------------------------*/
+enum class Primitive : unsigned char
+{
+    Static, Wave, Pulse, Gradient, Spin, Comet, Noise,
+    Ripple, ScreenField, Level,
+};
+
+struct PreparedLayer
+{
+    Primitive          prim     = Primitive::Static;
+    Vec3               dir;             /* Normalize(direction): wave, gradient */
+    std::vector<float> seg_len;         /* comet: closed-path segment lengths   */
+    float              path_len = 0.0f; /* comet: loop length (0 = degenerate)  */
+};
+
+struct LayerFrame
+{
+    float  tphase = 0.0f;               /* wave/pulse/gradient/spin: wrapped    */
+                                        /* time phase (drive included)          */
+    float  head   = 0.0f;               /* comet: head arc position (m)         */
+    double ox = 0.0, oy = 0.0, oz = 0.0;/* noise: direction * t * speed         */
+    double nx = 0.0, ny = 0.0, nz = 0.0;/* noise: the layer's drive offset      */
+};
+
+PreparedLayer PrepareLayer(const EffectLayer& layer);
+LayerFrame    LayerFrameTerms(const EffectLayer& layer,
+                              const PreparedLayer& prepared,
+                              const LayerDrive& drive, double t);
+ColorF        EvalPrepared(const EffectLayer& layer,
+                           const PreparedLayer& prepared,
+                           const LayerFrame& frame, const EvalInput& in);
+
+/* Evaluate one primitive — returns color + coverage (a). Prepares
+   the layer on every call: for one-off samples; the engine uses
+   the prepared path above. */
 ColorF EvalPrimitive(const EffectLayer& layer, const EvalInput& in);
 ColorF EvalPrimitive(const EffectLayer& layer, const EvalInput& in,
                      const LayerDrive& drive);

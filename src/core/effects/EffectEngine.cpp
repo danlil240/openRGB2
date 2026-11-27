@@ -17,6 +17,18 @@ void EffectEngine::SetLayers(const std::vector<EffectLayer>& new_layers)
 {
     layers = new_layers;
     drives.assign(layers.size(), LayerDrive{});
+    Prepare();
+}
+
+/* Audit C-9: layer-only invariants once per stack, not per LED. */
+void EffectEngine::Prepare()
+{
+    prepared.clear();
+    prepared.reserve(layers.size());
+    for(const EffectLayer& L : layers)
+    {
+        prepared.push_back(PrepareLayer(L));
+    }
 }
 
 void EffectEngine::ReplaceLayers(const std::vector<EffectLayer>& new_layers,
@@ -30,6 +42,7 @@ void EffectEngine::ReplaceLayers(const std::vector<EffectLayer>& new_layers,
     }
     layers = new_layers;
     drives = std::move(next);
+    Prepare();
 }
 
 void EffectEngine::Evaluate(const SceneDocument& doc, double t,
@@ -55,6 +68,15 @@ void EffectEngine::Evaluate(const SceneDocument& doc,
     if(layers.empty())
     {
         return;
+    }
+
+    /* Audit C-9: the layer's time terms (wrapped phase, comet head,
+       noise drift) depend only on the layer and t — once per layer
+       per frame, not once per emitter. */
+    std::vector<LayerFrame> terms(layers.size());
+    for(size_t k = 0; k < layers.size(); k++)
+    {
+        terms[k] = LayerFrameTerms(layers[k], prepared[k], drives[k], t);
     }
 
     for(const SceneObject& obj : doc.objects)
@@ -115,7 +137,8 @@ void EffectEngine::Evaluate(const SceneDocument& doc,
                 touched  = true;
                 /* r.a already carries layer.opacity — every
                    primitive applies it (BlendOver's contract). */
-                const ColorF r = EvalPrimitive(layer, in, drives[k]);
+                const ColorF r = EvalPrepared(layer, prepared[k],
+                                              terms[k], in);
                 acc = BlendOver(acc, r, layer.blend);
             }
             colors[i] = ToSceneColor(acc);

@@ -62,8 +62,11 @@ public:
                   const InputState* input = nullptr) const;
 
 private:
-    std::vector<EffectLayer> layers;
-    std::vector<LayerDrive>  drives;    /* parallel to layers */
+    void Prepare();
+
+    std::vector<EffectLayer>   layers;
+    std::vector<LayerDrive>    drives;    /* parallel to layers */
+    std::vector<PreparedLayer> prepared;  /* parallel to layers */
 };
 
 } /* namespace studio */
