@@ -152,6 +152,17 @@ struct EngineHostOptions
     std::string backend_exe;
     bool        power_monitor   = true;
 
+    /* B-1: the competitor scan repeats on the maintenance tick
+       every owner_rescan (0 = startup only) — G Hub, the
+       LampArray service and Dynamic Lighting come back after
+       login or a Windows Update, long after the engine
+       started. The sources default to the live system
+       (EnumerateProcesses / ReadDynamicLightingEnabled);
+       tests inject deterministic ones. */
+    std::chrono::milliseconds owner_rescan{ 5000 };
+    std::function<std::vector<ProcessEntry>()> process_source;
+    std::function<int()>                       dynamic_lighting_source;
+
     /* Task 2 (studio-import): the managed workspace root —
        immutable workspace generations + the versioned resource
        library live here, separate from engine-state.json.
@@ -185,6 +196,9 @@ struct OwnershipReport
     bool                     backend_attached  = false;
     bool                     config_checked    = false;
     ManagedConfigReport      config;
+    /* B-1: Windows Dynamic Lighting — 1 on, 0 off, -1 unknown.
+       When on, its conflict finding is in `findings`. */
+    int                      dynamic_lighting  = -1;
 };
 
 class EngineHost
@@ -233,7 +247,9 @@ public:
     sdk::OpenRgbClient*      GetSdk()        { return sdk_.get(); }
     PowerLifecycle*          GetLifecycle()  { return lifecycle_.get(); }
     ReactiveInputs*          GetReactive()   { return reactive_.get(); }
-    const OwnershipReport&   Ownership() const { return ownership_; }
+    /* A copy: the maintenance tick re-scans while IPC threads
+       read the report (B-1). */
+    OwnershipReport          Ownership() const;
     /* Task 4.7: the wire form of the ownership report —
        serialized for STATE/DIAGNOSTICS (docs/ipc-protocol.md
        §5). Conflicts and notices are the scan's findings
@@ -251,6 +267,10 @@ private:
     bool StartIpc();
     bool ApplyStartupScene(std::string& err);
     void ScanOwners();
+    /* B-1: listener pid + processes + Dynamic Lighting. The
+       startup scan logs every finding; a re-scan logs only
+       what changed. Takes ownership_mutex_. */
+    void ScanCompetitors(bool initial);
     /* QUIT stop_backend teardown: re-verifies the pending
        pid's image against opts_.backend_exe, signals its
        shutdown event (WM_CLOSE fallback for windowed
@@ -286,6 +306,8 @@ private:
        the offline suite collide. */
     std::unique_ptr<SingleInstanceGuard> instance_;
     OwnershipReport          ownership_;
+    mutable std::mutex       ownership_mutex_;
+    TimePoint                next_owner_scan_{};
     std::atomic<bool>        stop_{ false };
 
     Engine                                   engine_;

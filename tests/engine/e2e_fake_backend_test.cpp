@@ -241,7 +241,25 @@ int main()
     sdk_test::FakeSdkServer server;
     server.controllers = { WirelessGroup(), Wired() };
 
+    /* B-1: injected scan sources so the re-scan is
+       deterministic (the real enumeration is covered by
+       e2e_lifecycle_test's competitor fixture). */
+    std::mutex                 scan_mutex;
+    std::vector<ProcessEntry>  scan_procs = { { 4242, "Steam.exe" } };
+    int                        scan_dl    = 0;
+
     EngineHostOptions opts;
+    opts.process_source = [&scan_mutex, &scan_procs]()
+    {
+        std::lock_guard<std::mutex> g(scan_mutex);
+        return scan_procs;
+    };
+    opts.dynamic_lighting_source = [&scan_mutex, &scan_dl]()
+    {
+        std::lock_guard<std::mutex> g(scan_mutex);
+        return scan_dl;
+    };
+    opts.owner_rescan    = std::chrono::milliseconds(1);
     opts.sdk_enabled     = true;
     opts.transport_factory = [&server]()
         -> std::unique_ptr<sdk::IStreamTransport>
@@ -305,6 +323,54 @@ int main()
         CHECK(oj["config"].contains("checked"));
         CHECK(oj["config"]["findings"].is_array());
         CHECK(oj["config"]["legacy_producers"].is_array());
+        CHECK(oj["dynamic_lighting"].get<std::string>() == "off");
+        CHECK(oj["conflicts"].empty());
+    }
+
+    /*---- B-1: competitors appearing AFTER startup are found --*/
+    {
+        auto has_conflict = [&host](const std::string& owner)
+        {
+            for(const OwnerFinding& f : host.Ownership().findings)
+            {
+                if(f.conflict && f.owner == owner) return true;
+            }
+            return false;
+        };
+        auto log_has = [&log_lines, &log_mutex](const std::string& s)
+        {
+            std::lock_guard<std::mutex> g(log_mutex);
+            for(const std::string& l : log_lines)
+            {
+                if(l.find(s) != std::string::npos) return true;
+            }
+            return false;
+        };
+        {
+            std::lock_guard<std::mutex> g(scan_mutex);
+            scan_procs.push_back(
+                { 4243, "logi_lamparray_service.AMD64.exe" });
+            scan_dl = 1;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        host.PollOnce();
+        CHECK(has_conflict("LampArray service (Dynamic Lighting)"));
+        CHECK(has_conflict("Windows Dynamic Lighting"));
+        CHECK(host.OwnershipJson()["dynamic_lighting"]
+                  .get<std::string>() == "on");
+        CHECK(log_has("new CONFLICT: LampArray service"));
+        CHECK(log_has("new CONFLICT: Windows Dynamic Lighting"));
+
+        {
+            std::lock_guard<std::mutex> g(scan_mutex);
+            scan_procs = { { 4242, "Steam.exe" } };
+            scan_dl    = 0;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        host.PollOnce();
+        CHECK(!has_conflict("LampArray service (Dynamic Lighting)"));
+        CHECK(!has_conflict("Windows Dynamic Lighting"));
+        CHECK(log_has("cleared: LampArray service"));
     }
     sdk::OpenRgbClient* client = host.GetSdk();
     CHECK(client != nullptr);

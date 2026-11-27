@@ -84,6 +84,9 @@ static void TestClassifier()
         { 700, "lghub_agent.exe" },
         { 701, "LogiOptions.exe" },            /* Options+      */
         { 702, "LogiOptionsPlus.exe" },
+        /* B-1: the Windows-Update-installed Logitech LampArray
+           bridge — it repaints the G512 on its own. */
+        { 703, "logi_lamparray_service.AMD64.exe" },
         { 800, "FanControl.exe" },
         { 900, "explorer.exe" },               /* ignored       */
         { 901, "svchost.exe" },                /* ignored       */
@@ -126,6 +129,9 @@ static void TestClassifier()
           FindPid(out, 701)->owner == "Logitech G Hub / Options");
     CHECK(FindPid(out, 702) &&
           FindPid(out, 702)->owner == "Logitech G Hub / Options");
+    CHECK(FindPid(out, 703) &&
+          FindPid(out, 703)->owner == "LampArray service (Dynamic Lighting)" &&
+          FindPid(out, 703)->conflict);
 
     /* FanControl is a notice — cooling owner, never a conflict. */
     const OwnerFinding* fc = Find(out, "FanControl");
@@ -350,9 +356,64 @@ static void TestListenerPid()
 #endif
 }
 
+/*---------------------------------------------------------*\
+|| B-1: Windows Dynamic Lighting + re-scan change report     ||
+\*---------------------------------------------------------*/
+static void TestDynamicLighting()
+{
+    OwnerFinding f;
+    CHECK(ClassifyDynamicLighting(1, f));
+    CHECK(f.conflict && f.owner == "Windows Dynamic Lighting" &&
+          f.pid == 0);
+    CHECK(!ClassifyDynamicLighting(0, f));    /* switched off */
+    CHECK(!ClassifyDynamicLighting(-1, f));   /* unreadable   */
+
+    CHECK(std::string(DynamicLightingStateName(1))  == "on");
+    CHECK(std::string(DynamicLightingStateName(0))  == "off");
+    CHECK(std::string(DynamicLightingStateName(-1)) == "unknown");
+
+    /* The live read never throws and stays in range. */
+    const int live = ReadDynamicLightingEnabled();
+    CHECK(live >= -1 && live <= 1);
+}
+
+static void TestOwnerChanges()
+{
+    const std::vector<OwnerFinding> before =
+        ClassifyOwners({ { 700, "lghub_agent.exe" },
+                         { 800, "FanControl.exe" } }, 1, 0);
+    std::vector<OwnerFinding> after =
+        ClassifyOwners({ { 800, "FanControl.exe" },
+                         { 703, "logi_lamparray_service.AMD64.exe" } },
+                       1, 0);
+    OwnerFinding dl;
+    CHECK(ClassifyDynamicLighting(1, dl));
+    after.push_back(dl);
+
+    /* Identical scans report nothing. */
+    CHECK(DescribeOwnerChanges(before, before).empty());
+
+    const std::vector<std::string> lines =
+        DescribeOwnerChanges(before, after);
+    /* G Hub left; LampArray + Dynamic Lighting arrived;
+       FanControl unchanged and unmentioned. */
+    CHECK(lines.size() == 3);
+    int added = 0, cleared = 0;
+    for(const std::string& l : lines)
+    {
+        CHECK(l.find("FanControl") == std::string::npos);
+        if(l.find("new CONFLICT") != std::string::npos) ++added;
+        if(l.find("cleared") != std::string::npos)      ++cleared;
+    }
+    CHECK(added == 2);
+    CHECK(cleared == 1);
+}
+
 int main()
 {
     TestClassifier();
+    TestDynamicLighting();
+    TestOwnerChanges();
     TestManagedConfig();
     TestSingleInstance();
     TestListenerPid();

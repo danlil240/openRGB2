@@ -16,7 +16,12 @@
 ||      may own RGB hardware or host the legacy Studio/     ||
 ||      Effects/HardwareSync plugin producers), L-Connect,  ||
 ||      Gigabyte Control Center/RGB Fusion, Razer Synapse,  ||
-||      Logitech G Hub, iCUE, SignalRGB. FanControl is a    ||
+||      Logitech G Hub, iCUE, SignalRGB, and LampArray      ||
+||      bridge services (logi_lamparray_service — Windows   ||
+||      Dynamic Lighting's driver for Logitech devices).    ||
+||      Windows Dynamic Lighting itself is a per-user       ||
+||      setting, not a process: it is read from the         ||
+||      registry and reported the same way. FanControl is a ||
 ||      NOTICE, not a conflict: it owns cooling, not RGB,   ||
 ||      and must keep running.                              ||
 ||   2. Managed-config check — the backend's private        ||
@@ -93,6 +98,37 @@ std::vector<OwnerFinding> ClassifyOwners(
     const std::vector<ProcessEntry>& processes,
     uint32_t self_pid,
     uint32_t backend_pid);
+
+/*---------------------------------------------------------*\
+|| Windows Dynamic Lighting (B-1)                           ||
+||                                                          ||
+|| Settings > Personalization > Dynamic Lighting, "Use      ||
+|| Dynamic Lighting on my devices": HKCU\Software\         ||
+|| Microsoft\Lighting\AmbientLightingEnabled (DWORD). While ||
+|| on, Windows drives LampArray devices (keyboard, mouse,   ||
+|| motherboard ARGB) and repaints over the backend.         ||
+\*---------------------------------------------------------*/
+
+/* 1 = on, 0 = off, -1 = unknown (value absent, unreadable, or
+   not Windows). Read-only. */
+int ReadDynamicLightingEnabled();
+
+/* "on" / "off" / "unknown" — the wire spelling. */
+const char* DynamicLightingStateName(int state);
+
+/* Pure: the conflict finding for an "on" state (pid 0, no
+   exe). false for off/unknown — an unreadable value is never
+   reported as a conflict. */
+bool ClassifyDynamicLighting(int state, OwnerFinding& out);
+
+/* Pure: one log line per finding that appeared ("new
+   CONFLICT: ..." / "new notice: ...") or disappeared
+   ("cleared: ..."), keyed on owner + exe + pid. Unchanged
+   findings produce nothing, so a periodic re-scan logs only
+   what changed. */
+std::vector<std::string> DescribeOwnerChanges(
+    const std::vector<OwnerFinding>& before,
+    const std::vector<OwnerFinding>& after);
 
 /*---------------------------------------------------------*\
 || Managed-config sole-writer check                         ||

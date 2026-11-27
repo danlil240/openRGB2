@@ -340,35 +340,77 @@ bool EngineHost::Started() const
 /*---------------------------------------------------------*\
 || Ownership scan (Task 3.9): report-only.                   ||
 \*---------------------------------------------------------*/
-void EngineHost::ScanOwners()
+void EngineHost::ScanCompetitors(bool initial)
 {
-    ownership_.scanned = true;
-
+    /* Gather outside the lock — process enumeration and the
+       registry read are the slow parts. */
+    uint32_t backend_pid = 0;
     if(opts_.sdk_enabled)
     {
-        ownership_.backend_pid =
-            FindTcpListenerPid(opts_.sdk_port);
-        ownership_.backend_listening = ownership_.backend_pid != 0;
+        backend_pid = FindTcpListenerPid(opts_.sdk_port);
     }
-
     uint32_t self_pid = 0;
 #ifdef _WIN32
     self_pid = GetCurrentProcessId();
 #endif
-    ownership_.findings = ClassifyOwners(EnumerateProcesses(),
-                                         self_pid,
-                                         ownership_.backend_pid);
-    if(ownership_.findings.empty())
+    std::vector<OwnerFinding> findings = ClassifyOwners(
+        opts_.process_source ? opts_.process_source()
+                             : EnumerateProcesses(),
+        self_pid, backend_pid);
+    const int dynamic_lighting =
+        opts_.dynamic_lighting_source
+            ? opts_.dynamic_lighting_source()
+            : ReadDynamicLightingEnabled();
+    {
+        OwnerFinding dl;
+        if(ClassifyDynamicLighting(dynamic_lighting, dl))
+        {
+            findings.push_back(std::move(dl));
+        }
+    }
+
+    std::vector<OwnerFinding> before;
+    {
+        std::lock_guard<std::mutex> g(ownership_mutex_);
+        before = std::move(ownership_.findings);
+        ownership_.scanned           = true;
+        ownership_.backend_pid       = backend_pid;
+        ownership_.backend_listening = backend_pid != 0;
+        ownership_.findings          = findings;
+        ownership_.dynamic_lighting  = dynamic_lighting;
+    }
+
+    if(!initial)
+    {
+        for(const std::string& line :
+            DescribeOwnerChanges(before, findings))
+        {
+            Log("ownership re-scan: " + line);
+        }
+        return;
+    }
+    if(findings.empty())
     {
         Log("ownership scan: no competing RGB owners detected");
     }
-    for(const OwnerFinding& f : ownership_.findings)
+    for(const OwnerFinding& f : findings)
     {
         Log(std::string("ownership ") +
             (f.conflict ? "CONFLICT" : "notice") + ": " +
             f.owner + " (pid " + std::to_string(f.pid) + ", " +
             f.exe + ") — " + f.detail);
     }
+    if(dynamic_lighting < 0)
+    {
+        Log("ownership: Windows Dynamic Lighting state unknown "
+            "(setting not readable)");
+    }
+}
+
+void EngineHost::ScanOwners()
+{
+    ScanCompetitors(/*initial*/ true);
+    next_owner_scan_ = Clock::now() + opts_.owner_rescan;
 
     /* The managed config's sole-writer check covers BOTH
        plugin-load paths (plan section 4): <config>/plugins +
@@ -409,11 +451,18 @@ void EngineHost::ScanOwners()
     }
 }
 
+OwnershipReport EngineHost::Ownership() const
+{
+    std::lock_guard<std::mutex> g(ownership_mutex_);
+    return ownership_;
+}
+
 nlohmann::json EngineHost::OwnershipJson() const
 {
     /* Findings verbatim — the report-only contract (plan
        section 4) means the UI shows the scan's conflicts,
        never a kill button or a UI-side re-classification. */
+    std::lock_guard<std::mutex> g(ownership_mutex_);
     nlohmann::json conflicts = nlohmann::json::array();
     nlohmann::json notices   = nlohmann::json::array();
     for(const OwnerFinding& f : ownership_.findings)
@@ -435,6 +484,8 @@ nlohmann::json EngineHost::OwnershipJson() const
         })},
         { "conflicts", std::move(conflicts) },
         { "notices",   std::move(notices)   },
+        { "dynamic_lighting",
+          DynamicLightingStateName(ownership_.dynamic_lighting) },
         { "config", nlohmann::json::object({
             { "checked",           ownership_.config_checked },
             { "findings",          ownership_.config.findings },
@@ -1529,6 +1580,16 @@ void EngineHost::PollOnce()
        BEFORE playback maintenance so the restore ordering
        (revalidate -> write) is never pre-empted by a poll-
        side convergence write. */
+    /* B-1: competitors that start after the engine (G Hub at
+       login, the LampArray service after a Windows Update,
+       Dynamic Lighting switched back on) are re-detected. */
+    if(opts_.scan_owners &&
+       opts_.owner_rescan.count() > 0 &&
+       Clock::now() >= next_owner_scan_)
+    {
+        ScanCompetitors(/*initial*/ false);
+        next_owner_scan_ = Clock::now() + opts_.owner_rescan;
+    }
     lifecycle_->Poll(Clock::now());
     /* Playback maintenance: acknowledgement polling, clock
        sampling, topology re-resolution. */
