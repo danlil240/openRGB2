@@ -336,6 +336,12 @@ private:
     };
     std::map<std::string, ZoneResizeAttempts>  zone_resize_tries_;
     bool                                     started_ = false;
+    /* Set once Start() gets past its precondition checks: a
+       Start() that fails midway (after IPC listeners, the power
+       monitor, the calibration worker or reactive sources are
+       up) must still be torn down by Stop() before members
+       destruct, so Stop() keys off this, not started_. */
+    bool                                     start_attempted_ = false;
     OrderlyShutdown::Result                  shutdown_result_;
     bool                                     stopped_ = false;
 };

@@ -752,6 +752,7 @@ bool EngineHost::Start(std::string& err)
         err = "already started";
         return false;
     }
+    start_attempted_ = true;
 
     /* 1. Single instance (plan section 4): exactly one engine
        owns the managed configuration. Refusing to start is the
@@ -1748,7 +1749,10 @@ const OrderlyShutdown::Result& EngineHost::Stop()
         return shutdown_result_;
     }
     stopped_ = true;
-    if(!started_)
+    /* A partial Start() (it returned false after spawning some
+       threads) still runs the full sequence — every step is a
+       no-op for a piece that never came up. */
+    if(!start_attempted_)
     {
         return shutdown_result_;
     }
@@ -1774,6 +1778,17 @@ const OrderlyShutdown::Result& EngineHost::Stop()
                  std::chrono::milliseconds(2000),
                  [this]
                  { if(ipc_server_) ipc_server_->Stop(); });
+    /* Calibration worker joins once no IPC verb can reach it
+       and BEFORE frame production / the delivery lanes / the
+       transport stop: its Stop() releases a live session's lane
+       suppression and playback hold through pipeline_ and
+       playback_, and its worker's change hook calls into
+       service_ — which destructs before calibration_ (member
+       order), so the worker must be gone by then. */
+    shutdown.Add("calibration",
+                 std::chrono::milliseconds(2000),
+                 [this]
+                 { if(calibration_) calibration_->Stop(); });
     /* Workspace job worker joins BEFORE frame production and
        the IPC service stop — an in-flight commit's apply_scene
        seam reaches service_ + engine_, so no workspace job may
@@ -1798,7 +1813,7 @@ const OrderlyShutdown::Result& EngineHost::Stop()
        default); lanes join sequentially. */
     shutdown.Add("delivery-pipeline",
                  std::chrono::milliseconds(12000),
-                 [this] { pipeline_->Stop(); });
+                 [this] { if(pipeline_) pipeline_->Stop(); });
     shutdown.Add("sdk-transport",
                  std::chrono::milliseconds(1000),
                  [this] { if(sdk_) sdk_->Disconnect(); });

@@ -185,6 +185,45 @@ static size_t CountEvents(const std::vector<sdk_test::ServerEvent>& ev,
     return n;
 }
 
+/* A Start() that fails AFTER the IPC listeners and the calibration
+   worker are up (here: an unreadable --scene) must still be torn
+   down by Stop() — previously Stop() returned early on !started_
+   and the listener/calibration threads outlived the members they
+   call into. */
+static void TestPartialStartTeardown(const std::filesystem::path& tmp)
+{
+    const std::string pid = std::to_string(_getpid());
+    EngineHostOptions o;
+    o.sdk_enabled     = false;
+    o.ipc_enabled     = true;
+    o.command_pipe_name =
+        "\\\\.\\pipe\\openrgb2-e2e-partial-" + pid;
+    o.diagnostics_pipe_name =
+        "\\\\.\\pipe\\openrgb2-e2e-partial-diag-" + pid;
+    o.power_monitor   = false;
+    o.scan_owners     = false;
+    o.single_instance = true;
+    o.instance_name   = "Local\\openrgb2-engine-e2e-partial-" + pid;
+    o.scene_path      = (tmp / "missing-scene.json").string();
+    o.state_path      = (tmp / "partial-state.json").string();
+    o.log             = [](const std::string&) {};
+
+    EngineHost host(std::move(o));
+    std::string err;
+    CHECK(!host.Start(err));
+    CHECK(!host.Started());
+    const OrderlyShutdown::Result& sd = host.Stop();
+    bool saw_ipc = false, saw_cal = false;
+    for(const OrderlyShutdown::StepResult& st : sd.steps)
+    {
+        saw_ipc = saw_ipc || st.name == "ipc-listeners";
+        saw_cal = saw_cal || st.name == "calibration";
+    }
+    CHECK(saw_ipc);
+    CHECK(saw_cal);
+    CHECK(sd.all_within_bound);
+}
+
 int main()
 {
     std::error_code ec;
@@ -381,6 +420,9 @@ int main()
 
     static const char* want_order[] = {
         "power-monitor", "ipc-listeners", "ipc-server",
+        /* the calibration worker joins before anything its
+           claim release or change hook reaches destructs */
+        "calibration",
         /* studio-import Task 3: the workspace job worker joins
            before scene-worker/service teardown so an in-flight
            commit's apply_scene seam can never race a
@@ -389,10 +431,10 @@ int main()
         "scene-worker", "reactive-inputs",
         "delivery-pipeline", "sdk-transport",
     };
-    CHECK(sd.steps.size() == 8);
-    if(sd.steps.size() == 8)
+    CHECK(sd.steps.size() == 9);
+    if(sd.steps.size() == 9)
     {
-        for(size_t i = 0; i < 8; ++i)
+        for(size_t i = 0; i < 9; ++i)
         {
             CHECK(sd.steps[i].name == want_order[i]);
             CHECK(sd.steps[i].within);
@@ -467,6 +509,8 @@ int main()
         host3.RequestStop();
         host3.Stop();
     }
+
+    TestPartialStartTeardown(tmp);
 
     std::printf("%d checks, %d failures\n", checks, failures);
     {
