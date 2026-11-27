@@ -309,6 +309,13 @@ PlaybackController::Result PlaybackController::RequestImpl(
     bool              to_live      = false;
     bool              control_only_req = false;
     bool              early_accept     = false;
+    /* The controller already owned (suppressed) the target lane
+       before this request — an animation->animation switch. A
+       failed switch must then leave the suppression in place:
+       the previous upload is still Active and owns the group,
+       so releasing it would let live frames reach the owned
+       group until the ack watchdog notices. */
+    bool              lane_owned_before = false;
     std::string       sdk_name;
     LianLiWireless::PlaybackPreset want_preset =
         LianLiWireless::PlaybackPreset::SpectrumCycle;
@@ -511,6 +518,9 @@ PlaybackController::Result PlaybackController::RequestImpl(
                 ++epoch_;
                 to_animation =
                     (mode == PlaybackMode::AnimationPlayback);
+                lane_owned_before =
+                    to_animation && suppressed_ && has_wireless_ &&
+                    wireless_key_ == wireless.key;
                 /* Back to live only needs a transition when an
                    owned group actually exists — has_wireless_ is
                    set and cleared together with upload state. */
@@ -597,7 +607,10 @@ PlaybackController::Result PlaybackController::RequestImpl(
         if(deps_.wait_idle &&
            !deps_.wait_idle(wireless.key, cfg_.drain_timeout))
         {
-            deps_.set_suppressed(wireless.key, false, "");
+            if(!lane_owned_before)
+            {
+                deps_.set_suppressed(wireless.key, false, "");
+            }
             std::lock_guard<std::mutex> lock(mutex_);
             transition_      = false;
             r.reason = "a live send could not drain before the "
@@ -609,7 +622,10 @@ PlaybackController::Result PlaybackController::RequestImpl(
             BuildPatch(want_preset, params);
         if(!deps_.select_mode(wireless.key, sdk_name, patch, io_err))
         {
-            deps_.set_suppressed(wireless.key, false, "");
+            if(!lane_owned_before)
+            {
+                deps_.set_suppressed(wireless.key, false, "");
+            }
             std::lock_guard<std::mutex> lock(mutex_);
             transition_ = false;
             r.reason    = io_err.empty() ? "mode select failed"

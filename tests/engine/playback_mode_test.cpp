@@ -1131,6 +1131,53 @@ static void TestPresetSwitch()
     CHECK(h.ctl->LastApplyResult().accepted);
 }
 
+/* A FAILED animation->animation switch keeps the lane owned:
+   the previous upload is still Active on the group, so the
+   failure path must not unsuppress (it used to, letting live
+   frames reach the owned group). A failed FIRST upload still
+   releases the lane it had just claimed. */
+static void TestFailedSwitchKeepsOwnership()
+{
+    Harness h;
+    const DeviceSnapshot ws = WirelessSnap();
+    h.backend.snaps = { ws };
+    h.pipeline.RegisterDevice(ws);
+    h.backend.report.name  = "Direct";
+    h.backend.report.valid = true;
+
+    PlaybackParams params;
+    h.scene = MakeScene("a", "spectrum_cycle");
+    PlaybackController::Result r =
+        h.ctl->Request(PlaybackMode::AnimationPlayback,
+                       PlaybackControl::Playing, params);
+    CHECK(r.accepted);
+    h.ReportPending();
+    h.Poll();
+    CHECK(h.ctl->Status().upload == UploadState::Active);
+    CHECK(h.pipeline.IsSuppressed(ws.key));
+
+    h.backend.select_ok = false;
+    h.scene = MakeScene("b", "breathing");
+    r = h.ctl->Request(PlaybackMode::AnimationPlayback,
+                       PlaybackControl::Playing, params);
+    CHECK(!r.accepted);
+    CHECK(h.ctl->Status().upload == UploadState::Active);
+    CHECK(h.pipeline.IsSuppressed(ws.key));
+    CHECK(h.pipeline.SubmitLatest(FrameFor(ws, 9, h.Red())).status
+          == SubmitStatus::Rejected);
+
+    /* First upload failing: the lane was not owned before. */
+    Harness h2;
+    h2.backend.snaps = { ws };
+    h2.pipeline.RegisterDevice(ws);
+    h2.backend.select_ok = false;
+    h2.scene = MakeScene("a", "spectrum_cycle");
+    r = h2.ctl->Request(PlaybackMode::AnimationPlayback,
+                        PlaybackControl::Playing, params);
+    CHECK(!r.accepted);
+    CHECK(!h2.pipeline.IsSuppressed(ws.key));
+}
+
 /*---------------------------------------------------------*\
 ||| T13: F03 — early request rejections land in Detail()   ||
 |||      so playback status reports the honest reason      ||
@@ -1189,6 +1236,7 @@ int main()
     TestSceneStoreBound();
     TestLiveRefusal();
     TestPresetSwitch();
+    TestFailedSwitchKeepsOwnership();
     TestRejectionDetail();
 
     std::printf("playback_test: %d checks, %d failures\n",
