@@ -1435,6 +1435,8 @@ IpcReply EngineService::Dispatch(MsgType type,
             return r;
         }
         std::string err;
+        /* ordered against layout read-modify-apply edits */
+        std::lock_guard<std::mutex> edit(scene_edit_mutex_);
         if(!ApplySceneDocument(doc, err))
         {
             return IpcReply::Fail(ErrCode::BadRequest, err);
@@ -1899,6 +1901,15 @@ IpcReply EngineService::HandleLayoutCommand(
     {
         return HandleIdentify(body);
     }
+    /* Every other layout verb is read-copy-modify-apply on the
+       current scene. Each session dispatches on its own reader
+       thread, so two concurrent edits would both copy the same
+       document and the second apply would silently revert the
+       first (audit I-13). One edit at a time — SET_SCENE takes
+       the same lock so a whole-document replace is ordered
+       against them too. Never held while waiting on anything
+       but the apply itself. */
+    std::lock_guard<std::mutex> edit(scene_edit_mutex_);
     if(verb == "add_object")
     {
         return HandleAddObjects(body);
