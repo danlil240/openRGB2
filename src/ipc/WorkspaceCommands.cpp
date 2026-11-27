@@ -657,7 +657,11 @@ IpcReply WorkspaceCommands::HandleJobVerb(uint64_t session_id,
 {
     /* A `staged` token only ever belongs to the session that
        produced it — a foreign or expired token fails before
-       the job exists. */
+       the job exists. An accepted job PINS its token until it
+       reaches a terminal state (OnJobFinished): a job queued
+       behind slow work must not find its token idled out
+       (audit I-5). */
+    std::string pinned;
     const auto sit = body.find("staged");
     if(sit != body.end())
     {
@@ -667,17 +671,46 @@ IpcReply WorkspaceCommands::HandleJobVerb(uint64_t session_id,
                               "staged must be a token string",
                               "bad_request");
         }
-        if(!transfers_.StagedFor(session_id,
-                                 sit->get<std::string>()))
+        const std::string pin =
+            transfers_.PinStaged(session_id, sit->get<std::string>());
+        if(pin == "transfer_expired")
+        {
+            return FailDetail(ErrCode::BadRequest,
+                "staged token expired — upload it again",
+                "transfer_expired");
+        }
+        if(!pin.empty())
         {
             return FailDetail(ErrCode::BadRequest,
                 "staged token is not consumable by this session",
                 "bad_request");
         }
+        pinned = sit->get<std::string>();
     }
 
-    const WorkspaceService::JobResult r =
-        service_->Enqueue(session_id, verb, body);
+    WorkspaceService::JobResult r;
+    if(pinned.empty())
+    {
+        r = service_->Enqueue(session_id, verb, body);
+    }
+    else
+    {
+        /* Enqueue + record under pins_mutex_: a job that runs
+           to completion before the record lands would find no
+           pin to release in OnJobFinished (the worker's event
+           hook takes this mutex, so it waits here instead).
+           Enqueue itself never calls back into this object. */
+        std::lock_guard<std::mutex> lock(pins_mutex_);
+        r = service_->Enqueue(session_id, verb, body);
+        if(r.accepted)
+        {
+            job_pins_[r.job_id] = JobPin{ session_id, pinned };
+        }
+    }
+    if(!pinned.empty() && !r.accepted)
+    {
+        transfers_.UnpinStaged(pinned);
+    }
     if(r.accepted)
     {
         return IpcReply::Success(MsgType::Ok, nlohmann::json::object({
@@ -1034,6 +1067,17 @@ void WorkspaceCommands::OnSessionEnd(uint64_t session_id)
     }
     transfers_.CancelSession(session_id);
     {
+        /* the session's tokens are gone — so are their pins
+           (a running job's late terminal event then finds
+           nothing to release) */
+        std::lock_guard<std::mutex> lock(pins_mutex_);
+        for(auto it = job_pins_.begin(); it != job_pins_.end();)
+        {
+            it = it->second.session_id == session_id
+                ? job_pins_.erase(it) : std::next(it);
+        }
+    }
+    {
         std::lock_guard<std::mutex> lock(preview_mutex_);
         previews_.erase(session_id);
     }
@@ -1066,6 +1110,22 @@ void WorkspaceCommands::OnSessionEnd(uint64_t session_id)
 void WorkspaceCommands::SweepExpired()
 {
     transfers_.SweepExpired();
+}
+
+void WorkspaceCommands::OnJobFinished(uint64_t job_id)
+{
+    std::string token;
+    {
+        std::lock_guard<std::mutex> lock(pins_mutex_);
+        const auto it = job_pins_.find(job_id);
+        if(it == job_pins_.end())
+        {
+            return;
+        }
+        token = std::move(it->second.token);
+        job_pins_.erase(it);
+    }
+    transfers_.UnpinStaged(token);
 }
 
 bool WorkspaceCommands::ReadStaged(const std::string& token,
@@ -1168,9 +1228,16 @@ IpcReply WorkspaceCommands::PreviewCandidate(
                               "bad_request");
         }
         /* Session-bound consumption, same rule the job verbs
-           enforce. */
-        if(!transfers_.StagedFor(session_id,
-                                 sit->get<std::string>()))
+           enforce (a lapsed token says so — audit I-5). */
+        const std::string chk = transfers_.CheckStaged(
+            session_id, sit->get<std::string>());
+        if(chk == "transfer_expired")
+        {
+            return FailDetail(ErrCode::BadRequest,
+                "staged token expired — upload it again",
+                "transfer_expired");
+        }
+        if(!chk.empty())
         {
             return FailDetail(ErrCode::BadRequest,
                 "staged token is not consumable by this session",

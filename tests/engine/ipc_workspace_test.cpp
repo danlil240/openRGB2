@@ -1010,12 +1010,146 @@ int main()
         const std::string tid = r["transfer_id"].get<std::string>();
         CHECK(!tid.empty());
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        /* any command lazily sweeps; the dead transfer is gone */
+        /* any command lazily sweeps; the dead transfer is gone —
+           and says so with the documented token (audit I-5), not
+           as an id the server never issued */
         WsCall(c, seq, json::object({{ "verb", "list" }}));
         WsCallErr(c, seq, json::object({
             { "verb", "transfer_chunk" }, { "transfer_id", tid },
             { "offset", 0 }, { "data", Base64Encode("1234", 4) },
+        }), ErrCode::BadRequest, "transfer_expired");
+        /* a never-issued id stays unknown_transfer */
+        WsCallErr(c, seq, json::object({
+            { "verb", "transfer_finish" },
+            { "transfer_id", "tr-999-0000000000000000" },
         }), ErrCode::BadRequest, "unknown_transfer");
+    }
+
+    /*---- finished upload token lifetime (audit I-5) ----------*/
+    {
+        /* A finish-verified token is what an import dialog holds
+           between import_inspect and import_commit while the user
+           reviews conflicts — it must outlive the 60 s OPEN-stream
+           idle bound, stay alive while it is being used, and say
+           transfer_expired when it finally lapses. */
+        Rig rig(g_tmp / "staged-expiry");
+        rig.eopts.transfers.idle_expiry_ms   = 80;
+        rig.eopts.transfers.staged_expiry_ms = 1500;
+        rig.Start();
+        TestClient c;
+        Welcome(c, *rig.server);
+        const std::string tok = Upload(c, seq, "document",
+            WorkspaceDoc("staged-life").dump(2));
+        CHECK(!tok.empty());
+        auto run = [&](const char* verb, uint64_t base) -> json
+        {
+            const json r = WsCall(c, seq, json::object({
+                { "verb",              verb   },
+                { "id",                "sl1"  },
+                { "base_revision",     base   },
+                { "resource_revision", 0      },
+                { "staged",            tok    },
+            }));
+            if(!r.value("accepted", false))
+            {
+                return r;
+            }
+            return WaitJob(c, seq, r["job_id"].get<uint64_t>());
+        };
+        /* well past the open-stream idle bound */
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        WsCall(c, seq, json::object({{ "verb", "list" }}));
+        CHECK(run("validate", 0).value("state", "") == "succeeded");
+        /* ~1.2 s after finish, but only ~0.9 s after the last
+           use: refresh-on-use keeps it alive */
+        std::this_thread::sleep_for(std::chrono::milliseconds(900));
+        WsCall(c, seq, json::object({{ "verb", "list" }}));
+        CHECK(run("commit", 0).value("state", "") == "succeeded");
+        /* idle past the staged bound -> transfer_expired */
+        std::this_thread::sleep_for(std::chrono::milliseconds(1800));
+        WsCall(c, seq, json::object({{ "verb", "list" }}));
+        WsCallErr(c, seq, json::object({
+            { "verb",              "commit" },
+            { "id",                "sl1"    },
+            { "base_revision",     1        },
+            { "resource_revision", 0        },
+            { "staged",            tok      },
+        }), ErrCode::BadRequest, "transfer_expired");
+        WsCallErr(c, seq, json::object({
+            { "verb",   "preview_begin" },
+            { "staged", tok             },
+        }), ErrCode::BadRequest, "transfer_expired");
+    }
+
+    /*---- a queued job pins its staged token (audit I-5) -------*/
+    {
+        Rig rig(g_tmp / "staged-pin");
+        rig.eopts.transfers.idle_expiry_ms   = 80;
+        rig.eopts.transfers.staged_expiry_ms = 300;
+        std::atomic<bool> release{ false };
+        rig.ws->SetPreJobHookForTesting(
+            [&release](const std::string& verb)
+            {
+                if(verb != "validate")
+                {
+                    return;
+                }
+                for(int i = 0; i < 500 && !release.load(); ++i)
+                {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(10));
+                }
+            });
+        rig.Start();
+        TestClient c;
+        Welcome(c, *rig.server);
+        const std::string tok = Upload(c, seq, "document",
+            WorkspaceDoc("pinned").dump(2));
+        CHECK(!tok.empty());
+        /* a blocker holds the single worker ... */
+        const json b = WsCall(c, seq, json::object({
+            { "verb",              "validate" },
+            { "id",                "pin1"     },
+            { "base_revision",     0          },
+            { "resource_revision", 0          },
+            { "document",          WorkspaceDoc("blocker") },
+        }));
+        CHECK(b.value("accepted", false));
+        /* ... so the commit referencing `tok` sits queued */
+        const json q = WsCall(c, seq, json::object({
+            { "verb",              "commit" },
+            { "id",                "pin1"   },
+            { "base_revision",     0        },
+            { "resource_revision", 0        },
+            { "staged",            tok      },
+        }));
+        CHECK(q.value("accepted", false));
+        /* queued longer than the staged bound, sweeps running */
+        for(int i = 0; i < 7; ++i)
+        {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(100));
+            WsCall(c, seq, json::object({{ "verb", "list" }}));
+        }
+        release.store(true);
+        const json st = WaitJob(c, seq, q["job_id"].get<uint64_t>());
+        CHECK(st.value("state", "") == "succeeded");
+        if(st.value("state", "") != "succeeded")
+        {
+            std::printf("  (pinned commit: %s / %s)\n",
+                        st.value("error", "").c_str(),
+                        st.value("detail", "").c_str());
+        }
+        /* the terminal job released the pin: the token lapses */
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        WsCall(c, seq, json::object({{ "verb", "list" }}));
+        WsCallErr(c, seq, json::object({
+            { "verb",              "validate" },
+            { "id",                "pin1"     },
+            { "base_revision",     1          },
+            { "resource_revision", 0          },
+            { "staged",            tok        },
+        }), ErrCode::BadRequest, "transfer_expired");
     }
 
     /*---- >1 MiB document through chunked transfer -----------*/

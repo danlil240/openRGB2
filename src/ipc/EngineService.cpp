@@ -337,6 +337,11 @@ EngineService::EngineService(Engine& engine, Deps deps,
         deps_.workspace->SetJobEventHook(
             [this](const WorkspaceService::JobStatus& st)
             {
+                /* the job no longer needs its staged token */
+                if(ws_commands_)
+                {
+                    ws_commands_->OnJobFinished(st.job_id);
+                }
                 Emit(event_kind::kWorkspace,
                      JobStatusToJson(st));
             });

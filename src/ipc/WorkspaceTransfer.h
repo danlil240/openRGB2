@@ -29,7 +29,13 @@
 |||   most 2 OPEN transfers per session — a finish-          ||
 |||   verified upload keeps serving its staged token to    ||
 |||   jobs without holding a stream slot; 128 MiB staged   ||
-|||   across the server; idle transfers expire after 60 s.   ||
+|||   across the server; idle OPEN transfers expire after  ||
+|||   60 s. A finish-verified staged token idles out after ||
+|||   15 min instead (an import dialog holds it while the  ||
+|||   user reviews), every use refreshes it, and a queued  ||
+|||   or running job that references it pins it. A lapsed  ||
+|||   id answers "transfer_expired" (bounded tombstones),  ||
+|||   never a silent "unknown_transfer" (audit I-5).       ||
 |||   Disk staging lives INSIDE the verified managed       ||
 |||   root (<root>/transfers/) — clients never supply      ||
 |||   paths; server-generated opaque ids only.             ||
@@ -46,6 +52,7 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
@@ -79,7 +86,8 @@ public:
         uint64_t max_bundle_bytes        = 64ull * 1024 * 1024;
         size_t   max_per_session         = 2;
         uint64_t max_staged_total_bytes  = 128ull * 1024 * 1024;
-        uint32_t idle_expiry_ms          = 60000;
+        uint32_t idle_expiry_ms          = 60000;   /* open streams */
+        uint32_t staged_expiry_ms        = 15u * 60u * 1000u;
     };
 
     /* staging_root must be inside the verified managed
@@ -170,16 +178,33 @@ public:
                 const std::string& transfer_id);
 
     /* A finished upload is consumable while it lives; reads
-       are bounded by the kind cap. Session end, expiry, or
-       cancel removes it — ReadStaged then fails honestly. */
+       are bounded by the kind cap and refresh its idle clock.
+       Session end, expiry, or cancel removes it — ReadStaged
+       then fails honestly (err "transfer_expired" for a
+       lapsed token). */
     bool ReadStaged(const std::string& staged_token,
                     std::string& bytes,
                     std::string& err) const;
     /* Ownership + readiness check for the command layer —
        a staged token may only be consumed by a job of the
-       session that uploaded it. */
+       session that uploaded it. A hit refreshes the token. */
     bool StagedFor(uint64_t session_id,
                    const std::string& staged_token) const;
+    /* StagedFor with the reason: "" when consumable by
+       `session_id` (refreshed), else "transfer_expired" or
+       "unknown_transfer". */
+    std::string CheckStaged(uint64_t session_id,
+                            const std::string& staged_token) const;
+    /* CheckStaged + a pin: a pinned token never idles out
+       (a job holding it may sit queued behind slow work).
+       Returns "" on success, else the detail token —
+       "transfer_expired" or "unknown_transfer". Every
+       successful pin needs exactly one UnpinStaged. */
+    std::string PinStaged(uint64_t session_id,
+                          const std::string& staged_token);
+    /* Release one pin (no-op when the token is gone); the
+       idle clock restarts from now. */
+    void        UnpinStaged(const std::string& staged_token);
 
     void CancelSession(uint64_t session_id);
     /* Drop transfers idle past options.idle_expiry_ms — called
@@ -207,7 +232,10 @@ private:
         uint64_t    length   = 0;       /* download byte length     */
         uint64_t    read_pos = 0;       /* download cursor          */
         std::string path;
-        uint64_t    last_ms  = 0;
+        /* mutable: const reads (ReadStaged/StagedFor) refresh
+           the idle clock — refresh-on-use. */
+        mutable uint64_t last_ms = 0;
+        uint32_t    pins     = 0;       /* jobs holding the token  */
     };
 
     std::string NewId();
@@ -218,11 +246,22 @@ private:
        holding mutex_; NEVER call the locking forms there. */
     void        SweepExpiredLocked();
     size_t      LiveCountLocked(uint64_t session_id) const;
+    /* Detail for an id with no live record: "transfer_expired"
+       when it idled out on this session, else
+       "unknown_transfer". */
+    std::string MissingDetailLocked(uint64_t session_id,
+                                    const std::string& id) const;
+    std::string MissingDetailLocked(const std::string& id) const;
 
     std::string          root_;
     Options              options_;
     mutable std::mutex   mutex_;
     std::map<std::string, Transfer> transfers_;
+    /* Expired-id tombstones (id -> owning session), bounded
+       FIFO: only for the transfer_expired answer. */
+    static constexpr size_t kMaxTombstones = 64;
+    std::map<std::string, uint64_t> expired_;
+    std::deque<std::string>         expired_order_;
     uint64_t             staged_bytes_ = 0;
     uint64_t             next_id_      = 1;
 };
