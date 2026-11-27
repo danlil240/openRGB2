@@ -28,8 +28,13 @@ function New-ScheduledTaskPrincipal {
 }
 function New-ScheduledTaskSettingsSet {
     param([timespan]$ExecutionTimeLimit, [string]$MultipleInstances,
-          [switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries)
-    return [pscustomobject]@{ExecutionTimeLimit=$ExecutionTimeLimit;MultipleInstances=$MultipleInstances}
+          [switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries,
+          [Nullable[int]]$Priority)
+    # Unset -> the scheduler default 7 (below normal), as the real
+    # cmdlet leaves it.
+    $p = if($null -ne $Priority) { [int]$Priority } else { 7 }
+    return [pscustomobject]@{ExecutionTimeLimit=$ExecutionTimeLimit
+                             MultipleInstances=$MultipleInstances;Priority=$p}
 }
 function Register-ScheduledTask {
     param([string]$TaskName, [string]$TaskPath, $Action, $Trigger, $Principal, $Settings,
@@ -161,6 +166,26 @@ try {
        $script:registered.Settings.ExecutionTimeLimit -ne [timespan]::Zero) {
         throw 'scheduled task does not match elevated sign-in contract'
     }
+    # The scheduler default priority 7 is Below Normal (plus low I/O
+    # priority), inherited by the whole stack it starts: the task must
+    # ask for 4, normal (audit P-4).
+    if($script:registered.Settings.Priority -ne 4) {
+        throw "sign-in task priority is $($script:registered.Settings.Priority), expected 4 (normal)"
+    }
+    Write-Host 'PASS sign-in task registered at priority 4 (normal)'
+    # A task registered by an older build (default priority 7) for this
+    # same executable is not reported enabled: turning the setting on
+    # re-registers it at normal priority.
+    $script:registered.Settings = [pscustomobject]@{Priority=7}
+    $old = Invoke-OpenRGB2StartupTask status $root $sid $user
+    if($old.enabled -or $old.state -ne 'stale' -or $old.target -ne $exe) {
+        throw "a below-normal task was reported as the current one: $($old | ConvertTo-Json -Compress)"
+    }
+    $enabled = Invoke-OpenRGB2StartupTask enable $root $sid $user
+    if(-not $enabled.enabled -or $script:registered.Settings.Priority -ne 4) {
+        throw 'enable did not re-register a below-normal task at priority 4'
+    }
+    Write-Host 'PASS a below-normal task from an older build is stale; enable re-registers it'
     $disabled = Invoke-OpenRGB2StartupTask disable $root $sid $user
     if($disabled.enabled -or $script:registered) {
         throw 'disable left the task registered'

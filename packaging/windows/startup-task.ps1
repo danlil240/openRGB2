@@ -8,6 +8,12 @@
                          its target no longer exists -- "target" names
                          it; disable removes it.
 
+   The task runs at priority 4 (normal). The scheduler default, 7,
+   is Below Normal with low I/O priority, and every process the task
+   starts (UI, engine, backend) inherits it; a task registered
+   without it (older builds) reports "stale" so enabling again
+   re-registers it.
+
    enable refuses (exit 1, message on stderr) when the install folder,
    openrgb2-ui.exe or the scripts\ the elevated UI runs are writable by
    the signed-in user: the task starts that executable with highest
@@ -46,9 +52,12 @@ function Test-OpenRGB2StartupTask($Task, [string]$Exe) {
     $actionPath = [string]$Task.Actions[0].Execute
     try { $actionPath = [IO.Path]::GetFullPath($actionPath) }
     catch { return $false }
+    $priority = $null
+    try { $priority = $Task.Settings.Priority } catch { }
     return $actionPath.Equals($Exe, [StringComparison]::OrdinalIgnoreCase) -and
            ([string]$Task.Principal.RunLevel) -eq 'Highest' -and
-           ([string]$Task.Principal.LogonType) -eq 'Interactive'
+           ([string]$Task.Principal.LogonType) -eq 'Interactive' -and
+           $null -ne $priority -and [int]$priority -eq 4
 }
 
 # The SIDs a non-elevated process of this user acts as: the user, the
@@ -229,10 +238,13 @@ function Invoke-OpenRGB2StartupTask {
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $UserName
         $principal = New-ScheduledTaskPrincipal -UserId $UserName `
             -LogonType Interactive -RunLevel Highest
+        # -Priority 4 = normal: the default 7 starts the whole stack
+        # at Below Normal CPU and low I/O priority (audit P-4).
         $settings = New-ScheduledTaskSettingsSet `
             -ExecutionTimeLimit ([timespan]::Zero) `
             -MultipleInstances IgnoreNew `
-            -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+            -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+            -Priority 4
         $null = Register-ScheduledTask -TaskName $name -TaskPath '\' -Action $action `
             -Trigger $trigger -Principal $principal -Settings $settings -Force
         $task = Get-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction Stop
