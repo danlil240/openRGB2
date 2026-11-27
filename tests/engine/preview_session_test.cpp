@@ -572,10 +572,11 @@ struct Rig
     }
 
     /* Drive one preview publish tick (the owner loop calls
-       PollFrameStatus every ~20 ms). */
+       PollPreviews every ~20 ms, independent of whether
+       anyone subscribed to frame_status). */
     void Tick(TimePoint now)
     {
-        svc->PollFrameStatus(now);
+        svc->PollPreviews(now);
     }
 };
 
