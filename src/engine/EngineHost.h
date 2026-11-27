@@ -68,6 +68,7 @@
 #include "Transport.h"
 
 #include "WinPowerMonitor.h"
+#include "WinTimerResolution.h"
 
 #include <atomic>
 #include <chrono>
@@ -181,6 +182,12 @@ struct EngineHostOptions
     std::function<std::unique_ptr<IReactiveSource>(
         const std::string& id)> reactive_factory;
 
+    /* Audit E-2: the 1 ms timer-resolution request held from
+       Start() to Stop(). Empty = timeBeginPeriod/timeEndPeriod;
+       tests inject counters so they never change the real
+       timer. */
+    platform::ScopedTimerResolution::Api timer_api;
+
     /* Log sink (default: stderr with the engine prefix). */
     std::function<void(const std::string&)> log;
 };
@@ -234,6 +241,23 @@ public:
     void RequestStop();
     bool StopRequested() const;
     bool Started() const;
+
+    /* Owner-loop schedule (audit E-2). The fast tick (frame_status
+       + draft previews) runs on a fixed grid anchored at Run()'s
+       start: Run() sleeps until NextOwnerWake — the first grid
+       slot strictly after `now` (missed slots are dropped, never
+       replayed), or the next maintenance pass if that is sooner.
+       17 ms: every second slot (34 ms) clears the 33 ms publish
+       cap with 1 ms left for wake jitter, so the feeds publish
+       at ~29 Hz; the old relative 20 ms sleep took ~31 ms on the
+       default 15.6 ms timer (~16 Hz). */
+    static constexpr Clock::duration kOwnerTick =
+        std::chrono::milliseconds(17);
+    static TimePoint NextOwnerWake(TimePoint anchor, TimePoint now,
+                                   TimePoint next_maint);
+    /* True while the 1 ms timer resolution is held. */
+    bool TimerResolutionActive() const
+    { return timer_resolution_.Active(); }
 
     /*---- Introspection (diagnostics/tests) ------------------*/
     Engine&                  GetEngine()     { return engine_; }
@@ -321,6 +345,8 @@ private:
     std::unique_ptr<PowerLifecycle>          lifecycle_;
     std::unique_ptr<ReactiveInputs>          reactive_;
     platform::WinPowerMonitor                power_monitor_;
+    /* Held from Start() to the end of Stop() (E-2). */
+    platform::ScopedTimerResolution          timer_resolution_;
     /* studio-import Task 11: the engine-owned physical LED
        calibration session (calibration_* workspace verbs).
        Declared AFTER the deps it calls (pipeline_, sdk_,

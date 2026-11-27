@@ -11,7 +11,8 @@ target_include_directories(lianli_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_compile_definitions(lianli_bench PRIVATE NDEBUG)
 
-target_link_libraries(lianli_bench PRIVATE ws2_32)
+# winmm: timeBeginPeriod(1) for the pacing loop (audit P-8).
+target_link_libraries(lianli_bench PRIVATE ws2_32 winmm)
 
 # Milestone 5 skew-measurement harness (task 5.1). Physical runs are
 # opt-in like lianli_bench. Unlike the M1 producer it drives the REAL
@@ -33,4 +34,5 @@ target_compile_definitions(skew_bench PRIVATE NDEBUG)
 target_link_libraries(skew_bench PRIVATE
     openrgb2_engine
     openrgb2_backend_openrgb
-    ws2_32)
+    ws2_32
+    winmm)

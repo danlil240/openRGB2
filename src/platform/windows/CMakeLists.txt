@@ -14,15 +14,18 @@ add_library(openrgb2_platform_windows STATIC
     WinReactiveInputs.cpp
     WinAudioLoopback.cpp
     WinScreenSampler.cpp
-    WinKeyHook.cpp)
+    WinKeyHook.cpp
+    WinTimerResolution.cpp)
 target_include_directories(openrgb2_platform_windows PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(openrgb2_platform_windows PUBLIC
     openrgb2_engine)
 # RegisterPowerSettingNotification / RegisterSuspendResumeNotification;
-# WASAPI loopback (COM); GDI StretchBlt screen grab.
+# WASAPI loopback (COM); GDI StretchBlt screen grab;
+# timeBeginPeriod for the engine's 1 ms timer resolution (E-2).
 target_link_libraries(openrgb2_platform_windows PRIVATE
     PowrProf
     user32
     gdi32
-    ole32)
+    ole32
+    winmm)
