@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <process.h>
 #include <fstream>
 #include <map>
 #include <set>
@@ -153,7 +154,7 @@ static json MatrixPreset(const std::string& id)
 static std::filesystem::path TempDir(const std::string& name)
 {
     const auto dir = std::filesystem::temp_directory_path()
-                     / ("dls_preset_test_" + name);
+                     / ("dls_preset_test_" + std::to_string(_getpid()) + "_" + name);
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir, ec);

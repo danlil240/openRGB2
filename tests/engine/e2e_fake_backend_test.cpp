@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <process.h>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -189,7 +190,7 @@ int main()
     std::error_code ec;
     const std::filesystem::path tmp =
         std::filesystem::temp_directory_path(ec) /
-        "openrgb2-e2e-state";
+        ("openrgb2-e2e-state-" + std::to_string(_getpid()));
     std::filesystem::create_directories(tmp, ec);
     const std::string scene_file = (tmp / "scene.json").string();
     const std::string state_file = (tmp / "engine-state.json").string();
@@ -216,7 +217,7 @@ int main()
     /* A test-scoped guard name: the production name may be
        held by a real engine on this machine, and the guard
        itself is collision-covered in ownership_scan_test. */
-    opts.instance_name   = "Local\\openrgb2-engine-e2e-test";
+    opts.instance_name   = ("Local\\openrgb2-engine-e2e-test-" + std::to_string(_getpid()));
     opts.scene_path      = scene_file;
     opts.state_path      = state_file;
     opts.backend_config_dir = "";   /* not configured here — the
@@ -441,7 +442,7 @@ int main()
 
         /* Host B: no --scene -> the persisted scene applies. */
         EngineHost host2(make_opts(
-            "Local\\openrgb2-engine-e2e-test-2", true));
+            ("Local\\openrgb2-engine-e2e-test-2-" + std::to_string(_getpid())).c_str(), true));
         CHECK(host2.Start(err));
         CHECK(host2.GetService() != nullptr);
         std::shared_ptr<const studio::SceneDocument> doc =
@@ -459,7 +460,7 @@ int main()
         /* Host C: --no-scene-restore -> same state dir starts
            idle, snapshot untouched. */
         EngineHost host3(make_opts(
-            "Local\\openrgb2-engine-e2e-test-3", false));
+            ("Local\\openrgb2-engine-e2e-test-3-" + std::to_string(_getpid())).c_str(), false));
         CHECK(host3.Start(err));
         CHECK(host3.GetService() != nullptr);
         CHECK(host3.GetService()->Scene() == nullptr);

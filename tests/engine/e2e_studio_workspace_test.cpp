@@ -72,6 +72,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <process.h>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -795,9 +796,9 @@ int main()
         (tmp / "workspaces").generic_string();
 
     const std::string cmd_pipe  =
-        "\\\\.\\pipe\\openrgb2-e2e-studio-ws";
+        ("\\\\.\\pipe\\openrgb2-e2e-studio-ws-" + std::to_string(_getpid()));
     const std::string diag_pipe =
-        "\\\\.\\pipe\\openrgb2-e2e-studio-ws-diag";
+        ("\\\\.\\pipe\\openrgb2-e2e-studio-ws-diag-" + std::to_string(_getpid()));
 
     sdk_test::FakeSdkServer server;
     server.controllers = { WirelessGroup(), Wired() };
@@ -811,7 +812,7 @@ int main()
     opts.reactive_inputs      = false;
     opts.scan_owners          = false;
     opts.single_instance      = true;
-    opts.instance_name        = "Local\\openrgb2-engine-e2e-studio";
+    opts.instance_name        = ("Local\\openrgb2-engine-e2e-studio-" + std::to_string(_getpid()));
     opts.workspace_root       = ws_root;
     /* The packaged preset libraries — the same dirs the staged
        package ships (working dir is tests/engine). */
