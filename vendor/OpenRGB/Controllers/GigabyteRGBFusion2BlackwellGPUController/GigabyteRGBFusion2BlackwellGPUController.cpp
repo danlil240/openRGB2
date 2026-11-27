@@ -11,6 +11,7 @@
 #include <thread>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include "GigabyteRGBFusion2BlackwellGPUController.h"
 #include "GigabyteRGBFusion2BlackwellGPUDefinitions.h"
 #include "LogManager.h"
@@ -123,43 +124,12 @@ static void BWGpuTrace(const uint8_t* pkt, int palette_pos, int write_result,
     fflush(f);
 }
 
-/*---------------------------------------------------------*\
-|  Luminance floor (flicker workaround): AORUS MASTER       |
-|  firmware visibly flickers when a direct-mode color       |
-|  drifts through its low-PWM region. Dark colors are       |
-|  scaled up to the floor, hue-preserving. Pure black       |
-|  stays black so "off" still turns the LED off.            |
-\*---------------------------------------------------------*/
-static RGBColor BWGpuFloorColor(RGBColor color)
-{
-    const int r = (int)RGBGetRValue(color);
-    const int g = (int)RGBGetGValue(color);
-    const int b = (int)RGBGetBValue(color);
-
-    const double luma = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
-    if(luma >= 64.0 || luma < 2.0)
-    {
-        return color;
-    }
-
-    const double scale  = 64.0 / luma;
-    const int    fr     = (int)((r * scale) + 0.5);
-    const int    fg     = (int)((g * scale) + 0.5);
-    const int    fb     = (int)((b * scale) + 0.5);
-
-    /* ToRGBColor shifts its macro arguments without parentheses.
-       Pass clamped values, not ternary expressions: otherwise a
-       clamped blue/green channel is packed into the red byte. */
-    const int cr = fr > 255 ? 255 : fr;
-    const int cg = fg > 255 ? 255 : fg;
-    const int cb = fb > 255 ? 255 : fb;
-    return ToRGBColor(cr, cg, cb);
-}
-
-void RGBFusion2BlackwellGPUController::SetMode(uint8_t type, uint8_t zone, uint8_t mode, fusion2_config zone_config)
+int RGBFusion2BlackwellGPUController::BuildPacket(uint8_t type, uint8_t zone, uint8_t mode, const fusion2_config& zone_config, uint8_t* zone_pkt)
 {
     if(zone_config.numberOfColors == 0 && zone < RGB_FUSION_2_BLACKWELL_GPU_NUMBER_OF_ZONES)
         this->zone_color[zone] = zone_config.colors[0];
+
+    const RGBColor cached_color = (zone < RGB_FUSION_2_BLACKWELL_GPU_NUMBER_OF_ZONES) ? this->zone_color[zone] : zone_config.colors[0];
 
     /************************************************************************************\
     *                                                                                    *
@@ -170,7 +140,18 @@ void RGBFusion2BlackwellGPUController::SetMode(uint8_t type, uint8_t zone, uint8
     * SZ is the amount of colors that will be sent in the format of 3 bytes RGB          *
     *                                                                                    *
     \************************************************************************************/
-    uint8_t zone_pkt[64] = {type, 0x01, mode, zone_config.speed, zone_config.brightness, (uint8_t)RGBGetRValue(this->zone_color[zone]), (uint8_t)RGBGetGValue(this->zone_color[zone]), (uint8_t)RGBGetBValue(this->zone_color[zone]), 0x00, zone, zone_config.numberOfColors, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    memset(zone_pkt, 0, 64);
+    zone_pkt[0]  = type;
+    zone_pkt[1]  = 0x01;
+    zone_pkt[2]  = mode;
+    zone_pkt[3]  = zone_config.speed;
+    zone_pkt[4]  = zone_config.brightness;
+    zone_pkt[5]  = (uint8_t)RGBGetRValue(cached_color);
+    zone_pkt[6]  = (uint8_t)RGBGetGValue(cached_color);
+    zone_pkt[7]  = (uint8_t)RGBGetBValue(cached_color);
+    zone_pkt[8]  = 0x00;
+    zone_pkt[9]  = zone;
+    zone_pkt[10] = zone_config.numberOfColors;
 
     int palette_pos = 12;
     switch(gpu_layout)
@@ -196,7 +177,7 @@ void RGBFusion2BlackwellGPUController::SetMode(uint8_t type, uint8_t zone, uint8
 
         int currentPos = palette_pos;
 
-        for(uint8_t i = 0; i < zone_config.numberOfColors; i++)
+        for(uint8_t i = 0; i < zone_config.numberOfColors && i < 8; i++)
         {
             zone_pkt[currentPos + 0] = RGBGetRValue(zone_config.colors[i]);
             zone_pkt[currentPos + 1] = RGBGetGValue(zone_config.colors[i]);
@@ -211,27 +192,53 @@ void RGBFusion2BlackwellGPUController::SetMode(uint8_t type, uint8_t zone, uint8
         | — an empty palette is a no-op on AORUS MASTER firmware,   |
         | which then keeps re-rendering its stored profile. A       |
         | single-color zone must send SZ=1 with the color as the    |
-        | palette entry. The luminance floor keeps drifting colors  |
-        | out of the firmware's low-PWM flicker region.             |
+        | palette entry. Colors go out exactly as requested: the    |
+        | former luminance floor (an AORUS MASTER low-PWM flicker   |
+        | workaround) never ran on MASTER, whose Direct writes use  |
+        | the Static transport, and only recolored dark targets on  |
+        | the other layouts.                                        |
         \*---------------------------------------------------------*/
-        const RGBColor base_color = BWGpuFloorColor(this->zone_color[zone]);
-        zone_pkt[5]               = (uint8_t)RGBGetRValue(base_color);
-        zone_pkt[6]               = (uint8_t)RGBGetGValue(base_color);
-        zone_pkt[7]               = (uint8_t)RGBGetBValue(base_color);
         zone_pkt[10]              = 1;
-        zone_pkt[palette_pos + 0] = (uint8_t)RGBGetRValue(base_color);
-        zone_pkt[palette_pos + 1] = (uint8_t)RGBGetGValue(base_color);
-        zone_pkt[palette_pos + 2] = (uint8_t)RGBGetBValue(base_color);
+        zone_pkt[palette_pos + 0] = zone_pkt[5];
+        zone_pkt[palette_pos + 1] = zone_pkt[6];
+        zone_pkt[palette_pos + 2] = zone_pkt[7];
     }
 
-    const s32 write_result = bus->i2c_write_block(dev, sizeof(zone_pkt), zone_pkt);
+    return palette_pos;
+}
+
+void RGBFusion2BlackwellGPUController::WritePacket(uint8_t zone, const uint8_t* zone_pkt, int palette_pos, const fusion2_config& zone_config, std::chrono::steady_clock::time_point now)
+{
+    uint8_t pkt_copy[64];
+    memcpy(pkt_copy, zone_pkt, sizeof(pkt_copy));
+
+    const s32 write_result = bus->i2c_write_block(dev, sizeof(pkt_copy), pkt_copy);
+
+    if(zone < RGB_FUSION_2_BLACKWELL_GPU_NUMBER_OF_ZONES)
+    {
+        /*-----------------------------------------------------*\
+        | Only a successful write may suppress the next         |
+        | identical one.                                        |
+        \*-----------------------------------------------------*/
+        memcpy(last_pkt[zone], zone_pkt, 64);
+        last_pkt_valid[zone] = (write_result >= 0);
+        last_pkt_time[zone]  = now;
+    }
 
     BWGpuTrace(zone_pkt, palette_pos, (int)write_result,
                zone_config.diag_sm, zone_config.diag_who,
                zone_config.diag_tid, zone_config.colors[0]);
 }
 
-void RGBFusion2BlackwellGPUController::SetZone(uint8_t zone, uint8_t mode, fusion2_config zone_config)
+void RGBFusion2BlackwellGPUController::SetMode(uint8_t type, uint8_t zone, uint8_t mode, fusion2_config zone_config)
+{
+    uint8_t   zone_pkt[64];
+    const int palette_pos = BuildPacket(type, zone, mode, zone_config, zone_pkt);
+
+    WritePacket(zone, zone_pkt, palette_pos, zone_config, std::chrono::steady_clock::now());
+}
+
+uint8_t RGBFusion2BlackwellGPUController::ResolveTransport(uint8_t& mode, fusion2_config& zone_config)
 {
     if(mode == RGB_FUSION2_BLACKWELL_GPU_MODE_BREATHING)
         zone_config.brightness = RGB_FUSION2_BLACKWELL_GPU_BRIGHTNESS_MAX;
@@ -257,5 +264,34 @@ void RGBFusion2BlackwellGPUController::SetZone(uint8_t zone, uint8_t mode, fusio
     if(mode != RGB_FUSION2_BLACKWELL_GPU_MODE_DIRECT)
         type = RGB_FUSION2_BLACKWELL_GPU_REG_MODE;
 
+    return type;
+}
+
+void RGBFusion2BlackwellGPUController::SetZone(uint8_t zone, uint8_t mode, fusion2_config zone_config)
+{
+    const uint8_t type = ResolveTransport(mode, zone_config);
+
     SetMode(type, zone, mode, zone_config);
+}
+
+bool RGBFusion2BlackwellGPUController::SetZoneIfChanged(uint8_t zone, uint8_t mode, fusion2_config zone_config,
+                                                        std::chrono::steady_clock::time_point now,
+                                                        std::chrono::milliseconds refresh)
+{
+    const uint8_t type = ResolveTransport(mode, zone_config);
+
+    uint8_t   zone_pkt[64];
+    const int palette_pos = BuildPacket(type, zone, mode, zone_config, zone_pkt);
+
+    if(zone < RGB_FUSION_2_BLACKWELL_GPU_NUMBER_OF_ZONES &&
+       last_pkt_valid[zone] &&
+       memcmp(last_pkt[zone], zone_pkt, sizeof(zone_pkt)) == 0 &&
+       now >= last_pkt_time[zone] &&
+       (now - last_pkt_time[zone]) < refresh)
+    {
+        return false;
+    }
+
+    WritePacket(zone, zone_pkt, palette_pos, zone_config, now);
+    return true;
 }
