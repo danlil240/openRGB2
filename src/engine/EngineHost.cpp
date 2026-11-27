@@ -1223,8 +1223,10 @@ bool EngineHost::Start(std::string& err)
                     return;
                 }
                 std::string serr;
-                if(!profile_->SaveSceneSnapshot(
-                       studio::ToJson(doc).dump(2) + "\n", serr))
+                /* Hand the JSON over as-is: the store
+                   serializes it once, no dump-then-reparse. */
+                if(!profile_->SaveSceneSnapshotJson(
+                       studio::ToJson(doc), serr))
                 {
                     Log("last-scene snapshot save failed: " +
                         serr);

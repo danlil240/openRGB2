@@ -36,6 +36,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace openrgb2;
@@ -831,6 +832,52 @@ static void TestSceneSnapshot()
     }
 }
 
+/* Write-path cache: an identical save is a no-op (no backup
+   churn); a file changed behind the store's back is re-read and
+   judged as before; concurrent snapshot writers are serialized
+   (the temp name is fixed). */
+static void TestWriteCache()
+{
+    const std::string p = Path("cache.json");
+    ProfileStore      store(p);
+    std::string       err;
+
+    const EngineState a = SampleState("name:a", PlaybackMode::LiveEffects);
+    CHECK(store.Save(a, err));
+    CHECK(store.Save(a, err));
+    CHECK(!fs::exists(store.LkgPath()));      /* nothing backed up */
+
+    CHECK(store.Save(SampleState("name:b", PlaybackMode::LiveEffects),
+                     err));
+    CHECK(fs::exists(store.LkgPath()));       /* a -> lkg */
+
+    /* External corruption invalidates the cache: the next save
+       sets the corrupt file aside instead of trusting it. */
+    WriteText(p, "{{{external");
+    CHECK(store.Save(a, err));
+    CHECK(fs::exists(store.RejectedPath()));
+    CHECK(store.Load().status == ProfileStore::LoadStatus::Loaded);
+
+    /* Concurrent snapshot writers. */
+    bool ok1 = true, ok2 = true;
+    auto writer = [&store](int base, bool& ok)
+    {
+        for(int i = 0; i < 40; ++i)
+        {
+            std::string e;
+            const nlohmann::json doc = {
+                { "version", 1 }, { "name", std::to_string(base + i) } };
+            ok = store.SaveSceneSnapshotJson(doc, e) && ok;
+        }
+    };
+    std::thread t1(writer, 0, std::ref(ok1));
+    std::thread t2(writer, 1000, std::ref(ok2));
+    t1.join();
+    t2.join();
+    CHECK(ok1 && ok2);
+    CHECK(store.LoadSceneSnapshot().present);
+}
+
 int main()
 {
     g_tmp = fs::temp_directory_path() /
@@ -846,6 +893,7 @@ int main()
     TestBoundaryValidation();
     TestDurablePlaybackMode();
     TestSceneSnapshot();
+    TestWriteCache();
     TestSceneLoader();
 
     /* Opt-in manual check: point OPENRGB2_SCENE_FILE at a real

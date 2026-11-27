@@ -58,7 +58,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
+#include <filesystem>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -220,7 +223,12 @@ public:
        A crash anywhere leaves either the old or the new file —
        never a torn document. Directories are created as needed.
        On failure returns false with `err` set; the previous
-       file is left untouched. */
+       file is left untouched.
+       Saves are serialized on an internal mutex. When the file
+       on disk is still exactly what this store last wrote (size
+       + mtime unchanged), its cached bytes stand in for the
+       re-read/re-parse of step 2, and a byte-identical save is a
+       no-op (no backup churn, no fsyncs). */
     bool Save(const EngineState& state, std::string& err) const;
 
     /*---- last-scene snapshot --------------------------------
@@ -247,9 +255,33 @@ public:
     SceneSnapshot LoadSceneSnapshot() const;
     bool          SaveSceneSnapshot(const std::string& bytes,
                                     std::string& err) const;
+    /* Same, for a document the caller already holds as JSON —
+       serialized here, never re-parsed. Snapshot writes share
+       Save()'s mutex (the temp name is fixed). */
+    bool          SaveSceneSnapshotJson(const nlohmann::json& doc,
+                                    std::string& err) const;
 
 private:
+    /* What this store itself last wrote to a path, and the
+       file's size/mtime right after — a later write trusts the
+       cached bytes only while the file still matches. */
+    struct Written
+    {
+        bool                            valid = false;
+        std::string                     bytes;
+        std::uintmax_t                  size  = 0;
+        std::filesystem::file_time_type mtime{};
+    };
+    static bool StillOurs(const std::string& path, const Written& w);
+    static void Remember(const std::string& path,
+                         const std::string& bytes, Written& w);
+    bool        WriteSnapshotLocked(const std::string& bytes,
+                                    std::string& err) const;
+
     std::string path_;
+    mutable std::mutex io_mutex_;
+    mutable Written    primary_written_;
+    mutable Written    snapshot_written_;
 };
 
 } /* namespace openrgb2 */

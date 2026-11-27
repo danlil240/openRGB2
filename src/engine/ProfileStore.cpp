@@ -1022,11 +1022,46 @@ ProfileStore::LoadResult ProfileStore::Load() const
     return result;
 }
 
+bool ProfileStore::StillOurs(const std::string& path, const Written& w)
+{
+    if(!w.valid)
+    {
+        return false;
+    }
+    std::error_code ec;
+    const std::uintmax_t size = std::filesystem::file_size(path, ec);
+    if(ec || size != w.size)
+    {
+        return false;
+    }
+    const auto mtime = std::filesystem::last_write_time(path, ec);
+    return !ec && mtime == w.mtime;
+}
+
+void ProfileStore::Remember(const std::string& path,
+                            const std::string& bytes, Written& w)
+{
+    std::error_code ec1, ec2;
+    w.size  = std::filesystem::file_size(path, ec1);
+    w.mtime = std::filesystem::last_write_time(path, ec2);
+    w.valid = !ec1 && !ec2 && w.size == bytes.size();
+    w.bytes = w.valid ? bytes : std::string();
+}
+
 bool ProfileStore::Save(const EngineState& state, std::string& err) const
 {
+    const nlohmann::json       j  = EngineStateToJson(state);
+    const std::string bytes = j.dump(2) + "\n";
+
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    const bool ours = StillOurs(path_, primary_written_);
+    if(ours && bytes == primary_written_.bytes)
+    {
+        return true;    /* byte-identical to the file on disk */
+    }
+
     /* Serialize + re-validate the candidate — the store never
        lands a document its own validation rejects. */
-    const nlohmann::json       j  = EngineStateToJson(state);
     EngineState                check;
     std::vector<std::string>   errs;
     if(!EngineStateFromJson(j, check, &errs))
@@ -1038,7 +1073,6 @@ bool ProfileStore::Save(const EngineState& state, std::string& err) const
         }
         return false;
     }
-    const std::string bytes = j.dump(2) + "\n";
 
     const std::filesystem::path p(path_);
     std::error_code ec;
@@ -1062,8 +1096,13 @@ bool ProfileStore::Save(const EngineState& state, std::string& err) const
         EngineState              cur_state;
         std::vector<std::string> cerrs, cwarns;
         bool                     cmig = false;
-        if(ReadFile(path_, cur) &&
-           ParseState(cur, cur_state, cerrs, cwarns, cmig))
+        /* A file still exactly as this store wrote it was
+           validated before that write — no re-read/re-parse. */
+        const bool cur_valid =
+            ours ? (cur = primary_written_.bytes, true)
+                 : (ReadFile(path_, cur) &&
+                    ParseState(cur, cur_state, cerrs, cwarns, cmig));
+        if(cur_valid)
         {
             if(!WriteAtomic(LkgPath() + ".tmp", LkgPath(), cur, err))
             {
@@ -1082,10 +1121,12 @@ bool ProfileStore::Save(const EngineState& state, std::string& err) const
         }
     }
 
+    primary_written_.valid = false;
     if(!WriteAtomic(TempPath(), path_, bytes, err))
     {
         return false;
     }
+    Remember(path_, bytes, primary_written_);
     return true;
 }
 
@@ -1145,8 +1186,32 @@ bool ProfileStore::SaveSceneSnapshot(const std::string& bytes,
         err = "scene snapshot candidate is not a JSON object";
         return false;
     }
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    return WriteSnapshotLocked(bytes, err);
+}
 
+bool ProfileStore::SaveSceneSnapshotJson(const nlohmann::json& doc,
+                                     std::string& err) const
+{
+    if(!doc.is_object())
+    {
+        err = "scene snapshot candidate is not a JSON object";
+        return false;
+    }
+    const std::string bytes = doc.dump(2) + "\n";
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    return WriteSnapshotLocked(bytes, err);
+}
+
+bool ProfileStore::WriteSnapshotLocked(const std::string& bytes,
+                                       std::string& err) const
+{
     const std::filesystem::path p(SceneSnapshotPath());
+    const bool ours = StillOurs(p.string(), snapshot_written_);
+    if(ours && bytes == snapshot_written_.bytes)
+    {
+        return true;    /* byte-identical to the file on disk */
+    }
     std::error_code ec;
     if(p.has_parent_path() &&
        !std::filesystem::exists(p.parent_path(), ec))
@@ -1164,7 +1229,7 @@ bool ProfileStore::SaveSceneSnapshot(const std::string& bytes,
        reported, never silently destroyed. Only a file we
        actually READ is set aside; an unreadable one keeps its
        bytes and the write below reports any real error. */
-    if(std::filesystem::exists(p, ec))
+    if(!ours && std::filesystem::exists(p, ec))
     {
         std::string cur;
         if(ReadFile(p.string(), cur))
@@ -1185,8 +1250,13 @@ bool ProfileStore::SaveSceneSnapshot(const std::string& bytes,
         }
     }
 
-    return WriteAtomic(p.string() + ".tmp", p.string(), bytes,
-                       err);
+    snapshot_written_.valid = false;
+    if(!WriteAtomic(p.string() + ".tmp", p.string(), bytes, err))
+    {
+        return false;
+    }
+    Remember(p.string(), bytes, snapshot_written_);
+    return true;
 }
 
 } /* namespace openrgb2 */
