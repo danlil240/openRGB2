@@ -267,7 +267,12 @@ and be started elevated at the next launch or sign-in.
   owner `Administrators`, inheritance broken, `Administrators` +
   `SYSTEM` full control, `Users` read/execute. `state\` and
   `profiles\local\` stay writable (Modify) by the installing user
-  (`-UserSid`, default: the folder's previous owner);
+  (`-UserSid`; default: the folder's owner when that is a user account,
+  else the one user account granted write on `state\`, inherited grants
+  included). When that is not exactly one account the elevated update
+  refuses before changing anything and asks for `-UserSid` (`whoami
+  /user` in that user's normal shell) — it never assumes the elevating
+  account, which can be a different administrator;
   `state\backend\plugins\` is pinned admin-only because the backend
   loads plugin DLLs from its config dir. The `.previous` snapshot is
   protected the same way. `-SkipAclHardening` opts out. A non-elevated

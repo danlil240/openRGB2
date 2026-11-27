@@ -42,6 +42,9 @@
       T13 start refuses (exit 4) when OpenRGB.exe / the :6744
           listener has an unreadable image path (unverifiable --
           never mistaken for a foreign listener)
+      T14 update ACL-hardening user resolution: inherited grants count,
+          admin/system/well-known SIDs never do, ambiguity refuses
+          (-UserSid required) instead of picking the elevating account
 
     Exit code: number of failed checks.
 #>
@@ -683,6 +686,56 @@ $rc = Invoke-ManagedStart -InstallDir $instA -Scene "" -NoUI $true `
     -ProcessList @([pscustomobject]@{pid=54; exe="Steam.exe"})
 Check ($rc -eq 4) ":6744 listener with unreadable image -> unverifiable (4), not a foreign listener"
 Check (-not (Test-Path $runFileA)) "no engine spawned, run file untouched"
+
+#====================================================================#
+Section "T14 update: ACL-hardening user resolution never guesses"
+#====================================================================#
+# Injected security descriptors (no filesystem, no elevation): the
+# resolver must find the installing user through INHERITED grants on a
+# fresh state\, ignore admin/system/creator/well-known SIDs, and return
+# nothing -- never the elevating account -- when it is not exactly one.
+$u1 = "S-1-5-21-1111-2222-3333-1001"
+$u2 = "S-1-5-21-1111-2222-3333-1002"
+$adm500 = "S-1-5-21-1111-2222-3333-500"
+function New-SddlAcl([string]$Sddl) {
+    $a = New-Object Security.AccessControl.DirectorySecurity
+    $a.SetSecurityDescriptorSddlForm($Sddl)
+    return $a
+}
+function Resolve-WithAcls([string]$InstallSddl, [string]$StateSddl) {
+    $map = @{ "Q:\OpenRGB2" = $InstallSddl; "Q:\OpenRGB2\state" = $StateSddl }
+    $reader = { param($p) if($map[$p]) { New-SddlAcl $map[$p] } else { $null } }.GetNewClosure()
+    return Resolve-InstallUserSid -InstallDir "Q:\OpenRGB2" -AclReader $reader
+}
+$pfLike = "O:BAG:SYD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;0x1200a9;;;BU)(A;OICIIOID;GA;;;CO)(A;OICIID;0x1200a9;;;S-1-15-2-1)"
+Check ((Resolve-WithAcls "O:${u1}G:SYD:AI(A;OICIID;FA;;;$u1)" $null) -eq $u1) `
+    "install owned by the user -> that user"
+Check ((Resolve-WithAcls "O:BAG:SYD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)" `
+        "O:BAG:SYD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;$u1)") -eq $u1) `
+    "Administrators-owned install, fresh state\ with only INHERITED grants -> the user"
+Check ((Resolve-WithAcls "O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)" `
+        "O:BAG:SYD:AI(A;OICI;0x1301bf;;;$u1)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;SY)(A;OICIID;0x1200a9;;;BU)") -eq $u1) `
+    "hardened install: explicit Modify on state\ -> the user"
+Check ((Resolve-WithAcls "O:BAG:SYD:AI(A;OICIID;FA;;;BA)(A;OICIID;FA;;;$adm500)(A;OICIID;0x1301bf;;;$u1)" `
+        "O:BAG:SYD:AI(A;OICIID;FA;;;BA)(A;OICIID;FA;;;$adm500)(A;OICIID;0x1301bf;;;$u1)") -eq $u1) `
+    "built-in Administrator account (RID 500) is never the installing user"
+Check ($null -eq (Resolve-WithAcls $pfLike $null)) `
+    "Program Files-like folder, no state\: admin/system/creator/app-package SIDs only -> unresolved"
+Check ($null -eq (Resolve-WithAcls $pfLike "O:BAG:SYD:AI(A;OICI;0x1301bf;;;$u1)(A;OICI;0x1301bf;;;$u2)")) `
+    "two users granted write on state\ -> ambiguous, unresolved"
+Check ($null -eq (Resolve-WithAcls $pfLike "O:BAG:SYD:AI(A;OICIIO;FA;;;$u1)")) `
+    "inherit-only grant is not access to state\ itself -> unresolved"
+Check ($null -eq (Resolve-WithAcls $pfLike "O:BAG:SYD:AI(A;OICI;0x1200a9;;;$u1)")) `
+    "read-only grant does not make an owner of user state -> unresolved"
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$r = & { function Resolve-InstallUserSid { return $null }
+         Resolve-AclUserSid "Q:\OpenRGB2" "" }
+Check (($null -eq $r.Sid) -and $r.Error -match '-UserSid' -and $r.Error -match 'nothing was changed') `
+    "unresolved -> hardening refused with a -UserSid instruction (not the elevating account $me)"
+$r = Resolve-AclUserSid "Q:\OpenRGB2" "not-a-sid"
+Check (($null -eq $r.Sid) -and $r.Error -match 'not a valid SID') "-UserSid that is not a SID is refused"
+$r = Resolve-AclUserSid "Q:\OpenRGB2" $u2
+Check ($r.Sid -eq $u2) "-UserSid wins over resolution"
 
 } catch {
     $script:Fail++
