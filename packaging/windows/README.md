@@ -15,7 +15,17 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\stage-release.ps1
 ```
 
 Output: `build\package\OpenRGB2-<version>-win64\` (version is read
-from the top-level `CMakeLists.txt`).
+from the top-level `CMakeLists.txt`). A relative `-OutDir` is resolved
+against the current PowerShell location. The manifest records the git
+revision and `revision_dirty` (tracked files differed from HEAD).
+Staging refuses to wipe an existing package dir while one of its
+executables is in use (also catches an elevated stack whose path a
+non-elevated shell cannot read); processes running from elsewhere do
+not block it.
+
+The UI needs Qt: `OPENRGB2_BUILD_UI` (CMake option, default `ON`) makes
+a missing Qt component a configure error. `-DOPENRGB2_BUILD_UI=OFF`
+builds only the Qt-free engine, tools and non-UI tests.
 
 Inputs it expects (all built in-tree first):
 
@@ -85,16 +95,25 @@ per-file `signed` flag and a `signing` block when a package was signed.
 ## Files here
 
 - `stage-release.ps1` — staging + verification script.
-- `build-and-deploy.ps1` — one-command wrapper: CMake build → pinned
-  backend check → `stage-release.ps1` → optional `update-openrgb2.ps1`
-  into `-InstallDir` (stops the running install first).
+- `build-and-deploy.ps1` — one-command wrapper: CMake build (fails
+  early on a `Qt6_DIR-NOTFOUND` cache) → pinned backend check
+  (`-BuildBackend` runs the qmake recipe from `vendor\OpenRGB`) →
+  with `-InstallDir`, stop the running install → `stage-release.ps1`
+  → `update-openrgb2.ps1` into `-InstallDir`.
+- `..\..\scripts\build-all-and-install.ps1` — repo-to-desktop-icon
+  wrapper: builds and stages as you, and asks UAC only to stop and
+  deploy the elevated install (plus a sweep when an elevated dev-run
+  process holds a repo binary).
 - `start-openrgb2.ps1` / `stop-openrgb2.ps1` — managed startup
   (ownership scan -> explicit `-TakeOver` gate -> backend -> engine ->
   UI) and ordered clean shutdown (engine IPC QUIT -> graceful backend
   handoff; verified-own processes only, never kills competitors).
 - `update-openrgb2.ps1` / `rollback-openrgb2.ps1` — manifest-verified
   update over an install (preserving `profiles/local/` + `state/`)
-  and one-level rollback from `<install>.previous`.
+  and one-level rollback from `<install>.previous`. An interrupted
+  update keeps its snapshot (`.update-in-progress.json` marker): re-run
+  to resume, or roll back. Run elevated, the update makes the install
+  admin-only.
 - `OpenRGB2.cmd` — double-click launcher shipped at the package root.
   The copy in this source directory launches the staged release under
   `build/package/` when one is present.
@@ -102,7 +121,9 @@ per-file `signed` flag and a `signing` block when a package was signed.
   stack as administrator, keeps a tray icon after the window closes,
   and logs startup to `state/startup.log`.
 - `startup-task.ps1` — manages the optional current-user, highest-privilege
-  sign-in task controlled by Settings → Windows startup.
+  sign-in task controlled by Settings → Windows startup. Refuses to
+  enable over a user-writable install; reports a `stale` task left by a
+  moved install, which disable removes.
 - `OpenRGB2.vbs` — retained compatibility launcher for older shortcuts.
 - `create-desktop-shortcut.ps1` — creates `OpenRGB2.lnk` pointing directly
   at the UI executable, using the packaged OpenRGB2 icon.

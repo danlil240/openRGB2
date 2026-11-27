@@ -13,20 +13,38 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Qt 6.8.3 / MSVC 2022 is the pinned toolkit for the application (engine and
-# UI milestones). The offline core and backend tests are Qt-free, so Qt is not
-# required until those targets land.
+# Warning level. With cmake_minimum_required >= 3.15 (CMP0092 NEW) CMake no
+# longer puts MSVC's default /W3 into CMAKE_<LANG>_FLAGS, so without this the
+# whole tree builds at the compiler default /W1. Warnings stay warnings (no
+# /WX). C/C++ only -- the RC compiler does not take /W3.
+if(MSVC)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/W3>)
+endif()
+
+# Qt 6.8.3 / MSVC 2022 is the pinned toolkit for the UI process
+# (openrgb2-ui + the OpenRGB2.UI QML module + the `ui` CTest suites). The
+# engine, IPC, SDK client and the core/backend/engine/sdk tests are Qt-free:
+# a Qt-free development build passes -DOPENRGB2_BUILD_UI=OFF. With the UI ON
+# (the default, and what packaging needs) a missing Qt component is a
+# configure ERROR -- it used to silently drop the UI and every `ui` test.
 #
 #   cmake -S . -B build -G "Visual Studio 17 2022" -A x64 ^
 #       -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64
 #
-find_package(Qt6 6.8 QUIET COMPONENTS
-    Core Gui Qml QmlMeta QmlModels QmlWorkerScript
-    Quick QuickControls2 Network OpenGL Widgets)
-if(NOT Qt6_FOUND)
+# Threads::Threads (src/ipc and others) -- Qt's package config used to
+# provide it implicitly, which broke every Qt-free configure.
+find_package(Threads REQUIRED)
+
+option(OPENRGB2_BUILD_UI
+    "Build the Qt UI (openrgb2-ui, OpenRGB2.UI QML module, ui tests)" ON)
+if(OPENRGB2_BUILD_UI)
+    find_package(Qt6 6.8 REQUIRED COMPONENTS
+        Core Gui Qml QmlMeta QmlModels QmlWorkerScript
+        Quick QuickControls2 Network OpenGL Widgets)
+else()
     message(STATUS
-        "Qt6 not found (pass -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64). "
-        "Required for the engine/UI milestones; the offline tests are Qt-free.")
+        "OPENRGB2_BUILD_UI=OFF: building the Qt-free engine/tools/tests only "
+        "(no openrgb2-ui, no `ui` tests).")
 endif()
 
 # studio-import Task 8: Qt Quick3D is provisioned for the Layout
@@ -36,11 +54,13 @@ endif()
 # full-Studio build requires it (packaging asserts the module).
 option(OPENRGB2_WITH_QUICK3D
     "Include the Quick3D Layout viewport (full Studio package)" ON)
-find_package(Qt6 6.8 QUIET COMPONENTS Quick3D)
 set(OPENRGB2_HAVE_QUICK3D OFF)
-if(OPENRGB2_WITH_QUICK3D AND Qt6Quick3D_FOUND)
+if(OPENRGB2_BUILD_UI)
+    find_package(Qt6 6.8 QUIET COMPONENTS Quick3D)
+endif()
+if(OPENRGB2_BUILD_UI AND OPENRGB2_WITH_QUICK3D AND Qt6Quick3D_FOUND)
     set(OPENRGB2_HAVE_QUICK3D ON)
-elseif(OPENRGB2_WITH_QUICK3D AND Qt6_FOUND)
+elseif(OPENRGB2_BUILD_UI AND OPENRGB2_WITH_QUICK3D)
     message(STATUS
         "Qt6Quick3D not found — building the basic UI without the "
         "Layout 3D viewport (set OPENRGB2_WITH_QUICK3D=OFF to silence).")
@@ -53,7 +73,7 @@ enable_testing()
 # Shared Qt-free Studio model core — must precede every consumer.
 add_subdirectory(src/core)
 add_subdirectory(src/engine)
-if(Qt6_FOUND)
+if(OPENRGB2_BUILD_UI)
     # Milestone 4 — the UI process (OpenRGB2.UI QML module + the
     # openrgb2-ui executable) and its CTest label.
     add_subdirectory(ui)
@@ -66,7 +86,7 @@ add_subdirectory(tests/core)
 add_subdirectory(tests/backend)
 add_subdirectory(tests/engine)
 add_subdirectory(tests/sdk)
-if(Qt6_FOUND)
+if(OPENRGB2_BUILD_UI)
     add_subdirectory(tests/ui)
 endif()
 # Milestone 6 — package lifecycle (managed startup, takeover,

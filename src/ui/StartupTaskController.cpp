@@ -46,8 +46,22 @@ StartupTaskController::StartupTaskController(const QString& installDir,
             error_ = tr("Task Scheduler returned an invalid status");
         else
         {
-            enabled_ = doc.object().value(QStringLiteral("enabled")).toBool();
-            error_.clear();
+            const QJsonObject obj = doc.object();
+            enabled_ = obj.value(QStringLiteral("enabled")).toBool();
+            stale_ = obj.value(QStringLiteral("state")).toString()
+                     == QStringLiteral("stale");
+            stale_target_ = stale_
+                ? obj.value(QStringLiteral("target")).toString()
+                : QString();
+            if(stale_)
+                error_ = tr("A Windows sign-in task for another OpenRGB2 "
+                            "location is registered (%1). Turn this "
+                            "setting on to use this install instead, or "
+                            "on and off again to remove it.")
+                             .arg(stale_target_.isEmpty()
+                                  ? tr("unknown path") : stale_target_);
+            else
+                error_.clear();
         }
         busy_ = false;
         emit stateChanged();
