@@ -668,7 +668,35 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
     if(!session_.HasWorking() ||
        (ws_changed && session_.HasWorking()))
     {
-        if(ws_changed)
+        if(ws_changed && !pre_attach_origin_.isEmpty() &&
+           session_.HasWorking() && !session_.HasBaseline())
+        {
+            /* First attach under a draft recovered before any
+               engine document loaded. */
+            if(pre_attach_origin_ == id)
+            {
+                /* Its own workspace: the engine copy becomes the
+                   baseline UNDER the draft — pending edits, the
+                   same outcome as recovering it online. */
+                adopt_under_draft_ = true;
+                force_adopt_       = false;
+            }
+            else
+            {
+                /* Another workspace is active: its document
+                   loads, and the recovered edits stay durable
+                   under their own id for a later offer. */
+                drafts_.Flush();
+                staged_id_.clear();
+                force_adopt_ = true;
+                emit notice(QStringLiteral(
+                    "The recovered draft belongs to workspace '%1' "
+                    "— kept in the draft store; '%2' is open now")
+                        .arg(pre_attach_origin_, id));
+            }
+            pre_attach_origin_.clear();
+        }
+        else if(ws_changed)
         {
             /* A different managed workspace is active — the
                old draft stays in its own durable record; the
@@ -763,13 +791,25 @@ void WorkspaceController::AdoptFetchedDocument(
     }
     else if(force_adopt_ || !session_.HasWorking())
     {
-        force_adopt_ = false;
+        force_adopt_       = false;
+        adopt_under_draft_ = false;
         session_.LoadApplied(d, ws_rev_, res_rev_);
         baseline_sha_.clear();
         SetConflict(false);
         /* A recovery offer for this workspace stays up until
            the user decides — the engine doc loading clean must
            never silently consume a crash record. */
+    }
+    else if(adopt_under_draft_)
+    {
+        /* First baseline for a draft recovered before the engine
+           attached (see ApplySnapshot): the draft stays as
+           pending edits. Not a conflict — nothing moved under
+           edits made against an engine copy. */
+        adopt_under_draft_ = false;
+        session_.ApplyRemote(d, ws_rev_, res_rev_);
+        baseline_sha_.clear();
+        SetConflict(false);
     }
     else
     {
@@ -909,6 +949,12 @@ void WorkspaceController::recoverDraft()
                                 "restored"), QStringLiteral("input"));
         return;
     }
+    /* No engine document yet (UI started first): remember which
+       workspace this draft belongs to, so its record keeps that
+       key and the first attach can tell its own workspace from
+       another (ApplySnapshot). */
+    pre_attach_origin_ = session_.HasBaseline() ? QString()
+                                                : offered_ws_id_;
     /* Stage the draft locally — the engine sees NOTHING until
        the user explicitly saves. */
     session_.LoadDraft(d);
@@ -1231,6 +1277,20 @@ void WorkspaceController::confirmReplace()
     const PendingReplace pr = *pending_replace_;
     pending_replace_.reset();
     emit replaceChanged();
+    /* The confirm text promised the replaced edits "stay in the
+       draft store, recoverable until you discard". Make the
+       staged record durable NOW and release it from this
+       session: the force-adopt that follows lands a clean draft,
+       and NoteDraftEdited drops only a record this session still
+       owns. Released, the record becomes a recovery candidate —
+       CheckRecoveryOffer offers it once its workspace is open
+       (straight after a same-workspace reload/restore, or when
+       the user switches back). */
+    if(!staged_id_.isEmpty())
+    {
+        drafts_.Flush();
+        staged_id_.clear();
+    }
     if(pr.action == QLatin1String("restore_backup"))
     {
         DoRestoreBackup();
@@ -1683,8 +1743,9 @@ void WorkspaceController::NoteDraftEdited()
         emit dirtyChanged();
     }
     emit historyChanged();
-    const QString id = ws_id_.isEmpty()
-        ? QStringLiteral("local") : ws_id_;
+    const QString id = !ws_id_.isEmpty()            ? ws_id_
+                     : !pre_attach_origin_.isEmpty() ? pre_attach_origin_
+                     : QStringLiteral("local");
     if(d)
     {
         drafts_.Stage(id, session_.BaseRevision(),

@@ -31,6 +31,7 @@
 
 #include <QCoreApplication>
 #include <QFile>
+#include <QFileInfo>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QVariantMap>
@@ -904,6 +905,71 @@ int main(int argc, char** argv)
         /* Remove fails the same way and restores the entry. */
         CHECK(!lib.removeProfile(QStringLiteral("alpha")));
         CHECK(lib.entries().size() == 1);
+    }
+
+    /*---- ProfileLibrary never overwrites a library it could not
+           load, and never writes one it could not load back ------*/
+    std::printf("-- library: unloadable file is never overwritten\n");
+    {
+        QTemporaryDir dir;
+        CHECK(dir.isValid());
+        const QString path =
+            dir.filePath(QStringLiteral("lib.json"));
+        /* A real library past the 4 MiB read bound. */
+        const std::string pad(5 * 1024 * 1024, 'x');
+        const nlohmann::json big = nlohmann::json::object({
+            { "schema_version", 1 },
+            { "app", "openrgb2-ui" },
+            { "scenes", nlohmann::json::array({
+                nlohmann::json::object({
+                    { "name", "kept" },
+                    { "document",
+                      nlohmann::json::object({ { "pad", pad } }) },
+                }) }) },
+        });
+        {
+            QFile w(path);
+            CHECK(w.open(QIODevice::WriteOnly));
+            const std::string s = big.dump();
+            w.write(s.data(), (qint64)s.size());
+        }
+        const qint64 size_before = QFileInfo(path).size();
+
+        ui::ProfileLibrary lib;
+        lib.setPathForTesting(path);
+        CHECK(lib.entries().isEmpty());
+        CHECK(!lib.lastError().isEmpty());
+        QVariantMap doc;
+        doc.insert("name", QStringLiteral("new"));
+        CHECK(!lib.saveProfile(QStringLiteral("new"), doc));
+        CHECK(!lib.lastError().isEmpty());
+        CHECK(QFileInfo(path).size() == size_before);
+        CHECK(!lib.removeProfile(QStringLiteral("kept")));
+        CHECK(QFileInfo(path).size() == size_before);
+    }
+    std::printf("-- library: a save past the bound is refused\n");
+    {
+        QTemporaryDir dir;
+        CHECK(dir.isValid());
+        const QString path =
+            dir.filePath(QStringLiteral("lib.json"));
+        ui::ProfileLibrary lib;
+        lib.setPathForTesting(path);
+        QVariantMap small;
+        small.insert("name", QStringLiteral("small"));
+        CHECK(lib.saveProfile(QStringLiteral("small"), small));
+        const qint64 size_before = QFileInfo(path).size();
+
+        QVariantMap huge;
+        huge.insert("pad", QString(5 * 1024 * 1024, QLatin1Char('y')));
+        CHECK(!lib.saveProfile(QStringLiteral("huge"), huge));
+        CHECK(!lib.lastError().isEmpty());
+        CHECK(QFileInfo(path).size() == size_before);
+        CHECK(lib.entries().size() == 1);
+        /* The file still loads in a fresh instance. */
+        ui::ProfileLibrary again;
+        again.setPathForTesting(path);
+        CHECK(again.entries().size() == 1);
     }
 
     std::printf("%d checks, %d failures\n", checks, failures);

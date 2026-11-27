@@ -538,6 +538,15 @@ private:
        candidate CheckRecoveryOffer must surface, never
        silently drop. */
     QString     staged_id_;
+    /* A draft recovered while no engine document had loaded
+       (the UI started first): the workspace its record came
+       from. Its record stays keyed by this id (never "local"),
+       and the first attach decides: same workspace -> the
+       engine copy becomes the baseline under the draft
+       (adopt_under_draft_); another workspace -> the record is
+       released for a later recovery offer, never overwritten. */
+    QString     pre_attach_origin_;
+    bool        adopt_under_draft_ = false;
     /* Cached baseline hash for the durable record — the
        baseline only moves at LoadApplied/ApplyRemote/
        AdoptCommitted; recomputing per edit serializes the

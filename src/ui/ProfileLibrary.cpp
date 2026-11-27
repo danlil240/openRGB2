@@ -65,33 +65,37 @@ void ProfileLibrary::SetError(const QString& e)
 ||| Load                                                    ||
 \*---------------------------------------------------------*/
 
-void ProfileLibrary::EnsureLoaded()
+bool ProfileLibrary::EnsureLoaded()
 {
     if(loaded_)
     {
-        return;
+        return true;
     }
-    loaded_ = true;
     scenes_ = nlohmann::json::array();
 
     QFile f(path_);
     if(!f.exists())
     {
-        return;                    /* empty library, not an error */
+        loaded_ = true;
+        return true;               /* empty library, not an error */
     }
+    /* Unreadable-but-present: stay UNLOADED. The next save
+       would otherwise persist only its own entry over the whole
+       library this message promises to leave untouched. */
     if(f.size() > kMaxFileBytes)
     {
         SetError(QStringLiteral("scene library exceeds the %1 "
                                 "MiB bound — left untouched")
                      .arg(kMaxFileBytes / (1024 * 1024)));
-        return;
+        return false;
     }
     if(!f.open(QIODevice::ReadOnly))
     {
         SetError(QStringLiteral("scene library unreadable: %1")
                      .arg(f.errorString()));
-        return;
+        return false;
     }
+    loaded_ = true;
     const QByteArray raw = f.readAll();
     f.close();
 
@@ -108,7 +112,7 @@ void ProfileLibrary::EnsureLoaded()
         QFile::rename(path_, aside);
         SetError(QStringLiteral("scene library was corrupt — set "
                                 "aside as %1").arg(aside));
-        return;
+        return true;               /* preserved aside; start empty */
     }
     /* Entries are trusted only as far as SHAPE: name:string +
        document:object. Scene-field validation/migration stays
@@ -122,6 +126,7 @@ void ProfileLibrary::EnsureLoaded()
             scenes_.push_back(e);
         }
     }
+    return true;
 }
 
 /*---------------------------------------------------------*\
@@ -139,6 +144,15 @@ bool ProfileLibrary::Persist(QString& err)
         { "scenes",         scenes_        },
     });
     const std::string text = root.dump(2);
+    /* The read bound applies to writes too — a file EnsureLoaded
+       would refuse must never be produced. */
+    if((qint64)text.size() > kMaxFileBytes)
+    {
+        err = QStringLiteral("scene library would exceed the %1 "
+                             "MiB bound — not saved")
+                  .arg(kMaxFileBytes / (1024 * 1024));
+        return false;
+    }
 
     QSaveFile out(path_);
     if(!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
@@ -200,7 +214,10 @@ bool ProfileLibrary::saveProfile(const QString& name,
         SetError(QStringLiteral("no scene document to store"));
         return false;
     }
-    EnsureLoaded();
+    if(!EnsureLoaded())
+    {
+        return false;              /* error already set */
+    }
 
     /* Replace same-name (profiles are keyed by name). Keep
        the displaced entry so a failed write can put it back —
@@ -272,7 +289,10 @@ QVariantMap ProfileLibrary::profileDocument(const QString& name)
 
 bool ProfileLibrary::removeProfile(const QString& name)
 {
-    EnsureLoaded();
+    if(!EnsureLoaded())
+    {
+        return false;              /* error already set */
+    }
     bool          found = false;
     nlohmann::json removed;
     std::size_t   removed_at = 0;

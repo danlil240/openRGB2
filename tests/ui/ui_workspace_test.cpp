@@ -1467,6 +1467,90 @@ int main(int argc, char** argv)
         bridge.stop();
     }
 
+    /* A draft recovered BEFORE the engine attaches (the UI starts
+       first in a managed launch) must survive the first attach:
+       on its own workspace it stays as pending edits over the
+       engine's copy; on a different workspace its record is kept
+       under its own id instead of being overwritten. */
+    for(const bool same_ws : { true, false })
+    {
+        std::printf("-- controller: offline-recovered draft survives "
+                    "attach (%s workspace)\n",
+                    same_ws ? "same" : "other");
+        QTemporaryDir dir;
+        const studio::StudioDocument local =
+            ParseCompact(CompactDoc("offline-draft"));
+        {
+            WorkspaceDraftStore seed;
+            seed.setRootForTesting(dir.path());
+            seed.Stage(QStringLiteral("wsx"), 1, 1,
+                QString::fromStdString(Sha256(DocBytes(local))),
+                studio::ToJson(local));
+            seed.Flush();
+        }
+        WsRig rig;
+        rig.engine.ws_id = same_ws ? "wsx" : "ws0";
+        bool online = false;
+        rig.bridge.setChannelFactoryForTesting(
+            [&rig, &online](std::string& err)
+                -> std::unique_ptr<IIpcChannel>
+            {
+                if(!online)
+                {
+                    err = "no engine yet";
+                    return nullptr;
+                }
+                auto np = std::make_shared<TestPipe>();
+                rig.pipes.push_back(np);
+                rig.engine.srv = np->Peer();
+                return np->ClientChannel();
+            });
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.ctl.setDebounceForTesting(10);
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.recoveryOffered(); }, 4000));
+        rig.ctl.recoverDraft();
+        CHECK(rig.ctl.dirty());
+        CHECK(rig.ctl.Session().Working().meta.name ==
+              "offline-draft");
+
+        online = true;
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() &&
+                   rig.ctl.Session().HasBaseline() &&
+                   !rig.ctl.loading(); }));
+        rig.PumpUntil([] { return false; }, 200);   /* settle */
+        rig.ctl.FlushDrafts();
+        if(same_ws)
+        {
+            /* Pending edits over the engine baseline — not
+               replaced, not a false "changed under you". */
+            CHECK(rig.ctl.dirty());
+            CHECK(rig.ctl.Session().Working().meta.name ==
+                  "offline-draft");
+            CHECK(rig.ctl.Session().Baseline().meta.name == "desk");
+            CHECK(!rig.ctl.conflict());
+        }
+        else
+        {
+            /* The engine's own workspace loads; the foreign
+               draft is never staged into it ... */
+            CHECK(!rig.ctl.dirty());
+            CHECK(rig.ctl.Session().Working().meta.name == "desk");
+        }
+        /* ... and in both cases the edits are on disk under the
+           workspace they belong to. */
+        WorkspaceDraftRecord rec =
+            rig.ctl.Drafts().Read(QStringLiteral("wsx"));
+        studio::StudioDocument kept;
+        CHECK(rec.exists &&
+              studio::FromJson(rec.document, kept) &&
+              kept.meta.name == "offline-draft");
+        CHECK(rig.engine.commits == 0);
+        rig.bridge.stop();
+    }
+
     std::printf("-- controller: library import retains "
                 "originals + names\n");
     {

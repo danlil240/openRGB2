@@ -75,7 +75,11 @@ signals:
     void lastErrorChanged();
 
 private:
-    void EnsureLoaded();
+    /* False when the file exists but could not be read (over the
+       bound, or not openable): the library is then NOT loaded —
+       a retry happens on the next call — and nothing may write
+       over a file whose content was never seen. */
+    bool EnsureLoaded();
     bool Persist(QString& err);
     void SetError(const QString& e);
 
