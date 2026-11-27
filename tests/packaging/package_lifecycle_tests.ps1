@@ -305,6 +305,41 @@ Kill-Spawned
 Remove-Item -Force -ErrorAction SilentlyContinue $runFile
 
 #====================================================================#
+Section "T4b engine dies at startup: the backend this start spawned is not orphaned"
+#====================================================================#
+# The engine stand-in (whoami.exe) rejects the engine's arguments and
+# exits at once; the backend stand-in (cmd.exe) stays up and has no
+# shutdown event (an older backend), so it cannot be closed
+# gracefully from here. It used to be left running with no run file
+# (audit P-14); now it is recorded so stop-openrgb2.ps1 closes it.
+$instI = Join-Path $TestRoot "install-i"
+New-FakeTree $instI "1.0.0" "I" (Join-Path $Sys32 "cmd.exe") (Join-Path $Sys32 "whoami.exe")
+$runFileI = Join-Path $instI "state\openrgb2.run.json"
+$rc = Invoke-ManagedStart -InstallDir $instI -Scene "" -NoUI $true `
+    -TakeOver $false -ScanOnly $false -Elevated $false `
+    -BackendWaitSeconds 1 -ListenerPidOverride 0 `
+    -ProcessList @([pscustomobject]@{pid=54; exe="Steam.exe"})
+Check ($rc -eq 1) "engine that exits during startup -> 1"
+$orphanPid = 0
+if(Test-Path $runFileI) {
+    $runI = Get-Content $runFileI -Raw | ConvertFrom-Json
+    $orphanPid = [int]$runI.backend_pid
+    $script:Spawned += $orphanPid
+    Check ([int]$runI.engine_pid -eq 0) "run file records no engine"
+} else { Check $false "run file records the backend this start spawned" }
+# stop-openrgb2.ps1 signals a run-file pid only after this same
+# image-path verification (Resolve-OwnPid -> Test-OwnProcess).
+Check ($orphanPid -gt 0 -and
+       (Test-OwnProcess $orphanPid (Join-Path $instI "backend\OpenRGB.exe"))) `
+      "the recorded pid is the still-running backend this start spawned (stop can verify it)"
+# whatever happened above, never leak the stand-in (matched by OUR
+# temp image path only)
+$script:Spawned += @(Get-Process -Name "OpenRGB" -ErrorAction SilentlyContinue |
+    Where-Object { try { $_.Path -eq (Join-Path $instI "backend\OpenRGB.exe") } catch { $false } } |
+    ForEach-Object { $_.Id })
+Kill-Spawned
+
+#====================================================================#
 Section "T5 update preserves user state"
 #====================================================================#
 $instB = Join-Path $TestRoot "install-b"
