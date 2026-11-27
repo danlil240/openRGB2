@@ -688,6 +688,13 @@ Ed.CameraController {
                     QStringLiteral("gizmo"));
                 CHECK(sel != nullptr && cam != nullptr
                       && giz != nullptr);
+                /* The input router keeps its grab — LayoutPage
+                   hosts the viewport in a Flickable that would
+                   otherwise steal orbit/gizmo drags and scroll. */
+                QObject* input = vp->findChild<QObject*>(
+                    QStringLiteral("viewportInput"));
+                CHECK(input != nullptr
+                      && input->property("preventStealing").toBool());
                 CHECK(sel->property("editor")
                           .value<QObject*>() == &rig.ctl);
                 CHECK(cam->property("prefsSource")

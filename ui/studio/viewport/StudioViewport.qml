@@ -741,8 +741,13 @@ Rectangle {
            and wheel goes through selCtl. Middle-button pan wins
            over any surface; see SelectionController.qml. */
         MouseArea {
+            objectName: "viewportInput"
             anchors.fill: parent
             acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+            /* Hosted inside a page Flickable (LayoutPage): without
+               this the page steals orbit/pan/gizmo drags past its
+               threshold, scrolls, and cancels the gesture. */
+            preventStealing: true
             onPressed: function(m) {
                 root.forceActiveFocus()
                 selCtl.press(m.x, m.y, m.button, m.modifiers)
