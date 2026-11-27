@@ -131,6 +131,12 @@ if($cmakeTop -match "project\s*\(\s*OpenRGB2\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+
 if(-not $OutDir) {
     $OutDir = Join-Path $BuildDir "package\OpenRGB2-$version-win64"
 }
+# Full path from here on: the manifest's relative paths are computed
+# with $OutDir.Length against Get-ChildItem's FullName, so a relative
+# -OutDir would corrupt every entry. This resolves against the
+# PowerShell location (not the process cwd) and works before the
+# directory exists.
+$OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir).TrimEnd('\','/')
 
 if(-not $QtDir) {
     if($env:OPENRGB2_QT_DIR) { $QtDir = $env:OPENRGB2_QT_DIR }
@@ -232,24 +238,45 @@ if(-not $VerifyOnly) {
     if(Test-Path $OutDir) {
         # A running staged stack holds its payload DLLs locked -- refuse
         # the wipe with a pointer at the managed stop instead of dying
-        # mid-delete on UnauthorizedAccess. Elevated processes hide
-        # their image path from a non-elevated Get-Process, so also
-        # match by executable name (conservative: flags any same-named
-        # process even when the path can't be verified as ours).
-        $outFull  = (Resolve-Path $OutDir).Path
+        # mid-delete on UnauthorizedAccess. Two signals, both scoped to
+        # THIS package dir (a stack running from an install elsewhere,
+        # or a stock OpenRGB anywhere, must not block staging):
+        #  * a process whose image path is under $OutDir;
+        #  * a staged .exe that cannot be opened for exclusive write --
+        #    a loaded image holds a sharing lock at any integrity
+        #    level, so this also catches an ELEVATED stack whose image
+        #    path a non-elevated Get-Process cannot read.
+        $outFull  = $OutDir
         $locking  = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-            try { $_.Path -and $_.Path.StartsWith($outFull,
+            try { $_.Path -and $_.Path.StartsWith($outFull + '\',
                     [StringComparison]::OrdinalIgnoreCase) }
             catch { $false }
-        })
-        $lockingIds = @($locking | ForEach-Object { $_.Id })
-        $locking += @(Get-Process -Name "openrgb2-engine","openrgb2-ui",
-                      "openrgb2-ctl","OpenRGB" -ErrorAction SilentlyContinue |
-            Where-Object { $lockingIds -notcontains $_.Id })
+        } | ForEach-Object { "$($_.ProcessName)#$($_.Id)" })
+        foreach($exe in @(Get-ChildItem -LiteralPath $outFull -Recurse -File `
+                              -Filter *.exe -ErrorAction SilentlyContinue)) {
+            try {
+                $fs = [IO.File]::Open($exe.FullName, [IO.FileMode]::Open,
+                    [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                $fs.Dispose()
+            } catch [UnauthorizedAccessException] {
+                # read-only/protected file -- not a running image
+            } catch {
+                $locking += "$($exe.FullName.Substring($outFull.Length + 1)) (in use)"
+            }
+        }
         if($locking.Count -gt 0) {
-            Fail ("staged binaries are still running (" +
-                  (($locking | ForEach-Object { "$($_.ProcessName)#$($_.Id)" }) -join ', ') +
-                  ") -- stop them first: scripts\stop-openrgb2.ps1 " +
+            # Name-only hints: same-named processes whose image path is
+            # unreadable here (elevated) may be what holds the lock.
+            $hidden = @(Get-Process -Name "openrgb2-engine","openrgb2-ui",
+                          "openrgb2-ctl","OpenRGB" -ErrorAction SilentlyContinue |
+                Where-Object { $img = $null; try { $img = $_.Path } catch { }; -not $img } |
+                ForEach-Object { "$($_.ProcessName)#$($_.Id)" })
+            $hint = if($hidden.Count -gt 0) {
+                        " -- possibly the elevated $($hidden -join ', ') " +
+                        "(their image path is unreadable from this shell)"
+                    } else { "" }
+            Fail ("staged binaries are still running (" + ($locking -join ', ') +
+                  ")$hint -- stop them first: scripts\stop-openrgb2.ps1 " +
                   "(elevated instances need an elevated shell)")
         }
         # Retry past transient locks (AV/indexer), then give up cleanly.
@@ -465,7 +492,16 @@ if(-not $VerifyOnly) {
     # never carry an "exclusions_verified" claim.                    #
     #--------------------------------------------------------------#
     $gitRev = ""
+    $gitDirty = $null
     try { $gitRev = (& git -C $RepoRoot rev-parse HEAD 2>$null).Trim() } catch {}
+    if($gitRev) {
+        # The revision alone does not describe a build from a modified
+        # tree: record whether tracked files differed from HEAD.
+        try {
+            $st = @(& git -C $RepoRoot status --porcelain --untracked-files=no 2>$null)
+            if($LASTEXITCODE -eq 0) { $gitDirty = ($st.Count -gt 0) }
+        } catch {}
+    }
 
     $files = @()
     Get-ChildItem $OutDir -Recurse -File |
@@ -508,6 +544,7 @@ if(-not $VerifyOnly) {
         source = [ordered]@{
             repository   = "openRGB2"
             revision     = $gitRev
+            revision_dirty = $gitDirty
             build_dir    = ConvertTo-ManifestPath $BuildDir
             configuration= $Configuration
             qt_dir       = ConvertTo-ManifestPath $QtDir
