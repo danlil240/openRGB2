@@ -299,6 +299,16 @@ public:
        slow subscriber never stalls workspace work). */
     void      SetJobEventHook(
                   std::function<void(const JobStatus&)> hook);
+    /* Published-snapshot change hook — invoked OFF the service
+       locks by FlushSnapshotNotify() whenever PublishLocked()
+       actually moved the published fields (adopt, commit,
+       restore, resource install/remove). The IPC layer emits
+       the fresh `get`-shaped snapshot here so every subscribed
+       session — including one whose initial snapshot raced a
+       boot re-adoption — re-converges on the real managed
+       state instead of driving saves into the refused legacy
+       SET_SCENE gate. */
+    void      SetSnapshotEventHook(std::function<void()> hook);
     /* Instrumentation seam for the offline suite: invoked on
        the worker before each job runs. Production never sets
        it. */
@@ -466,11 +476,25 @@ private:
        boundary (same discipline as apply_scene). Callers hold
        no lock. */
     void                FlushActiveNotify();
+    /* Drains the pending published-snapshot notification after
+       the commit lock is released — same discipline as
+       FlushActiveNotify: the hook emits an IPC snapshot EVENT
+       that re-reads Snapshot(), and a publish racing the drain
+       re-arms the flag rather than emitting a stale body.
+       Callers hold no lock. */
+    void                FlushSnapshotNotify();
     mutable std::mutex  snap_mutex_;
     PublishedState      snap_;
     /* Set under mutex_ whenever current_.id adopts a different
        id; drained by FlushActiveNotify() post-lock. */
     bool                active_notify_ = false;
+    /* Set under mutex_ whenever PublishLocked() changed the
+       published fields; drained post-lock by
+       FlushSnapshotNotify(). */
+    bool                snap_notify_ = false;
+    /* Under jobs_mutex_ — the IPC surface's snapshot emitter,
+       invoked with no locks held. */
+    std::function<void()> snapshot_hook_;
 };
 
 const char*        JobStateName(WorkspaceService::JobState s);

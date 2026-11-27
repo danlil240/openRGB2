@@ -244,6 +244,10 @@ public:
     Q_INVOKABLE int  importProfiles(ProfileLibrary* library);
     /* Refresh the managed workspace list (list verb). */
     Q_INVOKABLE void refreshList();
+    /* Re-pull the managed snapshot (get) — the self-heal a
+       refused legacy save triggers when the engine reports a
+       managed workspace this session never saw adopted. */
+    Q_INVOKABLE void resync();
 
     /* Normal-close hook: flush debounced draft records. */
     void FlushDrafts();

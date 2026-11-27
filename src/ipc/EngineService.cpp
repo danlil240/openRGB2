@@ -340,6 +340,20 @@ EngineService::EngineService(Engine& engine, Deps deps,
                 Emit(event_kind::kWorkspace,
                      JobStatusToJson(st));
             });
+        /* The published snapshot rebroadcasts on every change —
+           without it a session whose subscribe-time snapshot
+           raced the boot re-adoption latches managed:false, and
+           every save drives into the workspace_required refusal
+           on the legacy scene path. */
+        deps_.workspace->SetSnapshotEventHook(
+            [this]
+            {
+                if(ws_commands_)
+                {
+                    Emit(event_kind::kWorkspace,
+                         ws_commands_->SnapshotJson());
+                }
+            });
 
         /* studio-import Task 7: the session-bound draft
            preview. Topology reads share the layout seam's
@@ -403,6 +417,7 @@ EngineService::~EngineService()
     if(deps_.workspace)
     {
         deps_.workspace->SetJobEventHook(nullptr);
+        deps_.workspace->SetSnapshotEventHook(nullptr);
     }
 }
 
@@ -1154,21 +1169,6 @@ nlohmann::json EngineService::DiagnosticsJson(TimePoint now) const
 }
 
 /*---------------------------------------------------------*\
-|| IIpcService                                               ||
-\*---------------------------------------------------------*/
-
-nlohmann::json EngineService::OnWelcome()
-{
-    nlohmann::json caps = nlohmann::json::array();
-    if(ws_commands_)
-    {
-        /* studio-import Task 3: managed-workspace jobs,
-           revisions, and bounded transfers (plan 3.3). A client
-           that doesn't see it falls back to the legacy surface
-           unchanged. */
-        caps.push_back("studio_workspace_v1");
-    }
-/*---------------------------------------------------------*\
 ||| backend_counters — the vendor SDK extension's cached   |||
 ||| snapshot. WirelessStatus() is a state-lock read; this   |||
 ||| never waits behind wire I/O (same discipline as the     |||
@@ -1220,6 +1220,21 @@ nlohmann::json EngineService::BackendCountersJson() const
     return out;
 }
 
+/*---------------------------------------------------------*\
+|| IIpcService                                               ||
+\*---------------------------------------------------------*/
+
+nlohmann::json EngineService::OnWelcome()
+{
+    nlohmann::json caps = nlohmann::json::array();
+    if(ws_commands_)
+    {
+        /* studio-import Task 3: managed-workspace jobs,
+           revisions, and bounded transfers (plan 3.3). A client
+           that doesn't see it falls back to the legacy surface
+           unchanged. */
+        caps.push_back("studio_workspace_v1");
+    }
     return nlohmann::json::object({
         { "engine",       "openrgb2-engine" },
         { "running",      engine_.Running() },
