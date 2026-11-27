@@ -803,6 +803,12 @@ Item {
                                     MouseArea {
                                         anchors.fill: parent
                                         enabled: root.editable
+                                        /* The page Flickable would
+                                           otherwise steal the drag
+                                           past its threshold and
+                                           scroll the page instead of
+                                           moving the object. */
+                                        preventStealing: true
                                         property real grabX: 0
                                         property real grabY: 0
                                         /* F09: press marks the drag
@@ -897,6 +903,18 @@ Item {
                                                 d.o.id, nx, nz);
                                             /* if the engine
                                                refused, snap back */
+                                            rebind();
+                                        }
+                                        /* A grab taken away mid-drag
+                                           (focus loss, popup) drops
+                                           the uncommitted move. */
+                                        onCanceled: {
+                                            if(!d.dragging) return;
+                                            d.dragging = false;
+                                            dragMoved = false;
+                                            rebind();
+                                        }
+                                        function rebind() {
                                             d.x = Qt.binding(function() {
                                                 return view.ox
                                                     + (d.o.x + (d.o.ox || 0)
