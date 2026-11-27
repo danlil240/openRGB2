@@ -151,13 +151,16 @@ $startSrc = Get-Content (Join-Path $ScriptsDir "start-openrgb2.ps1") -Raw
 # otherwise make them refuse as unverifiable.
 $NoProcs = @()
 
-# Hosts may run a real elevated OpenRGB2 stack: the stop checks expect
-# exit 1 then (unverifiable, reported honestly), never a silent 0.
-function Get-HostUnverifiable {
-    return @(Get-Process -Name "openrgb2-engine","openrgb2-ui","OpenRGB" `
-        -ErrorAction SilentlyContinue | Where-Object {
-            $img = $null; try { $img = $_.Path } catch { $img = $null }
-            -not $img })
+# The host may run a real OpenRGB2 stack -- elevated, so its image
+# paths are unreadable here and every same-named lookup would see an
+# UNVERIFIABLE process (audit P-6: the suite failed whenever one ran).
+# Every check that drives the real scripts' same-named discovery
+# therefore injects a process table holding ONLY this suite's own
+# stand-ins (live Get-Process objects, so image paths are real); the
+# unverifiable case is covered with an explicit synthetic entry.
+function Get-SpawnedTable {
+    return @(foreach($id in $script:Spawned) {
+        Get-Process -Id $id -ErrorAction SilentlyContinue })
 }
 
 # Body runs under try/finally: an exception mid-run must not leak the
@@ -417,7 +420,7 @@ New-Item -ItemType Directory -Force (Join-Path $instC "state") | Out-Null
 } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $instC "state\openrgb2.run.json")
 
 $rc = Invoke-ManagedStop -InstallDir $instC -TimeoutSeconds 3 `
-    -Force $true -CtlExe $ctlStub
+    -Force $true -CtlExe $ctlStub -ProcessList (Get-SpawnedTable)
 Check ($rc -eq 0) "clean stop returns 0"
 if(Test-Path $marker) {
     $m = Get-Content $marker -Raw | ConvertFrom-Json
@@ -435,19 +438,18 @@ Check ((Sha (Join-Path $instC "profiles\local\engine-state.json")) -eq $profBefo
 Check (-not (Test-Path (Join-Path $instC "state\openrgb2.run.json"))) `
       "run file cleared"
 
-# nothing-running stop is a clean no-op -- unless the HOST itself
-# has same-named processes we cannot verify (e.g. a real elevated
-# managed stack running on the dev box): those are honestly reported
-# and the exit is 1, never a silent 0. Expected rc mirrors the
-# script's own rule: unreadable image path -> unverifiable.
+# nothing-running stop is a clean no-op.
 $rc = Invoke-ManagedStop -InstallDir $instC -TimeoutSeconds 1 `
-    -Force $false -CtlExe $ctlStub
-$hostUnverifiable = @(Get-HostUnverifiable)
-if($hostUnverifiable.Count -eq 0) {
-    Check ($rc -eq 0) "stop with nothing running exits 0"
-} else {
-    Check ($rc -eq 1) `
-        "stop exits 1 when host has unverifiable same-named procs (elevated stack present)"
+    -Force $false -CtlExe $ctlStub -ProcessList (Get-SpawnedTable)
+Check ($rc -eq 0) "stop with nothing running exits 0"
+# Same-named processes whose image path cannot be read (an elevated
+# stack seen from this shell) are reported honestly -- exit 1, never
+# a silent 0 -- and never touched.
+foreach($name in @("openrgb2-ui", "openrgb2-engine", "OpenRGB")) {
+    $hiddenProc = @([pscustomobject]@{ ProcessName=$name; Id=4242; Path=$null })
+    $rc = Invoke-ManagedStop -InstallDir $instC -TimeoutSeconds 1 `
+        -Force $true -CtlExe $ctlStub -ProcessList $hiddenProc
+    Check ($rc -eq 1) "stop exits 1 when a same-named $name is unverifiable"
 }
 
 # UI step: closing the window hides the UI to the tray, so without
@@ -458,18 +460,16 @@ $uiProc = Start-Process -FilePath (Join-Path $instC "openrgb2-ui.exe") -PassThru
 $script:Spawned += $uiProc.Id
 Start-Sleep -Milliseconds 400
 $rc = Invoke-ManagedStop -InstallDir $instC -TimeoutSeconds 1 `
-    -Force $false -CtlExe $ctlStub
+    -Force $false -CtlExe $ctlStub -ProcessList (Get-SpawnedTable)
 $uiAlive = $false
 try { $uiAlive = $null -ne (Get-Process -Id $uiProc.Id -ErrorAction Stop) } catch {}
 Check ($rc -eq 1 -and $uiAlive) "UI still running without -Force -> reported (exit 1), not killed"
 $rc = Invoke-ManagedStop -InstallDir $instC -TimeoutSeconds 1 `
-    -Force $true -CtlExe $ctlStub
+    -Force $true -CtlExe $ctlStub -ProcessList (Get-SpawnedTable)
 $uiAlive = $false
 try { $uiAlive = $null -ne (Get-Process -Id $uiProc.Id -ErrorAction Stop) } catch {}
 Check (-not $uiAlive) "stop -Force closes OUR UI (verified by image path)"
-if(@(Get-HostUnverifiable).Count -eq 0) {
-    Check ($rc -eq 0) "stop -Force with the UI exits 0"
-}
+Check ($rc -eq 0) "stop -Force with the UI exits 0"
 Kill-Spawned
 
 #====================================================================#
@@ -480,7 +480,8 @@ New-FakeTree $instD "1.0.0" "D" (Join-Path $Sys32 "cmd.exe") (Join-Path $Sys32 "
 $running = Start-Process -FilePath (Join-Path $instD "openrgb2-engine.exe") -PassThru
 $script:Spawned += $running.Id
 Start-Sleep -Milliseconds 500
-$rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instD -SkipVerify $true
+$rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instD -SkipVerify $true `
+    -SkipAclHardening $true -ProcessList (Get-SpawnedTable)
 Check ($rc -eq 1) "update refused while engine running"
 Check ((Read-Tag $instD) -eq "D") "refused update changed nothing"
 Check (-not (Test-Path "$instD.previous")) "refused update took no snapshot"
@@ -491,14 +492,16 @@ Kill-Spawned
 $ui = Start-Process -FilePath (Join-Path $instD "openrgb2-ui.exe") -PassThru
 $script:Spawned += $ui.Id
 Start-Sleep -Milliseconds 500
-$rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instD -SkipVerify $true
+$rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instD -SkipVerify $true `
+    -SkipAclHardening $true -ProcessList (Get-SpawnedTable)
 Check ($rc -eq 1) "update refused while UI running"
 Check ((Read-Tag $instD) -eq "D") "UI-blocked update changed nothing"
 # rollback refuses while running too (needs a valid backup present
 # first -- the running check must fire before any restore).
 New-FakeTree "$instD.previous" "0.9.0" "D0" `
     (Join-Path $Sys32 "cmd.exe") (Join-Path $Sys32 "cmd.exe")
-$rc = Invoke-PackageRollback -InstallDir $instD -BackupDir "" -SkipVerify $true
+$rc = Invoke-PackageRollback -InstallDir $instD -BackupDir "" -SkipVerify $true `
+    -ProcessList (Get-SpawnedTable)
 Check ($rc -eq 1) "rollback refused while UI running"
 Check ((Read-Tag $instD) -eq "D") "refused rollback changed nothing"
 Kill-Spawned
