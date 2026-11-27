@@ -45,6 +45,9 @@
       T14 update ACL-hardening user resolution: inherited grants count,
           admin/system/well-known SIDs never do, ambiguity refuses
           (-UserSid required) instead of picking the elevating account
+      T15 start: findings reach STDOUT under -File and the exit code
+          matches them (3 conflict / 4 unverifiable); oversized logs
+          rotate by rename only while nobody holds them
 
     Exit code: number of failed checks.
 #>
@@ -736,6 +739,53 @@ $r = Resolve-AclUserSid "Q:\OpenRGB2" "not-a-sid"
 Check (($null -eq $r.Sid) -and $r.Error -match 'not a valid SID') "-UserSid that is not a SID is refused"
 $r = Resolve-AclUserSid "Q:\OpenRGB2" $u2
 Check ($r.Sid -eq $u2) "-UserSid wins over resolution"
+
+#====================================================================#
+Section "T15 start: findings on stdout + exit contract; log rotation by rename"
+#====================================================================#
+# Log rotation: a log nobody holds is RENAMED to .1 (the previous .1
+# replaced); a held log is left alone; a small log is never touched.
+$logDir = Join-Path $TestRoot "logrot"
+New-Item -ItemType Directory -Force $logDir | Out-Null
+$big = Join-Path $logDir "startup.log"
+[IO.File]::WriteAllText($big, ("x" * 2048))
+[IO.File]::WriteAllText("$big.1", "older")
+Invoke-LogRotation $big 1024
+Check ((-not (Test-Path $big)) -and (Get-Item "$big.1").Length -eq 2048) `
+    "unheld log past the limit is renamed to .1 (previous .1 replaced), not truncated"
+[IO.File]::WriteAllText($big, ("y" * 2048))
+$hold = [IO.File]::Open($big, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+                        [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+try { Invoke-LogRotation $big 1024 } finally { $hold.Dispose() }
+Check ((Get-Item $big).Length -eq 2048 -and (Get-Item "$big.1").Length -eq 2048 -and
+       (Get-Content -Raw "$big.1").StartsWith("x")) `
+    "a log someone holds open is left alone (no truncation, no rename)"
+$small = Join-Path $logDir "shutdown.log"
+[IO.File]::WriteAllText($small, "short")
+Invoke-LogRotation $small 1024
+Check ((Test-Path $small) -and -not (Test-Path "$small.1")) "a log under the limit is not rotated"
+
+# Output contract (the UI parses the start script's STDOUT): run the
+# real script as a separate -File process over a throwaway install,
+# -ScanOnly (spawns nothing). Whatever this machine's live process
+# table holds, the findings land on stdout and the exit code matches
+# them: UNVERIFIABLE -> 4, an ownership CONFLICT -> 3, else 0.
+$scanInst = Join-Path $TestRoot "install-scan"
+New-Item -ItemType Directory -Force (Join-Path $scanInst "backend") | Out-Null
+foreach($f in @("openrgb2-engine.exe", "backend\OpenRGB.exe")) {
+    [IO.File]::WriteAllText((Join-Path $scanInst $f), "")
+}
+$stdout = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+    -File (Join-Path $ScriptsDir "start-openrgb2.ps1") `
+    -InstallDir $scanInst -ScanOnly 2>$null
+$scanRc = $LASTEXITCODE
+$text = ($stdout -join "`n")
+Check ($text -match "OpenRGB2 managed startup" -and
+       $text -match "ownership (scan: no competing|CONFLICT:|notice)") `
+    "start -File: the ownership scan reaches stdout"
+$expectRc = if($text -match "UNVERIFIABLE:") { 4 }
+            elseif($text -match "ownership CONFLICT:") { 3 } else { 0 }
+Check ($scanRc -eq $expectRc) "start -File exit code $scanRc matches its stdout findings (expected $expectRc)"
 
 } catch {
     $script:Fail++

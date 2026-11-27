@@ -70,8 +70,9 @@ to reopen it, use **Exit UI** to leave lighting running, or choose
 **Quit OpenRGB2** to stop the managed engine and backend before exiting.
 The Settings page has the confirmed engine shutdown action. Startup
 output goes to `state\startup.log`, and a dialog reports startup errors.
-`state\startup.log` and `state\shutdown.log` are rotated to `<name>.1`
-once they pass 1 MB.
+`state\startup.log` and `state\shutdown.log` are renamed to `<name>.1`
+once they pass 1 MB (at a start when nothing holds them open; never
+truncated in place).
 
 Settings → Windows startup has **Open OpenRGB2 when I sign in** (off by
 default). Enabling it registers a task for the current Windows user with
