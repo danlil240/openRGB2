@@ -135,7 +135,7 @@ public:
     void           SetPreviewDeps(PreviewDeps deps);
 
     /* The owner-loop publish tick — called from
-       EngineService::PollFrameStatus (~20 ms cadence); the
+       EngineService::PollPreviews (~20 ms cadence); the
        per-session 30 Hz cap lives inside. Bounded work per
        call: one Sample per due session. */
     void           PollPreviews(TimePoint now = Clock::now());
