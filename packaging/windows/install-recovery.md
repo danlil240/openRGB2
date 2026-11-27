@@ -78,8 +78,10 @@ default). Enabling it registers a task for the current Windows user with
 highest privileges; at sign-in the app starts in the tray without a UAC
 prompt. It **refuses to enable** while the install folder,
 `openrgb2-ui.exe` or `scripts\` are writable without administrator
-rights (see "Install protection" below) — run the update elevated
-first. Disable the setting before deleting or moving this install. If
+rights, and while any folder above the install lets you rename it
+aside — which includes the default `%LOCALAPPDATA%\Programs\OpenRGB2`
+(see "Install protection" below): install under `%ProgramFiles%\OpenRGB2`
+for the sign-in task. Disable the setting before deleting or moving this install. If
 the install was moved anyway, the setting reports the task as
 belonging to another location (state `stale`, with its path); turning
 the setting on registers this install instead, and disabling removes
@@ -275,14 +277,38 @@ and be started elevated at the next launch or sign-in.
   stop + deploy step elevated, so the default install
   (`%LOCALAPPDATA%\Programs\OpenRGB2`) ends up protected.
 - The sign-in task refuses to enable over a user-writable install.
+- The sign-in task **also refuses an install inside a folder you
+  control**. A protected folder can still be swapped out from above:
+  whoever may rename it (or any folder above it) aside can put a
+  look-alike `OpenRGB2` in its place, and the task would start that
+  copy's `openrgb2-ui.exe` with highest privileges at the next
+  sign-in. So `enable` walks every folder from the install up to the
+  volume root and refuses if, for your account (its groups included,
+  Administrators excluded), a folder grants delete / change
+  permissions / take ownership or is owned by you, or its parent
+  grants delete-child / change permissions / take ownership or is
+  owned by you. (Add-subfolder rights alone, like the one
+  Authenticated Users hold on `C:\`, are harmless: the name is
+  taken.) The default `%LOCALAPPDATA%\Programs\OpenRGB2` always fails
+  this — your profile is yours. For the sign-in task, install under an
+  admin-only location such as `%ProgramFiles%\OpenRGB2`:
 
-**Not covered** (residual risk): the folder *containing* the install is
-still yours — for the default `%LOCALAPPDATA%\Programs` you can rename
-the protected `OpenRGB2` folder aside and put another one in its place,
-which the sign-in task would then start elevated. An install under
-`C:\Program Files` closes that gap. `state\backend` (the backend's
+  ```powershell
+  scripts\build-all-and-install.ps1 -InstallDir "$env:ProgramFiles\OpenRGB2"
+  ```
+
+  The elevated deploy step creates the folder; `state\` and
+  `profiles\local\` stay writable by you. Then enable the setting from
+  that install (move your desktop shortcut to it; the old install's
+  user state is not copied — copy `profiles\local\` across first if
+  you want it).
+
+**Not covered** (residual risk): `state\backend` (the backend's
 working directory) stays writable, so a DLL that is missing from both
 `backend\` and the system directories could be picked up from there.
+Without the sign-in task, an install under a folder you control (the
+default) can still be swapped out from above; the next elevated
+launch then shows the UAC prompt for whatever is in its place.
 
 ## Recovery notes
 

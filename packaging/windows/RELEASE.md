@@ -69,7 +69,9 @@ still has the opt-in `-Elevated` switch. Because the stack runs
 elevated from this folder, an update run elevated makes the folder
 admin-only (only `state\` and `profiles\local\` stay writable by you),
 and the sign-in toggle refuses to enable over a folder you can write
-to — see `INSTALL.md`, "Install protection".
+to, or one inside a folder you control (install under
+`%ProgramFiles%\OpenRGB2` for it) — see `INSTALL.md`, "Install
+protection".
 
 ## Measured support matrix
 

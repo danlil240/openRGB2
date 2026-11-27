@@ -13,7 +13,11 @@
    the signed-in user: the task starts that executable with highest
    privileges at every sign-in, so a user-writable install would be a
    silent elevation path. update-openrgb2.ps1 run elevated makes the
-   install admin-only. #>
+   install admin-only. It also refuses when any folder above the
+   install (up to the volume root) lets the user rename the install
+   aside and plant a look-alike -- e.g. the default
+   %LOCALAPPDATA%\Programs\OpenRGB2: the task needs an install under an
+   admin-only location such as %ProgramFiles%\OpenRGB2. #>
 [CmdletBinding()]
 param(
     [ValidateSet('status','enable','disable')]
@@ -47,41 +51,114 @@ function Test-OpenRGB2StartupTask($Task, [string]$Exe) {
            ([string]$Task.Principal.LogonType) -eq 'Interactive'
 }
 
-# Paths the user can modify, given the user's SID. Rights that let a
-# non-admin replace or re-permission an object: write/append data,
-# delete child, delete, change permissions, take ownership (and the
-# generic forms); ownership itself carries WRITE_DAC. Administrators
-# is excluded -- an elevated token holding it is not the threat.
-function Get-OpenRGB2UserWritablePaths([string[]]$Paths, [string]$Sid) {
-    $sidType = [Security.Principal.SecurityIdentifier]
+# The SIDs a non-elevated process of this user acts as: the user, the
+# well-known groups every interactive user holds, and the current
+# token's groups. Administrators is excluded -- an elevated token
+# holding it is not the threat.
+function Get-OpenRGB2UserSids([string]$Sid) {
     $mine = @($Sid, 'S-1-1-0', 'S-1-5-11', 'S-1-5-4', 'S-1-5-32-545')
     try {
         $id = [Security.Principal.WindowsIdentity]::GetCurrent()
         $mine += $id.User.Value
         foreach($g in $id.Groups) { $mine += $g.Value }
     } catch { }
-    $mine = @($mine | Where-Object { $_ -and $_ -ne 'S-1-5-32-544' } | Sort-Object -Unique)
+    return ,@($mine | Where-Object { $_ -and $_ -ne 'S-1-5-32-544' } | Sort-Object -Unique)
+}
+
+# 'owner' when one of $Mine owns $Acl (ownership carries WRITE_DAC),
+# 'rights' when an effective (not inherit-only) Allow ACE for one of
+# $Mine holds any bit of $Mask, else $null. Deny ACEs are ignored on
+# purpose: a stray Allow is reported even if a Deny might cancel it.
+function Get-OpenRGB2AclGrant($Acl, [string[]]$Mine, [int64]$Mask) {
+    $sidType = [Security.Principal.SecurityIdentifier]
+    $owner = $null
+    try { $owner = $Acl.GetOwner($sidType).Value } catch { }
+    if($owner -and $Mine -contains $owner) { return 'owner' }
+    foreach($rule in $Acl.GetAccessRules($true, $true, $sidType)) {
+        if([string]$rule.AccessControlType -ne 'Allow') { continue }
+        if(([int]$rule.PropagationFlags -band
+            [int][Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
+        if($Mine -notcontains $rule.IdentityReference.Value) { continue }
+        if(([int64]$rule.FileSystemRights -band $Mask) -ne 0) { return 'rights' }
+    }
+    return $null
+}
+
+# Paths the user can modify, given the user's SID. Rights that let a
+# non-admin replace or re-permission an object: write/append data,
+# delete child, delete, change permissions, take ownership (and the
+# generic forms); ownership itself carries WRITE_DAC.
+function Get-OpenRGB2UserWritablePaths([string[]]$Paths, [string]$Sid) {
+    $mine = Get-OpenRGB2UserSids $Sid
     $writeMask = 0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor
                  0x80000 -bor 0x10000000 -bor 0x40000000
     $writable = @()
     foreach($path in $Paths) {
         if(-not (Test-Path -LiteralPath $path)) { continue }
-        $acl = Get-Acl -LiteralPath $path
-        $owner = $null
-        try { $owner = $acl.GetOwner($sidType).Value } catch { }
-        if($owner -and $mine -contains $owner) { $writable += "$path (owned by the user)"; continue }
-        foreach($rule in $acl.GetAccessRules($true, $true, $sidType)) {
-            if([string]$rule.AccessControlType -ne 'Allow') { continue }
-            if(([int]$rule.PropagationFlags -band
-                [int][Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
-            if($mine -notcontains $rule.IdentityReference.Value) { continue }
-            if(([int64]$rule.FileSystemRights -band $writeMask) -ne 0) {
-                $writable += $path
-                break
-            }
-        }
+        $grant = Get-OpenRGB2AclGrant (Get-Acl -LiteralPath $path) $mine $writeMask
+        if($grant -eq 'owner') { $writable += "$path (owned by the user)" }
+        elseif($grant) { $writable += $path }
     }
     return ,$writable
+}
+
+# The install folder can be swapped out from ABOVE even when it is
+# admin-only itself: whoever can rename it (or any folder above it)
+# aside can create a look-alike under the old name, and the sign-in
+# task then starts that look-alike's openrgb2-ui.exe with highest
+# privileges. Walks every folder from the install dir up to the volume
+# root and returns a description for each one the user could replace:
+#   - the folder itself grants DELETE, WRITE_DAC, WRITE_OWNER or
+#     GENERIC_ALL, or is owned by the user (it can be renamed away, or
+#     re-permissioned so it can);
+#   - its parent grants FILE_DELETE_CHILD, WRITE_DAC, WRITE_OWNER or
+#     GENERIC_ALL, or is owned by the user (the parent can remove or
+#     rename the entry whatever the entry's own ACL says).
+# Add-file/add-subdirectory on a parent alone is not reported: the name
+# is taken, so nothing can be planted there until the existing entry is
+# moved, which needs one of the rights above. The volume root is only
+# checked as a parent. -AclReader is the offline-test seam (path ->
+# FileSystemSecurity or $null).
+function Get-OpenRGB2ReplaceableAncestors {
+    param(
+        [string]$Install,
+        [string]$Sid,
+        [scriptblock]$AclReader = { param($p) Get-Acl -LiteralPath $p }
+    )
+    $mine = Get-OpenRGB2UserSids $Sid
+    $selfMask   = 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000
+    $parentMask = 0x40 -bor 0x40000 -bor 0x80000 -bor 0x10000000
+    $cache = @{}
+    $read = {
+        param($p)
+        if(-not $cache.ContainsKey($p)) {
+            $a = $null
+            try { $a = & $AclReader $p } catch { $a = $null }
+            $cache[$p] = $a
+        }
+        return $cache[$p]
+    }
+    $found = @()
+    $node = [IO.Path]::GetFullPath($Install).TrimEnd('\')
+    while($node) {
+        $parent = [IO.Path]::GetDirectoryName($node)
+        if(-not $parent) { break }      # $node is the volume root
+        $acl = & $read $node
+        if($acl) {
+            $g = Get-OpenRGB2AclGrant $acl $mine $selfMask
+            if($g -eq 'owner') { $found += "$node (owned by you)" }
+            elseif($g) { $found += "$node (you may delete or rename it)" }
+        }
+        $pacl = & $read $parent
+        if($pacl) {
+            $g = Get-OpenRGB2AclGrant $pacl $mine $parentMask
+            if($g -eq 'owner') { $found += "$parent (owned by you)" }
+            elseif($g) { $found += "$parent (you may delete or rename what is in it)" }
+        }
+        $node = $parent.TrimEnd('\')
+        if($node.Length -le 2 -and $node.EndsWith(':')) { break }
+    }
+    return ,@($found | Select-Object -Unique)
 }
 
 # What enable checks: the folder the task's executable lives in, the
@@ -117,13 +194,35 @@ function Invoke-OpenRGB2StartupTask {
         }
         $writable = Get-OpenRGB2UserWritablePaths `
             (Get-OpenRGB2ProtectedPaths $install) $Sid
+        $replaceable = Get-OpenRGB2ReplaceableAncestors $install $Sid
+        # Literal text (not expanded): the user types it in PowerShell.
+        $reinstall = ('The sign-in task needs OpenRGB2 installed under ' +
+            'an admin-only location such as %ProgramFiles%\OpenRGB2. ' +
+            'Reinstall it there from the source checkout with: ' +
+            'scripts\build-all-and-install.ps1 -InstallDir ' +
+            '"$env:ProgramFiles\OpenRGB2" (it asks for administrator ' +
+            'approval to deploy), then enable this setting from that ' +
+            'install.')
         if($writable.Count -gt 0) {
+            $fix = if($replaceable.Count -gt 0) { $reinstall }
+                   else {
+                       'Re-run the install/update from an elevated ' +
+                       'PowerShell (update-openrgb2.ps1 makes the ' +
+                       'install admin-only), then enable again.'
+                   }
             throw ("Refusing to register an elevated sign-in task: " +
                 "$($writable[0]) is writable without administrator " +
                 "rights, so any program could replace what runs " +
-                "elevated at sign-in. Re-run the install/update from " +
-                "an elevated PowerShell (update-openrgb2.ps1 makes the " +
-                "install admin-only), then enable again.")
+                "elevated at sign-in. $fix")
+        }
+        if($replaceable.Count -gt 0) {
+            throw ("Refusing to register an elevated sign-in task: " +
+                "this install is admin-only, but the folder it lives " +
+                "in is not -- $($replaceable[0]) -- so any program " +
+                "running as you could move the OpenRGB2 folder aside " +
+                "and put its own in its place, which the task would " +
+                "then start with administrator rights at sign-in. " +
+                $reinstall)
         }
         $action = New-ScheduledTaskAction -Execute $exe `
             -Argument '--managed --background' -WorkingDirectory $install

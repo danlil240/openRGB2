@@ -122,8 +122,10 @@ per-file `signed` flag and a `signing` block when a package was signed.
   and logs startup to `state/startup.log`.
 - `startup-task.ps1` — manages the optional current-user, highest-privilege
   sign-in task controlled by Settings → Windows startup. Refuses to
-  enable over a user-writable install; reports a `stale` task left by a
-  moved install, which disable removes.
+  enable over a user-writable install, or one inside a folder the user
+  could rename it out of (the default `%LOCALAPPDATA%\Programs` — use
+  `%ProgramFiles%\OpenRGB2`); reports a `stale` task left by a moved
+  install, which disable removes.
 - `OpenRGB2.vbs` — retained compatibility launcher for older shortcuts.
 - `create-desktop-shortcut.ps1` — creates `OpenRGB2.lnk` pointing directly
   at the UI executable, using the packaged OpenRGB2 icon.
