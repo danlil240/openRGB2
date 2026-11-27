@@ -1478,6 +1478,26 @@ int main()
         CHECK(persist_calls == 1);
         CHECK(persisted_name == "seed");
 
+        /* Audit I-13: the controllers list is bounded. 257
+           copies of one live zone refuse up front instead of
+           authoring 257 objects on the reader thread (every
+           new id scans the whole document — a ~1 MiB body of
+           repeats ran for minutes). The scene is untouched. */
+        {
+            nlohmann::json many = nlohmann::json::array();
+            for(int i = 0; i < 257; ++i)
+            {
+                many.push_back(fan3);
+            }
+            r = svc6.Dispatch(MsgType::LayoutCommand,
+                nlohmann::json::object({
+                    { "verb",        "add_object" },
+                    { "controllers", many         },
+                }));
+            CHECK(r.code == ErrCode::BadRequest);
+            CHECK(persist_calls == 1);
+        }
+
         /* All-fail batch: an unknown controller -> Unavailable;
            the per-entry reason lands in `skipped` and the scene
            is untouched (no revision bump, no persist). */
