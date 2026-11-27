@@ -49,6 +49,7 @@
 #include "scene/BindingResolver.h"
 #include "scene/SceneTypes.h"
 
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -140,9 +141,23 @@ public:
        that resolved to real hardware is verified"). Unresolved
        bindings stay unwritable. The grant is mapper-side
        runtime state: the applied document object and the
-       stored workspace document are never mutated. */
+       stored workspace document are never mutated.
+
+       Bindings resolve HERE against the snapshots of the
+       latest SyncDevices — output never waits for the host's
+       next maintenance poll (audit E-1). revision 0 swaps the
+       mapped document at once. A non-zero revision (the
+       SceneWorker revision the same document was submitted
+       under) STAGES it: Scene()/BindingState()/BoundZone()/
+       BoundControllers() report it immediately, but MapFrame
+       keeps mapping the previous document until a frame
+       arrives whose scene_revision has reached it — so the
+       worker's colors and the mapper's objects never belong
+       to different documents. Stage the mapper BEFORE
+       submitting to the worker. */
     void                                        SetScene(
-        std::shared_ptr<const studio::SceneDocument> doc);
+        std::shared_ptr<const studio::SceneDocument> doc,
+        uint64_t revision = 0);
     std::shared_ptr<const studio::SceneDocument> Scene() const;
 
     /* Re-resolve every persisted binding against the current
@@ -249,6 +264,25 @@ private:
         std::string           reason;
     };
 
+    /* One document with its resolution against the current
+       snapshots and its auto-verify counts. */
+    struct BoundScene
+    {
+        std::shared_ptr<const studio::SceneDocument> doc;
+        std::map<std::string, Resolution>            resolved;
+        uint64_t revision         = 0;
+        uint64_t bound_objects    = 0;
+        uint64_t writable_objects = 0;
+    };
+
+    /* Under mutex_: resolve `s` against controllers_. */
+    void              Resolve(BoundScene& s) const;
+    /* Under mutex_: the newest applied document (staged if
+       any) — what the control-plane queries report. */
+    const BoundScene& Latest() const;
+    /* Under mutex_: the one-line apply summary (see SyncDevices). */
+    void              LogSummary();
+
     /* Per-controller emitted state: the baseline for the next
        complete-controller frame and the sequence space. The
        generation tag invalidates it across topology changes —
@@ -274,9 +308,18 @@ private:
     void Log(const std::string& line) const;   /* under mutex_ */
 
     mutable std::mutex                              mutex_;
-    std::shared_ptr<const studio::SceneDocument>    doc_;
+    /* active_ is what MapFrame maps; staged_ holds revision-
+       stamped applies the worker has not produced a frame for
+       yet (oldest first, bounded — see SetScene). */
+    BoundScene                                      active_;
+    std::deque<BoundScene>                          staged_;
     std::map<DeviceKey, DeviceSnapshot>             snapshots_;
-    std::map<std::string, Resolution>               resolved_;
+    /* The latest enumeration in resolver form, plus each
+       entry's key (same order) — SetScene resolves against it
+       without waiting for the next SyncDevices. */
+    std::vector<studio::ControllerSnapshot>         controllers_;
+    std::vector<DeviceKey>                          controller_keys_;
+    bool                                            synced_ = false;
     std::map<DeviceKey, Emitted>                    emitted_;
     std::map<DeviceKey, Identify>                   identify_;
     /* MapFrame's per-controller write queues, kept across ticks
@@ -294,8 +337,6 @@ private:
        resolution pass, the last logged pair (one apply-
        summary line per scene apply and per count change),
        and the most recent MapFrame() counters. */
-    uint64_t            bound_objects_    = 0;
-    uint64_t            writable_objects_ = 0;
     bool                summary_pending_  = false;
     uint64_t            logged_bound_     = 0;
     uint64_t            logged_writable_  = 0;

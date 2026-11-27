@@ -121,6 +121,9 @@ static void TestDeterministicStep()
     CHECK(frames[0].sample_time == epoch + std::chrono::milliseconds(250));
     CHECK(frames[0].colors == Reference(*doc, WaveLayers(), 0.250));
     CHECK(worker.AppliedRevision() == 1);
+    /* E-1: the frame names the scene revision it was evaluated
+       against, so the mapper can swap documents in step. */
+    CHECK(frames[0].scene_revision == 1);
     CHECK(worker.HasScene());
 }
 
