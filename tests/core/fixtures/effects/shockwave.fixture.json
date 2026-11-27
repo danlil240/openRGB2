@@ -7409,7 +7409,7 @@
           0.0
         ],
         "enabled": true,
-        "opacity": 0.5,
+        "opacity": 0.25,
         "origin": [
           0.0,
           0.0,
@@ -7520,7 +7520,7 @@
           0.0
         ],
         "enabled": true,
-        "opacity": 0.5,
+        "opacity": 0.25,
         "origin": [
           0.0,
           0.0,
@@ -7631,7 +7631,7 @@
           0.0
         ],
         "enabled": true,
-        "opacity": 0.5,
+        "opacity": 0.25,
         "origin": [
           0.0,
           0.0,
@@ -7742,7 +7742,7 @@
           0.0
         ],
         "enabled": true,
-        "opacity": 0.5,
+        "opacity": 0.25,
         "origin": [
           0.0,
           0.0,
