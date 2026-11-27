@@ -496,7 +496,11 @@ void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateLEDs()
 void RGBController_RGBFusion2BlackwellGPU::Sweep(bool throttle)
 {
     std::lock_guard<std::mutex> sweep_lock(sweep_mutex);
+    SweepLocked(throttle);
+}
 
+void RGBController_RGBFusion2BlackwellGPU::SweepLocked(bool throttle)
+{
     const TimePoint now = clock_fn();
 
     /*---------------------------------------------------------*\
@@ -518,7 +522,8 @@ void RGBController_RGBFusion2BlackwellGPU::Sweep(bool throttle)
     {
         if(now - last_throttle_sweep < std::chrono::milliseconds(min_interval_ms))
         {
-            unsettled = true;
+            unsettled        = true;
+            throttle_dropped = true;
             {
                 std::lock_guard<std::mutex> settle_lock(settle_mutex);
                 settle_wake = true;
@@ -529,7 +534,8 @@ void RGBController_RGBFusion2BlackwellGPU::Sweep(bool throttle)
         last_throttle_sweep = now;
     }
 
-    last_sweep = now;
+    last_sweep       = now;
+    throttle_dropped = false;
 
     const bool write_all = force_write;
     force_write          = false;
@@ -816,14 +822,49 @@ void RGBController_RGBFusion2BlackwellGPU::Sweep(bool throttle)
     }
 }
 
+/*---------------------------------------------------------*\
+| One settle sweep, decided under sweep_mutex (caller holds |
+| it). Only the Direct-mode smoothing filter needs settling |
+| — a non-Direct sweep has refresh 0 and would re-write     |
+| every zone's mode packet, possibly restarting the         |
+| hardware effect phase. So the settle path sweeps only     |
+| while unsettled in Direct mode (or to deliver a frame     |
+| dropped by the diagnostic throttle). With require_idle    |
+| (the settle thread) it also yields to streamed frames     |
+| that arrived within the last settle interval.             |
+\*---------------------------------------------------------*/
+bool RGBController_RGBFusion2BlackwellGPU::SettleSweepLocked(bool require_idle)
+{
+    const bool direct = (modes[active_mode].value == RGB_FUSION2_BLACKWELL_GPU_MODE_DIRECT);
+
+    if(!throttle_dropped && !(unsettled && direct))
+    {
+        unsettled = false;
+        return false;
+    }
+
+    if(require_idle && (clock_fn() - last_sweep) < std::chrono::milliseconds(BWGPU_SETTLE_INTERVAL_MS))
+    {
+        std::lock_guard<std::mutex> settle_lock(settle_mutex);
+        settle_wake = true;
+        return true;
+    }
+
+    SweepLocked(false);
+    return unsettled;
+}
+
 bool RGBController_RGBFusion2BlackwellGPU::SettleStep()
 {
     AccessMutex.lock_shared();
-    Sweep(false);
+    bool still_unsettled;
+    {
+        std::lock_guard<std::mutex> sweep_lock(sweep_mutex);
+        still_unsettled = SettleSweepLocked(false);
+    }
     AccessMutex.unlock_shared();
 
-    std::lock_guard<std::mutex> sweep_lock(sweep_mutex);
-    return unsettled;
+    return still_unsettled;
 }
 
 void RGBController_RGBFusion2BlackwellGPU::SettleThreadFunction()
@@ -859,20 +900,15 @@ void RGBController_RGBFusion2BlackwellGPU::SettleThreadFunction()
         settle_wake = false;
         lock.unlock();
 
+        /*-----------------------------------------------------*\
+        | Decide and sweep under one sweep_mutex hold, so a     |
+        | mode change cannot slip between the check and the    |
+        | write (see SettleSweepLocked).                        |
+        \*-----------------------------------------------------*/
         AccessMutex.lock_shared();
-        bool idle;
         {
             std::lock_guard<std::mutex> sweep_lock(sweep_mutex);
-            idle = (clock_fn() - last_sweep) >= std::chrono::milliseconds(BWGPU_SETTLE_INTERVAL_MS);
-            if(!idle && unsettled)
-            {
-                std::lock_guard<std::mutex> settle_lock(settle_mutex);
-                settle_wake = true;
-            }
-        }
-        if(idle)
-        {
-            Sweep(false);
+            SettleSweepLocked(true);
         }
         AccessMutex.unlock_shared();
 
@@ -914,11 +950,21 @@ void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateSingleLED(int /*led*/)
 
 void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateMode()
 {
+    /*-----------------------------------------------------*\
+    | A mode change supersedes any pending settle left from |
+    | Direct frames; the full sweep below re-arms one only  |
+    | if the new mode is Direct and still unsettled.        |
+    \*-----------------------------------------------------*/
     {
-        std::lock_guard<std::mutex> sweep_lock(sweep_mutex);
-        force_write = true;
+        std::lock_guard<std::mutex> settle_lock(settle_mutex);
+        settle_wake = false;
     }
-    Sweep(false);
+
+    std::lock_guard<std::mutex> sweep_lock(sweep_mutex);
+    unsettled        = false;
+    throttle_dropped = false;
+    force_write      = true;
+    SweepLocked(false);
 }
 
 void RGBController_RGBFusion2BlackwellGPU::DeviceSaveMode()
