@@ -399,10 +399,29 @@ function Invoke-ManagedStart {
         if($NoSceneRestore) { $elevArgs += "-NoSceneRestore" }
         if($NoUI)   { $elevArgs += "-NoUI" }
         if($TakeOver){ $elevArgs += "-TakeOver" }
+        if($ScanOnly){ $elevArgs += "-ScanOnly" }
         if($HideWindows) { $elevArgs += "-HideWindows" }
+        $elevArgs += @("-BackendWaitSeconds", "$BackendWaitSeconds")
+        # Wait for the elevated copy and return ITS exit code (audit
+        # P-14: -ScanOnly was dropped -- the elevated copy started the
+        # whole stack -- and 0 came back before anything had run).
+        # WaitForExit, not Start-Process -Wait: -Wait also waits for
+        # the backend/engine the elevated copy leaves running.
         Write-Host "re-launching elevated (UAC prompt)..."
-        Start-Process powershell.exe -Verb RunAs -ArgumentList ($elevArgs -join " ")
-        return 0
+        try {
+            $ep = Start-Process powershell.exe -Verb RunAs -PassThru `
+                -ArgumentList ($elevArgs -join " ")
+        } catch {
+            Write-Host "ERROR: elevation declined or unavailable: $($_.Exception.Message)" -ForegroundColor Red
+            return 1
+        }
+        $ep.WaitForExit()
+        if($ep.ExitCode -ne 0) {
+            Write-Host ("elevated start returned $($ep.ExitCode) -- for the " +
+                "full output re-run in an elevated PowerShell: " +
+                "scripts\start-openrgb2.ps1") -ForegroundColor Yellow
+        }
+        return $ep.ExitCode
     }
 
     Write-Host "==> OpenRGB2 managed startup ($InstallDir)" -ForegroundColor Cyan

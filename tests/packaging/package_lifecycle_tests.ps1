@@ -788,6 +788,35 @@ $expectRc = if($text -match "UNVERIFIABLE:") { 4 }
             elseif($text -match "ownership CONFLICT:") { 3 } else { 0 }
 Check ($scanRc -eq $expectRc) "start -File exit code $scanRc matches its stdout findings (expected $expectRc)"
 
+#====================================================================#
+Section "T16 start -Elevated: forwards -ScanOnly, returns the elevated exit code"
+#====================================================================#
+# The UAC re-launch used to drop -ScanOnly (the elevated copy started
+# the whole stack) and always returned 0 without waiting (audit
+# P-14). Start-Process is stubbed: no UAC prompt, nothing spawned.
+$script:ElevCall = $null
+$rcElev = & {
+    function Start-Process {
+        param([string]$FilePath, [string]$Verb, [object]$ArgumentList,
+              [switch]$PassThru, [switch]$Wait, [string]$WindowStyle)
+        $script:ElevCall = [pscustomobject]@{
+            File = $FilePath; Verb = $Verb; Args = (@($ArgumentList) -join ' ')
+            PassThru = [bool]$PassThru; Waited = $false }
+        $fake = [pscustomobject]@{ ExitCode = 3 }
+        $fake | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+            $script:ElevCall.Waited = $true }
+        if($PassThru) { return $fake }
+    }
+    Invoke-ManagedStart -InstallDir $instA -Scene "" -NoUI $true `
+        -TakeOver $false -ScanOnly $true -Elevated $true `
+        -BackendWaitSeconds 1 -ListenerPidOverride 0
+}
+Check ($null -ne $script:ElevCall -and $script:ElevCall.Verb -eq "RunAs") "-Elevated re-launches via RunAs"
+Check ($null -ne $script:ElevCall -and $script:ElevCall.Args -match '(^|\s)-ScanOnly(\s|$)') `
+      "-Elevated forwards -ScanOnly to the elevated copy"
+Check ($null -ne $script:ElevCall -and $script:ElevCall.Waited) "-Elevated waits for the elevated copy"
+Check (@($rcElev).Count -eq 1 -and $rcElev -eq 3) "-Elevated returns the elevated copy's exit code (3)"
+
 } catch {
     $script:Fail++
     Write-Host "  FAIL unhandled exception: $($_.Exception.Message)" -ForegroundColor Red
