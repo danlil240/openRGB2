@@ -56,86 +56,61 @@ RgbColor ScaleColor(RgbColor c, float brightness)
 
 } /* anonymous namespace */
 
-void DeviceMapper::SetScene(
-    std::shared_ptr<const studio::SceneDocument> doc)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    doc_ = std::move(doc);
-    /* The new scene may carry different bindings — resolution
-       re-runs on the next SyncDevices, which also re-arms the
-       one-line apply summary and the auto-verify grants. */
-    resolved_.clear();
-    bound_objects_    = 0;
-    writable_objects_ = 0;
-    stats_            = MapStats{};
-    summary_pending_  = doc_ != nullptr;
-}
+/* Bound on revision-stamped applies awaiting their first
+   frame. The worker is latest-wins, so only the newest few can
+   still arrive; while output is gated (display off) a burst of
+   applies must not grow the queue without limit. */
+static constexpr size_t kMaxStagedScenes = 8;
 
-std::shared_ptr<const studio::SceneDocument> DeviceMapper::Scene() const
+void DeviceMapper::Resolve(BoundScene& s) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return doc_;
-}
-
-void DeviceMapper::SyncDevices(
-    const std::vector<DeviceSnapshot>& snapshots)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    std::vector<studio::ControllerSnapshot> controllers;
-    controllers.reserve(snapshots.size());
-    snapshots_.clear();
-    for(const DeviceSnapshot& snap : snapshots)
+    s.resolved.clear();
+    s.bound_objects    = 0;
+    s.writable_objects = 0;
+    if(!s.doc)
     {
-        controllers.push_back(ToControllerSnapshot(snap));
-        snapshots_.emplace(snap.key, snap);
+        return;
     }
-
-    resolved_.clear();
-    if(doc_)
+    for(const studio::DeviceBinding& binding : s.doc->bindings)
     {
-        for(const studio::DeviceBinding& binding : doc_->bindings)
+        Resolution res;
+        const studio::ResolvedBinding r =
+            studio::ResolveBinding(binding, controllers_);
+        res.status = r.status;
+        res.reason = r.reason;
+
+        if(r.status == studio::BindingStatus::Resolved)
         {
-            Resolution res;
-            const studio::ResolvedBinding r =
-                studio::ResolveBinding(binding, controllers);
-            res.status = r.status;
-            res.reason = r.reason;
+            const studio::ControllerSnapshot& cs =
+                controllers_[(size_t)r.controller_index];
+            res.zone.controller =
+                controller_keys_[(size_t)r.controller_index];
 
-            if(r.status == studio::BindingStatus::Resolved)
+            /* No zone requested -> zone 0 (single-zone
+               devices), matching the imported adapter. */
+            int zi = r.zone_index;
+            if(zi < 0 && !cs.zones.empty())
             {
-                const DeviceSnapshot& snap =
-                    snapshots[(size_t)r.controller_index];
-                res.zone.controller = snap.key;
-
-                /* No zone requested -> zone 0 (single-zone
-                   devices), matching the imported adapter. */
-                int zi = r.zone_index;
-                if(zi < 0 && !snap.zones.empty())
-                {
-                    zi = 0;
-                }
-                if(zi >= 0)
-                {
-                    const studio::ControllerSnapshot& cs =
-                        controllers[(size_t)r.controller_index];
-                    res.zone.zone_index = (uint32_t)zi;
-                    res.zone.start_idx  = cs.zones[(size_t)zi].start_idx;
-                    res.zone.led_count  = cs.zones[(size_t)zi].leds_count;
-                }
-                else
-                {
-                    /* Zoneless controller — treat as
-                       unresolved for writes. */
-                    res.status = studio::BindingStatus::Unresolved;
-                    res.reason = "controller has no zones";
-                }
+                zi = 0;
             }
-            /* else Unresolved/Ambiguous: the binding keeps its
-               persisted identity — never reassigned to a
-               same-named device (plan section 6). */
-            resolved_[binding.id] = std::move(res);
+            if(zi >= 0)
+            {
+                res.zone.zone_index = (uint32_t)zi;
+                res.zone.start_idx  = cs.zones[(size_t)zi].start_idx;
+                res.zone.led_count  = cs.zones[(size_t)zi].leds_count;
+            }
+            else
+            {
+                /* Zoneless controller — treat as
+                   unresolved for writes. */
+                res.status = studio::BindingStatus::Unresolved;
+                res.reason = "controller has no zones";
+            }
         }
+        /* else Unresolved/Ambiguous: the binding keeps its
+           persisted identity — never reassigned to a
+           same-named device (plan section 6). */
+        s.resolved[binding.id] = std::move(res);
     }
 
     /* AUTO-VERIFY ON RESOLVE (QA F04, decided semantics):
@@ -143,42 +118,119 @@ void DeviceMapper::SyncDevices(
        writable — resolution against live hardware IS the
        verification grant; the stored document's authored
        `verified` bit is never mutated. Unresolved bindings
-       stay unwritable. The apply summary is one line per
-       scene apply plus one per count change (a controller
-       arriving later can resolve more bindings without a
-       new apply). */
-    bound_objects_    = 0;
-    writable_objects_ = 0;
-    if(doc_)
+       stay unwritable. */
+    for(const studio::SceneObject& obj : s.doc->objects)
     {
-        for(const studio::SceneObject& obj : doc_->objects)
+        if(obj.kind != studio::ObjectKind::Device ||
+           obj.binding.empty())
         {
-            if(obj.kind != studio::ObjectKind::Device ||
-               obj.binding.empty())
-            {
-                continue;
-            }
-            ++bound_objects_;
-            const auto rit = resolved_.find(obj.binding);
-            if(rit != resolved_.end() &&
-               rit->second.status == studio::BindingStatus::Resolved)
-            {
-                ++writable_objects_;
-            }
+            continue;
         }
-        if(summary_pending_ ||
-           bound_objects_    != logged_bound_ ||
-           writable_objects_ != logged_writable_)
+        ++s.bound_objects;
+        const auto rit = s.resolved.find(obj.binding);
+        if(rit != s.resolved.end() &&
+           rit->second.status == studio::BindingStatus::Resolved)
         {
-            summary_pending_ = false;
-            logged_bound_    = bound_objects_;
-            logged_writable_ = writable_objects_;
-            Log("scene apply: " + std::to_string(bound_objects_) +
-                " bound device objects, " +
-                std::to_string(writable_objects_) +
-                " writable (resolved bindings auto-verify)");
+            ++s.writable_objects;
         }
     }
+}
+
+const DeviceMapper::BoundScene& DeviceMapper::Latest() const
+{
+    return staged_.empty() ? active_ : staged_.back();
+}
+
+void DeviceMapper::LogSummary()
+{
+    /* One line per scene apply plus one per count change (a
+       controller arriving later can resolve more bindings
+       without a new apply). */
+    const BoundScene& s = Latest();
+    if(!s.doc)
+    {
+        return;
+    }
+    if(summary_pending_ ||
+       s.bound_objects    != logged_bound_ ||
+       s.writable_objects != logged_writable_)
+    {
+        summary_pending_ = false;
+        logged_bound_    = s.bound_objects;
+        logged_writable_ = s.writable_objects;
+        Log("scene apply: " + std::to_string(s.bound_objects) +
+            " bound device objects, " +
+            std::to_string(s.writable_objects) +
+            " writable (resolved bindings auto-verify)");
+    }
+}
+
+void DeviceMapper::SetScene(
+    std::shared_ptr<const studio::SceneDocument> doc,
+    uint64_t revision)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    BoundScene next;
+    next.doc      = std::move(doc);
+    next.revision = revision;
+    /* Resolve now against the last enumeration (E-1): waiting
+       for the host's next SyncDevices left every controller
+       frozen for up to one maintenance poll per apply. */
+    Resolve(next);
+
+    if(revision == 0 || revision <= active_.revision)
+    {
+        active_ = std::move(next);
+        staged_.clear();
+    }
+    else
+    {
+        staged_.push_back(std::move(next));
+        while(staged_.size() > kMaxStagedScenes)
+        {
+            staged_.pop_front();
+        }
+    }
+    stats_           = MapStats{};
+    summary_pending_ = Latest().doc != nullptr;
+    if(synced_)
+    {
+        LogSummary();
+    }
+}
+
+std::shared_ptr<const studio::SceneDocument> DeviceMapper::Scene() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return Latest().doc;
+}
+
+void DeviceMapper::SyncDevices(
+    const std::vector<DeviceSnapshot>& snapshots)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    controllers_.clear();
+    controller_keys_.clear();
+    controllers_.reserve(snapshots.size());
+    controller_keys_.reserve(snapshots.size());
+    snapshots_.clear();
+    for(const DeviceSnapshot& snap : snapshots)
+    {
+        controllers_.push_back(ToControllerSnapshot(snap));
+        controller_keys_.push_back(snap.key);
+        snapshots_.emplace(snap.key, snap);
+    }
+    synced_ = true;
+
+    /* Every held document re-resolves — the mapped one and any
+       staged apply still waiting for its first frame. */
+    Resolve(active_);
+    for(BoundScene& s : staged_)
+    {
+        Resolve(s);
+    }
+    LogSummary();
 
     /* Drop emitted state for controllers absent from this
        enumeration — it can never seed a frame again. The
@@ -211,8 +263,22 @@ void DeviceMapper::SyncDevices(
 std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    /* Promote the newest staged apply this frame was evaluated
+       against: from here on the frame's colors and the mapped
+       objects belong to the same document. Older staged
+       entries were superseded (the worker is latest-wins). */
+    while(!staged_.empty() &&
+          staged_.front().revision <= eval.scene_revision)
+    {
+        active_ = std::move(staged_.front());
+        staged_.pop_front();
+    }
+    const std::shared_ptr<const studio::SceneDocument>& doc =
+        active_.doc;
+    const std::map<std::string, Resolution>& resolved =
+        active_.resolved;
     std::vector<RgbFrame> out;
-    if(doc_)
+    if(doc)
     {
 
     /* Collect writes per controller BEFORE assembling frames —
@@ -225,7 +291,7 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
         kv.second.used = false;
         kv.second.writes.clear();
     }
-    for(const studio::SceneObject& obj : doc_->objects)
+    for(const studio::SceneObject& obj : doc->objects)
     {
         ++stats_.objects_total;
         if(obj.kind != studio::ObjectKind::Device ||
@@ -237,8 +303,8 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
                               never multiply LED counts. */
         }
         ++stats_.objects_bound;
-        const auto rit = resolved_.find(obj.binding);
-        if(rit == resolved_.end() ||
+        const auto rit = resolved.find(obj.binding);
+        if(rit == resolved.end() ||
            rit->second.status != studio::BindingStatus::Resolved)
         {
             /* F04: the authored `verified` bit does NOT gate
@@ -271,10 +337,10 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
             const studio::SceneColor c =
                 (evaluated && e < evaluated->size())
                     ? (*evaluated)[e]
-                    : studio::EmitterColor(*doc_, obj.id, (int)e);
+                    : studio::EmitterColor(*doc, obj.id, (int)e);
             queue.emplace_back(zone.start_idx + (uint32_t)addr,
                                ScaleColor(FromSceneColor(c),
-                                          doc_->brightness));
+                                          doc->brightness));
             wrote = true;
         }
         if(wrote)
@@ -340,9 +406,9 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
         frame.colors              = colors;
         out.push_back(std::move(frame));
     }
-    stats_.objects_writable = writable_objects_;
+    stats_.objects_writable = active_.writable_objects;
     stats_.frames_emitted   = (uint64_t)out.size();
-    } /* doc_ */
+    } /* doc */
 
     /* Identification overlays run with or without a scene —
        they exist to FIND hardware, so they cannot depend on
@@ -571,8 +637,10 @@ bool DeviceMapper::BindingState(const std::string& binding_id,
                                 studio::BindingStatus& out) const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto it = resolved_.find(binding_id);
-    if(it == resolved_.end())
+    const std::map<std::string, Resolution>& resolved =
+        Latest().resolved;
+    const auto it = resolved.find(binding_id);
+    if(it == resolved.end())
     {
         return false;
     }
@@ -584,8 +652,10 @@ bool DeviceMapper::BoundZone(const std::string& binding_id,
                              ZonePlacement& out) const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto it = resolved_.find(binding_id);
-    if(it == resolved_.end() ||
+    const std::map<std::string, Resolution>& resolved =
+        Latest().resolved;
+    const auto it = resolved.find(binding_id);
+    if(it == resolved.end() ||
        it->second.status != studio::BindingStatus::Resolved)
     {
         return false;
@@ -598,7 +668,7 @@ std::vector<DeviceKey> DeviceMapper::BoundControllers() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<DeviceKey> keys;
-    for(const auto& kv : resolved_)
+    for(const auto& kv : Latest().resolved)
     {
         if(kv.second.status == studio::BindingStatus::Resolved)
         {

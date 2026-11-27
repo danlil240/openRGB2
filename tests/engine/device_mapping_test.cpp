@@ -1112,6 +1112,89 @@ static void TestBrightnessClamps()
     }
 }
 
+/* E-1 regression: a scene apply must not freeze output until
+   the host's next SyncDevices (the 500 ms maintenance poll).
+   SetScene resolves the new bindings against the snapshots it
+   already holds; a revision-stamped apply keeps mapping the
+   previous document until the worker's frame carries the new
+   revision, so no tick pairs one document's colors with the
+   other's objects. */
+static void TestSceneApplyResolvesWithoutResync()
+{
+    const DeviceSnapshot mb  = Motherboard();
+    const DeviceSnapshot gpu = Gpu();
+
+    auto docA = std::make_shared<studio::SceneDocument>();
+    docA->brightness = 1.0f;
+    docA->bindings = { Binding("b-h1", "X870E", "", "", "ARGB_V2_1", 8) };
+    docA->objects  = { DevObj("o-a", "b-h1", 0, 8) };
+
+    auto docB = std::make_shared<studio::SceneDocument>();
+    docB->brightness = 1.0f;
+    docB->bindings = { Binding("b-gpu", "5080 MASTER", "", "", "", 0) };
+    docB->objects  = { DevObj("o-b", "b-gpu", 0, 26) };
+
+    auto docC = std::make_shared<studio::SceneDocument>();
+    docC->brightness = 1.0f;
+    docC->bindings = { Binding("b-h1", "X870E", "", "", "ARGB_V2_1", 8) };
+    docC->objects  = { DevObj("o-c", "b-h1", 0, 8) };
+
+    std::vector<std::string> logs;
+    DeviceMapper mapper;
+    mapper.SetLogger([&logs](const std::string& l)
+                     { logs.push_back(l); });
+    mapper.SetScene(docA);
+    mapper.SyncDevices({ mb, gpu });
+    CHECK(logs.size() == 1);
+    CHECK(FrameFor(mapper.MapFrame(EvalAll(*docA,
+              { { "o-a", SC(1, 2, 3) } })), mb.key) != nullptr);
+
+    /* Immediate apply (revision 0), NO SyncDevices: the very
+       next frame already reaches the new binding. */
+    mapper.SetScene(docB);
+    studio::BindingStatus bs = studio::BindingStatus::Unresolved;
+    CHECK(mapper.BindingState("b-gpu", bs) &&
+          bs == studio::BindingStatus::Resolved);
+    {
+        const std::vector<RgbFrame> frames =
+            mapper.MapFrame(EvalAll(*docB, { { "o-b", SC(4, 5, 6) } }));
+        const RgbFrame* f = FrameFor(frames, gpu.key);
+        CHECK(f != nullptr);
+        CHECK(f != nullptr && AllEqual(f->colors, 0, 26, RGB(4, 5, 6)));
+        CHECK(mapper.LastMapStats().objects_writable == 1);
+    }
+    /* One apply-summary line per apply, even with no resync. */
+    CHECK(logs.size() == 2);
+
+    /* Staged apply: the control plane sees docC at once, but
+       a frame the worker evaluated against the OLD revision
+       still maps through docB. */
+    mapper.SetScene(docC, /*revision*/ 7);
+    CHECK(mapper.Scene() == docC);
+    CHECK(mapper.BindingState("b-h1", bs) &&
+          bs == studio::BindingStatus::Resolved);
+    {
+        EvaluatedFrame old = EvalAll(*docB, { { "o-b", SC(8, 8, 8) } });
+        old.scene_revision = 6;
+        const std::vector<RgbFrame> frames = mapper.MapFrame(old);
+        CHECK(frames.size() == 1);
+        const RgbFrame* f = FrameFor(frames, gpu.key);
+        CHECK(f != nullptr && AllEqual(f->colors, 0, 26, RGB(8, 8, 8)));
+    }
+    {
+        EvaluatedFrame cur = EvalAll(*docC, { { "o-c", SC(9, 1, 2) } });
+        cur.scene_revision = 7;
+        const std::vector<RgbFrame> frames = mapper.MapFrame(cur);
+        CHECK(frames.size() == 1);
+        const RgbFrame* f = FrameFor(frames, mb.key);
+        CHECK(f != nullptr && AllEqual(f->colors, 0, 8, RGB(9, 1, 2)));
+    }
+    /* A topology change still re-resolves the swapped scene. */
+    mapper.SyncDevices({ gpu });
+    CHECK(mapper.BindingState("b-h1", bs) &&
+          bs != studio::BindingStatus::Resolved);
+}
+
 int main()
 {
     TestWirelessGroupBatchesToOneWrite();
@@ -1128,6 +1211,7 @@ int main()
     TestZeroBrightnessEmitsBlackFrame();
     TestBrightnessScalesMappedOnly();
     TestBrightnessClamps();
+    TestSceneApplyResolvesWithoutResync();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

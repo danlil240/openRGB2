@@ -49,6 +49,9 @@ struct EvaluatedFrame
     uint64_t            sequence = 0;
     double              scene_time_s = 0.0; /* t handed to Evaluate */
     TimePoint           sample_time;        /* monotonic sample     */
+    uint64_t            scene_revision = 0; /* applied revision the
+                                               colors belong to
+                                               (0 = no scene)       */
     studio::FrameColors colors;             /* object id -> LEDs    */
 };
 

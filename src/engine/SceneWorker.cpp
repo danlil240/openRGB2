@@ -209,6 +209,7 @@ bool SceneWorker::Step(TimePoint now)
         frame.scene_time_s =
             std::chrono::duration<double>(now - epoch_).count();
         frame.sample_time  = now;
+        frame.scene_revision = active_scene_.revision;
         cb = callback_;
     }
 

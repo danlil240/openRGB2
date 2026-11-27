@@ -624,11 +624,16 @@ bool EngineService::ApplyPreparedScene(const PreparedStudioScene& prepared,
            lookup never tear across revisions. */
         std::lock_guard<std::mutex> lock(mutex_);
         revision = ++scene_revision_;
-        engine_.Worker().SubmitPreparedScene(prepared, revision);
+        /* E-1: the mapper resolves the new bindings now and
+           STAGES the document under the worker revision — it
+           swaps on the first frame evaluated against it. Staged
+           before the submit, so no frame of this revision can
+           reach MapFrame ahead of its document. */
         if(deps_.mapper)
         {
-            deps_.mapper->SetScene(doc);
+            deps_.mapper->SetScene(doc, revision);
         }
+        engine_.Worker().SubmitPreparedScene(prepared, revision);
         scene_ = doc;
     }
     /* The persisted per-scene playback selection is restored
