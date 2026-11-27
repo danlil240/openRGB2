@@ -1193,10 +1193,13 @@ static void TestIncompleteRecordFieldsAreMisses()
 
 /*-------------------------------------------------------------*\
 || 14b. Timed re-arm: uploaded playback sends no new intent, so ||
-|| a terminal wedge must recover on its own, slowly, with       ||
-|| backoff — and a changed transmitter is adopted on re-arm.    ||
+|| an observation-only wedge (group master changed, layout /    ||
+|| motherboard RGB sync) recovers on its own, slowly, with      ||
+|| backoff. Competing owners are report-only: an exhausted      ||
+|| upload budget and a changed transmitter stay wedged until    ||
+|| new intent, and only new intent adopts a new transmitter.    ||
 \*-------------------------------------------------------------*/
-static void TestTerminalFailedTimedRearm()
+static void TestUploadBudgetFailureIsReportOnly()
 {
     FakeClock clk; FakeLink link;
     clk.now = 5000000;      /* steady clock far from its epoch */
@@ -1204,49 +1207,71 @@ static void TestTerminalFailedTimedRearm()
     rt.SetTarget(MAC_TARGET, 3);
     auto up = std::make_shared<RgbUpload>(MakeUpload());
     rt.SetDesired(up);
-    /* The device acks only an upload sent after ack_after RGB sends. */
+    /* Another owner keeps overriding the effect: never acks ours. */
     int ack_after = 1 << 30;
     link.poll_fn = [&] {
         return MakeDiscovery(MAC_TARGET, MAC_MASTER,
                              link.rgb_sends > ack_after ? up->EffectId().data() : nullptr);
     };
     RunUntil(rt, clk, [&] { return rt.State() == WirelessState::Failed; }, 60000);
-    CHECK(rt.State() == WirelessState::Failed,
-          "unacknowledged upload reaches terminal Failed");
+    CHECK(rt.State() == WirelessState::Failed
+          && rt.Wedge() == WedgeCause::UploadBudget,
+          "unacknowledged upload reaches a terminal upload-budget wedge");
 
-    /* The device now accepts uploads, but nothing sends new intent. */
-    int rgb_before = link.rgb_sends;
-    ack_after = rgb_before;
-    RunFor(rt, clk, 28000);
-    CHECK(rt.State() == WirelessState::Failed && link.rgb_sends == rgb_before,
-          "wedge stays silent before the timed re-arm");
-    RunFor(rt, clk, 5000);
+    /* Even if the device would now accept, nothing re-arms on a timer:
+       no poll, no keep-alive, no upload for ten minutes. */
+    ack_after = link.rgb_sends;
+    const int polls_before = link.poll_calls;
+    const int sends_before = link.send_calls;
+    RunFor(rt, clk, 600000, 500);
+    CHECK(rt.State() == WirelessState::Failed
+          && link.poll_calls == polls_before && link.send_calls == sends_before,
+          "upload-budget wedge never re-arms on a timer (report-only)");
+
+    /* New intent (an operator mode/effect request) re-arms it. */
+    rt.SetDesired(std::make_shared<RgbUpload>(*up));
+    RunFor(rt, clk, 3000);
     CHECK(rt.State() == WirelessState::Holding && rt.Confirmed(),
-          "timed re-arm recovers a Failed playback upload without new intent");
-    CHECK(link.rgb_sends > rgb_before, "timed re-arm re-sends the stored upload");
+          "new intent recovers an upload-budget wedge");
+}
 
-    /* Backoff: a persistent incompatible layout re-fails; the next
-       re-arm waits longer (60 s) than the first (30 s). */
-    link.poll_fn = [] {
+static void TestLayoutTimedRearmBackoff()
+{
+    FakeClock clk; FakeLink link;
+    clk.now = 5000000;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    bool bad = false;
+    link.poll_fn = [&] {
         auto r = MakeDiscovery();
-        r[4 + 19] = 2;      /* 2 fans, expected 3 */
+        if(bad) r[4 + 19] = 2;      /* 2 fans, expected 3 */
         return r;
     };
+    RunFor(rt, clk, 1000);
+    CHECK(rt.State() == WirelessState::Holding, "sighted -> holding");
+
+    bad = true;
     RunUntil(rt, clk, [&] { return rt.State() == WirelessState::Failed; }, 10000);
-    CHECK(rt.State() == WirelessState::Failed, "layout change reaches Failed");
+    CHECK(rt.State() == WirelessState::Failed && rt.Wedge() == WedgeCause::Layout,
+          "layout change reaches a Layout wedge");
     int polls_before = link.poll_calls;
+    const int sends_before = link.send_calls;
     RunFor(rt, clk, 29000);
     CHECK(link.poll_calls == polls_before, "no traffic before the first timed re-arm");
     RunFor(rt, clk, 5000);
     CHECK(link.poll_calls > polls_before, "first timed re-arm re-polls");
     CHECK(rt.State() == WirelessState::Failed, "incompatible layout re-fails after re-arm");
+    CHECK(link.send_calls == sends_before,
+          "a timed re-arm never writes while the layout is incompatible");
     polls_before = link.poll_calls;
     RunFor(rt, clk, 40000);
     CHECK(link.poll_calls == polls_before, "second re-arm backs off beyond 30 s");
     RunFor(rt, clk, 25000);
     CHECK(link.poll_calls > polls_before, "second re-arm happens within the doubled delay");
+    CHECK(link.send_calls == sends_before,
+          "repeated timed re-arms never write to an incompatible group");
 
-    /* A corrected fan count is new intent and re-arms at once. */
+    /* A corrected fan count is new intent for a layout wedge. */
     polls_before = link.poll_calls;
     rt.SetTarget(MAC_TARGET, 2);
     RunFor(rt, clk, 2000);
@@ -1254,7 +1279,54 @@ static void TestTerminalFailedTimedRearm()
           "corrected expected fan count re-arms a layout wedge");
 }
 
-static void TestForeignMasterTimedRearmAdoptsTransmitter()
+static void TestRearmBackoffResetsOnlyAfterSustainedHolding()
+{
+    FakeClock clk; FakeLink link;
+    clk.now = 9000000;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    bool bad = false;
+    link.poll_fn = [&] {
+        auto r = MakeDiscovery();
+        if(bad) r[4 + 28] |= 0x40;  /* motherboard RGB sync */
+        return r;
+    };
+    RunFor(rt, clk, 1000);
+    bad = true;
+    RunUntil(rt, clk, [&] { return rt.State() == WirelessState::Failed; }, 10000);
+    CHECK(rt.Wedge() == WedgeCause::Layout, "motherboard RGB sync is a Layout wedge");
+
+    /* First timed re-arm (30 s) finds the group compatible again. */
+    bad = false;
+    RunUntil(rt, clk, [&] { return rt.State() == WirelessState::Holding; }, 40000);
+    CHECK(rt.State() == WirelessState::Holding, "timed re-arm recovers a compatible group");
+
+    /* Only briefly Holding: the backoff must NOT reset to 30 s. */
+    RunFor(rt, clk, 5000);
+    bad = true;
+    RunUntil(rt, clk, [&] { return rt.State() == WirelessState::Failed; }, 10000);
+    int polls_before = link.poll_calls;
+    RunFor(rt, clk, 40000);
+    CHECK(link.poll_calls == polls_before,
+          "a brief Holding keeps the doubled re-arm delay");
+    bad = false;
+    RunFor(rt, clk, 25000);
+    CHECK(link.poll_calls > polls_before && rt.State() == WirelessState::Holding,
+          "second timed re-arm (60 s) recovers");
+
+    /* Sustained Holding (>= 30 s) resets the backoff to 30 s. */
+    RunFor(rt, clk, 35000);
+    bad = true;
+    RunUntil(rt, clk, [&] { return rt.State() == WirelessState::Failed; }, 10000);
+    polls_before = link.poll_calls;
+    RunFor(rt, clk, 25000);
+    CHECK(link.poll_calls == polls_before, "reset backoff still waits ~30 s");
+    RunFor(rt, clk, 10000);
+    CHECK(link.poll_calls > polls_before,
+          "sustained Holding resets the re-arm backoff to 30 s");
+}
+
+static void TestChangedTransmitterNeedsIntent()
 {
     FakeClock clk; FakeLink link;
     clk.now = 7000000;
@@ -1266,34 +1338,80 @@ static void TestForeignMasterTimedRearmAdoptsTransmitter()
     RunFor(rt, clk, 1000);
 
     /* Outage, then the pair comes back with a different transmitter
-       MAC: identity changed -> ForeignMaster. */
+       MAC - and the group even reports that transmitter as master. */
     link.fail_polls = true;
     RunFor(rt, clk, 2000);
     link.fail_polls = false;
     link.master_mac = MAC_FOREIGN;
-    link.poll_fn = [] { return MakeDiscovery(MAC_TARGET, MAC_MASTER); };
+    link.poll_fn = [&] {
+        return MakeDiscovery(MAC_TARGET, MAC_FOREIGN, up->EffectId().data());
+    };
     RunFor(rt, clk, 10000);
-    CHECK(rt.State() == WirelessState::ForeignMaster,
+    CHECK(rt.State() == WirelessState::ForeignMaster
+          && rt.Wedge() == WedgeCause::TransmitterIdentity,
           "changed transmitter wedges as ForeignMaster");
-    int rgb_before = link.rgb_sends;
 
-    /* Timed re-arm adopts the current transmitter, but the group still
-       reports the old master: no write, re-wedges via the debounce. */
-    RunFor(rt, clk, 40000);
-    CHECK(link.rgb_sends == rgb_before,
+    /* No timed re-arm and no automatic adoption, however long. */
+    const int sends_before = link.send_calls;
+    const int polls_before = link.poll_calls;
+    RunFor(rt, clk, 600000, 500);
+    CHECK(rt.State() == WirelessState::ForeignMaster
+          && link.send_calls == sends_before && link.poll_calls == polls_before,
+          "changed transmitter stays wedged without new intent");
+    Mac adopted{};
+    CHECK(!rt.TakeAdoptedMaster(adopted), "nothing adopted without new intent");
+
+    /* New intent adopts the transmitter present now (operator action),
+       but the group is reported on the old master: still no writes. */
+    link.poll_fn = [] { return MakeDiscovery(MAC_TARGET, MAC_MASTER); };
+    auto next = std::make_shared<RgbUpload>(MakeUpload(0x70));
+    rt.SetDesired(next);
+    RunFor(rt, clk, 3000);
+    CHECK(rt.TakeAdoptedMaster(adopted) && adopted == MAC_FOREIGN,
+          "new intent adopts the current transmitter and reports it");
+    CHECK(!rt.TakeAdoptedMaster(adopted), "adoption is reported once");
+    CHECK(rt.State() == WirelessState::ForeignMaster
+          && rt.Wedge() == WedgeCause::GroupMaster
+          && link.send_calls == sends_before,
           "adopted transmitter never writes to a group bound elsewhere");
-    CHECK(rt.State() == WirelessState::ForeignMaster,
-          "group bound to the old master re-wedges after re-arm");
 
-    /* The group is re-paired to the new transmitter: the next timed
-       re-arm recovers without any new intent. */
+    /* That is an observation-only wedge: once the group is re-paired to
+       the adopted transmitter, a timed re-arm recovers it. */
+    const int rgb_before = link.rgb_sends;
     link.poll_fn = [&] {
         return MakeDiscovery(MAC_TARGET, MAC_FOREIGN,
-                             link.rgb_sends > rgb_before ? up->EffectId().data() : nullptr);
+                             link.rgb_sends > rgb_before ? next->EffectId().data() : nullptr);
     };
-    RunFor(rt, clk, 130000);
+    RunFor(rt, clk, 70000);
     CHECK(link.rgb_sends > rgb_before && rt.Confirmed(),
-          "timed re-arm recovers on the replacement transmitter");
+          "timed re-arm recovers on the adopted transmitter");
+}
+
+static void TestServiceReportsAdoptedMaster()
+{
+    FakeClock clk; FakeLink link;
+    clk.now = 3000000;
+    LianLiWirelessService svc(link, clk);
+    svc.AddGroup(MAC_TARGET, 3);
+    auto up = std::make_shared<RgbUpload>(MakeUpload());
+    svc.SetDesired(MAC_TARGET, up);
+    link.poll_fn = [] { return MakeDiscovery(); };
+    for(int i = 0; i < 10; i++) { clk.Advance(100); svc.StepAll(); }
+
+    link.fail_polls = true;
+    for(int i = 0; i < 20; i++) { clk.Advance(100); svc.StepAll(); }
+    link.fail_polls = false;
+    link.master_mac = MAC_FOREIGN;
+    link.poll_fn = [] { return MakeDiscovery(MAC_TARGET, MAC_FOREIGN); };
+    for(int i = 0; i < 1000; i++) { clk.Advance(100); svc.StepAll(); }
+    Mac adopted{};
+    CHECK(!svc.AdoptedMaster(adopted),
+          "service reports no adopted transmitter without new intent");
+
+    svc.SetDesired(MAC_TARGET, std::make_shared<RgbUpload>(MakeUpload(0x70)));
+    for(int i = 0; i < 10; i++) { clk.Advance(100); svc.StepAll(); }
+    CHECK(svc.AdoptedMaster(adopted) && adopted == MAC_FOREIGN,
+          "service reports the transmitter adopted on new intent");
 }
 
 /*-------------------------------------------------------------*\
@@ -1562,8 +1680,11 @@ int main()
     TestForeignMasterRearmsOnNewDesired();
     TestForeignSightingsMustBeConsecutive();
     TestIncompleteRecordFieldsAreMisses();
-    TestTerminalFailedTimedRearm();
-    TestForeignMasterTimedRearmAdoptsTransmitter();
+    TestUploadBudgetFailureIsReportOnly();
+    TestLayoutTimedRearmBackoff();
+    TestRearmBackoffResetsOnlyAfterSustainedHolding();
+    TestChangedTransmitterNeedsIntent();
+    TestServiceReportsAdoptedMaster();
     TestNeverSightedGraceWithLargeClock();
     TestSightingAccumulator();
     TestEffectRendering();

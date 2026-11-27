@@ -71,6 +71,7 @@ private:
     TimePoint                           last_throttle_sweep{};
     bool                                force_write = false;
     bool                                unsettled   = false;
+    bool                                throttle_dropped = false;   /* diagnostic throttle dropped a frame */
     ClockFn                             clock_fn;
 
     /*-----------------------------------------------------*\
@@ -84,6 +85,8 @@ private:
     std::thread                         settle_thread;
 
     void        Sweep(bool throttle);
+    void        SweepLocked(bool throttle);         /* caller holds sweep_mutex */
+    bool        SettleSweepLocked(bool require_idle); /* caller holds sweep_mutex */
     void        SettleThreadFunction();
     void        StopSettleThread();
 };

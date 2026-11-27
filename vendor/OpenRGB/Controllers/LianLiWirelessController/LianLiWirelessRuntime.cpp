@@ -55,7 +55,9 @@ void WirelessRuntime::SetTarget(const Mac& mac, uint8_t fans)
     target_mac    = mac;
     expected_fans = fans;
     layout_mismatch = 0;
-    if(changed)
+    /* A corrected fan count (rescan) can only cure a layout wedge; it
+       is not an operator decision about ownership or transmitters. */
+    if(changed && IsTerminalWedge() && wedge_cause == WedgeCause::Layout)
     {
         RearmTerminal();
     }
@@ -128,10 +130,11 @@ void WirelessRuntime::Enter(WirelessState s, const char* err)
            first poll of this search. */
         search_armed = false;
     }
-    if(s == WirelessState::Holding)
+    if(s == WirelessState::Holding && state != WirelessState::Holding)
     {
-        /* Confirmed again: the next wedge starts a fresh backoff. */
-        rearm_delay_ms = cfg.rearm_ms;
+        /* The timed re-arm backoff resets only after Holding has been
+           sustained (Tick), never on a brief confirmation. */
+        holding_since_ms = clock.NowMs();
     }
     state = s;
     if(s == WirelessState::ForeignMaster)
@@ -191,7 +194,7 @@ bool WirelessRuntime::IsTerminalWedge() const
         || (state == WirelessState::Failed && !retry_transport);
 }
 
-void WirelessRuntime::RearmTerminal()
+void WirelessRuntime::RearmTerminal(bool from_intent)
 {
     /*---------------------------------------------------------*\
     | N01 (QA 2026-10-01): a terminal wedge must not wait for  |
@@ -210,23 +213,50 @@ void WirelessRuntime::RearmTerminal()
     | keeps its schedule; Cancelled is never re-armed.          |
     |                                                           |
     | Uploaded playback loops send no further intent, so Tick   |
-    | also re-arms a wedge on a slow timer (rearm_ms, doubling  |
-    | to rearm_max_ms). When the wedge was the local            |
-    | transmitter's identity changing, RetryTransport alone     |
-    | would compare against the old MAC and re-wedge forever:   |
-    | forget it and adopt the current transmitter. Writes still |
-    | go only to groups that report that transmitter as their   |
-    | master, so no group bound elsewhere is ever taken over.   |
+    | also re-arms (from_intent=false) on a slow timer          |
+    | (rearm_ms, doubling to rearm_max_ms) — but ONLY the       |
+    | observation-only wedges (WedgeCause::GroupMaster /        |
+    | Layout). After such a re-arm keep-alives and uploads      |
+    | still require a sighting that reports our master and the  |
+    | expected layout without motherboard RGB sync, so nothing  |
+    | is written until the group is confirmed ours again.       |
+    |                                                           |
+    | Competing owners are report-only: UploadBudget (another   |
+    | owner keeps overriding the effect on our own transmitter) |
+    | would fight again on every re-arm, and                    |
+    | TransmitterIdentity would hand the fans to whatever       |
+    | transmitter is present. Both stay wedged until new intent |
+    | (an operator mode/effect request). New intent on a        |
+    | TransmitterIdentity wedge adopts the transmitter present  |
+    | at the next Boot — that is the operator's decision — and  |
+    | TakeAdoptedMaster reports it so detection can follow.     |
     \*---------------------------------------------------------*/
-    if(IsTerminalWedge())
+    if(!IsTerminalWedge())
     {
-        if(identity_changed)
-        {
-            master           = Mac{};
-            identity_changed = false;
-        }
-        RetryTransport();
+        return;
     }
+    if(!from_intent && !TimedRearmAllowed(wedge_cause))
+    {
+        return;
+    }
+    if(wedge_cause == WedgeCause::TransmitterIdentity)
+    {
+        master        = Mac{};
+        adopt_on_boot = true;
+    }
+    wedge_cause = WedgeCause::None;
+    RetryTransport();
+}
+
+bool WirelessRuntime::TakeAdoptedMaster(Mac& out)
+{
+    if(!adopted_pending)
+    {
+        return false;
+    }
+    adopted_pending = false;
+    out = master;
+    return true;
 }
 
 void WirelessRuntime::RevalidateTransport(const char* err)
@@ -260,9 +290,15 @@ void WirelessRuntime::Tick()
     if(IsTerminalWedge())
     {
         /*-----------------------------------------------------*\
-        | Timed re-arm (see RearmTerminal): the first Tick in a  |
-        | wedge schedules it; the wedge stays silent until then. |
+        | Timed re-arm (see RearmTerminal): observation-only     |
+        | causes only. The first Tick in such a wedge schedules  |
+        | it; the wedge stays silent until then. Report-only     |
+        | causes stay silent until new intent.                   |
         \*-----------------------------------------------------*/
+        if(!TimedRearmAllowed(wedge_cause))
+        {
+            return;
+        }
         if(!rearm_scheduled)
         {
             rearm_scheduled = true;
@@ -276,7 +312,7 @@ void WirelessRuntime::Tick()
         Diagnostics::Get().Trace("timed_rearm", (long long)state,
                                  (long long)rearm_delay_ms, 0);
         rearm_delay_ms = std::min(rearm_delay_ms * 2, cfg.rearm_max_ms);
-        RearmTerminal();
+        RearmTerminal(false);
         return;
     }
     if(state == WirelessState::Failed)
@@ -382,6 +418,14 @@ void WirelessRuntime::Tick()
         }
     }
 
+    /* Confirmed ours for a sustained period: the next wedge starts a
+       fresh timed re-arm backoff. A brief Holding does not count. */
+    if(state == WirelessState::Holding
+       && now - holding_since_ms >= cfg.rearm_stable_ms)
+    {
+        rearm_delay_ms = cfg.rearm_ms;
+    }
+
     /* Discovery confirms identity and channel, but it must not gate
        every animation frame. Keep-alive still has first priority. */
     if(state == WirelessState::Uploading && desired && have_sighting
@@ -439,11 +483,17 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
         }
         if(master != Mac{} && current_master != master)
         {
-            identity_changed = true;
+            wedge_cause = WedgeCause::TransmitterIdentity;
             Enter(WirelessState::ForeignMaster, "transmitter identity changed");
             return false;
         }
         master = current_master;
+        if(adopt_on_boot)
+        {
+            /* new intent re-armed an identity wedge: operator adoption */
+            adopt_on_boot   = false;
+            adopted_pending = true;
+        }
         connection_generation = link.ConnectionGeneration();
         master_read_tries = 0;
         master_known = true;
@@ -559,6 +609,7 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
         have_sighting = false;
         if(++master_mismatch >= cfg.master_debounce)
         {
+            wedge_cause = WedgeCause::GroupMaster;
             Enter(WirelessState::ForeignMaster, "wireless master changed");
             return false;
         }
@@ -578,7 +629,10 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
            Stop writes immediately, then require repeated incompatible replies
            before making the failure terminal. */
         if(++layout_mismatch >= cfg.layout_debounce)
+        {
+            wedge_cause = WedgeCause::Layout;
             Enter(WirelessState::Failed, "fan layout or motherboard RGB ownership changed");
+        }
         return false;
     }
 
@@ -594,6 +648,7 @@ bool WirelessRuntime::SendDesired(uint64_t now)
     if(resends >= cfg.max_resends)
     {
         Diagnostics::Get().RecordUploadFailure();
+        wedge_cause = WedgeCause::UploadBudget;
         Enter(WirelessState::Failed, "upload retry budget exhausted");
         return false;
     }

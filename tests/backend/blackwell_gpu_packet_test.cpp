@@ -597,6 +597,37 @@ int main()
     }
 
     /*-----------------------------------------------------*\
+    | Scenario 9 (review follow-up): a settle left pending  |
+    | by a Direct change must not re-write every zone after |
+    | a switch to a non-Direct mode — that re-sends each    |
+    | mode packet and can restart the hardware effect.      |
+    \*-----------------------------------------------------*/
+    {
+        dev.SetColor(24, ToRGBColor(200, 10, 10));
+        Frame(dev);
+        CHECK(dev.SettleStep(), "Direct change leaves the filter unsettled");
+
+        const int pulse_idx = FindMode(dev, "Pulse");
+        CHECK(pulse_idx >= 0, "Pulse (Breathing) mode present");
+        dev.SetActiveMode(pulse_idx);
+        DrainModeWrites(bus);
+
+        fake_ms += 45;
+        CHECK(!dev.SettleStep(), "non-Direct mode reports nothing to settle");
+        fake_ms += 45;
+        dev.SettleStep();
+        {
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "settle step after a switch to Pulse writes no zones (got %zu)", bus.Count());
+            CHECK(bus.Count() == 0, msg);
+        }
+
+        dev.SetActiveMode(direct_idx);
+        DrainModeWrites(bus);
+    }
+
+    /*-----------------------------------------------------*\
     | Scenario 5: Static transport preserves dark targets. |
     | Converge smoothing first.                             |
     \*-----------------------------------------------------*/
