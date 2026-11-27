@@ -31,14 +31,23 @@ Item {
         return out;
     }
 
+    /* Sampled once per colors change, and only while the strip
+       is actually on screen (Item.visible follows hidden
+       ancestors, e.g. a StackLayout page that is not current). */
+    readonly property var _swatches: root.visible ? root.sampled() : []
+
     Row {
         id: row
         spacing: 1
+        /* Integer model: a new frame with the same swatch count
+           keeps every Rectangle and only re-evaluates its color —
+           a JS-array model would destroy and recreate all of them
+           on each frame_status push. */
         Repeater {
-            model: root.sampled()
+            model: root._swatches.length
             Rectangle {
                 width: 10; height: 16
-                color: modelData || "black"
+                color: root._swatches[index] || "black"
             }
         }
     }

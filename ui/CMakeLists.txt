@@ -99,6 +99,8 @@ qt_add_qml_module(openrgb2_ui
     SOURCES
         ${CMAKE_SOURCE_DIR}/src/ui/EngineBridge.h
         ${CMAKE_SOURCE_DIR}/src/ui/EngineBridge.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/FrameFeedModel.h
+        ${CMAKE_SOURCE_DIR}/src/ui/FrameFeedModel.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/EngineWireClient.h
         ${CMAKE_SOURCE_DIR}/src/ui/EngineWireClient.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/JsonVariant.h

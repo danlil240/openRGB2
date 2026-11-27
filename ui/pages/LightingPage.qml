@@ -652,7 +652,7 @@ Item {
                                 visible: root.appliedMode === "live_effects"
                                 text: {
                                     const ag = root.engineUp
-                                               ? bridge.frameStatus.aggregate
+                                               ? bridge.frameAggregate
                                                : undefined;
                                     if(ag && ag.mean_interval_s > 0)
                                         return qsTr("live delivery ≈ %1 updates/s — transport-accepted interval (%2), not display FPS")
@@ -1759,20 +1759,22 @@ Item {
                         width: parent.width
                         spacing: Theme.spaceM
 
+                        /* Stable-row C++ model — no delegate
+                           churn per frame_status push. */
                         Repeater {
                             model: root.engineUp
-                                   ? (bridge.frameStatus.controllers || [])
-                                   : []
+                                   ? bridge.frameControllers
+                                   : null
                             Column {
                                 spacing: Theme.spaceXS
                                 Text {
-                                    text: root.deviceNameFor(modelData.key)
+                                    text: root.deviceNameFor(model.key)
                                     color: Theme.textSecondary
                                     font.pixelSize: Theme.fontSizeSmall
                                 }
                                 FrameStrip {
                                     objectName: "previewStrip"
-                                    colors: modelData.colors || []
+                                    colors: model.colors || []
                                 }
                             }
                         }
@@ -1791,8 +1793,7 @@ Item {
                             objectName: "previewEmpty"
                             anchors.horizontalCenter: parent.horizontalCenter
                             visible: !root.engineUp
-                                     || !bridge.frameStatus.controllers
-                                     || bridge.frameStatus.controllers.length === 0
+                                     || bridge.frameControllers.count === 0
                             title: qsTr("No frame data")
                             detail: root.engineUp
                                     ? qsTr("The applied-output strip fills in when the engine delivers frames.")
