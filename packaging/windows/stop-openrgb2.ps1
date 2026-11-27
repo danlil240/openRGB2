@@ -5,6 +5,14 @@
 .DESCRIPTION
     Ordered teardown, reverse of start-openrgb2.ps1:
 
+      0. UI -- openrgb2-ui.exe (verified by image path) gets a
+         CloseMainWindow request. Closing the window normally hides
+         the UI to its tray, so it usually keeps running: -Force then
+         ends it with Stop-Process (verified own process only), and
+         without -Force the step reports it and the exit is 1. The UI
+         holds no hardware state, but update/rollback refuse while it
+         runs (it locks openrgb2-ui.exe). A UI that launched this
+         script (tray "Quit OpenRGB2") is never signaled.
       1. engine -- sends the IPC QUIT verb (openrgb2-ctl.exe quit), the
          same "Quit All" hook the UI uses: the engine runs its ordered,
          bounded shutdown (power monitor -> IPC intake -> IPC server ->
@@ -137,6 +145,27 @@ function Resolve-OwnPid {
     return [pscustomobject]@{ Pid=0; Unverifiable=$unverifiable; Foreign=$foreign }
 }
 
+# PIDs of this process's ancestors (parent chain). The UI's tray
+# "Quit OpenRGB2" runs this script as its child -- that UI must not be
+# signaled by the stop it started.
+function Get-AncestorPids {
+    $out = @()
+    try {
+        $byId = @{}
+        foreach($p in @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId `
+                            -ErrorAction Stop)) {
+            $byId[[int]$p.ProcessId] = [int]$p.ParentProcessId
+        }
+        $cur = $PID
+        for($i = 0; $i -lt 32 -and $byId.ContainsKey($cur); $i++) {
+            $cur = $byId[$cur]
+            if($cur -le 0 -or $out -contains $cur) { break }
+            $out += $cur
+        }
+    } catch { }
+    return ,$out
+}
+
 function Invoke-ManagedStop {
     param(
         [string]$InstallDir,
@@ -196,6 +225,7 @@ function Invoke-ManagedStop {
     }
 
     $EngineExe  = Join-Path $InstallDir "openrgb2-engine.exe"
+    $UiExe      = Join-Path $InstallDir "openrgb2-ui.exe"
     $BackendExe = Join-Path $InstallDir "backend\OpenRGB.exe"
     if(-not $CtlExe) { $CtlExe = Join-Path $InstallDir "openrgb2-ctl.exe" }
     $StateDir   = Join-Path $InstallDir "state"
@@ -215,6 +245,60 @@ function Invoke-ManagedStop {
     $exitCode   = 0
     $engineGone = $false
     $backendGone= $false
+    $uiGone     = $false
+
+    #---- 0. UI: close it so its image is free for update/rollback ----
+    # The UI holds no hardware state (the engine runs without it), but
+    # it locks openrgb2-ui.exe, so update/rollback refuse while it
+    # runs. A UI that launched this script (tray "Quit OpenRGB2") is an
+    # ancestor of ours: it is left to exit by itself once we return.
+    $ui = Resolve-OwnPid -RunFilePid 0 -ImageName "openrgb2-ui" -ExpectedPath $UiExe
+    $uiPid = [int]$ui.Pid
+    $ancestors = Get-AncestorPids
+    if($uiPid -ne 0 -and $ancestors -contains $uiPid) {
+        Info "UI (pid $uiPid) launched this stop -- it exits by itself afterwards"
+        $uiGone = $true
+    } elseif($uiPid -eq 0) {
+        if($ui.Unverifiable.Count -gt 0) {
+            Fail ("UI: same-named process running " +
+                "(pid $($ui.Unverifiable -join ', ')) but its image " +
+                "path is UNREADABLE from this shell -- the stack is " +
+                "elevated (or owned by another user). Verification " +
+                "never touches what it cannot prove is ours: re-run " +
+                "from an elevated PowerShell, or re-run with -Elevated.")
+            $exitCode = 1
+        } else {
+            foreach($fp in $ui.Foreign) {
+                Info ("UI: pid $($fp.Id) runs a DIFFERENT image " +
+                    "($($fp.Path)) -- foreign, not touched")
+            }
+            Info "UI: not running"
+            $uiGone = $true
+        }
+    } else {
+        Step "UI (pid $uiPid): close request"
+        $uiProc = Get-Process -Id $uiPid -ErrorAction SilentlyContinue
+        $closed = $false
+        try { $closed = $uiProc.CloseMainWindow() } catch { $closed = $false }
+        # Closing the window normally hides the UI to its tray icon, so
+        # a graceful close often leaves the process running: the bound
+        # is short, and -Force is the documented way to end it.
+        $uiWaitMs = [Math]::Min($TimeoutSeconds, 5) * 1000
+        if($uiProc -and -not $uiProc.WaitForExit($uiWaitMs)) {
+            if($Force -and (Test-OwnProcess $uiPid $UiExe)) {
+                Info "UI still running (it hides to the tray on close) -- Stop-Process (-Force, verified own process)"
+                Stop-Process -Id $uiPid -Force
+                $uiProc.WaitForExit(5000) | Out-Null
+            } else {
+                Fail ("UI (pid $uiPid) is still running (closing its window " +
+                    "hides it to the tray) -- use the tray menu 'Exit UI', " +
+                    "or re-run with -Force (verified own processes only)")
+                $exitCode = 1
+            }
+        }
+        $uiGone = -not (Get-Process -Id $uiPid -ErrorAction SilentlyContinue)
+        if($uiGone) { Info "UI exited" }
+    }
 
     #---- 1. engine: IPC QUIT (ordered, bounded shutdown) -------------
     $runEnginePid = 0
@@ -353,7 +437,7 @@ function Invoke-ManagedStop {
         Remove-Item -Force $RunFile
     }
 
-    if($engineGone -and $backendGone -and $exitCode -eq 0) {
+    if($uiGone -and $engineGone -and $backendGone -and $exitCode -eq 0) {
         Write-Host "OpenRGB2 stopped cleanly." -ForegroundColor Green
     }
     return $exitCode
@@ -361,6 +445,17 @@ function Invoke-ManagedStop {
 
 # Dot-source guard (packaging suite imports the functions).
 if($MyInvocation.InvocationName -ne '.') {
+    # An elevated run (the elevated UI runs this script) must not
+    # auto-load modules from the user's own, user-writable module path.
+    try {
+        $isAdmin = (New-Object Security.Principal.WindowsPrincipal(
+            [Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { $isAdmin = $false }
+    if($isAdmin) {
+        $env:PSModulePath = (Join-Path $env:ProgramFiles "WindowsPowerShell\Modules") +
+            ";" + (Join-Path $PSHOME "Modules")
+    }
     exit (Invoke-ManagedStop -InstallDir $InstallDir `
         -TimeoutSeconds $TimeoutSeconds -Force $Force `
         -Elevated ([bool]$Elevated) -CtlExe $CtlExe)
