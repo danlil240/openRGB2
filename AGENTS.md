@@ -23,7 +23,7 @@ milestones.
 | `tests/engine/` | Qt-free engine + IPC suites (CTest label `engine`) |
 | `tests/sdk/` | SDK-client suites over an in-process fake backend (CTest label `sdk`) |
 | `tools/bench/` | Milestone 1 benchmark producer (`lianli_bench`); physical runs are opt-in, wire layer is offline-tested |
-| `docs/` | Hardware profile (`hardware/daniel-pc.md`) and benchmark reports (`benchmarks/baseline.md`) |
+| `docs/` | Hardware profile (`hardware/daniel-pc.md`) and benchmark reports (`benchmarks/baseline.md`); open audit backlog in `audit-2026-11-28-open-findings.md` — read it before picking up new work |
 | `profiles/` | Committed topology profiles (no unique IDs); `profiles/local/` is gitignored user state |
 
 ## Toolchain (pinned)
