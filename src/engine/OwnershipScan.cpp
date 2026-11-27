@@ -254,6 +254,18 @@ std::vector<OwnerFinding> ClassifyOwners(
                          "peripherals)";
             out.push_back(f);
         }
+        else if(Contains(compact, "lamparray"))
+        {
+            /* B-1: e.g. logi_lamparray_service.AMD64.exe, which
+               Windows Update installs — Dynamic Lighting's
+               bridge to the device; it repaints on its own. */
+            f.owner    = "LampArray service (Dynamic Lighting)";
+            f.conflict = true;
+            f.detail   = "Windows Dynamic Lighting bridge — "
+                         "repaints its devices (e.g. Logitech "
+                         "keyboards) over the backend";
+            out.push_back(f);
+        }
         else if(Contains(name, "lghub") ||
                 name == "lcore.exe" ||
                 Contains(compact, "logioptions"))
@@ -503,6 +515,105 @@ ManagedConfigReport CheckManagedBackendConfig(
             "the backend's exe-dir plugins folder");
     }
     return rep;
+}
+
+/*---------------------------------------------------------*\
+|| Windows Dynamic Lighting (B-1)                           ||
+\*---------------------------------------------------------*/
+
+int ReadDynamicLightingEnabled()
+{
+#ifdef _WIN32
+    DWORD value = 0;
+    DWORD size  = sizeof(value);
+    if(RegGetValueW(HKEY_CURRENT_USER,
+                    L"Software\\Microsoft\\Lighting",
+                    L"AmbientLightingEnabled",
+                    RRF_RT_REG_DWORD, nullptr, &value, &size)
+       == ERROR_SUCCESS)
+    {
+        return value != 0 ? 1 : 0;
+    }
+#endif
+    return -1;
+}
+
+const char* DynamicLightingStateName(int state)
+{
+    return state > 0 ? "on" : (state == 0 ? "off" : "unknown");
+}
+
+bool ClassifyDynamicLighting(int state, OwnerFinding& out)
+{
+    if(state <= 0)
+    {
+        return false;
+    }
+    out          = OwnerFinding{};
+    out.conflict = true;
+    out.owner    = "Windows Dynamic Lighting";
+    out.detail   = "Settings > Personalization > Dynamic Lighting "
+                   "is on — Windows drives LampArray devices "
+                   "(keyboard, mouse, ARGB) over the backend";
+    return true;
+}
+
+namespace
+{
+
+std::string FindingKey(const OwnerFinding& f)
+{
+    return f.owner + "|" + f.exe + "|" + std::to_string(f.pid);
+}
+
+bool HasFinding(const std::vector<OwnerFinding>& v,
+                const OwnerFinding& f)
+{
+    const std::string key = FindingKey(f);
+    for(const OwnerFinding& g : v)
+    {
+        if(FindingKey(g) == key)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string DescribeFinding(const OwnerFinding& f)
+{
+    std::string s = f.owner;
+    if(f.pid != 0 || !f.exe.empty())
+    {
+        s += " (pid " + std::to_string(f.pid) + ", " + f.exe + ")";
+    }
+    return s;
+}
+
+} /* anonymous namespace */
+
+std::vector<std::string> DescribeOwnerChanges(
+    const std::vector<OwnerFinding>& before,
+    const std::vector<OwnerFinding>& after)
+{
+    std::vector<std::string> lines;
+    for(const OwnerFinding& f : after)
+    {
+        if(!HasFinding(before, f))
+        {
+            lines.push_back(std::string(f.conflict ? "new CONFLICT: "
+                                                   : "new notice: ") +
+                            DescribeFinding(f) + " — " + f.detail);
+        }
+    }
+    for(const OwnerFinding& f : before)
+    {
+        if(!HasFinding(after, f))
+        {
+            lines.push_back("cleared: " + DescribeFinding(f));
+        }
+    }
+    return lines;
 }
 
 } /* namespace openrgb2 */

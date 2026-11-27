@@ -205,6 +205,11 @@ function Get-OwnerFindings {
             $f.detail   = "competing RGB owner (Razer peripherals)"
             $out += [pscustomobject]$f
         }
+        elseif($compact.Contains("lamparray")) {
+            $f.conflict = $true; $f.owner = "LampArray service (Dynamic Lighting)"
+            $f.detail   = "Windows Dynamic Lighting bridge -- repaints its devices (e.g. Logitech keyboards) over the backend"
+            $out += [pscustomobject]$f
+        }
         elseif($name.Contains("lghub") -or $name -eq "lcore.exe" -or
                $compact.Contains("logioptions")) {
             $f.conflict = $true; $f.owner = "Logitech G Hub / Options"

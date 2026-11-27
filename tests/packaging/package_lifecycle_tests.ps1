@@ -174,13 +174,14 @@ $procs = @(
     [pscustomobject]@{ pid=51;  exe="FanControl.exe" },     # notice
     [pscustomobject]@{ pid=52;  exe="iCUE.exe" },
     [pscustomobject]@{ pid=53;  exe="RazerSynapse.exe" },
+    [pscustomobject]@{ pid=55;  exe="logi_lamparray_service.AMD64.exe" },
     [pscustomobject]@{ pid=54;  exe="Steam.exe" },          # unrelated -- invisible
     [pscustomobject]@{ pid=999; exe="LConnect.exe" }        # self pid -- skipped
 )
 $f = Get-OwnerFindings -Processes $procs -SelfPid 999 -BackendPid 7
 $conflicts = @($f | Where-Object conflict)
 $notices   = @($f | Where-Object { -not $_.conflict })
-Check ($conflicts.Count -eq 4) "conflicts: other-OpenRGB + LConnect + iCUE + Synapse"
+Check ($conflicts.Count -eq 5) "conflicts: other-OpenRGB + LConnect + iCUE + Synapse + LampArray"
 Check ($notices.Count -eq 2)   "notices: managed backend + FanControl"
 Check (@($f | Where-Object { $_.exe -ieq "openrgb.exe" -and $_.pid -eq 7 -and -not $_.conflict }).Count -eq 1) `
       "managed backend pid exempted by listener pid"

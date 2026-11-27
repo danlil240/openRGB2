@@ -25,6 +25,12 @@ file lists everything that is still open.
     resolves against the cached enumeration and stages the document under
     the worker revision (`EvaluatedFrame::scene_revision`) until the first
     frame of that revision. Regression: `TestSceneApplyResolvesWithoutResync`.
+  - Branch `fix/competing-writer-scan`: [B-1](#b-1). A `lamparray` process
+    rule (C++ and `start-openrgb2.ps1`), a Dynamic Lighting registry check
+    (`ReadDynamicLightingEnabled`, reported as `ownership.dynamic_lighting`
+    plus a conflict when on), and a re-scan every 5 s on the maintenance
+    tick that logs only changes. No new IPC event kind: the Diagnostics
+    page re-pulls the report while it is open.
 - **Line numbers.** They come from the audit, taken before those fixes and
   the Wave commit. Files changed since then (`WorkspaceController.cpp`,
   `WorkspaceStore.cpp`, `EffectTypes.cpp`, `EffectEngine.cpp`,
@@ -47,7 +53,7 @@ Ordered by user impact per unit of effort.
 
 1. ~~[E-1](#e-1)~~ **fixed on `fix/scene-apply-resolve`**: the engine stopped sending output on every scene apply until
    the next 500 ms poll. **checked**
-2. [B-1](#b-1): the competing-writer scan misses the LampArray service and
+2. ~~[B-1](#b-1)~~ **fixed on `fix/competing-writer-scan`**: the competing-writer scan missed the LampArray service and
    Windows Dynamic Lighting (the G512 flicker cause), and runs only once.
    **checked**
 3. [E-5](#e-5): static scenes are never re-sent after another app
