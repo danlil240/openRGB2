@@ -18,10 +18,17 @@
 
 #include "EngineHost.h"
 
+#ifdef _WIN32
+#include "WinSessionEnd.h"
+#endif
+
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
+#include <mutex>
 #include <string>
 
 namespace
@@ -218,6 +225,19 @@ int main(int argc, char** argv)
         }
     }
 
+    /* Audit E-10: the shutdown bounds are enforced. A teardown
+       step that never returns would leave the process (and the
+       instance guard) alive forever; past the total bound the
+       engine logs the step and exits. Code 3 = watchdog exit. */
+    opts.shutdown_watchdog = [](const std::string& step)
+    {
+        std::fprintf(stderr,
+            "openrgb2-engine: shutdown watchdog: step '%s' never "
+            "finished; exiting\n", step.c_str());
+        std::fflush(stderr);
+        std::_Exit(3);
+    };
+
     openrgb2::EngineHost host(std::move(opts));
     g_host = &host;
 
@@ -227,10 +247,58 @@ int main(int argc, char** argv)
     std::signal(SIGBREAK, OnSignal);
 #endif
 
+    /* Teardown-finished latch for the session-end handler. */
+    std::mutex              teardown_mutex;
+    std::condition_variable teardown_cv;
+    bool                    torn_down = false;
+    auto mark_torn_down = [&]
+    {
+        {
+            std::lock_guard<std::mutex> g(teardown_mutex);
+            torn_down = true;
+        }
+        teardown_cv.notify_all();
+    };
+
+#ifdef _WIN32
+    /* Audit E-10: OS shutdown, logoff and console close used to
+       end the process with no teardown (Windows terminates it as
+       soon as the notification returns). The handler requests
+       the stop and holds the notification until main() has run
+       Stop(), bounded in case teardown never comes. Registered
+       after the CRT signal handlers so it sees CLOSE/LOGOFF/
+       SHUTDOWN first; Ctrl+C / Ctrl+Break still take the signal
+       path above. */
+    openrgb2::platform::WinSessionEnd session_end;
+    {
+        std::string serr;
+        if(!session_end.Start(
+               [&](const std::string& why)
+               {
+                   std::fprintf(stderr,
+                       "openrgb2-engine: %s, stopping\n",
+                       why.c_str());
+                   host.RequestStop();
+                   std::unique_lock<std::mutex> lock(teardown_mutex);
+                   teardown_cv.wait_for(lock, std::chrono::seconds(60),
+                                        [&] { return torn_down; });
+               }, serr))
+        {
+            std::fprintf(stderr,
+                "openrgb2-engine: session-end notice unavailable: %s "
+                "(console close is still handled)\n", serr.c_str());
+        }
+    }
+#endif
+
     std::string err;
     if(!host.Start(err))
     {
         std::fprintf(stderr, "openrgb2-engine: %s\n", err.c_str());
+        /* Start() can fail after workers came up: tear down
+           before releasing a waiting session-end handler. */
+        host.Stop();
+        mark_torn_down();
         return 1;
     }
     std::fprintf(stderr,
@@ -245,6 +313,12 @@ int main(int argc, char** argv)
     const openrgb2::OrderlyShutdown::Result& sd = host.Stop();
     for(const openrgb2::OrderlyShutdown::StepResult& s : sd.steps)
     {
+        if(s.failed)
+        {
+            std::fprintf(stderr,
+                "openrgb2-engine: shutdown step '%s' failed: %s\n",
+                s.name.c_str(), s.error.c_str());
+        }
         if(!s.within)
         {
             std::fprintf(stderr,
@@ -267,5 +341,11 @@ int main(int argc, char** argv)
         elapsed, (unsigned long long)host.FramesProduced(),
         (long long)std::chrono::duration_cast<
             std::chrono::milliseconds>(sd.elapsed).count());
+    /* Teardown is done: release a session-end notification that
+       is waiting on it, then retire the notice. */
+    mark_torn_down();
+#ifdef _WIN32
+    session_end.Stop();
+#endif
     return 0;
 }

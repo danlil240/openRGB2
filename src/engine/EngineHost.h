@@ -181,6 +181,17 @@ struct EngineHostOptions
     std::function<std::unique_ptr<IReactiveSource>(
         const std::string& id)> reactive_factory;
 
+    /* Audit E-10: the shutdown watchdog. When set, Stop() arms
+       OrderlyShutdown's watchdog: if teardown is still running
+       TotalBound() + shutdown_watchdog_grace after it began,
+       this is called (from the watchdog thread) with the step
+       still running. The engine executable logs and exits the
+       process there; empty (the default, tests) = measure
+       only, as before. */
+    std::function<void(const std::string& running_step)>
+                              shutdown_watchdog;
+    std::chrono::milliseconds shutdown_watchdog_grace{ 2000 };
+
     /* Log sink (default: stderr with the engine prefix). */
     std::function<void(const std::string&)> log;
 };

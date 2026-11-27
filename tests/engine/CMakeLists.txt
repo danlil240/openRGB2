@@ -101,6 +101,18 @@ set_tests_properties(e2e_fake_backend_test PROPERTIES
     LABELS engine
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Audit E-10 — OS shutdown / logoff / console-close notice: the
+# hidden top-level window's WM_QUERYENDSESSION/WM_ENDSESSION and
+# the console control handler, delivered directly (no real logoff).
+add_executable(session_end_test session_end_test.cpp)
+target_link_libraries(session_end_test PRIVATE
+    openrgb2_platform_windows)
+target_compile_definitions(session_end_test PRIVATE NDEBUG)
+add_test(NAME session_end_test COMMAND session_end_test)
+set_tests_properties(session_end_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Task 5.2 — mode qualification: rapid mode/parameter storm
 # (no wedge, no lost requests, pending always resolves),
 # disconnect during an uploaded-playback apply (honest

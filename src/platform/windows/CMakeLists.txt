@@ -14,7 +14,8 @@ add_library(openrgb2_platform_windows STATIC
     WinReactiveInputs.cpp
     WinAudioLoopback.cpp
     WinScreenSampler.cpp
-    WinKeyHook.cpp)
+    WinKeyHook.cpp
+    WinSessionEnd.cpp)
 target_include_directories(openrgb2_platform_windows PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(openrgb2_platform_windows PUBLIC
