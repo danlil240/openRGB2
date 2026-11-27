@@ -294,7 +294,13 @@ struct Svc
 static void TestBundleRoundTrip()
 {
     std::printf("-- bundle: export/inspect/apply on disk\n");
-    const fs::path base_types = g_tmp / "t1-base";
+    /* Every type dir is workspace-shaped —
+       <ws>/presets/devices with its assets at <ws>/assets — so
+       asset lookups and landings stay inside g_tmp. (A shallow
+       dir used to resolve `../../assets` to %TEMP%\assets: the
+       test read a residue file there and ApplyImport wrote one.) */
+    const fs::path base_ws    = g_tmp / "t1-basews";
+    const fs::path base_types = base_ws / "presets" / "devices";
     fs::create_directories(base_types);
     /* ring-fan carries an asset ref; tower mounts it — the
        export must carry BOTH (transitive closure). */
@@ -302,9 +308,17 @@ static void TestBundleRoundTrip()
           TypeJson("ring-fan", 8, "base", "", "models/fan.glb"));
     Write(base_types / "tower.device.json",
           TypeJson("tower", 4, "base", "ring-fan"));
+    Write(base_ws / "assets" / "models" / "fan.glb", "GLB-BYTES");
 
     studio::PresetRegistry reg;
-    CHECK(reg.LoadDirectory(base_types.string(), nullptr));
+    {
+        std::vector<std::string> lerrs;
+        CHECK(reg.LoadDirectory(base_types.string(), &lerrs));
+        for(const std::string& e : lerrs)
+        {
+            std::printf("  (base load: %s)\n", e.c_str());
+        }
+    }
     CHECK(reg.Contains("tower") && reg.Contains("ring-fan"));
 
     /* The source workspace root: presets/devices + assets. */
@@ -375,14 +389,31 @@ static void TestBundleRoundTrip()
     }
 
     /* Same content local -> identical; different -> conflict. */
-    const fs::path local_types = g_tmp / "t1-local";
+    /* The local workspace has the type but NOT its asset yet —
+       the load reports it missing (the type still registers) and
+       the import below lands the bundled copy under <ws>/assets. */
+    const fs::path local_ws    = g_tmp / "t1-localws";
+    const fs::path local_types = local_ws / "presets" / "devices";
     fs::create_directories(local_types);
     Write(local_types / "ring-fan.device.json",
           TypeJson("ring-fan", 8, "base", "", "models/fan.glb"));
     Write(local_types / "tower.device.json",
           TypeJson("tower", 4, "DIFFERENT", "ring-fan"));
     studio::PresetRegistry local;
-    CHECK(local.LoadDirectory(local_types.string(), nullptr));
+    {
+        std::vector<std::string> lerrs;
+        CHECK(!local.LoadDirectory(local_types.string(), &lerrs));
+        bool missing_asset = false;
+        for(const std::string& e : lerrs)
+        {
+            std::printf("  (local load: %s)\n", e.c_str());
+            missing_asset = missing_asset ||
+                e.find("missing asset 'models/fan.glb'") !=
+                    std::string::npos;
+        }
+        CHECK(missing_asset);
+        CHECK(local.Contains("ring-fan") && local.Contains("tower"));
+    }
 
     studio::ImportPlan plan;
     errors.clear();
@@ -422,6 +453,25 @@ static void TestBundleRoundTrip()
     CHECK(Read(local_types / "tower.device.json") ==
           local_tower_before);                 /* never overwritten */
     CHECK(fs::exists(local_types / "tower-x.device.json"));
+    /* The bundled asset landed inside the target workspace. */
+    CHECK(Read(local_ws / "assets" / "models" / "fan.glb") ==
+          "GLB-BYTES");
+
+    /* A shallow (non-workspace-shaped) target with bundled assets
+       is refused before anything is written — the lexical
+       `../../assets` would have escaped the target's tree. */
+    {
+        const fs::path shallow = g_tmp / "t1-sub" / "t1-shallow";
+        fs::create_directories(shallow);
+        studio::StudioDocument sdoc;
+        std::vector<std::string> serrs;
+        CHECK(!studio::ApplyImport(plan, {{ "tower", "tower-x" }},
+                                   shallow.string(), sdoc,
+                                   &serrs, &warnings));
+        CHECK(!serrs.empty());
+        CHECK(!fs::exists(shallow / "tower-x.device.json"));
+        CHECK(!fs::exists(g_tmp / "assets"));
+    }
     /* The renamed type keeps its child ref — ring-fan was
        identical, so it stays ring-fan. */
     {
@@ -436,8 +486,11 @@ static void TestBundleRoundTrip()
     /* Nested collision: the child conflicts too — renaming it
        cascades a remap inside the renamed parent. */
     {
-        const fs::path nested = g_tmp / "t1-nested";
+        const fs::path nested_ws = g_tmp / "t1-nestedws";
+        const fs::path nested = nested_ws / "presets" / "devices";
         fs::create_directories(nested);
+        Write(nested_ws / "assets" / "models" / "fan.glb",
+              "LOCAL-GLB");
         Write(nested / "ring-fan.device.json",
               TypeJson("ring-fan", 8, "OTHER", "", "models/fan.glb"));
         Write(nested / "tower.device.json",
