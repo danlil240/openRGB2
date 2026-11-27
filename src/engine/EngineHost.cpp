@@ -1195,43 +1195,19 @@ bool EngineHost::Start(std::string& err)
            the OK reply can honestly report the handoff decision
            — "closing" means a verified-own pid was resolved and
            WM_CLOSE will be posted during teardown, never that
-           the process already exited. */
+           the process already exited. The pid is stored
+           BEFORE the stop flag (audit E-11): Run() returns as
+           soon as stop_ is set and Stop() registers the
+           backend-handoff step only for a pid it can already
+           see, so the old flag-first order could skip the
+           handoff while the reply said "closing". */
         ipc_deps.request_shutdown =
             [this](bool stop_backend) -> nlohmann::json
             {
+                const nlohmann::json reply =
+                    ArmBackendHandoff(stop_backend);
                 stop_.store(true);
-                if(!stop_backend)
-                {
-                    return nlohmann::json::object();
-                }
-                if(opts_.backend_exe.empty())
-                {
-                    Log("quit-all: backend teardown requested but "
-                        "no --backend-exe was declared — nothing "
-                        "can be verified as ours; left running");
-                    return nlohmann::json::object({
-                        { "backend", "not_configured" } });
-                }
-#ifdef _WIN32
-                const BackendResolution r =
-                    ResolveManagedBackend(opts_.backend_exe,
-                                          opts_.sdk_port);
-                if(r.pid == 0)
-                {
-                    Log(std::string("quit-all: no verifiably-"
-                        "managed backend to close (") +
-                        r.decision + ")");
-                    return nlohmann::json::object({
-                        { "backend", r.decision } });
-                }
-                pending_backend_pid_.store(r.pid);
-                return nlohmann::json::object({
-                    { "backend",     r.decision },
-                    { "backend_pid", r.pid      } });
-#else
-                return nlohmann::json::object({
-                    { "backend", "unverifiable" } });
-#endif
+                return reply;
             };
         /* Task 4.7: the startup ownership scan surfaced
            read-only in STATE/DIAGNOSTICS. ownership_ is
@@ -1925,6 +1901,41 @@ const OrderlyShutdown::Result& EngineHost::Stop()
 
     shutdown_result_ = shutdown.Run();
     return shutdown_result_;
+}
+
+nlohmann::json EngineHost::ArmBackendHandoff(bool stop_backend)
+{
+    if(!stop_backend)
+    {
+        return nlohmann::json::object();
+    }
+    if(opts_.backend_exe.empty())
+    {
+        Log("quit-all: backend teardown requested but "
+            "no --backend-exe was declared — nothing "
+            "can be verified as ours; left running");
+        return nlohmann::json::object({
+            { "backend", "not_configured" } });
+    }
+#ifdef _WIN32
+    const BackendResolution r =
+        ResolveManagedBackend(opts_.backend_exe, opts_.sdk_port);
+    if(r.pid == 0)
+    {
+        Log(std::string("quit-all: no verifiably-"
+            "managed backend to close (") +
+            r.decision + ")");
+        return nlohmann::json::object({
+            { "backend", r.decision } });
+    }
+    pending_backend_pid_.store(r.pid);
+    return nlohmann::json::object({
+        { "backend",     r.decision },
+        { "backend_pid", r.pid      } });
+#else
+    return nlohmann::json::object({
+        { "backend", "unverifiable" } });
+#endif
 }
 
 void EngineHost::SignalPendingBackend()

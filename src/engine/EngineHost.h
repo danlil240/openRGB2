@@ -257,6 +257,11 @@ public:
        the scan never ran. */
     nlohmann::json           OwnershipJson() const;
     uint64_t                 FramesProduced() const;
+    /* The managed-backend pid a QUIT stop_backend armed for the
+       teardown handoff (0 = none). E-11: it must be stored
+       before StopRequested() turns true. */
+    uint32_t                 PendingBackendPid() const
+    { return pending_backend_pid_.load(); }
 
     void Log(const std::string& line) const;
 
@@ -271,6 +276,10 @@ private:
        startup scan logs every finding; a re-scan logs only
        what changed. Takes ownership_mutex_. */
     void ScanCompetitors(bool initial);
+    /* QUIT stop_backend intake: resolves the verified-own
+       backend and stores pending_backend_pid_; returns the
+       reply fields. Runs BEFORE stop_ is set (E-11). */
+    nlohmann::json ArmBackendHandoff(bool stop_backend);
     /* QUIT stop_backend teardown: re-verifies the pending
        pid's image against opts_.backend_exe, signals its
        shutdown event (WM_CLOSE fallback for windowed

@@ -60,6 +60,7 @@
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1110,12 +1111,43 @@ static int TestBody(const std::filesystem::path& self_exe)
         CHECKV(quit_ui.Connect(cmd_pipe),
                "quit-all client could not connect");
         CHECKV(quit_ui.Hello(), "quit-all client HELLO failed");
-        CHECKV(quit_ui.Send(ipc::MsgType::Quit, 99,
-                   json::object({{ "stop_backend", true }})),
-               "QUIT send failed");
+        /* E-11: the owner loop (main's Run()) leaves the moment
+           StopRequested() turns true and Stop() registers the
+           backend-handoff step only if the pid is already
+           stored. Watch for that instant from another thread,
+           the way Run() would, and record the pid it sees. */
+        std::atomic<bool>     watch_done{ false };
+        std::atomic<uint32_t> pid_at_stop{ 0 };
+        std::atomic<bool>     stop_seen{ false };
+        std::thread watcher([&]
+        {
+            const auto end = std::chrono::steady_clock::now() +
+                             std::chrono::seconds(10);
+            while(!watch_done.load() &&
+                  std::chrono::steady_clock::now() < end)
+            {
+                if(host.StopRequested())
+                {
+                    pid_at_stop.store(host.PendingBackendPid());
+                    stop_seen.store(true);
+                    return;
+                }
+            }
+        });
+        const bool quit_sent = quit_ui.Send(ipc::MsgType::Quit, 99,
+                   json::object({{ "stop_backend", true }}));
         ipc::Message qm;
-        CHECKV(quit_ui.Recv(qm, 3000) && qm.type == ipc::MsgType::Ok,
-               "QUIT reply was not OK");
+        const bool quit_ok = quit_sent && quit_ui.Recv(qm, 3000) &&
+                             qm.type == ipc::MsgType::Ok;
+        watch_done.store(true);
+        watcher.join();
+        CHECKV(quit_sent, "QUIT send failed");
+        CHECKV(quit_ok, "QUIT reply was not OK");
+        CHECKV(stop_seen.load(), "QUIT never requested the stop");
+        CHECKV(pid_at_stop.load() != 0,
+               "stop was requested before the backend pid was "
+               "stored — Run() would exit and Stop() would skip "
+               "the handoff (E-11)");
         const json qb = qm.Body();
         CHECKV(qb.value("stop_backend", false),
                "reply lost the stop_backend echo");
