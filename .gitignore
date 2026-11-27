@@ -48,3 +48,6 @@ vendor/OpenRGB/OpenRGB Windows 32-bit/
 vendor/OpenRGB/*_debug/
 vendor/OpenRGB/*_release/
 vendor/OpenRGB/OpenRGB-baseline-backup/
+
+# QA session reports and evidence (docs/qa/) stay local, not in git.
+docs/qa/
