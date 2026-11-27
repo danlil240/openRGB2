@@ -242,7 +242,8 @@ ScenePlaybackCaps ClassifyScenePlayback(const studio::SceneDocument* doc)
     }
     /* A named preset that is not one of the uploaded
        presets: reactive looks get the honest reason first. */
-    const studio::PresetInfo* info = studio::FindPreset(preset);
+    const std::optional<studio::PresetInfo> info =
+        studio::FindPreset(preset);
     if(info && !info->needs.empty())
     {
         out.reason = "'" + preset + "' reacts to " + info->needs +
