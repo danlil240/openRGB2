@@ -331,6 +331,67 @@ static void TestDeterministicEquivalence()
     }
 }
 
+/* Mirrored devices: the resolver turns a mirror's parts into
+   Linked objects with NO emitters of their own (output goes
+   through the owner). The draft preview must still paint them
+   with the owner's evaluated frame — otherwise only one fan of
+   each mirrored set animates in the Layout views. */
+static void TestMirroredCopiesPreviewOwner()
+{
+    std::printf("-- unit: mirrored copies preview the owner's frame\n");
+    studio::PresetRegistry dev_reg;
+    std::vector<std::string> errs;
+    dev_reg.LoadDirectory((g_tmp / "types").string(), &errs);
+    studio::EffectRegistry eff_reg;
+
+    json doc = CompactDoc(2, 0, 0.5);
+    doc["device_settings"]["fan1"] =
+        json::object({{ "mirror_of", "fan0" }});
+    auto cand = ParseCand(doc, dev_reg, eff_reg);
+    const std::vector<DeviceSnapshot> snaps = { TestSnapshot() };
+
+    PreparedStudioScene prepared;
+    std::string err;
+    CHECK(PrepareStudioScene(*cand, snaps, prepared, err));
+
+    PreviewSession::Deps pdeps;
+    pdeps.snapshots = [snaps] { return snaps; };
+    PreviewSession ps(pdeps);
+    CHECK(ps.SetCandidate(cand, 1, err));
+    PreviewFrame frame;
+    studio::InputState empty_input;
+    const double t = 0.37;
+    CHECK(ps.Sample(t, &empty_input, frame));
+
+    std::map<std::string, const PreviewObjectColors*> by_id;
+    for(const PreviewObjectColors& o : frame.objects)
+    {
+        by_id[o.object_id] = &o;
+    }
+    int linked = 0;
+    for(const studio::SceneObject& obj : prepared.doc->objects)
+    {
+        if(obj.kind != studio::ObjectKind::Linked)
+        {
+            continue;
+        }
+        ++linked;
+        const studio::SceneObject* owner =
+            studio::OutputOwner(*prepared.doc, obj.id);
+        CHECK(owner != nullptr && !owner->emitters.empty());
+        if(owner == nullptr) continue;
+        auto it = by_id.find(obj.id);
+        CHECK(it != by_id.end());
+        if(it == by_id.end()) continue;
+        CHECK(it->second->kind == "linked");
+        CHECK(it->second->emitter_total == owner->emitters.size());
+        CHECK(it->second->colors ==
+              RefObjectColors(prepared, owner->id, t, &empty_input));
+    }
+    CHECK(linked > 0);
+    CHECK(frame.emitter_total == frame.emitter_sent);
+}
+
 static void TestUnboundObjectAndWorkerUntouched()
 {
     std::printf("-- unit: unbound object + physical counters untouched\n");
@@ -711,6 +772,7 @@ int main()
     WriteTestType(g_tmp / "types", 8);
 
     TestDeterministicEquivalence();
+    TestMirroredCopiesPreviewOwner();
     TestUnboundObjectAndWorkerUntouched();
     TestDisabledInputsStayEmpty();
     TestHiddenPauseAndStaleCandidate();
