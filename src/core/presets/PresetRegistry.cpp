@@ -273,9 +273,17 @@ bool PresetRegistry::LoadDirectory(const std::string& dir,
     {
         return true;   /* no preset dir = only defaults; not an error */
     }
-    for(const auto& entry : std::filesystem::directory_iterator(dir, ec))
+    /* Explicit increment(ec): a range-for's operator++ (and the
+       no-ec is_regular_file) THROW on a transient FS error, and
+       BuildDeviceRegistry runs this from EngineHost::Start with
+       no try — the scan error is reported instead. */
+    std::error_code iec;
+    std::filesystem::directory_iterator it(dir, iec), end;
+    for(; !iec && it != end; it.increment(iec))
     {
-        if(!entry.is_regular_file())
+        const std::filesystem::directory_entry& entry = *it;
+        std::error_code fec;
+        if(!entry.is_regular_file(fec))
         {
             continue;
         }
@@ -321,6 +329,15 @@ bool PresetRegistry::LoadDirectory(const std::string& dir,
         {
             ok = false;
             file_errors[path] = "missing asset reference";
+        }
+    }
+    if(iec)
+    {
+        ok = false;
+        if(errors)
+        {
+            errors->push_back(dir + ": directory scan failed ("
+                              + iec.message() + ")");
         }
     }
     /* Dependency validation can only run once the whole directory

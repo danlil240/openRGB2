@@ -2528,9 +2528,10 @@ WorkspaceService::Result WorkspaceService::ImportStagedJson(
             std::error_code tec;
             if(fs::is_directory(stage_lib, tec))
             {
-                for(const auto& ent :
-                        fs::directory_iterator(stage_lib, tec))
+                fs::directory_iterator dit(stage_lib, tec), dend;
+                for(; !tec && dit != dend; dit.increment(tec))
                 {
+                    const fs::directory_entry& ent = *dit;
                     studio::DevicePreset p;
                     if(ent.path().extension() == ".json" &&
                        studio::DevicePresetFromJsonFile(

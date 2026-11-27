@@ -319,13 +319,17 @@ std::vector<std::pair<uint64_t, std::string>> GenerationDirs(
     {
         return out;
     }
-    for(const auto& e : fs::directory_iterator(gens, ec))
+    /* Explicit increment(ec): a range-for's operator++ throws on
+       a transient FS error. A failed scan yields what it saw. */
+    fs::directory_iterator it(gens, ec), end;
+    for(; !ec && it != end; it.increment(ec))
     {
         uint64_t n = 0;
-        if(e.is_directory() &&
-           GenerationOrdinal(e.path().filename().string(), n))
+        std::error_code dec;
+        if(it->is_directory(dec) &&
+           GenerationOrdinal(it->path().filename().string(), n))
         {
-            out.push_back({ n, e.path().filename().string() });
+            out.push_back({ n, it->path().filename().string() });
         }
     }
     std::sort(out.begin(), out.end());
@@ -954,9 +958,15 @@ std::vector<std::string> WorkspaceStore::List() const
     {
         return out;
     }
-    for(const auto& e : fs::directory_iterator(root_, ec))
+    /* Explicit increment — never throws mid-scan (see
+       GenerationDirs). */
+    std::error_code iec;
+    fs::directory_iterator it(root_, iec), end;
+    for(; !iec && it != end; it.increment(iec))
     {
-        if(!e.is_directory())
+        const fs::directory_entry& e = *it;
+        std::error_code dec;
+        if(!e.is_directory(dec))
         {
             continue;
         }

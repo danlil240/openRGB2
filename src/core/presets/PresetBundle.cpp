@@ -429,9 +429,13 @@ bool ExportBundle(const std::string& dest_dir,
     if(overwrite && fs::is_directory(types_dir, ec))
     {
         const std::set<std::string> keep(ids.begin(), ids.end());
-        for(const auto& entry : fs::directory_iterator(types_dir, ec))
+        std::error_code iec;
+        fs::directory_iterator it(types_dir, iec), end;
+        for(; !iec && it != end; it.increment(iec))
         {
-            if(!entry.is_regular_file())
+            const fs::directory_entry& entry = *it;
+            std::error_code fec;
+            if(!entry.is_regular_file(fec))
             {
                 continue;
             }
@@ -457,6 +461,11 @@ bool ExportBundle(const std::string& dest_dir,
                                + "' could not be removed ("
                                + rec.message() + ")");
             }
+        }
+        if(iec)
+        {
+            Warn(warnings, types_dir.string() + ": stale-type prune"
+                           " scan failed (" + iec.message() + ")");
         }
     }
 
@@ -651,9 +660,13 @@ bool InspectBundle(const std::string& src_dir,
     const fs::path types_dir = src / "presets" / "devices";
     if(fs::is_directory(types_dir, ec))
     {
-        for(const auto& entry : fs::directory_iterator(types_dir, ec))
+        std::error_code iec;
+        fs::directory_iterator it(types_dir, iec), end;
+        for(; !iec && it != end; it.increment(iec))
         {
-            if(!entry.is_regular_file())
+            const fs::directory_entry& entry = *it;
+            std::error_code fec;
+            if(!entry.is_regular_file(fec))
             {
                 continue;
             }
@@ -700,6 +713,11 @@ bool InspectBundle(const std::string& src_dir,
                 continue;
             }
             bundled[p.id] = p;
+        }
+        if(iec)
+        {
+            Err(errors, types_dir.string() + ": directory scan failed ("
+                        + iec.message() + ")");
         }
     }
     /* Types a migrated expanded doc extracted are bundled content
@@ -880,10 +898,13 @@ bool InspectBundle(const std::string& src_dir,
     const fs::path assets_dir = src / "assets";
     if(fs::is_directory(assets_dir, ec))
     {
-        for(const auto& entry :
-            fs::recursive_directory_iterator(assets_dir, ec))
+        std::error_code iec;
+        fs::recursive_directory_iterator it(assets_dir, iec), end;
+        for(; !iec && it != end; it.increment(iec))
         {
-            if(!entry.is_regular_file())
+            const fs::directory_entry& entry = *it;
+            std::error_code fec;
+            if(!entry.is_regular_file(fec))
             {
                 continue;
             }
@@ -906,6 +927,11 @@ bool InspectBundle(const std::string& src_dir,
             }
             total += sz;
             p.assets.push_back(rel);
+        }
+        if(iec)
+        {
+            Err(errors, assets_dir.string() + ": directory scan failed ("
+                        + iec.message() + ")");
         }
         std::sort(p.assets.begin(), p.assets.end());
     }
