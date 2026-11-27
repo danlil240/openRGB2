@@ -137,6 +137,13 @@ static void RunFor(WirelessRuntime& rt, FakeClock& clk, uint64_t ms, uint64_t st
     for(uint64_t t = 0; t < ms; t += step) { clk.Advance(step); rt.Tick(); }
 }
 
+static void RunUntil(WirelessRuntime& rt, FakeClock& clk,
+                     const std::function<bool()>& done, uint64_t max_ms,
+                     uint64_t step = 100)
+{
+    for(uint64_t t = 0; t < max_ms && !done(); t += step) { clk.Advance(step); rt.Tick(); }
+}
+
 /*-------------------------------------------------------------*\
 | 1. Protocol: RGB packet layout, chunk boundaries, addressing  |
 \*-------------------------------------------------------------*/
@@ -1185,6 +1192,207 @@ static void TestIncompleteRecordFieldsAreMisses()
 }
 
 /*-------------------------------------------------------------*\
+|| 14b. Timed re-arm: uploaded playback sends no new intent, so ||
+|| a terminal wedge must recover on its own, slowly, with       ||
+|| backoff — and a changed transmitter is adopted on re-arm.    ||
+\*-------------------------------------------------------------*/
+static void TestTerminalFailedTimedRearm()
+{
+    FakeClock clk; FakeLink link;
+    clk.now = 5000000;      /* steady clock far from its epoch */
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    auto up = std::make_shared<RgbUpload>(MakeUpload());
+    rt.SetDesired(up);
+    /* The device acks only an upload sent after ack_after RGB sends. */
+    int ack_after = 1 << 30;
+    link.poll_fn = [&] {
+        return MakeDiscovery(MAC_TARGET, MAC_MASTER,
+                             link.rgb_sends > ack_after ? up->EffectId().data() : nullptr);
+    };
+    RunUntil(rt, clk, [&] { return rt.State() == WirelessState::Failed; }, 60000);
+    CHECK(rt.State() == WirelessState::Failed,
+          "unacknowledged upload reaches terminal Failed");
+
+    /* The device now accepts uploads, but nothing sends new intent. */
+    int rgb_before = link.rgb_sends;
+    ack_after = rgb_before;
+    RunFor(rt, clk, 28000);
+    CHECK(rt.State() == WirelessState::Failed && link.rgb_sends == rgb_before,
+          "wedge stays silent before the timed re-arm");
+    RunFor(rt, clk, 5000);
+    CHECK(rt.State() == WirelessState::Holding && rt.Confirmed(),
+          "timed re-arm recovers a Failed playback upload without new intent");
+    CHECK(link.rgb_sends > rgb_before, "timed re-arm re-sends the stored upload");
+
+    /* Backoff: a persistent incompatible layout re-fails; the next
+       re-arm waits longer (60 s) than the first (30 s). */
+    link.poll_fn = [] {
+        auto r = MakeDiscovery();
+        r[4 + 19] = 2;      /* 2 fans, expected 3 */
+        return r;
+    };
+    RunUntil(rt, clk, [&] { return rt.State() == WirelessState::Failed; }, 10000);
+    CHECK(rt.State() == WirelessState::Failed, "layout change reaches Failed");
+    int polls_before = link.poll_calls;
+    RunFor(rt, clk, 29000);
+    CHECK(link.poll_calls == polls_before, "no traffic before the first timed re-arm");
+    RunFor(rt, clk, 5000);
+    CHECK(link.poll_calls > polls_before, "first timed re-arm re-polls");
+    CHECK(rt.State() == WirelessState::Failed, "incompatible layout re-fails after re-arm");
+    polls_before = link.poll_calls;
+    RunFor(rt, clk, 40000);
+    CHECK(link.poll_calls == polls_before, "second re-arm backs off beyond 30 s");
+    RunFor(rt, clk, 25000);
+    CHECK(link.poll_calls > polls_before, "second re-arm happens within the doubled delay");
+
+    /* A corrected fan count is new intent and re-arms at once. */
+    polls_before = link.poll_calls;
+    rt.SetTarget(MAC_TARGET, 2);
+    RunFor(rt, clk, 2000);
+    CHECK(link.poll_calls > polls_before && rt.State() != WirelessState::Failed,
+          "corrected expected fan count re-arms a layout wedge");
+}
+
+static void TestForeignMasterTimedRearmAdoptsTransmitter()
+{
+    FakeClock clk; FakeLink link;
+    clk.now = 7000000;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    auto up = std::make_shared<RgbUpload>(MakeUpload());
+    rt.SetDesired(up);
+    link.poll_fn = [] { return MakeDiscovery(); };
+    RunFor(rt, clk, 1000);
+
+    /* Outage, then the pair comes back with a different transmitter
+       MAC: identity changed -> ForeignMaster. */
+    link.fail_polls = true;
+    RunFor(rt, clk, 2000);
+    link.fail_polls = false;
+    link.master_mac = MAC_FOREIGN;
+    link.poll_fn = [] { return MakeDiscovery(MAC_TARGET, MAC_MASTER); };
+    RunFor(rt, clk, 10000);
+    CHECK(rt.State() == WirelessState::ForeignMaster,
+          "changed transmitter wedges as ForeignMaster");
+    int rgb_before = link.rgb_sends;
+
+    /* Timed re-arm adopts the current transmitter, but the group still
+       reports the old master: no write, re-wedges via the debounce. */
+    RunFor(rt, clk, 40000);
+    CHECK(link.rgb_sends == rgb_before,
+          "adopted transmitter never writes to a group bound elsewhere");
+    CHECK(rt.State() == WirelessState::ForeignMaster,
+          "group bound to the old master re-wedges after re-arm");
+
+    /* The group is re-paired to the new transmitter: the next timed
+       re-arm recovers without any new intent. */
+    link.poll_fn = [&] {
+        return MakeDiscovery(MAC_TARGET, MAC_FOREIGN,
+                             link.rgb_sends > rgb_before ? up->EffectId().data() : nullptr);
+    };
+    RunFor(rt, clk, 130000);
+    CHECK(link.rgb_sends > rgb_before && rt.Confirmed(),
+          "timed re-arm recovers on the replacement transmitter");
+}
+
+/*-------------------------------------------------------------*\
+|| 14c. "Never sighted" grace is measured from the search start ||
+|| — not from the steady clock's epoch (the real clock is       ||
+|| milliseconds since boot, so now > lost_ms is always true).   ||
+\*-------------------------------------------------------------*/
+static void TestNeverSightedGraceWithLargeClock()
+{
+    FakeClock clk; FakeLink link;
+    clk.now = 86400000ull * 3;      /* three days of uptime */
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    link.poll_fn = [] { return std::vector<uint8_t>{}; };   /* absent */
+    RunFor(rt, clk, 5000);
+    CHECK(rt.State() == WirelessState::Searching,
+          "absence within the grace stays Searching on a large clock");
+    RunFor(rt, clk, 4000);
+    CHECK(rt.State() == WirelessState::Lost,
+          "absence past the grace -> Lost on a large clock");
+
+    /* A transport revalidation starts a fresh search and a fresh grace. */
+    link.poll_fn = [] { return MakeDiscovery(); };
+    RunFor(rt, clk, 1000);
+    CHECK(rt.State() == WirelessState::Holding, "target returns -> Holding");
+    link.fail_polls = true;
+    clk.Advance(1000); rt.Tick();          /* one failed poll -> Boot */
+    link.fail_polls = false;
+    link.poll_fn = [] { return std::vector<uint8_t>{}; };
+    RunFor(rt, clk, 3000);
+    CHECK(rt.State() != WirelessState::Lost,
+          "a miss right after revalidation does not skip the grace");
+}
+
+/*-------------------------------------------------------------*\
+|| 14d. Discovery accumulation: detection/rescan sizing uses    ||
+|| the runtime's validity rule and the modal fan count; the     ||
+|| service records rows seen by the worker's own polls.         ||
+\*-------------------------------------------------------------*/
+static void TestSightingAccumulator()
+{
+    SightingAccumulator acc;
+    auto row = [](uint8_t fans, const Mac& master = MAC_MASTER, uint8_t receiver = 1)
+    {
+        auto r = MakeDiscovery(MAC_TARGET, master, nullptr, 8, receiver);
+        r[4 + 19] = fans;
+        return r;
+    };
+    acc.AddResponse(row(3), 1000);
+    acc.AddResponse(row(3), 1200);
+    acc.AddResponse(row(1), 1400);      /* short row, last-wins would freeze 1 */
+    acc.AddResponse(row(0), 1600);      /* incomplete: no fans */
+    acc.AddResponse(row(3, Mac{}), 1700);   /* incomplete: zero master */
+    acc.AddResponse(row(3, MAC_MASTER, 0), 1800); /* incomplete: receiver 0 */
+    auto snap = acc.Snapshot(2000, 5000);
+    CHECK(snap.size() == 1, "one group accumulated");
+    CHECK(!snap.empty() && snap[0].fan_count == 3,
+          "modal fan count wins over a later short row");
+    CHECK(!snap.empty() && snap[0].master == MAC_MASTER,
+          "incomplete rows never replace the last complete row");
+    CHECK(acc.Snapshot(20000, 5000).empty(), "old sightings age out");
+
+    SightingAccumulator only_bad;
+    only_bad.AddResponse(row(0), 1000);
+    CHECK(only_bad.Snapshot(1000, 5000).empty(),
+          "a group seen only through incomplete rows is never sized");
+
+    /* Service: a second group powering on later shows up in the rows
+       the worker's polls observe, ready for a rescan to add it. */
+    FakeClock clk; FakeLink link;
+    clk.now = 1000000;
+    LianLiWirelessService svc(link, clk);
+    svc.AddGroup(MAC_TARGET, 3);
+    bool second_on = false;
+    link.poll_fn = [&] {
+        auto response = MakeDiscovery();
+        if(second_on)
+        {
+            auto second = MakeDiscovery(MAC_FOREIGN, MAC_MASTER);
+            response[1] = 2;
+            response.insert(response.end(), second.begin() + 4, second.end());
+        }
+        return response;
+    };
+    for(int i = 0; i < 10; i++) { clk.Advance(100); svc.StepAll(); }
+    auto recent = svc.RecentSightings(15000);
+    CHECK(recent.size() == 1, "worker polls record the tracked group");
+    second_on = true;
+    for(int i = 0; i < 10; i++) { clk.Advance(100); svc.StepAll(); }
+    recent = svc.RecentSightings(15000);
+    bool saw_second = false;
+    for(const Sighting& s : recent) if(s.mac == MAC_FOREIGN) saw_second = true;
+    CHECK(saw_second, "a group powered on later is visible to a rescan");
+
+    CHECK(svc.UpdateGroupFans(MAC_TARGET, 3), "known group accepts a fan update");
+    CHECK(!svc.UpdateGroupFans(Mac{1, 1, 1, 1, 1, 1}, 3), "unknown group rejects a fan update");
+}
+
+/*-------------------------------------------------------------*\
 || 15. Effect loops: render layout + multi-frame upload header   ||
 \*-------------------------------------------------------------*/
 static void TestEffectRendering()
@@ -1354,6 +1562,10 @@ int main()
     TestForeignMasterRearmsOnNewDesired();
     TestForeignSightingsMustBeConsecutive();
     TestIncompleteRecordFieldsAreMisses();
+    TestTerminalFailedTimedRearm();
+    TestForeignMasterTimedRearmAdoptsTransmitter();
+    TestNeverSightedGraceWithLargeClock();
+    TestSightingAccumulator();
     TestEffectRendering();
 
     printf("%d checks, %d failures\n", checks, failures);

@@ -164,4 +164,13 @@ namespace LianLiWireless
     | Validation helpers                                        |
     \*---------------------------------------------------------*/
     bool IsValidUnicastMac(const Mac& mac);
+
+    /*---------------------------------------------------------*\
+    | A discovery row is complete when it carries >= 1 fan, a   |
+    | unicast master MAC and a receiver slot >= 1. The RX table |
+    | can briefly expose partially written rows under RF load;  |
+    | an incomplete row is a miss for the runtime and is never  |
+    | used to size a group at detection.                        |
+    \*---------------------------------------------------------*/
+    bool IsCompleteSighting(const Sighting& s);
 }

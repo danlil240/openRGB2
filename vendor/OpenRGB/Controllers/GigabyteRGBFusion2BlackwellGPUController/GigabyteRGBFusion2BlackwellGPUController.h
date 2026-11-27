@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <string>
 #include "i2c_smbus.h"
 #include "RGBController.h"
@@ -96,10 +97,31 @@ public:
     void            SetZone(uint8_t zone, uint8_t mode, fusion2_config zone_config);
     void            SetMode(uint8_t type, uint8_t zone, uint8_t mode, fusion2_config zone_config);
 
+    /*-----------------------------------------------------*\
+    | Unchanged-zone suppression for streamed (Direct)      |
+    | writes: skips the I2C write when the packet is byte-  |
+    | identical to the last one written to this zone, the   |
+    | last write succeeded, and it is younger than the      |
+    | refresh period (re-sent after that in case the        |
+    | firmware drifted). Returns true if a write was made.  |
+    | SetZone/SetMode always write (and refresh the cache). |
+    \*-----------------------------------------------------*/
+    bool            SetZoneIfChanged(uint8_t zone, uint8_t mode, fusion2_config zone_config,
+                                     std::chrono::steady_clock::time_point now,
+                                     std::chrono::milliseconds refresh);
+
 private:
     i2c_smbus_interface*    bus;
     rgb_fusion_dev_id       dev;
     std::string             name;
     int                     gpu_layout;
+
+    uint8_t                                 last_pkt[RGB_FUSION_2_BLACKWELL_GPU_NUMBER_OF_ZONES][64] = {};
+    bool                                    last_pkt_valid[RGB_FUSION_2_BLACKWELL_GPU_NUMBER_OF_ZONES] = {};
+    std::chrono::steady_clock::time_point   last_pkt_time[RGB_FUSION_2_BLACKWELL_GPU_NUMBER_OF_ZONES] = {};
+
+    uint8_t         ResolveTransport(uint8_t& mode, fusion2_config& zone_config);
+    int             BuildPacket(uint8_t type, uint8_t zone, uint8_t mode, const fusion2_config& zone_config, uint8_t* zone_pkt);
+    void            WritePacket(uint8_t zone, const uint8_t* zone_pkt, int palette_pos, const fusion2_config& zone_config, std::chrono::steady_clock::time_point now);
 
 };

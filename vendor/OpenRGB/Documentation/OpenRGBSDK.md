@@ -992,9 +992,10 @@ The server responds with a null-terminated JSON document (same encoding conventi
   "counters": { "set_desired": 0, "uploads_admitted": 0, "..." : 0 } }
 ```
 
-- `available` is `false` (with an empty `groups` array and no `master`/`counters`) when no wireless dongle pair was ever detected — the service context does not exist.
+- `available` is `false` (with an empty `groups` array, a `detecting` boolean and no `master`/`counters`) when the service context does not exist: no wireless dongle pair was detected, or the first detection is still running.  `detecting` is `true` while that first detection polls discovery (about 5 s); a client should ask again later rather than treat it as unsupported.  The reply is always prompt: detection never holds the lock this reply takes across USB I/O, and group status is read from a snapshot the service worker publishes after each tick.
+- `groups` grows on a device rescan when the running service has sighted a newly bound supported group since; a group that disappears keeps its row (it reports `lost`).  A rescan also corrects a group's `fan_count` when the modal count over complete discovery rows disagrees.
 - `mac` matches the corresponding RGBController's `serial` field, so a client can join a group row to its enumerated device.
-- `wedged` marks the terminal states a new intent re-arms (`failed` — resend budget / transport backoff exhaustion — and `foreign_master`); `state` plus `last_error` carry the detail.
+- `wedged` marks the terminal states a new intent re-arms (`failed` — resend budget / transport backoff exhaustion — and `foreign_master`); `state` plus `last_error` carry the detail.  Without new intent (e.g. an uploaded playback loop) the service also re-arms a wedge on a timer: 30 s, doubling per attempt up to 240 s, reset once the group is confirmed again.
 - `sighting` is `null` until the group has been sighted in the RX discovery table; `upload` is `null` when no desired upload is outstanding.
-- `rgb_clock` is the V1 master RGB-clock sample used for playback-clock sync; `age_ms` is the backend-side age of the sample at serialization time.
+- `rgb_clock` is the V1 master RGB-clock sample used for playback-clock sync; `age_ms` is the backend-side age of the sample at serialization time (re-aged at read; the rest of the group row is at most one worker tick old).
 - `counters` carries the process-wide `DiagCounters` (submissions, lock wait, compression, admission, USB, discovery, keep-alive, resets, clock queries).

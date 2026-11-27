@@ -93,6 +93,8 @@ namespace LianLiWireless
         uint32_t max_send_failures = 5;     /* transport failures -> Failed  */
         uint32_t max_resends      = 8;      /* per-upload resend budget      */
         uint64_t reconnect_ms     = 3000;   /* delay between transport retry batches */
+        uint64_t rearm_ms         = 30000;  /* first timed re-arm of a terminal wedge */
+        uint64_t rearm_max_ms     = 240000; /* timed re-arm backoff ceiling          */
     };
 
     class WirelessRuntime
@@ -101,7 +103,11 @@ namespace LianLiWireless
         WirelessRuntime(IWirelessLink& link, IWirelessClock& clock,
                         WirelessRuntimeConfig cfg = {});
 
+        /* A changed fan count on an existing target is new intent: it
+           re-arms a terminal wedge (e.g. a layout failure caused by a
+           wrong count frozen at detection). */
         void SetTarget(const Mac& mac, uint8_t expected_fans);
+        uint8_t ExpectedFans() const { return expected_fans; }
         /* newest-frame-wins: replaces any pending desired upload */
         void SetDesired(std::shared_ptr<const RgbUpload> upload);
         void ClearDesired();
@@ -139,6 +145,7 @@ namespace LianLiWireless
         /* N01: new intent re-arms a terminal wedge (Failed budget /
            layout exhaustion, ForeignMaster). See implementation. */
         void RearmTerminal();
+        bool IsTerminalWedge() const;
 
         IWirelessLink&       link;
         IWirelessClock&      clock;
@@ -180,5 +187,20 @@ namespace LianLiWireless
         uint64_t             connection_generation = 0;
         uint64_t             next_rgb_clock_ms = 0;
         RgbClockSnapshot     rgb_clock;
+
+        /* "target never sighted" grace: measured from the first poll
+           after entering Boot/Searching, not from clock epoch. */
+        uint64_t             search_started_ms = 0;
+        bool                 search_armed = false;
+
+        /* Timed re-arm of terminal wedges (uploaded playback sends no
+           new intent). Backoff doubles per re-arm up to rearm_max_ms
+           and resets once the group is confirmed again. */
+        bool                 rearm_scheduled = false;
+        uint64_t             next_rearm_ms = 0;
+        uint64_t             rearm_delay_ms = 0;
+        /* ForeignMaster entered because the local transmitter's MAC
+           changed: a re-arm adopts the current transmitter. */
+        bool                 identity_changed = false;
     };
 }
