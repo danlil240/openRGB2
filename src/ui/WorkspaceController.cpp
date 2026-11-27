@@ -580,6 +580,18 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
     const bool revs_moved  = ws_changed || ws != ws_rev_ ||
                              res != res_rev_;
     const bool sha_changed = sha != ws_sha256_;
+    /* Our OWN commit echoed back (audit U-3): the engine
+       publishes the post-commit snapshot before the terminal
+       job event, so while saving the hash equals the bytes we
+       submitted; after the terminal it equals the commit we
+       adopted. Either way the baseline is (or is about to be)
+       exactly that document — re-downloading it only races
+       edits made meanwhile into a false "changed on the engine"
+       conflict. */
+    const bool own_commit_echo =
+        !ws_changed && !sha.isEmpty() &&
+        ((saving_ && sha == pending_doc_sha_) ||
+         (sha == committed_sha_ && ws == committed_ws_rev_));
     /* A RESOURCE-only move: install/remove jobs advance the
        library revision while the document (revision + content
        hash) stands — the draft's commit base rebases silently
@@ -713,7 +725,7 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
            recovered draft must not be born stale. */
         NoteDraftEdited();
     }
-    else if(revs_moved || sha_changed)
+    else if((revs_moved || sha_changed) && !own_commit_echo)
     {
         /* The accepted workspace moved under the draft —
            fetch the new document; the session decides adopt
@@ -1992,6 +2004,13 @@ void WorkspaceController::OnJobEvent(const QVariantMap& ev)
     {
         if(ws > ws_rev_)   { ws_rev_ = ws; }
         if(res > res_rev_) { res_rev_ = res; }
+        if(revs_moved)
+        {
+            /* workspaceRevision/resourceRevision NOTIFY on
+               workspaceChanged — a silent move left QML showing
+               the pre-commit revision (audit U-3). */
+            emit workspaceChanged();
+        }
     }
 
     if(pending_job_id_ != 0 && job == pending_job_id_)
@@ -2127,6 +2146,10 @@ void WorkspaceController::ResolveJob(const QVariantMap& st)
         {
             session_.AdoptCommitted(d, ws, res);
             baseline_sha_.clear();
+            /* Remember what landed: the snapshot that names it
+               (before or after this event) is our own echo. */
+            committed_sha_    = pending_doc_sha_;
+            committed_ws_rev_ = ws;
         }
         pending_doc_     = nullptr;
         pending_doc_sha_ = QString();

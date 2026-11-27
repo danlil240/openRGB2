@@ -436,6 +436,12 @@ private:
     uint64_t    pending_job_id_   = 0;
     nlohmann::json pending_doc_ = nullptr;
     QString     pending_doc_sha_;
+    /* This client's last landed commit (content hash + the
+       revision it landed as). A snapshot naming exactly these
+       is the echo of our own save, not a foreign change: the
+       baseline already holds those bytes (audit U-3). */
+    QString     committed_sha_;
+    quint64     committed_ws_rev_ = 0;
     QString     pending_save_name_;
     /* job_id -> purpose for terminal workspace events not part
        of the save flow (import/export/reload). */
