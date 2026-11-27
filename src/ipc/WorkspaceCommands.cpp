@@ -29,6 +29,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <limits>
 #include <string>
 
 namespace openrgb2 { namespace ipc {
@@ -1872,12 +1873,28 @@ IpcReply WorkspaceCommands::HandleCalibrationShow(
                           "led must be an integer",
                           "bad_request");
     }
+    /* Range-check at full width BEFORE narrowing: get<int>()
+       of 2^32+2 is 2 — a valid LED the client never asked
+       for (audit I-13). Anything outside int is out of range
+       for every zone; in-range values keep the engine
+       session's own [-1, led_count) check. */
+    const nlohmann::json& led_j = body["led"];
+    const bool led_fits = led_j.is_number_unsigned()
+        ? led_j.get<uint64_t>() <=
+              (uint64_t)std::numeric_limits<int>::max()
+        : led_j.get<int64_t>() >= std::numeric_limits<int>::min() &&
+          led_j.get<int64_t>() <= std::numeric_limits<int>::max();
+    if(!led_fits)
+    {
+        return FailDetail(ErrCode::Unavailable,
+                          "led is out of range", "out_of_range");
+    }
     std::string err;
     /* The ENGINE session validates owner + token — this
        layer never weakens that check. */
     if(!session->Show(session_id,
                       body["token"].get<std::string>(),
-                      body["led"].get<int>(), err))
+                      (int)led_j.get<int64_t>(), err))
     {
         const char* detail = "show_failed";
         if(err.find("still starting") != std::string::npos)
