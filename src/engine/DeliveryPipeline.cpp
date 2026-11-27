@@ -586,8 +586,18 @@ bool DeliveryPipeline::DeliverOne(Lane& lane, RgbFrame frame,
                                              : Clock::now();
     lane.stats.RecordTransportCompletion(completed);
     aggregate_.RecordTransportCompletion(completed);
-    lane.has_sent      = true;
     lane.last_send     = now;
+    /* A send that straddled a topology change (RegisterDevice
+       bumped the generation and reset the delivered state while
+       the transport call ran unlocked) describes the OLD
+       generation: recording it would re-arm has_sent with an
+       old-namespace sequence/colors and stale-suppress the new
+       generation's first frames. */
+    if(frame.topology_generation != lane.snap.topology_generation)
+    {
+        return true;
+    }
+    lane.has_sent      = true;
     /* A synthetic sequence is outside the live namespace —
        recording it would let it stale-suppress every future
        live frame. Live high-water tracking stays live-only. */
