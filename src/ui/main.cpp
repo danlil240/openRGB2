@@ -28,6 +28,7 @@
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QIcon>
 #include <QLocalServer>
@@ -60,8 +61,95 @@
 #include <cstdlib>
 #include <cstring>
 
+namespace
+{
+
+/* QA port text -> 0..65535 (0 = ephemeral). Anything else —
+   non-numeric, signed, out of range — is rejected instead of
+   silently becoming 0 or wrapping modulo 65536. */
+bool ParseQaPort(const QString& text, int& port)
+{
+    bool ok = false;
+    const uint v = text.trimmed().toUInt(&ok, 10);
+    if(!ok || v > 65535u)
+    {
+        return false;
+    }
+    port = (int)v;
+    return true;
+}
+
+/* Bring the window back from the tray / minimized state
+   without dropping a maximized state (showNormal() would). */
+void ShowRestored(QQuickWindow* window)
+{
+    const Qt::WindowStates st =
+        window->windowStates() & ~Qt::WindowMinimized;
+    if(st & Qt::WindowMaximized)
+    {
+        window->showMaximized();
+    }
+    else
+    {
+        window->showNormal();
+    }
+    window->raise();
+    window->requestActivate();
+}
+
+#ifdef Q_OS_WIN
+/* Elevation probe usable before QApplication exists. Unknown
+   counts as elevated: the caller only uses it to drop
+   user-controlled search paths, which is safe either way. */
+bool ProcessIsElevated()
+{
+    HANDLE token = nullptr;
+    TOKEN_ELEVATION elevation{};
+    DWORD bytes = 0;
+    const bool known =
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)
+        && GetTokenInformation(token, TokenElevation, &elevation,
+                               sizeof(elevation), &bytes);
+    if(token)
+        CloseHandle(token);
+    return !known || elevation.TokenIsElevated;
+}
+#endif
+
+/* An elevated UI must not load modules from locations a
+   medium-integrity process controls: these variables are
+   inherited from the (non-elevated) user environment and steer
+   Qt's plugin / QML import / platform-plugin search, which would
+   let unelevated code inject a plugin into the elevated process.
+   Cleared before Qt loads anything (QApplication, styles, QML). */
+void ScrubModuleSearchEnv()
+{
+    static const char* const kVars[] = {
+        "QT_PLUGIN_PATH",
+        "QML_IMPORT_PATH",
+        "QML2_IMPORT_PATH",
+        "QT_QPA_PLATFORM_PLUGIN_PATH",
+        "QT_QUICK_CONTROLS_STYLE_PATH",
+        "QT_QPA_PLATFORMTHEME",
+        "QT_STYLE_OVERRIDE",
+        "QT_QUICK_CONTROLS_STYLE",
+    };
+    for(const char* v : kVars)
+    {
+        qunsetenv(v);
+    }
+}
+
+} /* anonymous namespace */
+
 int main(int argc, char** argv)
 {
+#ifdef Q_OS_WIN
+    if(ProcessIsElevated())
+    {
+        ScrubModuleSearchEnv();
+    }
+#endif
     /* --pipe <name> overrides the well-known command pipe —
        used by manual verification against a fixture engine. */
     QString pipe;
@@ -75,9 +163,12 @@ int main(int argc, char** argv)
         qEnvironmentVariableIsSet("OPENRGB2_QA") &&
         qEnvironmentVariable("OPENRGB2_QA") != "0";
     int  qa_port = openrgb2::ui::QaServer::kDefaultPort;
+    bool qa_port_ok = true;
+    QString qa_port_text;
     if(qEnvironmentVariableIsSet("OPENRGB2_QA_PORT"))
     {
-        qa_port = qEnvironmentVariable("OPENRGB2_QA_PORT").toInt();
+        qa_port_text = qEnvironmentVariable("OPENRGB2_QA_PORT");
+        qa_port_ok = ParseQaPort(qa_port_text, qa_port);
     }
     for(int i = 1; i < argc; ++i)
     {
@@ -91,13 +182,15 @@ int main(int argc, char** argv)
             if(i + 1 < argc && std::isdigit(
                    (unsigned char)argv[i + 1][0]))
             {
-                qa_port = std::atoi(argv[++i]);
+                qa_port_text = QString::fromUtf8(argv[++i]);
+                qa_port_ok = ParseQaPort(qa_port_text, qa_port);
             }
         }
         else if(std::strncmp(argv[i], "--qa=", 5) == 0)
         {
             qa_enabled = true;
-            qa_port = std::atoi(argv[i] + 5);
+            qa_port_text = QString::fromUtf8(argv[i] + 5);
+            qa_port_ok = ParseQaPort(qa_port_text, qa_port);
         }
         else if(std::strcmp(argv[i], "--managed") == 0)
         {
@@ -400,6 +493,14 @@ int main(int argc, char** argv)
         }
     }
 #endif
+    /* Main.qml restores the NORMAL geometry; the maximized flag
+       is applied here because setWindowStates() does not show a
+       hidden (tray-start) window — the state takes effect when
+       it is first shown. */
+    if(ui_prefs.windowMaximized())
+    {
+        window->setWindowStates(Qt::WindowMaximized);
+    }
     if(startup_task.available())
         startup_task.refresh();
 
@@ -408,11 +509,7 @@ int main(int argc, char** argv)
     QProcess shutdown;
     if(tray_available)
     {
-        auto show_ui = [window] {
-            window->showNormal();
-            window->raise();
-            window->requestActivate();
-        };
+        auto show_ui = [window] { ShowRestored(window); };
         tray.setToolTip(QStringLiteral("OpenRGB2"));
         tray.setContextMenu(&tray_menu);
         tray_menu.addAction(QObject::tr("Open OpenRGB2"), show_ui);
@@ -490,6 +587,10 @@ int main(int argc, char** argv)
                || reason == QSystemTrayIcon::DoubleClick)
                 show_ui();
         });
+        /* The background takeover notification opens the window,
+           where the confirmation dialog is waiting. */
+        QObject::connect(&tray, &QSystemTrayIcon::messageClicked,
+                         &app, show_ui);
         QObject::connect(&instance_server, &QLocalServer::newConnection,
                          &app, [&instance_server, show_ui] {
             while(auto* client = instance_server.nextPendingConnection())
@@ -503,7 +604,7 @@ int main(int argc, char** argv)
         if(background && !QSystemTrayIcon::isSystemTrayAvailable())
             QTimer::singleShot(20000, window, [window] {
                 if(!QSystemTrayIcon::isSystemTrayAvailable())
-                    window->showNormal();
+                    ShowRestored(window);
             });
 #endif
     }
@@ -513,9 +614,7 @@ int main(int argc, char** argv)
                          &app, [&instance_server, window] {
             while(auto* client = instance_server.nextPendingConnection())
             {
-                window->showNormal();
-                window->raise();
-                window->requestActivate();
+                ShowRestored(window);
                 client->deleteLater();
             }
         });
@@ -524,8 +623,21 @@ int main(int argc, char** argv)
     /* The desktop executable starts the existing managed stack.
        PowerShell is a child of the GUI process with CREATE_NO_WINDOW;
        the script starts the backend and engine with hidden windows.
-       -NoUI avoids a second copy of this executable. */
+       -NoUI avoids a second copy of this executable.
+
+       Takeover is never silent (RELEASE.md / install-recovery.md):
+       the first run goes WITHOUT -TakeOver. When the ownership gate
+       refuses (exit 3 + "OWNERSHIP CONFLICT" in the script output)
+       the competing owners are listed in a dialog and the start is
+       retried with -TakeOver only after the user confirms. A
+       background (sign-in) launch has no window to ask from: it
+       raises a tray notification and asks when the window is first
+       shown. Exit 4 = an elevated stack this process cannot verify. */
     QProcess startup;
+    bool     startup_takeover = false;
+    qint64   startup_log_offset = 0;
+    bool     takeover_ask_pending = false;
+    QStringList takeover_conflicts;
     if(managed)
     {
         const QString install_dir = QCoreApplication::applicationDirPath();
@@ -544,18 +656,8 @@ int main(int argc, char** argv)
             const QString log = QDir(state_dir).filePath(
                 QStringLiteral("startup.log"));
             startup.setProgram(QStringLiteral("powershell.exe"));
-            startup.setArguments({QStringLiteral("-NoProfile"),
-                QStringLiteral("-NonInteractive"),
-                QStringLiteral("-ExecutionPolicy"),
-                QStringLiteral("Bypass"),
-                QStringLiteral("-File"), script,
-                QStringLiteral("-InstallDir"), install_dir,
-                QStringLiteral("-TakeOver"),
-                QStringLiteral("-HideWindows"),
-                QStringLiteral("-NoUI")});
             startup.setWorkingDirectory(install_dir);
             startup.setProcessChannelMode(QProcess::MergedChannels);
-            startup.setStandardOutputFile(log, QIODevice::Append);
 #ifdef Q_OS_WIN
             startup.setCreateProcessArgumentsModifier(
                 [](QProcess::CreateProcessArguments* args) {
@@ -564,6 +666,59 @@ int main(int argc, char** argv)
                     args->startupInfo->wShowWindow = SW_HIDE;
                 });
 #endif
+            auto run_start = [&startup, &startup_takeover,
+                              &startup_log_offset, script, install_dir,
+                              log](bool take_over) {
+                if(startup.state() != QProcess::NotRunning)
+                    return;
+                startup_takeover = take_over;
+                QStringList args{QStringLiteral("-NoProfile"),
+                    QStringLiteral("-NonInteractive"),
+                    QStringLiteral("-ExecutionPolicy"),
+                    QStringLiteral("Bypass"),
+                    QStringLiteral("-File"), script,
+                    QStringLiteral("-InstallDir"), install_dir};
+                if(take_over)
+                    args << QStringLiteral("-TakeOver");
+                args << QStringLiteral("-HideWindows")
+                     << QStringLiteral("-NoUI");
+                startup.setArguments(args);
+                /* This run's output = the log bytes past here. */
+                startup_log_offset = QFileInfo(log).size();
+                startup.setStandardOutputFile(log, QIODevice::Append);
+                startup.start();
+            };
+            /* Shown once the window can host it (now, or on the first
+               show after a background start). */
+            auto ask_takeover = [&takeover_conflicts, run_start, window] {
+                QString list;
+                for(const QString& c : takeover_conflicts)
+                    list += QStringLiteral("  ") + c.trimmed()
+                            + QLatin1Char('\n');
+                QMessageBox box(QMessageBox::Warning,
+                    QObject::tr("OpenRGB2 - competing RGB software"),
+                    QObject::tr("Other RGB software is running and controls "
+                                "the same devices:\n\n%1\n"
+                                "Take over anyway? OpenRGB2 never closes "
+                                "these programs - they keep running and may "
+                                "fight over the lights. Choose No to close "
+                                "them yourself first (recommended).")
+                        .arg(list),
+                    QMessageBox::Yes | QMessageBox::No);
+                box.setDefaultButton(QMessageBox::No);
+                if(window && window->isVisible())
+                    box.setWindowModality(Qt::ApplicationModal);
+                if(box.exec() == QMessageBox::Yes)
+                    run_start(true);
+            };
+            QObject::connect(window, &QWindow::visibleChanged, &app,
+                [&takeover_ask_pending, ask_takeover](bool visible) {
+                if(visible && takeover_ask_pending)
+                {
+                    takeover_ask_pending = false;
+                    QTimer::singleShot(0, ask_takeover);
+                }
+            });
             QObject::connect(&startup, &QProcess::errorOccurred,
                              &app, [log](QProcess::ProcessError error) {
                 if(error == QProcess::FailedToStart)
@@ -573,27 +728,105 @@ int main(int argc, char** argv)
             });
             QObject::connect(&startup,
                 qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
-                &app, [log](int code, QProcess::ExitStatus status) {
-                if(status != QProcess::NormalExit || code != 0)
-                    QMessageBox::warning(nullptr, QObject::tr("OpenRGB2 startup"),
-                        QObject::tr("Lighting services could not start (exit code %1).\nDetails: %2")
-                            .arg(code).arg(log));
+                &app, [log, window, &tray, tray_available,
+                       &startup_takeover, &startup_log_offset,
+                       &takeover_conflicts, &takeover_ask_pending,
+                       ask_takeover](int code, QProcess::ExitStatus status) {
+                if(status == QProcess::NormalExit && code == 0)
+                    return;
+                if(status == QProcess::NormalExit && code == 4)
+                {
+                    QMessageBox::warning(nullptr,
+                        QObject::tr("OpenRGB2 startup"),
+                        QObject::tr("OpenRGB2 appears to be already running "
+                                    "with administrator rights, or a lighting "
+                                    "process could not be verified from this "
+                                    "launch.\n\nStart OpenRGB2 as "
+                                    "administrator.\n\nDetails: %1").arg(log));
+                    return;
+                }
+                QString out;
+                if(status == QProcess::NormalExit && code == 3
+                   && !startup_takeover)
+                {
+                    QFile f(log);
+                    if(f.open(QIODevice::ReadOnly)
+                       && f.seek(startup_log_offset))
+                        out = QString::fromLocal8Bit(f.readAll());
+                }
+                if(out.contains(QLatin1String("OWNERSHIP CONFLICT")))
+                {
+                    takeover_conflicts.clear();
+                    for(const QString& line :
+                        out.split(QLatin1Char('\n')))
+                    {
+                        if(line.contains(QLatin1String("ownership CONFLICT:")))
+                            takeover_conflicts << line.trimmed();
+                    }
+                    if(window->isVisible())
+                    {
+                        ask_takeover();
+                    }
+                    else
+                    {
+                        /* Background start: never take over (and
+                           never pop a dialog from nowhere) — notify,
+                           ask when the user opens the window. */
+                        takeover_ask_pending = true;
+                        if(tray_available)
+                            tray.showMessage(
+                                QObject::tr("OpenRGB2 needs your confirmation"),
+                                QObject::tr("Other RGB software is running, so "
+                                            "lighting was not started. Open "
+                                            "OpenRGB2 to review."),
+                                QSystemTrayIcon::Warning, 15000);
+                    }
+                    return;
+                }
+                QMessageBox::warning(nullptr, QObject::tr("OpenRGB2 startup"),
+                    QObject::tr("Lighting services could not start (exit code %1).\nDetails: %2")
+                        .arg(code).arg(log));
             });
-            QTimer::singleShot(0, &startup, [&startup] { startup.start(); });
+            QTimer::singleShot(0, &startup, [run_start] { run_start(false); });
         }
     }
 
     /* QA harness is opt-in and needs the loaded root object —
        it walks the live item tree and synthesizes input. */
     openrgb2::ui::QaServer qa_server(engine);
-    if(qa_enabled)
+    if(qa_enabled && !qa_port_ok)
+    {
+        /* Fail closed: an unparseable/out-of-range port never
+           falls back to some other port. */
+        std::fprintf(stderr,
+            "QA socket disabled: invalid port \"%s\" "
+            "(expected 0..65535)\n",
+            qa_port_text.toUtf8().constData());
+    }
+    else if(qa_enabled)
     {
         QString qa_err;
         if(qa_server.Start((quint16)qa_port, qa_err))
         {
+            /* Every request must carry this per-launch token.
+               tools/qa/qa.py reads the per-user token file. */
+            const QString token_file =
+                openrgb2::ui::QaServer::TokenFilePath(
+                    qa_server.Port());
+            QString tok_err;
+            const bool wrote =
+                qa_server.WriteTokenFile(token_file, tok_err);
             std::fprintf(stderr,
-                "QA socket: 127.0.0.1:%u\n",
-                (unsigned)qa_server.Port());
+                "QA socket: 127.0.0.1:%u\n"
+                "QA token: %s\n"
+                "QA token file: %s%s%s\n",
+                (unsigned)qa_server.Port(),
+                qa_server.Token().toLatin1().constData(),
+                QDir::toNativeSeparators(token_file)
+                    .toUtf8().constData(),
+                wrote ? "" : " (write failed: ",
+                wrote ? "" : (tok_err + QStringLiteral(")"))
+                                 .toUtf8().constData());
         }
         else
         {

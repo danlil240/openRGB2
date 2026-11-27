@@ -38,7 +38,9 @@
 #include <QJSValue>
 #include <QQmlComponent>
 #include <QQmlEngine>
+#include <QQuickItem>
 #include <QQuickStyle>
+#include <QQuickWindow>
 #include <QSignalSpy>
 #include <QVariantMap>
 
@@ -690,6 +692,49 @@ int main(int argc, char** argv)
             Call(cal, "close");
             CHECK(host.property("ended").toInt() == 1);
             ed->deleteLater();
+        }
+    }
+
+    /* Item.visible does not follow the window: hiding the
+       window (close-to-tray) or minimizing must still end the
+       hardware session (lease + blink traffic), leaving the
+       panel open. */
+    std::printf("-- qml: window hide ends the session\n");
+    {
+        QJSValue host = HostStub(engine);
+        /* Like the real controller: calibEnd ends the session, so
+           calibInfo stops reporting it active. */
+        host.setProperty("calibEnd", engine.evaluate(
+            "(function() { this.ended++; this.act = false;"
+            " this.begun = null })"));
+        QObject* ed = make_ed(host);
+        if(ed != nullptr)
+        {
+            /* The editor is a Popup: parent it into a real window
+               and open it so the calibrator lives in that window. */
+            QQuickWindow win;
+            win.resize(960, 680);
+            win.show();
+            ed->setProperty("parent",
+                QVariant::fromValue<QQuickItem*>(win.contentItem()));
+            QMetaObject::invokeMethod(ed, "open");
+            QCoreApplication::processEvents();
+            QObject* cal =
+                ed->property("calibrator").value<QObject*>();
+            Call(cal, "openForZone", QVariant::fromValue(ed), 0);
+            Call(cal, "startSessionOn", 0, 0);
+            host.setProperty("act", true);
+            Call(cal, "syncSession");
+            CHECK(cal->property("sessionActive").toBool());
+            CHECK(host.property("ended").toInt() == 0);
+            win.hide();
+            CHECK(host.property("ended").toInt() == 1);
+            CHECK(!cal->property("sessionActive").toBool());
+            CHECK(cal->property("panelOpen").toBool()); /* panel stays */
+            QMetaObject::invokeMethod(ed, "close");
+            ed->setProperty("parent",
+                QVariant::fromValue<QQuickItem*>(nullptr));
+            delete ed;
         }
     }
 

@@ -652,7 +652,7 @@ Item {
                                 visible: root.appliedMode === "live_effects"
                                 text: {
                                     const ag = root.engineUp
-                                               ? bridge.frameStatus.aggregate
+                                               ? bridge.frameAggregate
                                                : undefined;
                                     if(ag && ag.mean_interval_s > 0)
                                         return qsTr("live delivery ≈ %1 updates/s — transport-accepted interval (%2), not display FPS")
@@ -1007,8 +1007,16 @@ Item {
                                 Layout.fillWidth: true
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0; to: 100; stepSize: 1
-                                onMoved: if(root.editorUp)
-                                    sceneEdit.setBrightness(value / 100)
+                                /* One commit per gesture (release),
+                                   not one undo record per pixel of
+                                   drag; keyboard steps (no press)
+                                   commit immediately. */
+                                function commitValue() {
+                                    if(root.editorUp)
+                                        sceneEdit.setBrightness(value / 100)
+                                }
+                                onMoved: if(!pressed) commitValue()
+                                onPressedChanged: if(!pressed) commitValue()
                                 Binding {
                                     target: brightSlider
                                     property: "value"
@@ -1040,8 +1048,13 @@ Item {
                                 Layout.fillWidth: true
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0.05; to: 4.0; stepSize: 0.05
-                                onMoved: if(root.editorUp)
-                                    sceneEdit.setEffectSpeed(value)
+                                /* Commit on release (see brightness). */
+                                function commitValue() {
+                                    if(root.editorUp)
+                                        sceneEdit.setEffectSpeed(value)
+                                }
+                                onMoved: if(!pressed) commitValue()
+                                onPressedChanged: if(!pressed) commitValue()
                                 Binding {
                                     target: fxSpeedSlider
                                     property: "value"
@@ -1073,8 +1086,13 @@ Item {
                                 Layout.fillWidth: true
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0; to: 1.0; stepSize: 0.01
-                                onMoved: if(root.editorUp)
-                                    sceneEdit.setEffectIntensity(value)
+                                /* Commit on release (see brightness). */
+                                function commitValue() {
+                                    if(root.editorUp)
+                                        sceneEdit.setEffectIntensity(value)
+                                }
+                                onMoved: if(!pressed) commitValue()
+                                onPressedChanged: if(!pressed) commitValue()
                                 Binding {
                                     target: fxIntSlider
                                     property: "value"
@@ -1759,20 +1777,22 @@ Item {
                         width: parent.width
                         spacing: Theme.spaceM
 
+                        /* Stable-row C++ model — no delegate
+                           churn per frame_status push. */
                         Repeater {
                             model: root.engineUp
-                                   ? (bridge.frameStatus.controllers || [])
-                                   : []
+                                   ? bridge.frameControllers
+                                   : null
                             Column {
                                 spacing: Theme.spaceXS
                                 Text {
-                                    text: root.deviceNameFor(modelData.key)
+                                    text: root.deviceNameFor(model.key)
                                     color: Theme.textSecondary
                                     font.pixelSize: Theme.fontSizeSmall
                                 }
                                 FrameStrip {
                                     objectName: "previewStrip"
-                                    colors: modelData.colors || []
+                                    colors: model.colors || []
                                 }
                             }
                         }
@@ -1791,8 +1811,7 @@ Item {
                             objectName: "previewEmpty"
                             anchors.horizontalCenter: parent.horizontalCenter
                             visible: !root.engineUp
-                                     || !bridge.frameStatus.controllers
-                                     || bridge.frameStatus.controllers.length === 0
+                                     || bridge.frameControllers.count === 0
                             title: qsTr("No frame data")
                             detail: root.engineUp
                                     ? qsTr("The applied-output strip fills in when the engine delivers frames.")

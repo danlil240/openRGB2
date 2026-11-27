@@ -449,6 +449,35 @@ int main(int argc, char** argv)
         return !ws_ctl.saving() && !ws_ctl.dirty();
     }));
 
+    /*---- a slider drag is ONE undo record ------------------
+       Brightness used to commit on every onMoved: one drag =
+       dozens of history entries + full-document serializations.
+       Now the press..release gesture commits once; a keyboard
+       step (no press) still commits immediately. */
+    {
+        QObject* bright =
+            win->findChild<QObject*>(QStringLiteral("sceneBrightness"));
+        CHECK(bright != nullptr);
+        if(bright != nullptr)
+        {
+            const size_t before = ws_ctl.Session().UndoCount();
+            bright->setProperty("pressed", true);
+            for(int v : { 20, 30, 40, 55 })
+            {
+                bright->setProperty("value", v);
+                QMetaObject::invokeMethod(bright, "moved");
+            }
+            CHECK(ws_ctl.Session().UndoCount() == before);
+            bright->setProperty("pressed", false);
+            CHECK(ws_ctl.Session().UndoCount() == before + 1);
+            CHECK(std::abs(scene_edit.brightness() - 0.55) < 1e-6);
+            /* keyboard step: moved with no press */
+            bright->setProperty("value", 60);
+            QMetaObject::invokeMethod(bright, "moved");
+            CHECK(ws_ctl.Session().UndoCount() == before + 2);
+        }
+    }
+
     bridge.stop();
     std::printf("qml_workspace_save_test: %d checks, "
                 "%d failures\n", checks, failures);

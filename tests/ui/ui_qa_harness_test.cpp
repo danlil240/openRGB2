@@ -12,6 +12,11 @@
 //   - wait polls a property to match
 //   - eval exposes the root context
 //   - unknown ops and bad selectors fail honestly
+//   - hardening: every request needs the per-launch token; a
+//     missing/wrong token, a malformed (e.g. HTTP) line or an
+//     over-long line gets one error reply and the connection
+//     closes; `shot` confines relative paths to the QA output
+//     dir and refuses to overwrite files outside it
 //
 // No engine, no hardware — the bridge stays disconnected and
 // the shell renders its honest degraded surface.
@@ -25,6 +30,10 @@
 
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QTemporaryDir>
 #include <QEventLoop>
 #include <QGuiApplication>
 #include <QJsonArray>
@@ -37,6 +46,7 @@
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QTcpSocket>
+#include <QTimer>
 
 #include <cstdio>
 
@@ -47,11 +57,20 @@ static int failures = 0;
 #define CHECK(x) do { ++checks; if(!(x)) { ++failures; \
     std::printf("FAIL line %d: %s\n", __LINE__, #x); } } while(0)
 
+/* The server's per-launch token — Req() adds it to every
+   request that does not carry its own "token". */
+static QString g_token;
+
 /* One request line -> one reply line. The test never enters
    app.exec(), so the reply loop must pump the shared event
    loop — that is also what fires the server's readyRead. */
-static QJsonObject Req(QTcpSocket& sock, const QJsonObject& req)
+static QJsonObject Req(QTcpSocket& sock, const QJsonObject& req_in)
 {
+    QJsonObject req = req_in;
+    if(!req.contains(QStringLiteral("token")))
+    {
+        req.insert(QStringLiteral("token"), g_token);
+    }
     sock.write(QJsonDocument(req).toJson(QJsonDocument::Compact));
     sock.write("\n");
     sock.flush();
@@ -79,6 +98,32 @@ static QJsonObject Req(QTcpSocket& sock, const QJsonObject& req)
 static bool OkField(const QJsonObject& r)
 {
     return r.value(QStringLiteral("ok")).toBool(false);
+}
+
+/* Send raw bytes, read one reply line, then report whether the
+   server closed the connection afterwards. */
+static QJsonObject RawThenExpectClose(QTcpSocket& sock,
+                                      const QByteArray& bytes,
+                                      bool& closed)
+{
+    sock.write(bytes);
+    sock.flush();
+    QByteArray acc;
+    const qint64 deadline =
+        QDateTime::currentMSecsSinceEpoch() + 5000;
+    while(QDateTime::currentMSecsSinceEpoch() < deadline)
+    {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        acc += sock.readAll();
+        if(acc.contains('\n') &&
+           sock.state() == QAbstractSocket::UnconnectedState)
+        {
+            break;
+        }
+    }
+    closed = sock.state() == QAbstractSocket::UnconnectedState;
+    return QJsonDocument::fromJson(acc.left(acc.indexOf('\n')))
+        .object();
 }
 
 int main(int argc, char** argv)
@@ -122,6 +167,83 @@ int main(int argc, char** argv)
     }
     const quint16 port = qa.Port();
     CHECK(port != 0);
+    g_token = qa.Token();
+    CHECK(g_token.size() == 64);
+
+    /* Shots go to a scratch QA output dir, never the source tree. */
+    QTemporaryDir shot_dir;
+    CHECK(shot_dir.isValid());
+    qputenv("OPENRGB2_QA_OUTDIR", shot_dir.path().toUtf8());
+
+    /* token file round-trip */
+    {
+        QTemporaryDir td;
+        const QString f = QDir(td.path()).filePath(
+            QStringLiteral("sub/qa.token"));
+        QString terr;
+        CHECK(qa.WriteTokenFile(f, terr));
+        QFile tf(f);
+        CHECK(tf.open(QIODevice::ReadOnly));
+        CHECK(QString::fromLatin1(tf.readAll()) == g_token);
+        CHECK(ui::QaServer::TokenFilePath(5583)
+                  .endsWith(QStringLiteral("qa-5583.token")));
+    }
+
+    /* Missing / wrong token -> unauthorized + closed. */
+    {
+        QTcpSocket bad;
+        bad.connectToHost(QStringLiteral("127.0.0.1"), port);
+        CHECK(bad.waitForConnected(3000));
+        bool closed = false;
+        const QJsonObject r = RawThenExpectClose(
+            bad, "{\"op\":\"ping\"}\n", closed);
+        CHECK(!OkField(r));
+        CHECK(r.value(QStringLiteral("error")).toString()
+              == QLatin1String("unauthorized"));
+        CHECK(closed);
+    }
+    {
+        QTcpSocket bad;
+        bad.connectToHost(QStringLiteral("127.0.0.1"), port);
+        CHECK(bad.waitForConnected(3000));
+        bool closed = false;
+        const QJsonObject r = RawThenExpectClose(
+            bad, "{\"op\":\"eval\",\"code\":\"1\","
+                 "\"token\":\"nope\"}\n", closed);
+        CHECK(r.value(QStringLiteral("error")).toString()
+              == QLatin1String("unauthorized"));
+        CHECK(closed);
+    }
+    /* Cross-protocol HTTP POST: the first (non-JSON) line gets
+       one malformed reply and the connection closes — the JSON
+       body that follows is never parsed. */
+    {
+        QTcpSocket bad;
+        bad.connectToHost(QStringLiteral("127.0.0.1"), port);
+        CHECK(bad.waitForConnected(3000));
+        bool closed = false;
+        const QByteArray http =
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            "Content-Type: text/plain\r\n\r\n"
+            "{\"op\":\"eval\",\"code\":\"Qt.quit()\"}\n";
+        const QJsonObject r = RawThenExpectClose(bad, http, closed);
+        CHECK(r.value(QStringLiteral("error")).toString()
+              == QLatin1String("malformed"));
+        CHECK(closed);
+    }
+    /* Over-long line without a newline -> line_too_long + closed. */
+    {
+        QTcpSocket bad;
+        bad.connectToHost(QStringLiteral("127.0.0.1"), port);
+        CHECK(bad.waitForConnected(3000));
+        bool closed = false;
+        const QJsonObject r = RawThenExpectClose(
+            bad, QByteArray(ui::QaServer::kMaxLineBytes + 4096, 'x'),
+            closed);
+        CHECK(r.value(QStringLiteral("error")).toString()
+              == QLatin1String("line_too_long"));
+        CHECK(closed);
+    }
 
     QTcpSocket sock;
     sock.connectToHost(QStringLiteral("127.0.0.1"), port);
@@ -322,28 +444,22 @@ int main(int argc, char** argv)
               == QLatin1String("unknown_op"));
     }
     {
-        sock.write("this is not json\n");
-        sock.flush();
-        QByteArray acc;
-        const qint64 deadline =
-            QDateTime::currentMSecsSinceEpoch() + 5000;
-        while(!acc.contains('\n') &&
-              QDateTime::currentMSecsSinceEpoch() < deadline)
-        {
-            QCoreApplication::processEvents(
-                QEventLoop::AllEvents, 50);
-            acc += sock.readAll();
-        }
+        /* Bad JSON closes the connection — use a throwaway one. */
+        QTcpSocket bad;
+        bad.connectToHost(QStringLiteral("127.0.0.1"), port);
+        CHECK(bad.waitForConnected(3000));
+        bool closed = false;
         const QJsonObject r =
-            QJsonDocument::fromJson(acc.left(acc.indexOf('\n')))
-                .object();
+            RawThenExpectClose(bad, "this is not json\n", closed);
         CHECK(!OkField(r));
         CHECK(r.value(QStringLiteral("error")).toString()
               == QLatin1String("malformed"));
+        CHECK(closed);
     }
 
     /* shot — offscreen grab may legitimately fail on some
-       platforms; the contract is an honest reply either way. */
+       platforms; the contract is an honest reply either way.
+       A relative path lands under the QA output dir. */
     {
         const QJsonObject r =
             Req(sock, {{ QStringLiteral("op"),
@@ -353,9 +469,94 @@ int main(int argc, char** argv)
         CHECK(r.contains(QStringLiteral("ok")));
         if(OkField(r))
         {
-            CHECK(r.value(QStringLiteral("result"))
-                      .toObject()
-                      .value(QStringLiteral("width")).toInt() > 0);
+            const QJsonObject res =
+                r.value(QStringLiteral("result")).toObject();
+            CHECK(res.value(QStringLiteral("width")).toInt() > 0);
+            CHECK(QFileInfo(res.value(QStringLiteral("path"))
+                                .toString()).absolutePath()
+                  == QFileInfo(shot_dir.path()).absoluteFilePath());
+        }
+    }
+    /* ...and never overwrites an existing file outside it, nor
+       writes a non-.png name. */
+    {
+        QTemporaryDir outside;
+        const QString victim = QDir(outside.path()).filePath(
+            QStringLiteral("keep.png"));
+        {
+            QFile f(victim);
+            CHECK(f.open(QIODevice::WriteOnly));
+            f.write("precious");
+        }
+        const QJsonObject r =
+            Req(sock, {{ QStringLiteral("op"),
+                         QStringLiteral("shot") },
+                       { QStringLiteral("path"), victim }});
+        CHECK(!OkField(r));
+        CHECK(r.value(QStringLiteral("error")).toString()
+              == QLatin1String("bad_path"));
+        QFile f(victim);
+        CHECK(f.open(QIODevice::ReadOnly));
+        CHECK(f.readAll() == "precious");
+        const QJsonObject r2 =
+            Req(sock, {{ QStringLiteral("op"),
+                         QStringLiteral("shot") },
+                       { QStringLiteral("path"),
+                         QStringLiteral("evil.dll") }});
+        CHECK(r2.value(QStringLiteral("error")).toString()
+              == QLatin1String("bad_path"));
+    }
+
+    /* Re-entry: a second request pipelined behind a `wait` is
+       queued while the wait's nested loop runs and answered
+       AFTER it, in order (not dispatched re-entrantly). */
+    {
+        QJsonObject w{
+            { QStringLiteral("op"),   QStringLiteral("wait") },
+            { QStringLiteral("sel"),  QStringLiteral("navLighting") },
+            { QStringLiteral("prop"), QStringLiteral("visible") },
+            { QStringLiteral("value"), false },
+            { QStringLiteral("timeout_ms"), 300 },
+            { QStringLiteral("token"), g_token }};
+        QJsonObject p{
+            { QStringLiteral("op"),   QStringLiteral("ping") },
+            { QStringLiteral("token"), g_token }};
+        sock.write(QJsonDocument(w).toJson(QJsonDocument::Compact)
+                   + "\n");
+        sock.flush();
+        /* This thread is inside the server's nested wait loop
+           once it pumps — a timer is the only way to put the 2nd
+           line on the wire WHILE the wait is running. Without the
+           re-entry guard the ping would be dispatched inside the
+           wait and its reply would arrive FIRST. */
+        const QByteArray ping_line =
+            QJsonDocument(p).toJson(QJsonDocument::Compact) + "\n";
+        QTimer::singleShot(100, &sock, [&sock, ping_line] {
+            sock.write(ping_line);
+            sock.flush();
+        });
+        QByteArray acc;
+        const qint64 deadline =
+            QDateTime::currentMSecsSinceEpoch() + 5000;
+        while(acc.count('\n') < 2 &&
+              QDateTime::currentMSecsSinceEpoch() < deadline)
+        {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+            acc += sock.readAll();
+        }
+        const QList<QByteArray> lines = acc.split('\n');
+        CHECK(lines.size() >= 2);
+        if(lines.size() >= 2)
+        {
+            const QJsonObject first =
+                QJsonDocument::fromJson(lines[0]).object();
+            const QJsonObject second =
+                QJsonDocument::fromJson(lines[1]).object();
+            CHECK(first.value(QStringLiteral("error")).toString()
+                  == QLatin1String("timeout"));
+            CHECK(OkField(second));
+            CHECK(second.value(QStringLiteral("result")).toString()
+                  == QLatin1String("pong"));
         }
     }
 
@@ -435,7 +636,8 @@ int main(int argc, char** argv)
             { QStringLiteral("sel"),  QStringLiteral("navLighting") },
             { QStringLiteral("prop"), QStringLiteral("visible") },
             { QStringLiteral("value"), false },
-            { QStringLiteral("timeout_ms"), 30000 }})
+            { QStringLiteral("timeout_ms"), 30000 },
+            { QStringLiteral("token"), g_token }})
                 .toJson(QJsonDocument::Compact));
         sock.write("\n");
         sock.flush();

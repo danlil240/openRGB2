@@ -822,14 +822,24 @@ void WorkspaceController::CheckRecoveryOffer()
     }
     else if(!available_)
     {
-        /* No workspace surface at all (missing/legacy
-           engine) — the only honest offer is whatever record
-           exists; the draft is workspace-agnostic until the
-           user opens a target. */
-        const QStringList ids = drafts_.recordedIds();
-        if(!ids.isEmpty())
+        /* No workspace surface (missing/legacy engine, or the
+           session just ended). When this run already knows which
+           workspace is open (ws_id_ survives a disconnect), only
+           ITS record may be offered — another workspace's draft
+           recovered here would commit as this workspace's
+           content on the next save. With no workspace known yet
+           the draft is workspace-agnostic: offer what exists. */
+        if(!ws_id_.isEmpty())
         {
-            id = ids.first();
+            id = ws_id_;
+        }
+        else
+        {
+            const QStringList ids = drafts_.recordedIds();
+            if(!ids.isEmpty())
+            {
+                id = ids.first();
+            }
         }
     }
     else
@@ -876,12 +886,14 @@ void WorkspaceController::recoverDraft()
     {
         return;
     }
-    if(managed_ && offered_ws_id_ != ws_id_)
+    if(!ws_id_.isEmpty() && offered_ws_id_ != ws_id_)
     {
         /* Defense-in-depth: re-check the offer against the
-           live managed id — a foreign record must never stage
-           into this session (its document would commit as
-           this workspace's content). */
+           workspace this session has open — managed or not (a
+           disconnect clears managed_ but the open workspace is
+           still ws_id_). A foreign record must never stage into
+           this session (its document would commit as this
+           workspace's content). */
         SetError(QStringLiteral("the recovered draft belongs "
                                 "to a different workspace"),
                  QStringLiteral("input"));

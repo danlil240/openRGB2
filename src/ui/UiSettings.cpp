@@ -116,6 +116,31 @@ int UiSettings::windowHeight() const
         ->value(QStringLiteral("ui/windowHeight"), 0).toInt();
 }
 
+bool UiSettings::hasWindowPosition() const
+{
+    QSettings* s = const_cast<UiSettings*>(this)->Ensure();
+    return s->contains(QStringLiteral("ui/windowX"))
+           && s->contains(QStringLiteral("ui/windowY"));
+}
+
+bool UiSettings::windowMaximized() const
+{
+    return const_cast<UiSettings*>(this)->Ensure()
+        ->value(QStringLiteral("ui/windowMaximized"), false)
+        .toBool();
+}
+
+void UiSettings::setWindowMaximized(bool maximized)
+{
+    if(maximized == windowMaximized())
+    {
+        return;
+    }
+    Ensure()->setValue(QStringLiteral("ui/windowMaximized"),
+                       maximized);
+    emit prefsChanged();
+}
+
 void UiSettings::saveGeometry(int x, int y, int w, int h)
 {
     QSettings* s = Ensure();

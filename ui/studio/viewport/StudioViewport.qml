@@ -198,6 +198,12 @@ Rectangle {
     function previewColorsFor(oId, emitterCount) {
         if (!viewport || !viewport.previewActive)
             return null
+        /* The real model answers from an id index in C++ — no
+           per-object copy + linear scan of the whole frame. */
+        if (typeof viewport.colorsFor === "function") {
+            var r = viewport.colorsFor(oId, emitterCount)
+            return (r === undefined || r === null) ? null : r
+        }
         var objs = viewport.objects || []
         for (var i = 0; i < objs.length; i++) {
             var o = objs[i]
@@ -449,14 +455,37 @@ Rectangle {
                 property var emitterPos: []
                 property var emitterColors: []
 
+                /* sceneChanged fires per mouse move during a gesture
+                   preview; emitter positions are in the object's
+                   LOCAL frame, so a transform-only change leaves
+                   them identical. Reassigning emitterPos (the
+                   Repeater3D model) recreates every emitter Model —
+                   only do it when the layout really changed. */
+                function sameLayout(a, b) {
+                    if (a.length !== b.length)
+                        return false
+                    for (var i = 0; i < a.length; i++) {
+                        var p = a[i], q = b[i]
+                        if (p.i !== q.i || p.x !== q.x || p.y !== q.y
+                            || p.z !== q.z)
+                            return false
+                    }
+                    return true
+                }
                 function reloadLayout() {
                     var list = root.objectCtl
                                ? root.objectCtl.emittersOf(oId) : []
-                    emitterPos = list
-                    var cols = []
-                    for (var i = 0; i < list.length; i++) cols.push(list[i].c)
-                    emitterColors = cols
+                    if (!sameLayout(list, emitterPos))
+                        emitterPos = list
                     reloadColors()
+                }
+                function sameColors(a, b) {
+                    if (a.length !== b.length)
+                        return false
+                    for (var i = 0; i < a.length; i++)
+                        if (String(a[i]) !== String(b[i]))
+                            return false
+                    return true
                 }
 
                 /* Draft-preview colors win while the Task 7 feed is
@@ -468,9 +497,13 @@ Rectangle {
                 function reloadColors() {
                     var pv = root.previewColorsFor(oId,
                                                    emitterPos.length)
-                    emitterColors = pv !== null ? pv
+                    var next = pv !== null ? pv
                         : (root.objectCtl
                            ? root.objectCtl.emitterColorsOf(oId) : [])
+                    /* Unchanged colors: keep the array so the
+                       per-dot material bindings don't all re-run. */
+                    if (!sameColors(next, emitterColors))
+                        emitterColors = next
                 }
 
                 position: Qt.vector3d(rf("x", 0), rf("y", 0), rf("z", 0))

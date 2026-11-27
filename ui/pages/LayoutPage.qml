@@ -585,7 +585,7 @@ Item {
                                         if(!root.engineUp)
                                             return false;
                                         const ag =
-                                            bridge.frameStatus.aggregate;
+                                            bridge.frameAggregate;
                                         return !!(ag
                                                   && ag.mean_interval_s
                                                      > 0);

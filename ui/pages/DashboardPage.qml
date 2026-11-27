@@ -193,8 +193,8 @@ Item {
                             text: {
                                 if(!root.engineUp)
                                     return qsTr("—");
-                                const wl = bridge.frameStatus.wireless;
-                                if(!wl)
+                                const wl = bridge.frameWireless;
+                                if(!wl || Object.keys(wl).length === 0)
                                     return qsTr("not measured");
                                 /* An uploaded loop (or a
                                    calibration session) owns the
@@ -218,8 +218,8 @@ Item {
                             text: {
                                 if(!root.engineUp)
                                     return qsTr("engine offline");
-                                const wl = bridge.frameStatus.wireless;
-                                if(!wl)
+                                const wl = bridge.frameWireless;
+                                if(!wl || Object.keys(wl).length === 0)
                                     return qsTr("no wireless lane enumerated");
                                 if(wl.owned || wl.suppressed)
                                     return qsTr("uploaded loop owns the group — live delivery suppressed");
@@ -251,27 +251,29 @@ Item {
                     width: parent.width
                     spacing: Theme.spaceM
 
+                    /* Stable-row C++ model: a frame push updates
+                       rows in place (no delegate churn). */
                     Repeater {
                         model: root.engineUp
-                               ? (bridge.frameStatus.controllers || [])
-                               : []
+                               ? bridge.frameControllers
+                               : null
 
                         Column {
                             spacing: Theme.spaceXS
 
                             Text {
-                                text: root.deviceNameFor(modelData.key)
+                                text: root.deviceNameFor(model.key)
                                 color: Theme.textSecondary
                                 font.pixelSize: Theme.fontSizeSmall
                             }
                             FrameStrip {
-                                colors: modelData.colors || []
+                                colors: model.colors || []
                             }
                             /* QA F04: the lane exists but the
                                transport never accepted a frame —
                                visible, not an absent row. */
                             Text {
-                                visible: modelData.delivered === false
+                                visible: model.delivered === false
                                 text: qsTr("no frames delivered")
                                 color: Theme.textDisabled
                                 font.pixelSize: Theme.fontSizeSmall
@@ -283,8 +285,7 @@ Item {
                         objectName: "previewEmpty"
                         anchors.horizontalCenter: parent.horizontalCenter
                         visible: !root.engineUp
-                                 || !bridge.frameStatus.controllers
-                                 || bridge.frameStatus.controllers.length === 0
+                                 || bridge.frameControllers.count === 0
                         title: qsTr("No frame data")
                         detail: root.engineUp
                                 ? qsTr("The engine reports no delivery counters yet — the preview fills in when frames are submitted.")

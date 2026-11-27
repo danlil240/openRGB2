@@ -19,14 +19,29 @@
 |||   path, so MouseAreas, Controls handlers, focus and     ||
 |||   shortcuts all behave as they do for a user.           ||
 |||                                                           ||
+|||   Hardening: loopback alone does not stop other local   ||
+|||   processes or a browser's cross-protocol POST, so      ||
+|||   every request must carry "token" — a per-launch      ||
+|||   random secret (Token(); main.cpp writes it to a      ||
+|||   per-user file and stderr). A wrong/missing token, a  ||
+|||   malformed line, or an over-long line gets one error  ||
+|||   reply and the connection is CLOSED. `shot` writes    ||
+|||   relative paths under ShotDir() and never overwrites  ||
+|||   an existing file outside it.                          ||
+|||                                                           ||
 |||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 ||\*---------------------------------------------------------*/
 
 #pragma once
 
+#include <QByteArray>
+#include <QHash>
 #include <QJsonObject>
 #include <QObject>
 #include <QPointer>
+#include <QString>
+
+#include <memory>
 
 class QQmlApplicationEngine;
 class QQuickItem;
@@ -51,8 +66,27 @@ public:
     bool    Start(quint16 port, QString& err);
     quint16 Port() const;
 
+    /* The per-launch secret every request must carry as
+       "token" (64 hex chars, generated in the constructor). */
+    QString Token() const { return token_; }
+
+    /* Writes Token() to `path` (parent created; owner-only
+       permissions where the platform honours them). */
+    bool    WriteTokenFile(const QString& path, QString& err) const;
+    /* The per-user token file for `port` -
+       <GenericDataLocation>/OpenRGB2/qa/qa-<port>.token
+       (%LOCALAPPDATA% on Windows). tools/qa/qa.py reads it. */
+    static QString TokenFilePath(quint16 port);
+
+    /* Where `shot` writes relative paths (created on demand):
+       $OPENRGB2_QA_OUTDIR, else <temp>/openrgb2-qa. */
+    static QString ShotDir();
+
     /* Default listen port (`--qa` without a value). */
     static constexpr quint16 kDefaultPort = 5583;
+    /* A request line longer than this (no newline yet) closes
+       the connection — the buffer is never unbounded. */
+    static constexpr int kMaxLineBytes = 1 << 20;
 
 private:
     void        OnNewConnection();
@@ -104,9 +138,24 @@ private:
     static QJsonObject Err(const QString& code,
                            const QString& message);
 
+    /* Per-socket framing state. `dispatching` is the re-entry
+       guard: an op that spins a nested event loop (wait, shot,
+       synthesized input) can fire readyRead for the SAME socket -
+       the nested call only appends to `acc`; the outer loop
+       drains the queued lines in order after Dispatch returns. */
+    struct ClientState
+    {
+        QByteArray acc;
+        bool       dispatching = false;
+        bool       closing     = false;
+    };
+    void        CloseAfterReply(QTcpSocket* sock);
+
     QQmlApplicationEngine& engine_;
     QTcpServer*            server_ = nullptr;
     QList<QPointer<QTcpSocket>> clients_;
+    QHash<QTcpSocket*, std::shared_ptr<ClientState>> state_;
+    QString                token_;
 };
 
 } /* namespace ui */

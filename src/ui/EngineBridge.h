@@ -20,6 +20,7 @@
 #pragma once
 
 #include "EngineWireClient.h"
+#include "FrameFeedModel.h"
 #include "NamedPipe.h"
 
 #include <QObject>
@@ -85,8 +86,31 @@ class EngineBridge : public QObject
          what PLAYBACK reports — nothing physical is invented */
     Q_PROPERTY(QVariantMap playbackView READ playbackView
                    NOTIFY playbackViewChanged)
+    /* The whole last frame_status body. C++ consumers and tests
+       read it; QML should bind to the split views below — every
+       QML read of this map converts ALL controller colors to JS,
+       and it changes at up to ~30 Hz. */
     Q_PROPERTY(QVariantMap frameStatus READ frameStatus
                    NOTIFY frameStatusChanged)
+    /* frame_status.controllers[] as a stable-row list model
+       (FrameFeedModel): a push updates rows in place, so preview
+       Repeaters keep their delegates. */
+    Q_PROPERTY(QObject* frameControllers READ frameControllers
+                   CONSTANT)
+    /* frame_status.aggregate / .wireless — notify only when the
+       sub-object actually changed. */
+    Q_PROPERTY(QVariantMap frameAggregate READ frameAggregate
+                   NOTIFY frameAggregateChanged)
+    Q_PROPERTY(QVariantMap frameWireless READ frameWireless
+                   NOTIFY frameWirelessChanged)
+    /* false while nothing can show the feed (window hidden to the
+       tray or minimized): frame_status pushes are dropped on the
+       worker thread before they reach the GUI thread. The stores
+       keep their last (stale) values; the next push after
+       re-activation refreshes them. Default true. */
+    Q_PROPERTY(bool frameFeedActive READ frameFeedActive
+                   WRITE setFrameFeedActive
+                   NOTIFY frameFeedActiveChanged)
     Q_PROPERTY(QVariantMap deliveryStats READ deliveryStats
                    NOTIFY deliveryStatsChanged)
     Q_PROPERTY(QVariantList presets READ presets
@@ -158,6 +182,11 @@ public:
        job results also arrive as "workspace" EVENTs. */
     Q_INVOKABLE int workspaceCommand(const QString& verb,
                                      const QVariantMap& args);
+    /* C++-only twin taking a ready JSON object (non-objects are
+       replaced by {}) — skips the QVariant round trip for large
+       bodies such as the draft-preview document. */
+    int workspaceCommandJson(const QString& verb,
+                             nlohmann::json args);
     Q_INVOKABLE int quitEngine(bool stopBackend);
 
     /*---- state ------------------------------------------------*/
@@ -174,6 +203,11 @@ public:
     QVariantMap playback() const;
     QVariantMap playbackView() const;
     QVariantMap frameStatus() const;
+    QObject*    frameControllers() const;
+    QVariantMap frameAggregate() const;
+    QVariantMap frameWireless() const;
+    bool        frameFeedActive() const;
+    void        setFrameFeedActive(bool active);
     QVariantMap deliveryStats() const;
     QVariantList presets() const;
     QVariantMap diagnostics() const;
@@ -205,6 +239,9 @@ signals:
     void playbackChanged();
     void playbackViewChanged();
     void frameStatusChanged();
+    void frameAggregateChanged();
+    void frameWirelessChanged();
+    void frameFeedActiveChanged();
     void deliveryStatsChanged();
     void presetsChanged();
     void diagnosticsChanged();
@@ -274,6 +311,12 @@ private:
     QVariantMap scene_;
     QVariantMap playback_;
     QVariantMap frame_status_;
+    QVariantMap frame_aggregate_;
+    QVariantMap frame_wireless_;
+    FrameFeedModel* frame_controllers_ = nullptr;   /* child */
+    /* Read on the worker thread (event filter), written on the
+       GUI thread. */
+    std::atomic<bool> frame_feed_active_{ true };
     QVariantMap delivery_stats_;
     QVariantList presets_;
     QVariantMap diagnostics_;
