@@ -2497,9 +2497,14 @@ EditorController::SetFlow(const FlowEdit& f)
     }
     if(!f.colors.empty())
     {
-        if(f.colors.size() < 2 || f.colors.size() > 5)
+        /* Any stop count a palette can hold: the card shows the
+           first flow layer's stops as swatches, so whatever it
+           shows (one stop, six) must be accepted back. The card's
+           own +/- buttons keep new edits in 2..5. */
+        if(f.colors.size() > EFFECT_MAX_STOPS)
         {
-            last_error = "wave needs 2 to 5 colors";
+            last_error = "wave needs 1 to "
+                       + std::to_string(EFFECT_MAX_STOPS) + " colors";
             return std::nullopt;
         }
         for(const ColorF& c : f.colors)

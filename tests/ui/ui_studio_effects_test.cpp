@@ -482,6 +482,94 @@ int main(int argc, char** argv)
               < 1e-4);
     }
 
+    std::printf("-- Wave card adapter: flowState / setFlow* "
+                "(audit U-12)\n");
+    {
+        /* The packaged Wave look: [0] colour flow (4 stops, z -1,
+           1.25 m, 0.12 m/s), [1] screen swell, [2] keyboard
+           white. */
+        Rig rig;
+        rig.LoadDoc(CompactDoc("wave"));
+        QVariantMap f = rig.ctl.flowState();
+        CHECK(f.value("available").toBool());
+        const QVariantMap dir = f.value("direction").toMap();
+        CHECK(std::fabs(dir.value("z").toDouble() + 1.0) < 1e-4);
+        CHECK(std::fabs(f.value("speed").toDouble() - 0.12) < 1e-4);
+        CHECK(std::fabs(f.value("wavelength").toDouble() - 1.25) < 1e-4);
+        CHECK(f.value("colors").toStringList().size() == 4);
+        CHECK(f.value("keyboardLayer").toInt() == 2);
+        CHECK(f.value("keyboardOn").toBool());
+
+        /* Direction: one record over both waves, undoable. */
+        CHECK(rig.ctl.setFlowDirection(2, 0, 0));
+        CHECK(rig.UndoCount() == 1);
+        CHECK(std::fabs(rig.Working().effect.layers[0].direction.x
+                        - 1.0f) < 1e-4);
+        CHECK(std::fabs(rig.Working().effect.layers[1].direction.x
+                        - 1.0f) < 1e-4);
+        CHECK(std::fabs(rig.ctl.flowState().value("direction").toMap()
+                            .value("x").toDouble() - 1.0) < 1e-4);
+        rig.ctl.undo();
+        CHECK(!rig.ctl.hasInlineLayers());
+
+        /* Speed / wavelength rescale proportionally. */
+        CHECK(rig.ctl.setFlowSpeed(0.24));
+        CHECK(std::fabs(rig.Working().effect.layers[1].speed - 0.30f)
+              < 1e-4);
+        CHECK(rig.ctl.setFlowWavelength(2.5));
+        CHECK(std::fabs(rig.Working().effect.layers[1].scale - 1.8f)
+              < 1e-4);
+
+        /* Every count flowState can show is accepted back: a
+           6th swatch, then recolouring one of six. */
+        QStringList cols = rig.ctl.flowState().value("colors")
+                               .toStringList();
+        cols << "#FF0000" << "#00FF00";
+        CHECK(rig.ctl.setFlowColors(cols));
+        cols = rig.ctl.flowState().value("colors").toStringList();
+        CHECK(cols.size() == 6);
+        while(cols.size() < 6)
+        {
+            cols << "#FFFFFF";
+        }
+        cols[5] = "#0000FF";
+        CHECK(rig.ctl.setFlowColors(cols));
+        CHECK(rig.ctl.flowState().value("colors").toStringList()
+                  .value(5).compare("#0000FF", Qt::CaseInsensitive)
+              == 0);
+        /* ...and a one-colour palette can be recoloured. */
+        CHECK(rig.ctl.setFlowColors({ "#FFFFFF" }));
+        CHECK(rig.ctl.flowState().value("colors").toStringList()
+                  .size() == 1);
+        CHECK(rig.ctl.setFlowColors({ "#123456" }));
+
+        /* Refusals are honest: a status line, no record. */
+        const size_t recs = rig.UndoCount();
+        QSignalSpy status(&rig.ctl,
+                          &EffectEditorController::statusMessage);
+        CHECK(!rig.ctl.setFlowColors({}));
+        CHECK(!rig.ctl.setFlowColors({ "#FF0000", "not-a-color" }));
+        QStringList many;
+        for(unsigned int k = 0; k <= studio::EFFECT_MAX_STOPS; ++k)
+        {
+            many << "#FF0000";
+        }
+        CHECK(!rig.ctl.setFlowColors(many));
+        CHECK(!rig.ctl.setFlowSpeed(-1.0));
+        CHECK(!rig.ctl.setFlowDirection(0, 0, 0));
+        CHECK(status.count() == 5);
+        CHECK(rig.UndoCount() == recs);
+
+        /* Mid-gesture the card is refused — with a status line,
+           not silently. */
+        status.clear();
+        rig.ctl.beginLayerGesture();
+        CHECK(!rig.ctl.setFlowSpeed(0.4));
+        CHECK(status.count() == 1);
+        rig.ctl.cancelLayerGesture();
+        CHECK(rig.UndoCount() == recs);
+    }
+
     std::printf("-- persisted input settings (draft inputs.*)\n");
     {
         Rig rig;
