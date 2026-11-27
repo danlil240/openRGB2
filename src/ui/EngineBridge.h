@@ -270,6 +270,9 @@ private:
     /*---- GUI-thread application of wire callbacks -------------*/
     void ApplyWelcome(const nlohmann::json& welcome);
     void ApplyEvent(const nlohmann::json& event_body);
+    /* GUI side of the frame_status slot: take the newest one
+       and apply it (audit U-10). */
+    void ApplyPendingFrameStatus();
     void ApplyReply(uint32_t request_id, ipc::MsgType type,
                     const nlohmann::json& body);
     void ApplySessionEnd(EngineWireClient::EndReason reason,
@@ -317,16 +320,19 @@ private:
     /* Read on the worker thread (event filter), written on the
        GUI thread. */
     std::atomic<bool> frame_feed_active_{ true };
-    /* The newest frame_status dropped while the feed was
-       inactive. The engine only emits on change, so on
-       re-activation this IS the current state (static,
-       uploaded and power-gated output would otherwise keep
-       showing pre-hide data). frame_mu_ makes the worker's
-       "inactive? then park" and the GUI's "activate + take"
-       atomic w.r.t. each other, so a parked event can never
-       be applied after a newer posted one, nor be lost. */
+    /* ONE latest-wins frame_status slot (audit U-10). The wire
+       thread overwrites it and posts at most one apply while
+       none is queued, so a GUI thread that falls behind a ~30 Hz
+       feed converts and repaints only the newest frame instead
+       of a backlog. While the feed is inactive the slot is just
+       parked: the engine only emits on change, so on
+       re-activation it IS the current state (static, uploaded
+       and power-gated output would otherwise keep showing
+       pre-hide data). frame_mu_ guards slot + queued flag
+       between the wire thread and the GUI thread. */
     std::mutex                      frame_mu_;
-    std::unique_ptr<nlohmann::json> parked_frame_status_;
+    std::unique_ptr<nlohmann::json> pending_frame_status_;
+    bool                            frame_post_queued_ = false;
     QVariantMap delivery_stats_;
     QVariantList presets_;
     QVariantMap diagnostics_;

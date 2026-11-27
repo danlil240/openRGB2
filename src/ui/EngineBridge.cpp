@@ -171,21 +171,23 @@ void EngineBridge::WorkerMain()
                    && k->get_ref<const std::string&>()
                           == ipc::event_kind::kFrameStatus)
                 {
-                    /* Park-or-post under frame_mu_, the same lock
-                       setFrameFeedActive posts the parked event
-                       under: frame_status posts stay in arrival
-                       order across a hide/show. */
+                    /* Latest-wins slot (audit U-10): overwrite the
+                       newest frame and post ONE apply while none
+                       is queued — a GUI thread behind the feed
+                       never works through a backlog. While the
+                       feed is inactive the frame only parks. */
                     std::lock_guard<std::mutex> lock(frame_mu_);
-                    if(!frame_feed_active_.load())
+                    if(pending_frame_status_)
+                        *pending_frame_status_ = j;
+                    else
+                        pending_frame_status_ =
+                            std::make_unique<nlohmann::json>(j);
+                    if(frame_feed_active_.load() &&
+                       !frame_post_queued_)
                     {
-                        if(parked_frame_status_)
-                            *parked_frame_status_ = j;
-                        else
-                            parked_frame_status_ =
-                                std::make_unique<nlohmann::json>(j);
-                        return;
+                        frame_post_queued_ = true;
+                        Post([this] { ApplyPendingFrameStatus(); });
                     }
-                    Post([this, j] { ApplyEvent(j); });
                     return;
                 }
             }
@@ -420,9 +422,28 @@ void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
     }
 }
 
+/* Assign + notify only when the value moved (audit U-10): the
+   Devices page polls snapshots/state/delivery/diagnostics every
+   couple of seconds, and an identical reply re-running every
+   binding and LayoutController's per-snapshot rebuild is pure
+   GUI-thread waste. */
+template <typename T, typename Sig>
+static void SetIfChanged(EngineBridge* self, T& store, T&& value,
+                         Sig signal)
+{
+    if(store != value)
+    {
+        store = std::move(value);
+        emit (self->*signal)();
+    }
+}
+
 void EngineBridge::ApplyReply(uint32_t request_id, ipc::MsgType type,
                               const nlohmann::json& body)
 {
+    /* Converted ONCE: whole-body stores and replyReceived share
+       the same implicitly shared QVariantMap. */
+    const QVariantMap body_map = JsonToVariant(body).toMap();
     /* Reply bodies are objects by contract; anything else skips
        the store update (still emitted to replyReceived below —
        the correlator is what callers pair on). The try/catch
@@ -434,55 +455,58 @@ void EngineBridge::ApplyReply(uint32_t request_id, ipc::MsgType type,
     switch(type)
     {
     case ipc::MsgType::Snapshots:
-        snapshots_ =
+        SetIfChanged(this, snapshots_,
             JsonToVariant(body.value("snapshots",
                                      nlohmann::json::array()))
-                .toList();
-        emit snapshotsChanged();
+                .toList(),
+            &EngineBridge::snapshotsChanged);
         if(body.contains("connection") &&
            body["connection"].is_object())
         {
-            connection_ = JsonToVariant(body["connection"]).toMap();
-            emit connectionChanged();
+            SetIfChanged(this, connection_,
+                JsonToVariant(body["connection"]).toMap(),
+                &EngineBridge::connectionChanged);
         }
         break;
     case ipc::MsgType::Scene:
-        scene_ = JsonToVariant(body).toMap();
+        scene_ = body_map;
         emit sceneChanged();
         break;
     case ipc::MsgType::Playback:
-        playback_ = JsonToVariant(body).toMap();
+        playback_ = body_map;
         emit playbackChanged();
         break;
     case ipc::MsgType::DeliveryStats:
-        delivery_stats_ = JsonToVariant(body).toMap();
-        emit deliveryStatsChanged();
+        SetIfChanged(this, delivery_stats_, QVariantMap(body_map),
+                     &EngineBridge::deliveryStatsChanged);
         break;
     case ipc::MsgType::State:
-        state_report_ = JsonToVariant(body).toMap();
-        emit stateReportChanged();
+        SetIfChanged(this, state_report_, QVariantMap(body_map),
+                     &EngineBridge::stateReportChanged);
         if(body.contains("sdk") && body["sdk"].is_object())
         {
-            connection_ = JsonToVariant(body["sdk"]).toMap();
-            emit connectionChanged();
+            SetIfChanged(this, connection_,
+                body_map.value(QStringLiteral("sdk")).toMap(),
+                &EngineBridge::connectionChanged);
         }
         if(body.contains("reactive") &&
            body["reactive"].is_object())
         {
-            reactive_ = JsonToVariant(body["reactive"]).toMap();
-            emit reactiveChanged();
+            SetIfChanged(this, reactive_,
+                body_map.value(QStringLiteral("reactive")).toMap(),
+                &EngineBridge::reactiveChanged);
         }
         break;
     case ipc::MsgType::Presets:
-        presets_ =
+        SetIfChanged(this, presets_,
             JsonToVariant(body.value("presets",
                                      nlohmann::json::array()))
-                .toList();
-        emit presetsChanged();
+                .toList(),
+            &EngineBridge::presetsChanged);
         break;
     case ipc::MsgType::Diagnostics:
-        diagnostics_ = JsonToVariant(body).toMap();
-        emit diagnosticsChanged();
+        SetIfChanged(this, diagnostics_, QVariantMap(body_map),
+                     &EngineBridge::diagnosticsChanged);
         break;
     case ipc::MsgType::Error:
         setLastError(QString::fromStdString(
@@ -502,7 +526,7 @@ void EngineBridge::ApplyReply(uint32_t request_id, ipc::MsgType type,
 
     emit replyReceived((int)request_id,
                        QString::fromLatin1(ipc::MsgTypeName(type)),
-                       JsonToVariant(body).toMap());
+                       body_map);
 }
 
 void EngineBridge::ApplySessionEnd(EngineWireClient::EndReason reason,
@@ -901,18 +925,33 @@ void EngineBridge::setFrameFeedActive(bool active)
         {
             return;
         }
-        /* false -> true: repaint the current frame_status. Posted
-           under the lock the worker posts frame_status under, so
-           it queues after anything posted before the hide and
-           before anything newer. */
-        if(active && parked_frame_status_)
+        /* false -> true: repaint the parked frame_status (the
+           newest; the slot is latest-wins). */
+        if(active && pending_frame_status_ && !frame_post_queued_)
         {
-            std::shared_ptr<const nlohmann::json> parked(
-                std::move(parked_frame_status_));
-            Post([this, parked] { ApplyEvent(*parked); });
+            frame_post_queued_ = true;
+            Post([this] { ApplyPendingFrameStatus(); });
         }
     }
     emit frameFeedActiveChanged();
+}
+
+void EngineBridge::ApplyPendingFrameStatus()
+{
+    std::unique_ptr<nlohmann::json> f;
+    {
+        std::lock_guard<std::mutex> lock(frame_mu_);
+        frame_post_queued_ = false;
+        if(!frame_feed_active_.load())
+        {
+            return;     /* hidden since the post: stays parked */
+        }
+        f = std::move(pending_frame_status_);
+    }
+    if(f)
+    {
+        ApplyEvent(*f);
+    }
 }
 QVariantMap EngineBridge::deliveryStats() const   { return delivery_stats_; }
 QVariantList EngineBridge::presets() const        { return presets_; }

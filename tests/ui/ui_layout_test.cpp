@@ -37,6 +37,8 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <thread>
+#include <chrono>
 
 using namespace openrgb2;
 using namespace openrgb2::ipc;
@@ -1258,6 +1260,33 @@ static void BridgeTests()
             return s.scene_saves == sc + 2 && !ctl.busy()
                    && ctl.items().size() == 9;
         }));
+    }
+
+    /*---- U-10: queued view notifications coalesce -----------*/
+    std::printf("-- view notify coalescing (U-10)\n");
+    {
+        /* Two store updates landing in one event-loop pass (a
+           scene push and a topology push queued back to back)
+           must rebuild the canvas Repeater ONCE, not per update. */
+        int items_signals = 0;
+        auto conn = QObject::connect(&ctl,
+            &LayoutController::itemsChanged,
+            [&] { ++items_signals; });
+        ++s.revision;
+        s.srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "scene" }, { "data", SceneEnvelope(s) } }));
+        s.srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "topology" },
+                { "data", nlohmann::json::object({
+                    { "snapshots", nlohmann::json::array(
+                        { SnapFixture() }) } }) } }));
+        /* Let the wire thread queue both before the GUI runs. */
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        PumpBoth(s, [&] { return false; }, 300);
+        CHECK(items_signals == 1);
+        QObject::disconnect(conn);
     }
 
     /*---- F09: ws-mode zero-delta move is a silent no-op -----*/

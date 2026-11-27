@@ -298,6 +298,10 @@ private:
        input handler tears the delegate down mid-dispatch (F02:
        the reported access violation). */
     void          QueueViewNotify(bool history);
+    /* One posted notify at a time; later requests in the same
+       event-loop pass fold into it (history OR-ed) — audit U-10. */
+    bool          view_notify_queued_  = false;
+    bool          view_notify_history_ = false;
     QString       WsBindingState(const studio::DeviceBinding& b,
                                  bool& connected) const;
     /* Emitters of the APPLIED resolved scene under instance
