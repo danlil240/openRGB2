@@ -220,6 +220,41 @@ static void TestOutputGate()
     }
 }
 
+/* World matrices are cached per applied document: a newly
+   applied document with a moved object must evaluate at the NEW
+   position (cache invalidated on apply), matching a fresh
+   reference evaluation tick after tick. */
+static void TestWorldCachePerScene()
+{
+    SceneWorker worker;
+    std::vector<EvaluatedFrame> frames;
+    worker.SetFrameCallback([&frames](const EvaluatedFrame& f)
+    {
+        frames.push_back(f);
+    });
+    const TimePoint epoch = Clock::now();
+    worker.SetEpoch(epoch);
+
+    auto a = WaveDoc();
+    worker.SubmitScene(a, WaveLayers(), 1);
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(100)));
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(200)));
+
+    auto b = std::make_shared<studio::SceneDocument>(*a);
+    b->objects[0].transform.position.x += 0.37f;
+    worker.SubmitScene(b, WaveLayers(), 2);
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(300)));
+
+    CHECK(frames.size() == 3);
+    if(frames.size() == 3)
+    {
+        CHECK(frames[0].colors == Reference(*a, WaveLayers(), 0.100));
+        CHECK(frames[1].colors == Reference(*a, WaveLayers(), 0.200));
+        CHECK(frames[2].colors == Reference(*b, WaveLayers(), 0.300));
+        CHECK(frames[2].colors != Reference(*a, WaveLayers(), 0.300));
+    }
+}
+
 static void TestNoScene()
 {
     SceneWorker worker;
@@ -473,6 +508,7 @@ int main()
     TestLatestWinsScene();
     TestNoScene();
     TestOutputGate();
+    TestWorldCachePerScene();
     TestInputSlot();
     TestReentrantInputProvider();
     TestStepFaultIsContained();

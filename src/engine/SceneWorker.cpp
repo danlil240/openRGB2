@@ -171,6 +171,7 @@ bool SceneWorker::Step(TimePoint now)
             pending_scene_     = SceneState{};
             has_pending_scene_ = false;
             engine_.SetLayers(active_scene_.scene.layers);
+            world_dirty_ = true;
         }
         if(has_pending_input_)
         {
@@ -239,7 +240,15 @@ bool SceneWorker::Step(TimePoint now)
                     PositionStudioInput(*input, active_scene_.scene));
                 input = positioned.get();
             }
-            engine_.Evaluate(*active_scene_.scene.doc,
+            if(world_dirty_)
+            {
+                /* Once per applied document, inside the fault
+                   containment below. */
+                active_world_ = studio::ResolveWorldMatrices(
+                    *active_scene_.scene.doc);
+                world_dirty_  = false;
+            }
+            engine_.Evaluate(*active_scene_.scene.doc, active_world_,
                              frame.scene_time_s,
                              frame.colors, input);
         }

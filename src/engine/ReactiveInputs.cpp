@@ -290,13 +290,20 @@ ReactiveInputs::Snapshot()
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto state = std::make_shared<studio::InputState>();
+    /* One shared, immutable empty state: the paused gate and an
+       idle bus (no input enabled, nothing published) cost no
+       allocation or copy per 60 Hz tick. */
+    static const std::shared_ptr<const studio::InputState> kEmpty =
+        std::make_shared<const studio::InputState>();
     if(paused_)
-        return state; /* display-off/suspend: NOTHING feeds
-                         the scene — the gate the Task 3.7
-                         atomic was waiting for */
+        return kEmpty; /* display-off/suspend: NOTHING feeds
+                          the scene — the gate the Task 3.7
+                          atomic was waiting for */
+    if(bus_.Idle())
+        return kEmpty;
 
-    *state = bus_.Snapshot(kEventMaxAgeS);
+    auto state = std::make_shared<studio::InputState>(
+        bus_.Snapshot(kEventMaxAgeS));
     return state;
 }
 

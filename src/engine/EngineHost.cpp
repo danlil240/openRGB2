@@ -1028,13 +1028,13 @@ bool EngineHost::Start(std::string& err)
         {
             ++frames_;
             const bool owns = playback_->PlaybackOwnsWired();
-            for(const RgbFrame& frame : mapper_.MapFrame(eval))
+            for(RgbFrame& frame : mapper_.MapFrame(eval))
             {
                 if(owns && !playback_->OwnsGroup(frame.controller))
                 {
                     continue;
                 }
-                engine_.SubmitLatest(frame);
+                engine_.SubmitLatest(std::move(frame));
             }
             playback_->Tick(eval.sample_time);
         });

@@ -48,6 +48,16 @@ SubmitResult Engine::SubmitLatest(const RgbFrame& frame)
     return sink->SubmitLatest(frame);
 }
 
+SubmitResult Engine::SubmitLatest(RgbFrame&& frame)
+{
+    std::shared_ptr<IFrameSink> sink;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sink = sink_;
+    }
+    return sink->SubmitLatestOwned(std::move(frame));
+}
+
 PlaybackStatus Engine::Status() const
 {
     std::lock_guard<std::mutex> lock(mutex_);

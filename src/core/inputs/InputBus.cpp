@@ -78,6 +78,13 @@ InputState InputBus::Snapshot(double max_age) const
     return out;
 }
 
+bool InputBus::Idle() const
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    return events.empty() && cells.empty() && cols == 0 && rows == 0 &&
+           level == 0.0f;
+}
+
 void InputBus::ClearEvents()
 {
     std::lock_guard<std::mutex> lock(mutex);

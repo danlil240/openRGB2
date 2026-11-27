@@ -31,7 +31,9 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
+#include <string>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -214,6 +216,11 @@ private:
     bool                                          has_pending_input_ = false;
 
     studio::EffectEngine  engine_;
+    /* World matrices of active_scene_'s document — resolved once
+       when the scene is applied (the document is immutable once
+       shared), not every 60 Hz tick. Worker-thread state. */
+    std::map<std::string, studio::Mat4> active_world_;
+    bool                                world_dirty_ = true;
     FrameCallback         callback_;
     IdleFrameHook         idle_frame_hook_;
     InputProvider         input_provider_;
