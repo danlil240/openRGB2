@@ -50,6 +50,9 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickStyle>
+#include <QQuickWindow>
+#include <QPointer>
+#include <QTest>
 #include <QSignalSpy>
 
 #include <cmath>
@@ -726,6 +729,152 @@ int main(int argc, char** argv)
         CHECK(m.SetStack({ e2 }));
         CHECK(rst.count() == 1);
         CHECK(m.count() == 1);
+    }
+
+    /*======================================================*\
+    || Q-1: a gradient-stop drag keeps its own handle        ||
+    \*======================================================*/
+    /* The real PaletteEditor in a real (offscreen) window,
+       driven by real mouse events. Every preview move emits
+       stackChanged; the handles must survive the reload so the
+       press that opened the layer gesture also gets the
+       release that commits it (ONE undo record, no gesture
+       left open). A grab taken away mid-drag must cancel the
+       gesture and restore the stops. */
+    std::printf("-- qml: palette stop drag survives reloads "
+                "(audit Q-1)\n");
+    {
+        Rig rig;
+        rig.LoadDoc(CompactDoc("aurora"));
+        /* Layer 1 of aurora: a wave with stops 0 / .35 / .65 /
+           .85 — materialize it so the stops are authored. */
+        rig.ctl.setLayerOpacity(1, 0.9);
+        const size_t undo0 = rig.UndoCount();
+        CHECK(rig.ctl.layerAt(1).value("palette").toList().size()
+              == 4);
+
+        QQmlEngine eng;
+        eng.rootContext()->setContextProperty(
+            QStringLiteral("effectEdit"), &rig.ctl);
+        QQmlComponent c(&eng, QUrl(QStringLiteral(
+            "qrc:/qt/qml/OpenRGB2/UI/studio/PaletteEditor.qml")));
+        CHECK(!c.isError());
+        QQuickWindow win;
+        win.resize(440, 200);
+        std::unique_ptr<QObject> o(c.create(eng.rootContext()));
+        auto* pal = qobject_cast<QQuickItem*>(o.get());
+        CHECK(pal != nullptr);
+        QObject* rep =
+            pal ? pal->findChild<QObject*>("stopHandles") : nullptr;
+        CHECK(rep != nullptr);
+        if(pal != nullptr && rep != nullptr)
+        {
+            pal->setParentItem(win.contentItem());
+            pal->setX(20);
+            pal->setY(20);
+            pal->setWidth(400);
+            pal->setProperty("layerIndex", 1);
+            win.show();
+            CHECK(QTest::qWaitForWindowExposed(&win));
+
+            auto handleAt = [&](int i) -> QQuickItem* {
+                QQuickItem* h = nullptr;
+                QMetaObject::invokeMethod(rep, "itemAt",
+                    Q_RETURN_ARG(QQuickItem*, h), Q_ARG(int, i));
+                return h;
+            };
+            auto centerOf = [&](QQuickItem* h) -> QPoint {
+                return h->mapToScene(QPointF(h->width() / 2,
+                                             h->height() / 2))
+                    .toPoint();
+            };
+            auto dragArea = [&](QQuickItem* h) -> QQuickItem* {
+                for(QQuickItem* ch : h->childItems())
+                {
+                    if(QString::fromLatin1(
+                           ch->metaObject()->className())
+                           .contains(QStringLiteral("MouseArea")))
+                    {
+                        return ch;
+                    }
+                }
+                return nullptr;
+            };
+
+            /* The page Flickable must not steal the drag. */
+            QQuickItem* h1 = handleAt(1);
+            CHECK(h1 != nullptr);
+            QQuickItem* ma1 = h1 ? dragArea(h1) : nullptr;
+            CHECK(ma1 != nullptr
+                  && ma1->property("preventStealing").toBool());
+
+            /* Drag stop 1 (.35) right past stop 2 (.65). */
+            if(h1 != nullptr)
+            {
+                QPointer<QQuickItem> held(h1);
+                QPoint p = centerOf(h1);
+                QTest::mousePress(&win, Qt::LeftButton, {}, p);
+                CHECK(rig.ctl.gestureActive());
+                for(int k = 0; k < 8; ++k)
+                {
+                    p.rx() += 20;
+                    QTest::mouseMove(&win, p);
+                }
+                /* THE REGRESSION: the handle that took the press
+                   is still alive after the preview reloads. */
+                CHECK(!held.isNull());
+                QTest::mouseRelease(&win, Qt::LeftButton, {}, p);
+                CHECK(!rig.ctl.gestureActive());
+                CHECK(rig.UndoCount() == undo0 + 1);
+                const QVariantList st =
+                    rig.ctl.layerAt(1).value("palette").toList();
+                CHECK(st.size() == 4);
+                bool movedPast = false;
+                for(const QVariant& v : st)
+                {
+                    const double pos =
+                        v.toMap().value("pos").toDouble();
+                    if(pos > 0.7 && pos < 0.8)
+                        movedPast = true;
+                    CHECK(std::fabs(pos - 0.35) > 1e-3);
+                }
+                CHECK(movedPast);
+                /* The handles still track the stops. */
+                CHECK(handleAt(3) != nullptr);
+            }
+
+            /* A grab taken away mid-drag (here: the drag area
+               disabled under the pointer) cancels the gesture
+               and restores the stops — no record, nothing
+               left open. */
+            QQuickItem* h0 = handleAt(0);
+            CHECK(h0 != nullptr);
+            if(h0 != nullptr)
+            {
+                const size_t undo1 = rig.UndoCount();
+                const QVariantList before =
+                    rig.ctl.layerAt(1).value("palette").toList();
+                QPoint p = centerOf(h0);
+                QTest::mousePress(&win, Qt::LeftButton, {}, p);
+                for(int k = 0; k < 4; ++k)
+                {
+                    p.rx() += 20;
+                    QTest::mouseMove(&win, p);
+                }
+                CHECK(rig.ctl.gestureActive());
+                QQuickItem* ma0 = dragArea(h0);
+                CHECK(ma0 != nullptr);
+                if(ma0 != nullptr)
+                    ma0->setEnabled(false);
+                CHECK(!rig.ctl.gestureActive());
+                CHECK(rig.UndoCount() == undo1);
+                CHECK(rig.ctl.layerAt(1).value("palette").toList()
+                      == before);
+                QTest::mouseRelease(&win, Qt::LeftButton, {}, p);
+                CHECK(rig.UndoCount() == undo1);
+            }
+            pal->setParentItem(nullptr);
+        }
     }
 
     /*======================================================*\

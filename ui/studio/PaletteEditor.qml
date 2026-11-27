@@ -30,12 +30,20 @@ Rectangle {
         && layerIndex >= 0
 
     /* Live stops snapshot — re-read on every stack change so a
-       drag preview paints what the draft holds. */
+       drag preview paints what the draft holds. The handles are
+       NOT a Repeater over this array (see stopHandles): a drag
+       reloads it on every move. */
     property var stops: []
     property int selStop: -1
     function reload() {
-        stops = ready ? (effectEdit.layerAt(layerIndex).palette || [])
-                      : []
+        /* Reads layerIndex directly, not `ready`: from
+           onLayerIndexChanged the `ready` binding may not have
+           re-evaluated yet, which left a newly selected layer
+           with an empty stop list until the next stack edit. */
+        const live = typeof effectEdit !== "undefined"
+                     && effectEdit.ready && layerIndex >= 0
+        stops = live ? (effectEdit.layerAt(layerIndex).palette || [])
+                     : []
         if(selStop >= stops.length)
             selStop = stops.length - 1
     }
@@ -113,46 +121,97 @@ Rectangle {
                 }
             }
 
+            /* Stop handles (audit Q-1). The model is the stop
+               COUNT, not the stops array: reload() reassigns that
+               array on every stackChanged — every preview move of
+               a drag — and a Repeater over a JS array rebuilds all
+               its delegates on each assignment. That destroyed the
+               handle whose MouseArea held the press, so onReleased
+               never fired and the layer gesture stayed open. An
+               integer model keeps the delegates while the count
+               holds; each reads its stop by index. A handle never
+               moves itself (no drag.target): x stays bound to the
+               draft, so after a re-sort the dragged stop is drawn
+               by its new index's delegate while the pressed one
+               keeps the grab and steers by the pointer. */
             Repeater {
-                model: pal.stops
+                objectName: "stopHandles"
+                model: pal.stops.length
                 delegate: Rectangle {
                     id: stopHandle
                     required property int index
-                    required property var modelData
+                    readonly property var stop: pal.stops[index]
+                        || ({ pos: 0, color: "#000000" })
                     width: 14; height: 14; radius: 7
                     y: 24
-                    x: bar.width * modelData.pos - width / 2
-                    color: modelData.color
+                    x: bar.width * stop.pos - width / 2
+                    color: stop.color
                     border.width: pal.selStop === index ? 2 : 1
                     border.color: pal.selStop === index
                                   ? Theme.accent : Theme.borderStrong
                     objectName: "stopHandle_" + index
 
-                    Drag.active: dragArea.drag.active
                     MouseArea {
                         id: dragArea
                         anchors.fill: parent
-                        drag.target: stopHandle
-                        drag.axis: Drag.XAxis
-                        onPressed: {
-                            pal.selStop = index;
+                        /* The inspector sits in a page Flickable
+                           that would otherwise steal the drag
+                           past its threshold (as in 21a7b63). */
+                        preventStealing: true
+                        /* This press opened the layer gesture —
+                           exactly one commit or cancel closes it. */
+                        property bool gestureOpen: false
+                        property bool moved: false
+                        property real pressX: 0
+                        property real grabDx: 0
+                        onPressed: function(m) {
+                            pal.selStop = stopHandle.index;
+                            pressX = mapToItem(bar, m.x, m.y).x;
+                            grabDx = m.x - stopHandle.width / 2;
+                            moved = false;
                             effectEdit.beginLayerGesture();
+                            gestureOpen = true;
                         }
-                        onPositionChanged: {
-                            if(drag.active) {
-                                const p = Math.max(0, Math.min(1,
-                                    (stopHandle.x + stopHandle.width / 2)
-                                    / bar.width));
-                                /* Re-sort can move the dragged
-                                   stop — track the index the
-                                   controller hands back. */
-                                pal.selStop = effectEdit.moveLayerStop(
-                                    pal.layerIndex, pal.selStop, p);
-                            }
+                        onPositionChanged: function(m) {
+                            if(!gestureOpen)
+                                return;
+                            /* Pointer in bar coordinates — this
+                               handle may have jumped to another
+                               stop's position after a re-sort. */
+                            const bx = mapToItem(bar, m.x, m.y).x;
+                            if(!moved && Math.abs(bx - pressX)
+                                    < Qt.styleHints.startDragDistance)
+                                return;
+                            moved = true;
+                            const p = Math.max(0, Math.min(1,
+                                (bx - grabDx) / bar.width));
+                            /* Re-sort can move the dragged stop —
+                               track the index the controller
+                               hands back. */
+                            pal.selStop = effectEdit.moveLayerStop(
+                                pal.layerIndex, pal.selStop, p);
                         }
-                        onReleased:
+                        onReleased: {
+                            if(!gestureOpen)
+                                return;
+                            gestureOpen = false;
                             effectEdit.commitLayerGesture(
-                                qsTr("move gradient stop"))
+                                qsTr("move gradient stop"));
+                        }
+                        /* A grab taken away mid-drag (focus loss,
+                           popup, disable) drops the uncommitted
+                           move instead of leaving the gesture
+                           open for the next press to revert. */
+                        onCanceled: {
+                            if(!gestureOpen)
+                                return;
+                            gestureOpen = false;
+                            effectEdit.cancelLayerGesture();
+                        }
+                        Component.onDestruction: {
+                            if(gestureOpen)
+                                effectEdit.cancelLayerGesture();
+                        }
                     }
                 }
             }
