@@ -225,6 +225,12 @@ public:
     std::vector<DeviceSnapshot> Snapshots() const;
     bool Snapshot(const DeviceKey& controller, DeviceSnapshot& out) const;
 
+    /* The current topology generation (state lock only, no
+       copy) — lets callers cache snapshot-derived data and
+       rebuild only when the topology moved (E-6). Mode/colour
+       refreshes never bump it. */
+    uint64_t TopologyGeneration() const;
+
     /*---- IFrameSink: the direct-mode send path ----------------*\
     | Validates the frame against the current snapshot          |
     | (unknown controller, not connected, stale topology        |

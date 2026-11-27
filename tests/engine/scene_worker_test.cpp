@@ -504,6 +504,64 @@ static void TestEngineComposition()
     CHECK(engine.Status().upload == UploadState::Active);
 }
 
+/* Audit E-6: while uploaded playback owns the output, the scene
+   is evaluated (and mapped) for nothing. The evaluate gate skips
+   the input pull and the evaluation but keeps the clock tick and
+   the callback (playback's wired Tick rides it); the frame says
+   so, and evaluation resumes the tick the gate drops. */
+static void TestEvaluateGate()
+{
+    SceneWorker worker;
+    std::vector<EvaluatedFrame> frames;
+    worker.SetFrameCallback([&frames](const EvaluatedFrame& f)
+    {
+        frames.push_back(f);
+    });
+    int pulls = 0;
+    worker.SetInputProvider([&pulls]()
+    {
+        ++pulls;
+        return std::shared_ptr<const studio::InputState>();
+    });
+    bool skip = true;
+    worker.SetEvaluateGate([&skip] { return skip; });
+
+    const TimePoint epoch = Clock::now();
+    worker.SetEpoch(epoch);
+    worker.SubmitScene(WaveDoc(), WaveLayers(), /*rev*/ 4);
+
+    CHECK(worker.Step(epoch));
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(16)));
+    CHECK(frames.size() == 2);
+    for(const EvaluatedFrame& f : frames)
+    {
+        CHECK(f.evaluate_gated);
+        CHECK(f.colors.empty());
+        CHECK(f.scene_revision == 4);
+    }
+    CHECK(pulls == 0);
+    CHECK(worker.Evaluations() == 0);
+    CHECK(worker.AppliedRevision() == 4);
+
+    skip = false;
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(500)));
+    CHECK(frames.size() == 3);
+    CHECK(pulls == 1);
+    CHECK(worker.Evaluations() == 1);
+    if(frames.size() == 3)
+    {
+        CHECK(!frames[2].evaluate_gated);
+        CHECK(frames[2].sequence == 3);
+        CHECK(frames[2].colors ==
+              Reference(*WaveDoc(), WaveLayers(), 0.500));
+    }
+
+    /* No scene: the gate never invents a frame. */
+    SceneWorker idle;
+    idle.SetEvaluateGate([] { return true; });
+    CHECK(!idle.Step(Clock::now()));
+}
+
 int main()
 {
     TestDeterministicStep();
@@ -511,6 +569,7 @@ int main()
     TestLatestWinsScene();
     TestNoScene();
     TestOutputGate();
+    TestEvaluateGate();
     TestWorldCachePerScene();
     TestInputSlot();
     TestReentrantInputProvider();

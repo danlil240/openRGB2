@@ -1082,6 +1082,12 @@ std::vector<DeviceSnapshot> OpenRgbClient::Snapshots() const
     return out;
 }
 
+uint64_t OpenRgbClient::TopologyGeneration() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return topology_generation_;
+}
+
 bool OpenRgbClient::Snapshot(const DeviceKey& controller,
                              DeviceSnapshot& out) const
 {
