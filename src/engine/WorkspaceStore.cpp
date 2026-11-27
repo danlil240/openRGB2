@@ -207,13 +207,30 @@ nlohmann::json FileEntry(const std::string& rel, const std::string& bytes)
     });
 }
 
+/* A string member, or "" when `obj` is not an object, lacks
+   `key`, or holds another type. Record files are read from
+   disk and may be damaged: json::value() THROWS type_error on
+   a wrong-typed member (or a non-object), and a throw out of
+   Load reaches startup re-adoption (audit I-11). Every
+   record read here type-checks the way ReadMarker does. */
+std::string StringMember(const nlohmann::json& obj, const char* key)
+{
+    if(!obj.is_object())
+    {
+        return std::string();
+    }
+    const auto it = obj.find(key);
+    return it != obj.end() && it->is_string()
+        ? it->get<std::string>() : std::string();
+}
+
 /* Verify one manifest file entry exists on disk with matching
    size + hash. */
 bool VerifyEntry(const fs::path& dir, const nlohmann::json& entry,
                  const std::string& what, std::string& err)
 {
-    const std::string rel = entry.value("file", std::string());
-    const std::string sha = entry.value("sha",  std::string());
+    const std::string rel = StringMember(entry, "file");
+    const std::string sha = StringMember(entry, "sha");
     if(rel.empty() || sha.empty())
     {
         err = what + ": manifest entry missing file/sha";
@@ -474,8 +491,10 @@ bool ReadManifest(const fs::path& gendir, Manifest& out,
         err = "manifest is not valid JSON";
         return false;
     }
-    if(j.value("kind", std::string()) != kManifestKind ||
-       j.value("schema_version", -1) != kRecordSchema)
+    const auto vit = j.find("schema_version");
+    if(StringMember(j, "kind") != kManifestKind ||
+       vit == j.end() || !vit->is_number_integer() ||
+       vit->get<long long>() != kRecordSchema)
     {
         err = "unrecognised manifest record";
         return false;
@@ -487,7 +506,12 @@ bool ReadManifest(const fs::path& gendir, Manifest& out,
         err = "manifest carries no valid generation id";
         return false;
     }
-    out.source_form = j.value("source_form", std::string());
+    if(j.contains("source_form") && !j["source_form"].is_string())
+    {
+        err = "manifest source_form is not a string";
+        return false;
+    }
+    out.source_form = StringMember(j, "source_form");
     out.resources   = j.count("resources") && j["resources"].is_object()
         ? j["resources"] : nlohmann::json::object();
     return true;

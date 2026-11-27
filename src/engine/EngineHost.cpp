@@ -1318,7 +1318,26 @@ bool EngineHost::Start(std::string& err)
        !workspaces_->ManagedActive())
     {
         const std::string wsid = engine_state_.active_workspace;
-        const WorkspaceService::Result wr = workspaces_->Open(wsid);
+        /* Open reads records off disk; the store type-checks
+           them, but anything that still throws (a damaged
+           file, a filesystem error, allocation) must cost the
+           managed state only — never the process, and never
+           every subsequent launch (audit I-11). */
+        WorkspaceService::Result wr;
+        try
+        {
+            wr = workspaces_->Open(wsid);
+        }
+        catch(const std::exception& e)
+        {
+            wr       = WorkspaceService::Result{};
+            wr.error = std::string("re-adopt threw: ") + e.what();
+        }
+        catch(...)
+        {
+            wr       = WorkspaceService::Result{};
+            wr.error = "re-adopt threw a non-standard exception";
+        }
         if(wr.ok)
         {
             Log("re-adopted managed workspace '" + wsid +

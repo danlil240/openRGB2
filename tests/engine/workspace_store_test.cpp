@@ -1395,6 +1395,115 @@ static void TestFailedCommitRetry()
     CHECK(lr.candidate->document.meta.name == "second");
 }
 
+/*---------------------------------------------------------*\
+|||| I-11: a wrong-typed manifest field never throws out of  ||
+|||| Load. Every damaged-newest-generation variant must fall ||
+|||| back to the marker backup (Recovered) — before the fix  ||
+|||| nlohmann's value()/type checks threw type_error, and    ||
+|||| startup re-adoption had no catch: a crash every launch. ||
+\*---------------------------------------------------------*/
+static void TestWrongTypedManifestNeverThrows()
+{
+    const fs::path types = g_tmp / "types-i11";
+    fs::create_directories(types);
+    WriteText((types / "mini-fan.device.json").string(),
+              TypeJson("mini-fan", 8, "base"));
+
+    WorkspaceStore::Deps deps;
+    deps.devices = RegistryWith(types.string());
+    const fs::path root = g_tmp / "ws-i11";
+    WorkspaceStore store(root.string(), deps);
+    const fs::path wsdir = root / "desk";
+
+    WorkspaceCandidate cand;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("one", "mini-fan")),
+                        deps.devices, deps.effects, cand));
+    CHECK(store.Commit("desk", cand, std::string(), 0).ok);
+    WorkspaceCandidate cand2;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("two", "mini-fan")),
+                        deps.devices, deps.effects, cand2));
+    CHECK(store.Commit("desk", cand2, std::string(), 1).ok);
+
+    const fs::path mpath =
+        wsdir / "generations" / "gen-000002" / "manifest.json";
+    const std::string good = ReadText(mpath.string());
+    const json gj = json::parse(good);
+    CHECK(gj.is_object());
+
+    struct Variant
+    {
+        const char* what;
+        json        patch;    /* merged over the good manifest */
+    };
+    const std::vector<Variant> variants = {
+        { "kind: number",           {{ "kind", 5 }} },
+        { "kind: array",            {{ "kind", json::array() }} },
+        { "schema_version: string", {{ "schema_version", "1" }} },
+        { "source_form: number",    {{ "source_form", 7 }} },
+        { "document: array",        {{ "document", json::array() }} },
+        { "document.file: number",  {{ "document", {
+              { "file", 5 }, { "sha", "x" } } }} },
+        { "document.sha: object",   {{ "document", {
+              { "file", "document.json" },
+              { "sha", json::object() } } }} },
+        { "original.file: array",   {{ "original", {
+              { "file", json::array() }, { "sha", "x" } } }} },
+        { "resources entry: string", {{ "resources", {
+              { "devices", {{ "mini-fan", "not-an-entry" }} } } }} },
+        { "resources entry.file: bool", {{ "resources", {
+              { "devices", {{ "mini-fan", {
+                    { "file", true }, { "sha", "x" } } }} } } }} },
+    };
+    for(const Variant& v : variants)
+    {
+        json m = gj;
+        m.merge_patch(v.patch);
+        WriteText(mpath.string(), m.dump(2));
+        bool threw = false;
+        WorkspaceStore::LoadResult lr;
+        try
+        {
+            lr = store.Load("desk");
+        }
+        catch(const std::exception& e)
+        {
+            threw = true;
+            std::printf("  (%s: Load threw %s)\n", v.what, e.what());
+        }
+        CHECK(!threw);
+        CHECK(lr.status == WorkspaceStore::LoadStatus::Recovered);
+        CHECK(lr.generation == 1);
+        CHECK(!lr.error.empty());
+        if(lr.status != WorkspaceStore::LoadStatus::Recovered)
+        {
+            std::printf("  (%s: status %d, %s)\n", v.what,
+                        (int)lr.status, lr.error.c_str());
+        }
+
+        /* The service surface (the startup re-adopt path) must
+           not throw either. */
+        WorkspaceService::Deps sdeps;
+        sdeps.devices = deps.devices;
+        WorkspaceService svc(root.string(), sdeps);
+        threw = false;
+        try
+        {
+            const WorkspaceService::Result r = svc.Open("desk");
+            CHECK(r.ok && r.recovered);
+        }
+        catch(const std::exception& e)
+        {
+            threw = true;
+            std::printf("  (%s: Open threw %s)\n", v.what, e.what());
+        }
+        CHECK(!threw);
+    }
+    WriteText(mpath.string(), good);
+    const WorkspaceStore::LoadResult lr = store.Load("desk");
+    CHECK(lr.status == WorkspaceStore::LoadStatus::Loaded);
+    CHECK(lr.generation == 2);
+}
+
 int main()
 {
     g_tmp = fs::temp_directory_path() /
@@ -1420,6 +1529,7 @@ int main()
     TestLoadBackup();
     TestFutureSchemaRefusal();
     TestFailedCommitRetry();
+    TestWrongTypedManifestNeverThrows();
 
     fs::remove_all(g_tmp, ec);
     std::printf("%d checks, %d failures\n", checks, failures);
