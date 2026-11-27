@@ -764,6 +764,111 @@ int main(int argc, char** argv)
         }
     }
 
+    /* Audit Q-10: the inspector text fields commit when the edit
+       ends (editingFinished = Enter OR focus loss), an unchanged
+       or refused edit leaves the model's value showing, and the
+       reactive-source badge follows the engine's input state. */
+    std::printf("-- qml: inspector fields commit on edit end; "
+                "source badge refreshes (audit Q-10)\n");
+    {
+        auto findIn = [](QObject* root, const char* name)
+            -> QObject* {
+            const QString n = QString::fromLatin1(name);
+            std::vector<QQuickItem*> stack;
+            if(auto* r = qobject_cast<QQuickItem*>(root))
+                stack.push_back(r);
+            while(!stack.empty())
+            {
+                QQuickItem* it = stack.back();
+                stack.pop_back();
+                if(it->objectName() == n)
+                    return it;
+                for(QQuickItem* ch : it->childItems())
+                    stack.push_back(ch);
+            }
+            return nullptr;
+        };
+        auto endEdit = [](QObject* field, const QString& text) {
+            field->setProperty("text", text);
+            QMetaObject::invokeMethod(field, "editingFinished");
+        };
+        Rig rig;
+        rig.LoadDoc(CompactDoc("aurora"));
+        rig.ctl.setSelectedLayer(1);   /* the wave layer */
+
+        QQmlEngine eng;
+        eng.rootContext()->setContextProperty(
+            QStringLiteral("effectEdit"), &rig.ctl);
+        QQmlComponent c(&eng, QUrl(QStringLiteral(
+            "qrc:/qt/qml/OpenRGB2/UI/studio/EffectInspector.qml")));
+        CHECK(!c.isError());
+        std::unique_ptr<QObject> o(c.create(eng.rootContext()));
+        CHECK(o != nullptr);
+        QObject* targets = o ? findIn(o.get(), "inspTargets")
+                             : nullptr;
+        QObject* originX = o ? findIn(o.get(), "inspOrigin_x")
+                             : nullptr;
+        QObject* pal = o ? findIn(o.get(), "paletteEditor")
+                         : nullptr;
+        QObject* stopColor = o ? findIn(o.get(), "stopColorField")
+                               : nullptr;
+        QObject* badge = o ? findIn(o.get(), "inspSourceState")
+                           : nullptr;
+        CHECK(targets && originX && pal && stopColor && badge);
+        if(targets && originX && pal && stopColor && badge)
+        {
+            /* Targets: focus loss commits; ending again with the
+               same text adds no record. */
+            const size_t u0 = rig.UndoCount();
+            endEdit(targets, QStringLiteral("fan0"));
+            CHECK(rig.ctl.layerAt(1).value("targets").toStringList()
+                  == QStringList({ "fan0" }));
+            CHECK(rig.UndoCount() == u0 + 1);
+            endEdit(targets, QStringLiteral("fan0"));
+            CHECK(rig.UndoCount() == u0 + 1);
+
+            /* Origin: a number commits; text that is not a number
+               is refused and the field shows the model again. */
+            endEdit(originX, QStringLiteral("0.25"));
+            CHECK(std::fabs(rig.ctl.layerAt(1).value("origin")
+                                .toMap().value("x").toDouble()
+                            - 0.25) < 1e-6);
+            const size_t u1 = rig.UndoCount();
+            endEdit(originX, QStringLiteral("abc"));
+            CHECK(rig.UndoCount() == u1);
+            CHECK(originX->property("text").toString()
+                  == QStringLiteral("0.25"));
+
+            /* Palette stop color: commits on edit end; a refused
+               color reverts the field. */
+            pal->setProperty("selStop", 0);
+            endEdit(stopColor, QStringLiteral("#00FF00"));
+            CHECK(QColor(rig.ctl.layerAt(1).value("palette").toList()
+                             .value(0).toMap().value("color")
+                             .toString()) == QColor("#00FF00"));
+            const size_t u2 = rig.UndoCount();
+            endEdit(stopColor, QStringLiteral("not-a-color"));
+            CHECK(rig.UndoCount() == u2);
+            CHECK(QColor(stopColor->property("text").toString())
+                  == QColor("#00FF00"));
+
+            /* Source badge follows the engine's reactive state. */
+            rig.ctl.setLayerSource(1, QStringLiteral("audio"));
+            CHECK(badge->property("text").toString()
+                  == QStringLiteral("not running"));
+            QVariantMap audio;
+            audio["id"] = QStringLiteral("audio");
+            audio["enabled"] = true;
+            audio["available"] = true;
+            audio["running"] = true;
+            QVariantMap reactive;
+            reactive["inputs"] = QVariantList({ audio });
+            rig.bridge.setReactiveForTesting(reactive);
+            CHECK(badge->property("text").toString()
+                  == QStringLiteral("live"));
+        }
+    }
+
     std::printf("-- qml: look apply prompts before replacing "
                 "authored layers\n");
     {
