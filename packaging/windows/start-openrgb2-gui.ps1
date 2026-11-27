@@ -76,7 +76,9 @@ try {
     . (Join-Path $PSScriptRoot 'start-openrgb2.ps1')
     # Rotate before the transcript opens the log: once it is held,
     # Invoke-ManagedStart's own rotation must skip it.
-    Invoke-LogRotation $log
+    if(Get-Command Invoke-LogRotation -ErrorAction SilentlyContinue) {
+        Invoke-LogRotation $log
+    }
     Start-Transcript -Path $log -Append -Force | Out-Null
     $transcriptStarted = $true
 
