@@ -1038,6 +1038,73 @@ int main(int argc, char** argv)
                                     .property(2).toNumber() - 135.0)
                       < 1e-6);
             }
+
+            /* Audit Q-7: the scrub strip keeps its grab (the
+               Layout page Flickable would otherwise steal it),
+               and a field never keeps text the model did not
+               take — the stub refuses every write (its state
+               never changes), like a locked instance. */
+            std::printf("-- qml: TransformInspector scrub + refused "
+                        "text (audit Q-7)\n");
+            {
+                auto findIn = [](QObject* root, const char* name)
+                    -> QObject* {
+                    const QString n = QString::fromLatin1(name);
+                    std::vector<QQuickItem*> stack;
+                    if(auto* r = qobject_cast<QQuickItem*>(root))
+                        stack.push_back(r);
+                    while(!stack.empty())
+                    {
+                        QQuickItem* it = stack.back();
+                        stack.pop_back();
+                        if(it->objectName() == n)
+                            return it;
+                        for(QQuickItem* ch : it->childItems())
+                            stack.push_back(ch);
+                    }
+                    return nullptr;
+                };
+                QObject* fx = findIn(insp, "numPosX");
+                QObject* input = fx ? findIn(fx, "numInput") : nullptr;
+                QObject* scrub = fx ? findIn(fx, "numScrub") : nullptr;
+                CHECK(fx != nullptr && input != nullptr
+                      && scrub != nullptr);
+                if(fx && input && scrub)
+                {
+                    const QJSValue pos =
+                        stub.property("_calls").property("pos");
+                    const int calls0 =
+                        pos.property("length").toInt();
+                    CHECK(scrub->property("preventStealing").toBool());
+
+                    /* Typed text, edit ends (Enter or focus loss):
+                       committed once, then the field shows the
+                       model's value again. */
+                    input->setProperty("text",
+                                       QStringLiteral("999.0"));
+                    QMetaObject::invokeMethod(input,
+                                              "editingFinished");
+                    CHECK(pos.property("length").toInt()
+                          == calls0 + 1);
+                    CHECK(input->property("text").toString()
+                          == QStringLiteral("120.0"));
+                    /* Unchanged text commits nothing. */
+                    QMetaObject::invokeMethod(input,
+                                              "editingFinished");
+                    CHECK(pos.property("length").toInt()
+                          == calls0 + 1);
+
+                    /* A scrub whose grab is taken away drops the
+                       scrubbed text without committing. */
+                    input->setProperty("text",
+                                       QStringLiteral("130.0"));
+                    QMetaObject::invokeMethod(scrub, "canceled");
+                    CHECK(input->property("text").toString()
+                          == QStringLiteral("120.0"));
+                    CHECK(pos.property("length").toInt()
+                          == calls0 + 1);
+                }
+            }
             delete insp;
         }
     }
