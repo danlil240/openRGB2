@@ -404,12 +404,16 @@ function Invoke-PackageUpdate {
             return 1
         }
     }
-    $InstallDir = (Resolve-Path $InstallDir).Path
+    # No trailing separator (as stage-release.ps1 does): the snapshot
+    # is "$InstallDir.previous", and "C:\x\OpenRGB2\" + ".previous"
+    # lands INSIDE the install -- the update then copied the install
+    # into itself (audit P-9).
+    $InstallDir = (Resolve-Path $InstallDir).Path.TrimEnd('\','/')
     if(-not $PackageDir) {
         Write-Host "ERROR: -PackageDir (the new staged package) is required" -ForegroundColor Red
         return 1
     }
-    $PackageDir = (Resolve-Path $PackageDir).Path
+    $PackageDir = (Resolve-Path $PackageDir).Path.TrimEnd('\','/')
 
     Write-Host "==> OpenRGB2 update: $PackageDir -> $InstallDir" -ForegroundColor Cyan
 
