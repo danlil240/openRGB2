@@ -151,6 +151,103 @@ static bool IsError(const Message& m, ErrCode code)
                == (uint32_t)code;
 }
 
+/*---------------------------------------------------------*\
+| Integrity probe (audit I-9): the suite runs at medium     |
+| integrity and cannot elevate, so the elevated / low /     |
+| unreadable-token paths are driven through the injected    |
+| probe. -1 = "token cannot be read".                        |
+\*---------------------------------------------------------*/
+static long g_il_self   = (long)kIntegrityMedium;
+static long g_il_server = (long)kIntegrityMedium;
+static long g_il_client = (long)kIntegrityMedium;
+
+static bool TestIntegrityProbe(IntegritySubject subject,
+                               unsigned long /*pid*/, uint32_t& rid)
+{
+    const long v = subject == IntegritySubject::Self       ? g_il_self
+                 : subject == IntegritySubject::PipeServer ? g_il_server
+                                                           : g_il_client;
+    if(v < 0)
+    {
+        return false;
+    }
+    rid = (uint32_t)v;
+    return true;
+}
+
+/* Connect + HELLO over a real listener; true when WELCOME
+   arrives. `err` carries the client-side refusal, if any. */
+static bool PipeHandshake(const std::string& pipe, std::string& err)
+{
+    std::unique_ptr<IIpcChannel> ch =
+        ConnectNamedPipeChannel(pipe, 3000, err);
+    if(!ch)
+    {
+        return false;
+    }
+    MessageReader rd(*ch);
+    const std::vector<uint8_t> hello = EncodeMessage(
+        MsgType::Hello, 0,
+        nlohmann::json::object({{ "min_version", 1 },
+                                { "max_version", 1 }}));
+    if(ch->SendAll(hello.data(), hello.size(), 3000, err)
+       != IpcIoResult::Ok)
+    {
+        return false;
+    }
+    Message m;
+    std::string detail;
+    if(rd.Read(m, 3000, detail) != ReadResult::Ok)
+    {
+        err = "read: " + detail;
+        return false;
+    }
+    return m.type == MsgType::Welcome;
+}
+
+/* The mandatory label ACE on a pipe object, as (rid, policy);
+   false when the object carries no label. */
+static bool ReadPipeLabel(const std::string& pipe, DWORD& rid,
+                          DWORD& policy)
+{
+    HANDLE h = CreateFileA(pipe.c_str(), GENERIC_READ | GENERIC_WRITE,
+                           0, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_OVERLAPPED, nullptr);
+    if(h == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+    PACL sacl = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    bool found = false;
+    if(GetSecurityInfo(h, SE_KERNEL_OBJECT, LABEL_SECURITY_INFORMATION,
+                       nullptr, nullptr, nullptr, &sacl, &sd)
+           == ERROR_SUCCESS && sacl)
+    {
+        for(DWORD i = 0; i < sacl->AceCount && !found; ++i)
+        {
+            ACE_HEADER* ace = nullptr;
+            if(GetAce(sacl, i, (void**)&ace) &&
+               ace->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+            {
+                SYSTEM_MANDATORY_LABEL_ACE* ml =
+                    (SYSTEM_MANDATORY_LABEL_ACE*)ace;
+                PSID sid = (PSID)&ml->SidStart;
+                rid    = *GetSidSubAuthority(
+                    sid, *GetSidSubAuthorityCount(sid) - 1);
+                policy = ml->Mask;
+                found  = true;
+            }
+        }
+    }
+    if(sd)
+    {
+        LocalFree(sd);
+    }
+    CloseHandle(h);
+    return found;
+}
+
 int main()
 {
     /*---- handshake: accept --------------------------------*/
@@ -940,6 +1037,145 @@ int main()
         PipeSecurityAttributes psa;
         CHECK(psa.Ok());
         CHECK(psa.Raw() != nullptr);
+    }
+
+    /*---- integrity policy (audit I-9) ------------------------*\
+    | The pipe carries an explicit Medium no-write-up label (a  |
+    | medium UI must keep reaching an elevated engine; low /    |
+    | sandboxed callers never can), and the client refuses a    |
+    | server below its own integrity level.                     |
+    \*---------------------------------------------------------*/
+    {
+        std::string sddl, err;
+        CHECK(BuildRestrictedSddl(sddl, err));
+        CHECK(sddl.find("D:P(D;;GA;;;NU)(A;;GA;;;") == 0);
+        CHECK(sddl.find("S:(ML;;NW;;;ME)") != std::string::npos);
+    }
+    {
+        /* Pure decision table. */
+        auto decide = [](PipeOwnerKind owner, bool user_self,
+                         long label, long token, uint32_t client)
+        {
+            PipeServerFacts f;
+            f.owner               = owner;
+            f.server_user_is_self = user_self;
+            f.label_known         = label >= 0;
+            f.label_integrity     = label >= 0 ? (uint32_t)label : 0;
+            f.token_known         = token >= 0;
+            f.token_integrity     = token >= 0 ? (uint32_t)token : 0;
+            f.client_integrity    = client;
+            std::string e;
+            return EvaluatePipeServerTrust(f, e);
+        };
+        const long ME = (long)kIntegrityMedium, HI = (long)kIntegrityHigh,
+                   LO = (long)kIntegrityLow,    SY = (long)kIntegritySystem;
+        const uint32_t cME = kIntegrityMedium, cHI = kIntegrityHigh;
+        /* shipped: medium UI -> elevated engine whose token the
+           UI cannot read (Administrators owner, ME label) */
+        CHECK( decide(PipeOwnerKind::Administrators, true, ME, -1, cME));
+        /* elevated UI -> elevated engine */
+        CHECK( decide(PipeOwnerKind::Administrators, true, ME, -1, cHI));
+        CHECK( decide(PipeOwnerKind::Administrators, true, ME, HI, cHI));
+        /* service engine */
+        CHECK( decide(PipeOwnerKind::LocalSystem, false, ME, SY, cME));
+        CHECK( decide(PipeOwnerKind::LocalSystem, false, ME, SY, cHI));
+        /* medium <-> medium */
+        CHECK( decide(PipeOwnerKind::Self, true, ME, ME, cME));
+        CHECK( decide(PipeOwnerKind::Self, true, ME, -1, cME));
+        /* elevated UI vs a medium same-user squatter: REFUSE */
+        CHECK(!decide(PipeOwnerKind::Self, true, ME, ME, cHI));
+        CHECK(!decide(PipeOwnerKind::Self, true, ME, -1, cHI));
+        CHECK(!decide(PipeOwnerKind::Self, true, -1, -1, cHI));
+        /* creator-owner policy: elevated engine owned by the
+           user SID, token read as High */
+        CHECK( decide(PipeOwnerKind::Self, true, ME, HI, cHI));
+        /* elevated UI needs an Administrators/SYSTEM owner (or
+           the creator-owner case above) */
+        CHECK(!decide(PipeOwnerKind::Other, true, ME, HI, cHI));
+        /* a contradiction resolves to the token's lower level */
+        CHECK( decide(PipeOwnerKind::Administrators, true, ME, ME, cME));
+        CHECK(!decide(PipeOwnerKind::Administrators, true, ME, ME, cHI));
+        /* low squatter: label or token says low -> REFUSE */
+        CHECK(!decide(PipeOwnerKind::Self, true, LO, -1, cME));
+        CHECK(!decide(PipeOwnerKind::Self, true, ME, LO, cME));
+        /* nothing readable -> REFUSE (fail closed) */
+        CHECK(!decide(PipeOwnerKind::Self, true, -1, -1, cME));
+        /* another user's squat -> REFUSE (pre-existing rule) */
+        CHECK(!decide(PipeOwnerKind::Other, false, ME, ME, cME));
+        CHECK(!decide(PipeOwnerKind::Unknown, false, ME, HI, cME));
+    }
+    {
+        /* Real listener: the label materializes on the pipe
+           object, and the injected probe drives both ends. */
+        const std::string pipe =
+            "\\\\.\\pipe\\openrgb2-test-integrity-" +
+            std::to_string(GetCurrentProcessId());
+        ScriptedService svc;
+        IpcServer server(svc);
+        NamedPipeListener listener(server, ChannelKind::Command, pipe);
+        std::string err;
+        CHECK(listener.Start(err));
+
+        DWORD rid = 0, policy = 0;
+        CHECK(ReadPipeLabel(pipe, rid, policy));
+        CHECK(rid == kIntegrityMedium);
+        CHECK((policy & SYSTEM_MANDATORY_LABEL_NO_WRITE_UP) != 0);
+
+        /* no probe: the real tokens (this medium test) */
+        err.clear();
+        CHECK(PipeHandshake(pipe, err));
+
+        SetIntegrityProbeForTesting(&TestIntegrityProbe);
+        auto set = [](long self, long server_il, long client_il)
+        {
+            g_il_self = self; g_il_server = server_il;
+            g_il_client = client_il;
+        };
+        const long ME = (long)kIntegrityMedium, HI = (long)kIntegrityHigh,
+                   LO = (long)kIntegrityLow;
+
+        /* medium client, server token unreadable (an elevated
+           engine seen from a medium UI): the ME label suffices */
+        set(ME, -1, ME);
+        err.clear();
+        CHECK(PipeHandshake(pipe, err));
+
+        /* ELEVATED client vs this medium-owned server: refused
+           before a byte goes out */
+        set(HI, ME, ME);
+        err.clear();
+        CHECK(!PipeHandshake(pipe, err));
+        CHECK(err.find("integrity") != std::string::npos);
+        set(HI, -1, ME);
+        err.clear();
+        CHECK(!PipeHandshake(pipe, err));
+
+        /* elevated client, server token read as High (creator-
+           owner policy elevated engine): allowed */
+        set(HI, HI, ME);
+        err.clear();
+        CHECK(PipeHandshake(pipe, err));
+
+        /* medium client vs a LOW server: refused */
+        set(ME, LO, ME);
+        err.clear();
+        CHECK(!PipeHandshake(pipe, err));
+
+        /* engine side: a low-integrity client is dropped
+           without a WELCOME; an unreadable one too (fail
+           closed); a medium one is served */
+        set(ME, ME, LO);
+        err.clear();
+        CHECK(!PipeHandshake(pipe, err));
+        set(ME, ME, -1);
+        err.clear();
+        CHECK(!PipeHandshake(pipe, err));
+        set(ME, ME, ME);
+        err.clear();
+        CHECK(PipeHandshake(pipe, err));
+
+        SetIntegrityProbeForTesting(nullptr);
+        listener.Stop();
     }
 
     /*---- client-side server verification --------------------*\
