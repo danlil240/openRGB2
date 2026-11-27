@@ -7,6 +7,7 @@
 #include "DevicePreset.h"
 #include "../scene/EmitterLayout.h"
 #include "../scene/JsonFields.h"
+#include "../config/JsonBounded.h"
 
 #include <algorithm>
 #include <fstream>
@@ -901,16 +902,17 @@ bool DevicePresetFromJsonFile(const std::string& path, DevicePreset& p,
     }
     std::stringstream ss;
     ss << f.rdbuf();
-    nlohmann::json j;
-    try
-    {
-        j = nlohmann::json::parse(ss.str());
-    }
-    catch(const std::exception& e)
+    /* Depth-capped (audit I-2): preset folders are loaded
+       from user-supplied places (an imported file's sibling
+       presets/, the managed library). */
+    const nlohmann::json j = ParseJsonBounded(ss.str());
+    if(j.is_discarded())
     {
         if(errors)
         {
-            errors->push_back(path + ": invalid JSON (" + e.what() + ")");
+            errors->push_back(path + ": invalid JSON (or nested deeper "
+                              "than " + std::to_string(kMaxJsonDepth) +
+                              " levels)");
         }
         return false;
     }

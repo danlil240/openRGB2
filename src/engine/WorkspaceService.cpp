@@ -6,6 +6,7 @@
 
 #include "WorkspaceService.h"
 
+#include "config/JsonBounded.h"
 #include "config/StudioConfig.h"
 #include "presets/DevicePreset.h"
 #include "presets/PresetBundle.h"
@@ -1072,11 +1073,14 @@ WorkspaceService::Result WorkspaceService::ImportFile(
                     "' (missing or oversized)";
         return res;
     }
-    const nlohmann::json j =
-        nlohmann::json::parse(bytes, nullptr, false);
+    /* Depth-capped (audit I-2): an imported file is
+       untrusted and the candidate parse deep-copies it. */
+    const nlohmann::json j = studio::ParseJsonBounded(bytes);
     if(j.is_discarded() || !j.is_object())
     {
-        res.error = path + " is not a valid workspace document";
+        res.error = path + " is not a valid workspace document"
+                           " (invalid JSON or nested deeper than " +
+                    std::to_string(studio::kMaxJsonDepth) + ")";
         return res;
     }
 
@@ -1731,7 +1735,10 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
         {
             return err.empty() ? "staged_unknown" : err;
         }
-        doc = nlohmann::json::parse(raw, nullptr, false);
+        /* Same nesting cap as wire bodies (audit I-2): staged
+           bytes are untrusted, and the candidate parse,
+           bundle unpack and dump(2) all recurse per level. */
+        doc = studio::ParseJsonBounded(raw);
         if(doc.is_discarded() || !doc.is_object())
         {
             return "invalid_document";
