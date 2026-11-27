@@ -255,6 +255,28 @@ set_tests_properties(qml_diagnostics_test PROPERTIES
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${QT_BIN_DIR}")
 
+# Audit Q-11: the real LightingPage.qml against notifying
+# QtObject stubs — a reactive-input checkbox re-asserts engine
+# state after a click, and the uploaded-preset colour well shows
+# the tracked colour instead of a hard-coded red.
+add_executable(qml_lighting_state_test qml_lighting_state_test.cpp)
+target_link_libraries(qml_lighting_state_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+target_include_directories(qml_lighting_state_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(qml_lighting_state_test PRIVATE NDEBUG)
+set_target_properties(qml_lighting_state_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(qml_lighting_state_test)
+add_test(NAME qml_lighting_state_test COMMAND qml_lighting_state_test)
+set_tests_properties(qml_lighting_state_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
+
 # Task 4.8: the real shell headless — Tab/Space focus chain,
 # Ctrl+1..5 view switching, Ctrl+S focused-commit save,
 # accessible-name resolution, theme contrast (WCAG ratios),
