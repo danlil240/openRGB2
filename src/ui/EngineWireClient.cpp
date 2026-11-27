@@ -212,7 +212,15 @@ EngineWireClient::EndReason EngineWireClient::Run(
 
     auto finish = [&](EndReason r, const std::string& d)
     {
-        live_.store(false);
+        {
+            /* Flipped under the queue mutex the writer waits on:
+               stored bare, it could land between the writer's
+               predicate check and its block, the notify below is
+               then lost and the join hangs forever (seen under
+               the U-11 handshake stress test). */
+            std::lock_guard<std::mutex> lock(out_mu_);
+            live_.store(false);
+        }
         negotiated_.store(0);
         {
             std::lock_guard<std::mutex> lock(ch_mu_);
@@ -384,11 +392,15 @@ EngineWireClient::EndReason EngineWireClient::Run(
         }
         /* The writer owns the pipe from here: SUBSCRIBE and every
            later request enqueue to it — SendRequest callers never
-           touch the channel. */
+           touch the channel. live_ goes up BEFORE the thread
+           starts: the writer parks on "queue non-empty or !live_",
+           so a writer scheduled ahead of this thread would see an
+           empty queue with !live_, exit, and fail SUBSCRIBE with
+           "session closing" (audit U-11). */
         writer_up_.store(true);
+        live_.store(true);
         writer_ = std::thread(&EngineWireClient::WriterMain, this,
                               channel_);
-        live_.store(true);
         if(handlers.onWelcome)
         {
             handlers.onWelcome(welcome);

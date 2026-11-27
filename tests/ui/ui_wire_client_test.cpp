@@ -863,6 +863,51 @@ void Test_DefaultKeepaliveDuringEvents()
     CHECK(end == EngineWireClient::EndReason::Stopped);
 }
 
+/* Audit U-11: the session writer parks on "queue non-empty or
+   session not live". Started before live_ was set, a writer
+   scheduled first saw !live_ with an empty queue and exited —
+   SUBSCRIBE then failed with "session closing" and the session
+   died right after WELCOME. A thread-start race, so repeat the
+   handshake many times; every one must reach SUBSCRIBE and stay
+   live until Stop(). The same loop also caught a lost wakeup on
+   the way down (live_ cleared outside the queue mutex), which
+   hung Stop() + join; a hang here is that regression. */
+void Test_WriterLiveBeforeStart()
+{
+    std::printf("-- writer never exits before the session is live\n");
+    const int kSessions = 200;
+    int failed = 0;
+    for(int i = 0; i < kSessions && failed == 0; ++i)
+    {
+        auto st = std::make_shared<PipeShared>();
+        ServerPeer srv(st);
+        EngineWireClient client;
+        Capture cap;
+        EngineWireClient::Options opts;
+        opts.keepalive_ms = 0;
+        EngineWireClient::EndReason end =
+            EngineWireClient::EndReason::Stopped;
+        std::string detail;
+        std::thread th([&] {
+            end = client.Run(
+                std::unique_ptr<IIpcChannel>(new PipeEnd(st, true)),
+                MakeHandlers(cap), opts, detail);
+        });
+        uint32_t sub_id = 0;
+        const bool hs = DriveHandshake(srv, cap, sub_id, 1000);
+        client.Stop();
+        th.join();
+        if(!hs || end != EngineWireClient::EndReason::Stopped)
+        {
+            ++failed;
+            std::printf("  session %d: handshake=%d end=%d "
+                        "detail=%s\n", i, (int)hs, (int)end,
+                        detail.c_str());
+        }
+    }
+    CHECK(failed == 0);
+}
+
 } /* anonymous namespace */
 
 int main()
@@ -879,6 +924,7 @@ int main()
     Test_KeepRunningCancel();
     Test_DefaultKeepaliveBeforeEngineIdleClose();
     Test_DefaultKeepaliveDuringEvents();
+    Test_WriterLiveBeforeStart();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
