@@ -102,6 +102,15 @@ int main()
     auto submit = std::async(std::launch::async, [&] { service.SetDesired(target, upload); });
     service.BeginMode(second_target, true);
     const bool prompt = submit.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready;
+    /* Status reads come from the published snapshot: they must not
+       wait for the worker's blocked USB I/O either. */
+    auto status_read = std::async(std::launch::async, [&]
+    {
+        LianLiWirelessService::GroupStatus st;
+        return service.GetStatus(target, st);
+    });
+    const bool status_prompt =
+        status_read.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready;
     {
         std::lock_guard<std::mutex> lock(link.mutex);
         link.release = true;
@@ -119,6 +128,11 @@ int main()
     if(!prompt)
     {
         std::puts("FAIL: submission waited on blocking transport I/O");
+        return 1;
+    }
+    if(!status_prompt || !status_read.get())
+    {
+        std::puts("FAIL: status read waited on blocking transport I/O");
         return 1;
     }
     FreshnessLink fresh_link;
@@ -228,6 +242,46 @@ int main()
     if(!status_service.GetStatus(target, status) || status.frame_count != 1)
     {
         std::puts("FAIL: stale playback replaced live mode");
+        return 1;
+    }
+    // A controller rebuilt by a rescan starts in Direct and never ran a
+    // mode update. In a Direct-kind slot it adopts the current revision
+    // (nothing cleared); in a playback slot it begins a Direct mode.
+    // Either way its frames are admitted at once.
+    if(status_service.AdoptMode(target, false) != live_revision)
+    {
+        std::puts("FAIL: rebuilt controller did not adopt the live revision");
+        return 1;
+    }
+    auto live2 = std::make_shared<RgbUpload>(std::vector<uint8_t>(12, 3),
+        120, 1, timing);
+    status_service.SetDesired(target, live2, live_revision);
+    status_service.StepAll();
+    if(!status_service.GetStatus(target, status)
+       || status.effect_id != live2->EffectId())
+    {
+        std::puts("FAIL: adopted revision rejected a Direct frame");
+        return 1;
+    }
+    const auto playback_revision = status_service.BeginMode(target, true);
+    status_service.SetDesired(target, animation, playback_revision);
+    status_service.StepAll();
+    const auto adopted = status_service.AdoptMode(target, false);
+    if(adopted == playback_revision || adopted == 0)
+    {
+        std::puts("FAIL: rebuilt controller adopted a playback revision");
+        return 1;
+    }
+    status_service.SetDesired(target, live, adopted);
+    status_service.StepAll();
+    if(!status_service.GetStatus(target, status) || status.frame_count != 1)
+    {
+        std::puts("FAIL: rebuilt controller's Direct frame was rejected");
+        return 1;
+    }
+    if(status_service.AdoptMode(Mac{9, 9, 9, 9, 9, 9}, false) != 0)
+    {
+        std::puts("FAIL: unknown group adopted a revision");
         return 1;
     }
     rgb_clock.now = 8000;

@@ -24,6 +24,33 @@
 
 namespace LianLiWireless
 {
+    /*---------------------------------------------------------*\
+    | Merges discovery sightings by MAC over time. Only         |
+    | complete rows (IsCompleteSighting) count, and a group's   |
+    | fan count is the modal count over the rows seen — one     |
+    | short or torn row cannot size a group. Thread-safe.       |
+    \*---------------------------------------------------------*/
+    class SightingAccumulator
+    {
+    public:
+        void Add(const Sighting& s, uint64_t now_ms);
+        void AddResponse(const std::vector<uint8_t>& response, uint64_t now_ms);
+
+        /* Groups seen within max_age_ms of now_ms; fan_count is the
+           modal count (ties go to the most recently seen count). */
+        std::vector<Sighting> Snapshot(uint64_t now_ms, uint64_t max_age_ms) const;
+
+    private:
+        struct Entry
+        {
+            Sighting                    last{};
+            uint64_t                    last_seen_ms = 0;
+            std::map<uint8_t, uint32_t> fan_votes;
+        };
+        mutable std::mutex      mutex;
+        std::map<Mac, Entry>    entries;
+    };
+
     class LianLiWirelessService
     {
     public:
@@ -62,12 +89,40 @@ namespace LianLiWireless
         void RemoveGroup(const Mac& mac);
         std::vector<Mac> Groups() const;
 
+        /* Corrects a tracked group's expected fan count (rescan with a
+           better observation); re-arms a layout wedge. False if the
+           group is unknown. */
+        bool UpdateGroupFans(const Mac& mac, uint8_t fan_count);
+
+        /*---------------------------------------------------------*\
+        | Discovery rows observed by the worker's own polls (every  |
+        | runtime's discovery goes through the service link), so a  |
+        | rescan can find groups that appeared later without        |
+        | driving the link from the detector thread.                |
+        \*---------------------------------------------------------*/
+        std::vector<Sighting> RecentSightings(uint64_t max_age_ms) const;
+
         /* newest-frame-wins; unknown MAC is ignored */
         uint64_t BeginMode(const Mac& mac, bool playback);
+
+        /*---------------------------------------------------------*\
+        | A controller rebuilt by a rescan starts in a mode of the  |
+        | given kind without a mode update. If the group's pending  |
+        | slot is already in that kind of mode, return its current  |
+        | revision (frames are admitted at once, nothing is         |
+        | cleared); otherwise BeginMode(playback). 0 for an unknown |
+        | MAC or a slot with no mode selected yet (revision 0 is    |
+        | admitted then).                                           |
+        \*---------------------------------------------------------*/
+        uint64_t AdoptMode(const Mac& mac, bool playback);
         void SetDesired(const Mac& mac, std::shared_ptr<const RgbUpload> upload,
                         uint64_t revision = 0);
         void ClearDesired(const Mac& mac);
 
+        /*---------------------------------------------------------*\
+        | Served from a per-group snapshot the worker publishes     |
+        | after each runtime Tick — never waits on USB I/O.         |
+        \*---------------------------------------------------------*/
         bool GetStatus(const Mac& mac, GroupStatus& out) const;
 
         /*---------------------------------------------------------*\
@@ -81,12 +136,58 @@ namespace LianLiWireless
         void StepAll();
 
     private:
+        /*---------------------------------------------------------*\
+        | Forwards to the real link and records every discovery     |
+        | response into the accumulator. Used only on the worker.   |
+        \*---------------------------------------------------------*/
+        struct ObservingLink : IWirelessLink
+        {
+            ObservingLink(IWirelessLink& inner_in, IWirelessClock& clock_in,
+                          SightingAccumulator& sink_in)
+                : inner(inner_in), clock(clock_in), sink(sink_in) {}
+
+            bool ReadMasterMac(Mac& out) override { return inner.ReadMasterMac(out); }
+            bool PollDiscovery(std::vector<uint8_t>& out) override
+            {
+                const bool ok = inner.PollDiscovery(out);
+                if(ok)
+                {
+                    sink.AddResponse(out, clock.NowMs());
+                }
+                return ok;
+            }
+            bool SendChunks(const std::array<UsbChunk, USB_CHUNKS_PER_PACKET>& chunks) override
+            {
+                return inner.SendChunks(chunks);
+            }
+            bool ReadRgbClock(const Mac& m, uint8_t ch, uint32_t& ticks) override
+            {
+                return inner.ReadRgbClock(m, ch, ticks);
+            }
+            uint64_t ConnectionGeneration() const override { return inner.ConnectionGeneration(); }
+
+            IWirelessLink&       inner;
+            IWirelessClock&      clock;
+            SightingAccumulator& sink;
+        };
+
+        static GroupStatus BuildStatus(const WirelessRuntime& rt);
+        void PublishStatus(const Mac& mac, const WirelessRuntime& rt);
+        void Wake();
+
         IWirelessLink&        link;
         IWirelessClock&       clock;
         WirelessRuntimeConfig cfg;
+        SightingAccumulator   sightings;
+        ObservingLink         observed;
 
+        /* guards the runtime map; held across every runtime Tick */
         mutable std::mutex    mutex;
         std::map<Mac, std::unique_ptr<WirelessRuntime>> runtimes;
+
+        /* small lock for the published per-group status snapshot */
+        mutable std::mutex    status_mutex;
+        std::map<Mac, GroupStatus> status_snapshot;
         struct PendingUpload
         {
             bool queued = false;

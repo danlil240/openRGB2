@@ -25,9 +25,10 @@
     @effects :white_check_mark:
     @detectors DetectLianLiWireless
     @comment Fan groups are discovered over the wireless RX dongle at
-             detect time. Groups that appear later (or while L-Connect
-             holds the receiver) need an app restart/rescan with the
-             dongles free. Effect modes render to a pre-built frame
+             detect time. Groups that appear later are added by a
+             device rescan from the running service's discovery polls
+             (no app restart; L-Connect must not hold the dongles at
+             first detection). Effect modes render to a pre-built frame
              loop uploaded once — the firmware cycles it on its own.
 \*-------------------------------------------------------------------*/
 
@@ -205,6 +206,16 @@ RGBController_LianLiWireless::RGBController_LianLiWireless(LianLiWirelessControl
     modes.push_back(StackRainbow);
 
     SetupZones();
+
+    /*-------------------------------------------------*\
+    | The service (and its per-group mode revision)     |
+    | outlives rescans, but a rebuilt controller starts |
+    | in Direct without a mode update. Adopt the        |
+    | service's current Direct-kind revision so Direct  |
+    | frames are admitted at once instead of being      |
+    | rejected until a mode is re-applied.              |
+    \*-------------------------------------------------*/
+    mode_revision = controller->AdoptMode(false);
 }
 
 RGBController_LianLiWireless::~RGBController_LianLiWireless()

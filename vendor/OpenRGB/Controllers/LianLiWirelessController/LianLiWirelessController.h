@@ -38,6 +38,7 @@ public:
                              LianLiWireless::WirelessFanInfo fan_info);
 
     uint64_t    BeginMode(bool playback) { return service.BeginMode(mac, playback); }
+    uint64_t    AdoptMode(bool playback) { return service.AdoptMode(mac, playback); }
     void        SetLEDs(const RGBColor* led_colors, size_t count,
                         uint64_t revision = 0);
 
