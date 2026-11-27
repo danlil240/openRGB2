@@ -1007,8 +1007,16 @@ Item {
                                 Layout.fillWidth: true
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0; to: 100; stepSize: 1
-                                onMoved: if(root.editorUp)
-                                    sceneEdit.setBrightness(value / 100)
+                                /* One commit per gesture (release),
+                                   not one undo record per pixel of
+                                   drag; keyboard steps (no press)
+                                   commit immediately. */
+                                function commitValue() {
+                                    if(root.editorUp)
+                                        sceneEdit.setBrightness(value / 100)
+                                }
+                                onMoved: if(!pressed) commitValue()
+                                onPressedChanged: if(!pressed) commitValue()
                                 Binding {
                                     target: brightSlider
                                     property: "value"
@@ -1040,8 +1048,13 @@ Item {
                                 Layout.fillWidth: true
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0.05; to: 4.0; stepSize: 0.05
-                                onMoved: if(root.editorUp)
-                                    sceneEdit.setEffectSpeed(value)
+                                /* Commit on release (see brightness). */
+                                function commitValue() {
+                                    if(root.editorUp)
+                                        sceneEdit.setEffectSpeed(value)
+                                }
+                                onMoved: if(!pressed) commitValue()
+                                onPressedChanged: if(!pressed) commitValue()
                                 Binding {
                                     target: fxSpeedSlider
                                     property: "value"
@@ -1073,8 +1086,13 @@ Item {
                                 Layout.fillWidth: true
                                 enabled: root.liveControlsEnabled && sceneEdit.hasWorking
                                 from: 0; to: 1.0; stepSize: 0.01
-                                onMoved: if(root.editorUp)
-                                    sceneEdit.setEffectIntensity(value)
+                                /* Commit on release (see brightness). */
+                                function commitValue() {
+                                    if(root.editorUp)
+                                        sceneEdit.setEffectIntensity(value)
+                                }
+                                onMoved: if(!pressed) commitValue()
+                                onPressedChanged: if(!pressed) commitValue()
                                 Binding {
                                     target: fxIntSlider
                                     property: "value"
