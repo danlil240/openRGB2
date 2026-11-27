@@ -71,6 +71,13 @@ struct IpcServerStats
     uint64_t queued_events     = 0;   /* currently queued          */
 };
 
+/* Frames one EVENT ({"data":...,"kind":...}, byte-identical to
+   encoding that object) serializing `data` at most once and
+   never copying it into an envelope: the producer's
+   pre-serialized data_json is used verbatim when present
+   (audit I-7). Empty when the body exceeds the cap. */
+std::vector<uint8_t> EncodeEventMessage(const IpcEvent& ev);
+
 class IpcServer
 {
 public:

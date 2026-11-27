@@ -374,10 +374,19 @@ EngineService::EngineService(Engine& engine, Deps deps,
             [this](uint64_t sid, const IpcEvent& ev,
                    const std::string& key)
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if(session_sink_)
+                /* The sink frames (serializes) the chunk —
+                   never under the service mutex, which every
+                   SCENE/STATE read and apply takes (audit
+                   I-7). */
+                std::function<void(uint64_t, const IpcEvent&,
+                                   const std::string&)> sink;
                 {
-                    session_sink_(sid, ev, key);
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    sink = session_sink_;
+                }
+                if(sink)
+                {
+                    sink(sid, ev, key);
                 }
             };
         pd.max_sessions        = options_.preview.max_sessions;
@@ -400,10 +409,15 @@ EngineService::EngineService(Engine& engine, Deps deps,
             [this](uint64_t sid, const IpcEvent& ev,
                    const std::string& key)
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if(session_sink_)
+                std::function<void(uint64_t, const IpcEvent&,
+                                   const std::string&)> sink;
                 {
-                    session_sink_(sid, ev, key);
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    sink = session_sink_;
+                }
+                if(sink)
+                {
+                    sink(sid, ev, key);
                 }
             };
         ws_commands_->SetCalibrationDeps(std::move(cd));
@@ -451,7 +465,15 @@ void EngineService::SetServerStatsProvider(
 }
 
 void EngineService::Emit(const std::string& kind,
-                         const nlohmann::json& data)
+                         nlohmann::json data)
+{
+    IpcEvent ev;
+    ev.kind = kind;
+    ev.data = std::move(data);
+    EmitEvent(std::move(ev));
+}
+
+void EngineService::EmitEvent(IpcEvent ev)
 {
     std::function<void(const IpcEvent&)> sink;
     {
@@ -460,7 +482,7 @@ void EngineService::Emit(const std::string& kind,
     }
     if(sink)
     {
-        sink(IpcEvent{ kind, data });
+        sink(ev);
     }
 }
 
@@ -2809,13 +2831,28 @@ IpcReply EngineService::HandleReactiveCommand(
 void EngineService::PollEvents(TimePoint now)
 {
     std::vector<IpcEvent> pending;
-
-    const nlohmann::json conn = ConnectionJson();
-    if(conn.dump() != last_connection_sig_)
+    /* Each diff signature IS the body's serialization: dump
+       once, move the body into the event, and hand the dump
+       along as data_json so the server never serializes it
+       again (audit I-7). */
+    auto diff = [&pending](const char* kind, nlohmann::json body,
+                           std::string& last_sig)
     {
-        last_connection_sig_ = conn.dump();
-        pending.push_back(IpcEvent{ event_kind::kConnection, conn });
-    }
+        auto dumped = std::make_shared<const std::string>(body.dump());
+        if(*dumped == last_sig)
+        {
+            return;
+        }
+        last_sig = *dumped;
+        IpcEvent ev;
+        ev.kind      = kind;
+        ev.data      = std::move(body);
+        ev.data_json = std::move(dumped);
+        pending.push_back(std::move(ev));
+    };
+
+    diff(event_kind::kConnection, ConnectionJson(),
+         last_connection_sig_);
 
     /* Topology is structure, not pixels: the diff signature
        excludes per-frame `colors` — with them, any animated
@@ -2824,36 +2861,30 @@ void EngineService::PollEvents(TimePoint now)
        payload still carries colors so consumers get a fresh
        frame on real changes; per-frame colors stream via
        frame_status regardless. */
-    const nlohmann::json sig =
-        SnapshotsJson(/*include_colors*/ false);
-    if(sig.dump() != last_topology_sig_)
     {
-        last_topology_sig_ = sig.dump();
-        pending.push_back(IpcEvent{ event_kind::kTopology,
-                                    SnapshotsJson() });
+        std::string sig =
+            SnapshotsJson(/*include_colors*/ false).dump();
+        if(sig != last_topology_sig_)
+        {
+            last_topology_sig_ = std::move(sig);
+            IpcEvent ev;
+            ev.kind = event_kind::kTopology;
+            ev.data = SnapshotsJson();
+            pending.push_back(std::move(ev));
+        }
     }
 
-    const nlohmann::json play = PlaybackJson();
-    if(play.dump() != last_playback_sig_)
-    {
-        last_playback_sig_ = play.dump();
-        pending.push_back(IpcEvent{ event_kind::kPlayback, play });
-    }
+    diff(event_kind::kPlayback, PlaybackJson(), last_playback_sig_);
 
     /* reactive: status strings shift on their own (a source
        reinitializing, a display disappearing) — diff-driven
        like the others so subscribers see them without a
        command round-trip. */
-    const nlohmann::json react = ReactiveJson();
-    if(react.dump() != last_reactive_sig_)
-    {
-        last_reactive_sig_ = react.dump();
-        pending.push_back(IpcEvent{ event_kind::kReactive, react });
-    }
+    diff(event_kind::kReactive, ReactiveJson(), last_reactive_sig_);
 
-    for(const IpcEvent& ev : pending)
+    for(IpcEvent& ev : pending)
     {
-        Emit(ev.kind, ev.data);
+        EmitEvent(std::move(ev));
     }
 
     /* Idle workspace transfers expire on the owner tick too —

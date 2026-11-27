@@ -57,6 +57,32 @@ bool IsRequestType(MsgType t)
 
 } /* anonymous namespace */
 
+std::vector<uint8_t> EncodeEventMessage(const IpcEvent& ev)
+{
+    /* nlohmann objects serialize keys in sorted order — "data"
+       before "kind" — so this is the same byte stream the old
+       json::object({{"kind",..},{"data",..}}).dump() produced,
+       minus the deep copy of `data` and, with data_json, the
+       second dump. */
+    std::string raw;
+    const std::string kind = nlohmann::json(ev.kind).dump();
+    if(ev.data_json)
+    {
+        raw.reserve(ev.data_json->size() + kind.size() + 18);
+        raw += "{\"data\":";
+        raw += *ev.data_json;
+    }
+    else
+    {
+        raw  = "{\"data\":";
+        raw += ev.data.dump();
+    }
+    raw += ",\"kind\":";
+    raw += kind;
+    raw += '}';
+    return EncodeRawMessage(MsgType::Event, 0, raw);
+}
+
 struct IpcServer::Session
 {
     uint64_t                    id    = 0;
@@ -261,12 +287,7 @@ void IpcServer::Emit(const IpcEvent& ev)
         return;
     }
 
-    std::vector<uint8_t> encoded =
-        EncodeMessage(MsgType::Event, 0,
-            nlohmann::json::object({
-                { "kind", ev.kind },
-                { "data", ev.data },
-            }));
+    std::vector<uint8_t> encoded = EncodeEventMessage(ev);
     if(encoded.empty())
     {
         return;
@@ -348,12 +369,7 @@ void IpcServer::EmitTo(uint64_t session_id, const IpcEvent& ev,
         }
     }
     /* Encoded only once a subscribed target exists. */
-    std::vector<uint8_t> encoded =
-        EncodeMessage(MsgType::Event, 0,
-            nlohmann::json::object({
-                { "kind", ev.kind },
-                { "data", ev.data },
-            }));
+    std::vector<uint8_t> encoded = EncodeEventMessage(ev);
     if(encoded.empty())
     {
         return;

@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -1306,6 +1307,82 @@ int main()
             }
         }
         CHECK(!frame_seen);
+    }
+
+    /*---- I-7: preview frames leave the service OFF its mutex
+       (encoding a chunk never stalls SceneJson/apply), and
+       the pre-serialized body is exactly the event's JSON. */
+    {
+        std::printf("-- ipc: preview emit runs outside the service mutex\n");
+        Rig rig(g_tmp / "r-i7");
+        rig.Start();
+        std::mutex                         probe_m;
+        std::vector<std::future<uint64_t>> probes;   /* probe_m */
+        std::atomic<int> frames{ 0 }, blocked{ 0 }, raw_mismatch{ 0 };
+        rig.svc->SetSessionEventSink(
+            [&](uint64_t sid, const IpcEvent& ev,
+                const std::string& key)
+            {
+                if(ev.kind == "preview" &&
+                   key.rfind("frame/", 0) == 0)
+                {
+                    ++frames;
+                    /* Another thread reading service state must
+                       not wait for this emit to finish. */
+                    std::future<uint64_t> f = std::async(
+                        std::launch::async,
+                        [&rig] { return rig.svc->SceneRevision(); });
+                    if(f.wait_for(std::chrono::seconds(1)) !=
+                       std::future_status::ready)
+                    {
+                        ++blocked;
+                    }
+                    /* Serialized once by the producer, and
+                       exactly the event's JSON; the framed
+                       EVENT is byte-identical to the old
+                       envelope encode. */
+                    if(!ev.data_json ||
+                       *ev.data_json != ev.data.dump() ||
+                       EncodeEventMessage(ev) !=
+                           EncodeMessage(MsgType::Event, 0,
+                               json::object({
+                                   { "kind", ev.kind },
+                                   { "data", ev.data } })))
+                    {
+                        ++raw_mismatch;
+                    }
+                    std::lock_guard<std::mutex> g(probe_m);
+                    probes.push_back(std::move(f));
+                }
+                rig.server->EmitTo(sid, ev, key);
+            });
+        TestClient c;
+        Welcome(c, *rig.server);
+        c.SendMsg(MsgType::Subscribe, ++seq,
+                  json::object({{ "events", json::array({ "preview" }) }}));
+        const json r = WsCall(c, seq, json::object({
+            { "verb",           "preview_begin" },
+            { "document",       CompactDoc(3, 1, 0.5) },
+            { "draft_revision", 4 },
+        }));
+        CHECK(r.value("active", false));
+        json frame;
+        TimePoint now = Clock::now();
+        for(int i = 0; i < 40 && !frame.is_object(); ++i)
+        {
+            now += std::chrono::milliseconds(20);
+            rig.Tick(now);
+            CollectFrame(c, 30, frame);
+        }
+        CHECK(frame.is_object());
+        CHECK(frames.load() > 0);
+        CHECK(blocked.load() == 0);
+        CHECK(raw_mismatch.load() == 0);
+        std::lock_guard<std::mutex> g(probe_m);
+        for(std::future<uint64_t>& f : probes)
+        {
+            f.wait();
+        }
     }
 
     std::error_code ec;

@@ -30,6 +30,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <memory>
 #include <string>
 
 namespace openrgb2
@@ -51,6 +52,13 @@ struct IpcEvent
 {
     std::string    kind;
     nlohmann::json data = nlohmann::json::object();
+    /* Optional: `data` already serialized (exactly
+       data.dump()) by a producer that had to dump it anyway —
+       a diff signature, a size-budgeted preview chunk. The
+       server frames these bytes verbatim instead of dumping
+       `data` a second time (audit I-7). `data` stays filled
+       for in-process consumers. */
+    std::shared_ptr<const std::string> data_json;
 };
 
 struct IpcReply
