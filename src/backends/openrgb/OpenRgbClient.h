@@ -99,6 +99,9 @@ struct ConnectionSnapshotInfo
     uint32_t        protocol_version  = 0;    /* negotiated, <= 4 */
     uint32_t        reconnect_attempt = 0;
     std::string     last_error;
+    /* Server indices whose CONTROLLER_DATA could not be parsed
+       at the last enumeration -- skipped, not fatal. */
+    std::vector<uint32_t> skipped_controllers;
 };
 
 /* Cached result of the LIANLI_WIRELESS_STATUS vendor
@@ -360,6 +363,10 @@ private:
        (state lock) — may exceed devices_.size() when
        duplicate-key controllers collapse. */
     uint32_t               server_controller_count_ = 0;
+
+    /* Server indices skipped at the last enumeration because
+       their CONTROLLER_DATA did not parse (state lock). */
+    std::vector<uint32_t>  skipped_controllers_;
 
     /* Packet-4000 requests sent whose replies have not been
        read yet. io_mutex_ only (wire-side bookkeeping). */

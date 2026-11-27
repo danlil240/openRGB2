@@ -99,6 +99,7 @@ ConnectionSnapshotInfo OpenRgbClient::ConnectionSnapshot() const
     out.protocol_version  = protocol_version_;
     out.reconnect_attempt = reconnect_attempt_;
     out.last_error        = last_error_;
+    out.skipped_controllers = skipped_controllers_;
     return out;
 }
 
@@ -309,6 +310,7 @@ bool OpenRgbClient::EnumerateIo(std::string& err)
        atomically under mutex_ — a state reader never observes
        a half-enumerated device list. */
     std::map<DeviceKey, DeviceRecord> devices;
+    std::vector<uint32_t>             skipped;
     for(uint32_t i = 0; i < count; ++i)
     {
         const std::vector<uint8_t> data =
@@ -319,9 +321,20 @@ bool OpenRgbClient::EnumerateIo(std::string& err)
         if(!ParseControllerData(data.data(), data.size(),
                                 pv, c))
         {
-            err = "malformed controller data for device " +
-                  std::to_string(i);
-            return false;
+            /* One description that does not parse is that
+               device's problem, not the rig's (audit P-14): the
+               reply was a whole, well-framed packet, so the
+               stream is still in sync -- skip the controller and
+               keep every other index. Recorded for diagnostics;
+               only an enumeration where EVERY description fails
+               (a protocol-level mismatch) is an error below. */
+            skipped.push_back(i);
+            if(err.empty())
+            {
+                err = "malformed controller data for device " +
+                      std::to_string(i);
+            }
+            continue;
         }
 
         DeviceRecord rec;
@@ -367,6 +380,11 @@ bool OpenRgbClient::EnumerateIo(std::string& err)
            RefreshStatus compares like with like. */
         devices.emplace(rec.snap.key, std::move(rec));
     }
+    if(count > 0 && skipped.size() == count)
+    {
+        return false;               /* err names the first index */
+    }
+    err.clear();
 
     /* Every enumeration is a topology generation: frames stamped
        with an older generation are obsolete. The generation bump
@@ -382,6 +400,7 @@ bool OpenRgbClient::EnumerateIo(std::string& err)
         }
         devices_ = std::move(devices);
         server_controller_count_ = count;
+        skipped_controllers_     = std::move(skipped);
     }
     /* Probe the wireless-status extension on every enumeration:
        covers Connect(), Enumerate(), and the structural-
@@ -594,9 +613,11 @@ bool OpenRgbClient::RefreshStatus()
             if(!ParseControllerData(data.data(), data.size(),
                                     pv, c))
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                last_error_ = "malformed controller data on refresh";
-                return false;
+                /* A known device whose description stopped
+                   parsing: re-enumerate (which skips it) rather
+                   than failing every refresh (audit P-14). */
+                structural = true;
+                continue;
             }
             /* A different identity or a changed zone/LED layout
                at an expected index means the topology moved —
