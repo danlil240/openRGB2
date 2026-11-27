@@ -14,6 +14,7 @@
 ||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 \*---------------------------------------------------------*/
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -34,9 +35,12 @@ using namespace LianLiWireless;
 | How long the detector polls the RX GetDev table for fan   |
 | group sightings. Records are transient — a few seconds    |
 | of merged polls are needed for a reliable picture.        |
+| Rescans read the running worker's own discovery rows      |
+| instead, accepting groups seen within the rescan age.     |
 \*---------------------------------------------------------*/
 #define LLW_DISCOVERY_WINDOW_MS     5000
 #define LLW_DISCOVERY_STEP_MS       200
+#define LLW_RESCAN_SIGHTING_AGE_MS  15000
 
 struct WirelessGroupInfo
 {
@@ -55,21 +59,32 @@ struct WirelessServiceContext
     LianLiWirelessUsbLink                       link;
     SystemWirelessClock                         clock;
     Mac                                         master{};
-    std::vector<WirelessGroupInfo>              groups;
+    std::vector<WirelessGroupInfo>              groups;     /* guarded by wireless_ctx_mutex */
     std::unique_ptr<LianLiWirelessService>      service;
 };
 
+/*---------------------------------------------------------*\
+| wireless_ctx_mutex only publishes/reads the context and   |
+| its group list — it is never held across USB I/O, so the |
+| SDK status reply (CollectStatusJson) cannot be blocked by |
+| the 5 s first-detection discovery window. Detection runs  |
+| are serialized by wireless_detect_mutex instead.          |
+\*---------------------------------------------------------*/
 static std::shared_ptr<WirelessServiceContext>    wireless_ctx;
 static std::mutex                                 wireless_ctx_mutex;
+static std::mutex                                 wireless_detect_mutex;
+static std::atomic<bool>                          wireless_detecting{false};
 
 /*---------------------------------------------------------*\
-| Poll discovery for window_ms and merge sightings by MAC.  |
-| Runs on the detector thread — only valid while the        |
-| service worker is not driving the link.                   |
+| Poll discovery for window_ms and merge sightings by MAC   |
+| (complete rows only, modal fan count — the same validity  |
+| rule the runtime applies). Runs on the detector thread —  |
+| only valid while no service worker drives the link.       |
 \*---------------------------------------------------------*/
-static std::vector<Sighting> PollSightings(IWirelessLink& link, uint32_t window_ms)
+static std::vector<Sighting> PollSightings(IWirelessLink& link, IWirelessClock& clock,
+                                           uint32_t window_ms)
 {
-    std::vector<Sighting> merged;
+    SightingAccumulator merged;
     auto deadline = std::chrono::steady_clock::now()
                   + std::chrono::milliseconds(window_ms);
 
@@ -79,104 +94,215 @@ static std::vector<Sighting> PollSightings(IWirelessLink& link, uint32_t window_
 
         if(link.PollDiscovery(resp))
         {
-            try
-            {
-                for(const Sighting& s : ParseDiscoveryResponse(resp.data(), resp.size()))
-                {
-                    bool known = false;
-
-                    for(Sighting& m : merged)
-                    {
-                        if(m.mac == s.mac)
-                        {
-                            m       = s;
-                            known   = true;
-                        }
-                    }
-
-                    if(!known)
-                    {
-                        merged.push_back(s);
-                    }
-                }
-            }
-            catch(const std::invalid_argument&) {}
+            merged.AddResponse(resp, clock.NowMs());
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(LLW_DISCOVERY_STEP_MS));
     }
 
-    return merged;
+    return merged.Snapshot(clock.NowMs(), (uint64_t)window_ms + 1000);
+}
+
+/*---------------------------------------------------------*\
+| Groups this backend may drive: bound to our master, a     |
+| validated fan variant, and no motherboard RGB sync.       |
+\*---------------------------------------------------------*/
+static bool AcceptGroup(const Sighting& s, const Mac& master, WirelessFanInfo& info)
+{
+    info = ClassifyFanType(s.fan_types[0]);
+
+    if(s.master != master)
+    {
+        return false;   /* bound to a different master        */
+    }
+    if(!info.supported)
+    {
+        return false;   /* fan variant not validated yet      */
+    }
+    if(s.mb_rgb_sync)
+    {
+        LOG_WARNING("[Lian Li Wireless] group %02X:%02X:%02X:%02X:%02X:%02X reports motherboard RGB sync — refusing writes",
+                    s.mac[0], s.mac[1], s.mac[2], s.mac[3], s.mac[4], s.mac[5]);
+        return false;
+    }
+    return true;
+}
+
+/*---------------------------------------------------------*\
+| First detection: open the pair, read the master, poll a   |
+| discovery window, start the service. Builds the context   |
+| without holding wireless_ctx_mutex; null if no supported  |
+| bound group was sighted (the dongles are released again). |
+\*---------------------------------------------------------*/
+static std::shared_ptr<WirelessServiceContext> BuildWirelessContext()
+{
+    unsigned tx_count = 0, rx_count = 0;
+
+    if(!CountWirelessDongles(tx_count, rx_count) || tx_count != 1 || rx_count != 1)
+    {
+        return nullptr;
+    }
+
+    std::shared_ptr<WirelessServiceContext> ctx = std::make_shared<WirelessServiceContext>();
+
+    if(!ctx->link.ReadMasterMac(ctx->master))
+    {
+        LOG_WARNING("[Lian Li Wireless] dongle pair found but master MAC unreadable: %s — is L-Connect running?",
+                    ctx->link.LastError());
+        return nullptr;
+    }
+
+    std::vector<Sighting> sightings = PollSightings(ctx->link, ctx->clock, LLW_DISCOVERY_WINDOW_MS);
+
+    for(const Sighting& s : sightings)
+    {
+        WirelessFanInfo info;
+
+        if(AcceptGroup(s, ctx->master, info))
+        {
+            ctx->groups.push_back({ s.mac, s.fan_count, info });
+        }
+    }
+
+    if(ctx->groups.empty())
+    {
+        LOG_WARNING("[Lian Li Wireless] no bound supported fan groups sighted (last error: %s)",
+                    ctx->link.LastError());
+        return nullptr;
+    }
+
+    ctx->service = std::make_unique<LianLiWirelessService>(ctx->link, ctx->clock);
+
+    for(const WirelessGroupInfo& g : ctx->groups)
+    {
+        ctx->service->AddGroup(g.mac, g.fan_count);
+    }
+
+    ctx->service->Start();
+    return ctx;
+}
+
+/*---------------------------------------------------------*\
+| Rescan: merge groups the running worker has sighted since |
+| (powered on later, or missed in the first window) and     |
+| correct a tracked group's fan count when the modal count  |
+| disagrees. The worker owns the link; this only reads its  |
+| accumulated rows. Removal is conservative: a group that   |
+| vanished keeps its controller (the runtime reports Lost). |
+\*---------------------------------------------------------*/
+static void MergeRescanSightings(WirelessServiceContext& ctx)
+{
+    /*-----------------------------------------------------*\
+    | Follow an operator-adopted transmitter: when new      |
+    | intent re-armed a transmitter-identity wedge, the     |
+    | runtime adopted the transmitter present then. Accept  |
+    | groups on that master from now on, so a group bound   |
+    | to it is added instead of driven only by an existing  |
+    | runtime. Never changes without that operator action.  |
+    | Written under the context mutex (CollectStatusJson    |
+    | reads it); rescans are serialized by the detect mutex.|
+    \*-----------------------------------------------------*/
+    Mac adopted{};
+    if(ctx.service->AdoptedMaster(adopted) && adopted != ctx.master)
+    {
+        LOG_INFO("[Lian Li Wireless] rescan follows adopted transmitter %02X:%02X:%02X:%02X:%02X:%02X",
+                 adopted[0], adopted[1], adopted[2], adopted[3], adopted[4], adopted[5]);
+        std::lock_guard<std::mutex> lock(wireless_ctx_mutex);
+        ctx.master = adopted;
+    }
+
+    std::vector<Sighting> recent = ctx.service->RecentSightings(LLW_RESCAN_SIGHTING_AGE_MS);
+
+    for(const Sighting& s : recent)
+    {
+        WirelessFanInfo info;
+
+        if(!AcceptGroup(s, ctx.master, info))
+        {
+            continue;
+        }
+
+        bool    known       = false;
+        uint8_t known_fans  = 0;
+        {
+            std::lock_guard<std::mutex> lock(wireless_ctx_mutex);
+            for(const WirelessGroupInfo& g : ctx.groups)
+            {
+                if(g.mac == s.mac)
+                {
+                    known      = true;
+                    known_fans = g.fan_count;
+                }
+            }
+        }
+
+        if(!known)
+        {
+            if(ctx.service->AddGroup(s.mac, s.fan_count))
+            {
+                LOG_INFO("[Lian Li Wireless] rescan added group %02X:%02X:%02X:%02X:%02X:%02X (%u fans)",
+                         s.mac[0], s.mac[1], s.mac[2], s.mac[3], s.mac[4], s.mac[5], s.fan_count);
+            }
+            std::lock_guard<std::mutex> lock(wireless_ctx_mutex);
+            ctx.groups.push_back({ s.mac, s.fan_count, info });
+        }
+        else if(known_fans != s.fan_count)
+        {
+            LOG_INFO("[Lian Li Wireless] rescan corrected group %02X:%02X:%02X:%02X:%02X:%02X fan count %u -> %u",
+                     s.mac[0], s.mac[1], s.mac[2], s.mac[3], s.mac[4], s.mac[5], known_fans, s.fan_count);
+            ctx.service->UpdateGroupFans(s.mac, s.fan_count);
+            std::lock_guard<std::mutex> lock(wireless_ctx_mutex);
+            for(WirelessGroupInfo& g : ctx.groups)
+            {
+                if(g.mac == s.mac)
+                {
+                    g.fan_count = s.fan_count;
+                    g.info      = info;
+                }
+            }
+        }
+    }
 }
 
 DetectedControllers DetectLianLiWireless()
 {
     DetectedControllers             detected_controllers;
-    std::lock_guard<std::mutex>     lock(wireless_ctx_mutex);
+    std::lock_guard<std::mutex>     detect_lock(wireless_detect_mutex);
 
-    if(wireless_ctx == nullptr)
+    std::shared_ptr<WirelessServiceContext> ctx;
     {
-        unsigned tx_count = 0, rx_count = 0;
-
-        if(!CountWirelessDongles(tx_count, rx_count) || tx_count != 1 || rx_count != 1)
-        {
-            return detected_controllers;
-        }
-
-        std::shared_ptr<WirelessServiceContext> ctx = std::make_shared<WirelessServiceContext>();
-
-        if(!ctx->link.ReadMasterMac(ctx->master))
-        {
-            LOG_WARNING("[Lian Li Wireless] dongle pair found but master MAC unreadable: %s — is L-Connect running?",
-                        ctx->link.LastError());
-            return detected_controllers;
-        }
-
-        std::vector<Sighting> sightings = PollSightings(ctx->link, LLW_DISCOVERY_WINDOW_MS);
-
-        for(const Sighting& s : sightings)
-        {
-            WirelessFanInfo info = ClassifyFanType(s.fan_types[0]);
-
-            if(s.master != ctx->master)
-            {
-                continue;   /* bound to a different master        */
-            }
-            if(!info.supported)
-            {
-                continue;   /* fan variant not validated yet      */
-            }
-            if(s.mb_rgb_sync)
-            {
-                LOG_WARNING("[Lian Li Wireless] group %02X:%02X:%02X:%02X:%02X:%02X reports motherboard RGB sync — refusing writes",
-                            s.mac[0], s.mac[1], s.mac[2], s.mac[3], s.mac[4], s.mac[5]);
-                continue;
-            }
-
-            ctx->groups.push_back({ s.mac, s.fan_count, info });
-        }
-
-        if(ctx->groups.empty())
-        {
-            LOG_WARNING("[Lian Li Wireless] no bound supported fan groups sighted (last error: %s)",
-                        ctx->link.LastError());
-            return detected_controllers;
-        }
-
-        ctx->service = std::make_unique<LianLiWirelessService>(ctx->link, ctx->clock);
-
-        for(const WirelessGroupInfo& g : ctx->groups)
-        {
-            ctx->service->AddGroup(g.mac, g.fan_count);
-        }
-
-        ctx->service->Start();
-        wireless_ctx = ctx;
+        std::lock_guard<std::mutex> lock(wireless_ctx_mutex);
+        ctx = wireless_ctx;
     }
 
-    for(const WirelessGroupInfo& g : wireless_ctx->groups)
+    if(ctx == nullptr)
     {
-        LianLiWirelessController*       controller     = new LianLiWirelessController(wireless_ctx, *wireless_ctx->service, g.mac, g.fan_count, g.info);
+        wireless_detecting = true;
+        ctx = BuildWirelessContext();
+        wireless_detecting = false;
+
+        if(ctx == nullptr)
+        {
+            return detected_controllers;
+        }
+
+        std::lock_guard<std::mutex> lock(wireless_ctx_mutex);
+        wireless_ctx = ctx;
+    }
+    else
+    {
+        MergeRescanSightings(*ctx);
+    }
+
+    std::vector<WirelessGroupInfo> groups;
+    {
+        std::lock_guard<std::mutex> lock(wireless_ctx_mutex);
+        groups = ctx->groups;
+    }
+
+    for(const WirelessGroupInfo& g : groups)
+    {
+        LianLiWirelessController*       controller     = new LianLiWirelessController(ctx, *ctx->service, g.mac, g.fan_count, g.info);
         RGBController_LianLiWireless*   rgb_controller = new RGBController_LianLiWireless(controller);
 
         detected_controllers.push_back(rgb_controller);
@@ -192,8 +318,10 @@ REGISTER_DETECTOR("Lian Li Wireless", DetectLianLiWireless);
 || (NET_PACKET_ID_LIANLI_WIRELESS_STATUS). Reads the       ||
 || service through the persistent detection context, so    ||
 || the surface stays live across device-list rescans that  ||
-|| rebuild the RGBControllers. GetStatus only snapshots    ||
-|| under the service mutex — never drives the link.        ||
+|| rebuild the RGBControllers. GetStatus reads the         ||
+|| worker's published snapshot — never drives the link and ||
+|| never waits for a tick; the context mutex is never held ||
+|| across detection I/O, so the reply is always prompt.    ||
 \*---------------------------------------------------------*/
 nlohmann::json LianLiWireless::CollectStatusJson()
 {
@@ -203,6 +331,7 @@ nlohmann::json LianLiWireless::CollectStatusJson()
     {
         return nlohmann::json::object({
             { "available", false                     },
+            { "detecting", wireless_detecting.load() },
             { "groups",    nlohmann::json::array()   },
         });
     }

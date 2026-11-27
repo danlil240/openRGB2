@@ -51,7 +51,9 @@ public:
                                std::string& err) = 0;
 
     /* Reads exactly len bytes. Timeout/Closed are clean
-       outcomes, not errors. */
+       outcomes, not errors. Timeout is returned ONLY when no
+       byte of this call was consumed; a timeout after a
+       partial read is an Error (the stream is desynchronized). */
     virtual RecvResult RecvExact(void* buf, size_t len,
                                  std::string& err) = 0;
 

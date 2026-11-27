@@ -18,6 +18,7 @@
 
 #include "DevicePreset.h"
 
+#include <filesystem>
 #include <map>
 #include <string>
 #include <vector>
@@ -118,5 +119,17 @@ private:
     std::map<std::string, DevicePreset> defaults;   /* packaged    */
     std::map<std::string, std::string>  file_errors;
 };
+
+/* The workspace assets root for a type directory laid out as
+   <root>/<kind>/devices (presets/devices, library/devices,
+   resources/devices) — sets `out` to <root>/assets. Returns false
+   and leaves `out` alone when `preset_dir` is not shaped like
+   that: the old lexical `dir/../../assets` silently resolved to a
+   directory OUTSIDE the workspace for a shallow dir (e.g. %TEMP%),
+   so asset checks read stray files and ApplyImport wrote there.
+   Every asset lookup/landing derives the root through this one
+   rule. */
+bool WorkspaceAssetsDir(const std::string& preset_dir,
+                        std::filesystem::path& out);
 
 } /* namespace studio */

@@ -11,15 +11,19 @@
          under vendor\OpenRGB ("OpenRGB Windows 64-bit" or release\)
          or in OPENRGB2_BACKEND_DIR. -BuildBackend runs the in-tree
          qmake recipe (long: full backend build) when it is missing.
-      3. packaging\windows\stage-release.ps1 assembles + verifies
+      3. Stop (only with -InstallDir): stops the running install via
+         its own scripts\stop-openrgb2.ps1 (UI close -> graceful
+         engine QUIT -> backend shutdown event; -ForceStop passes
+         -Force) BEFORE staging, so nothing of the install can hold
+         files the staging or update steps touch.
+      4. packaging\windows\stage-release.ps1 assembles + verifies
          build\package\OpenRGB2-<version>-win64. -Sign passes through
          to Azure Trusted Signing; the account fields resolve from
          OPENRGB2_TS_* env vars as documented in stage-release.ps1.
-      4. Deploy (only with -InstallDir): stops the running install
-         via its own scripts\stop-openrgb2.ps1 (graceful engine QUIT
-         + backend CloseMainWindow; -ForceStop passes -Force), then
-         runs update-openrgb2.ps1 -- manifest-verified, preserves
-         profiles\local\ + state\, one-level .previous rollback.
+      5. Deploy (only with -InstallDir): update-openrgb2.ps1 --
+         manifest-verified, preserves profiles\local\ + state\,
+         one-level .previous rollback; run elevated it also makes the
+         install admin-only (see update-openrgb2.ps1).
 
     Without -InstallDir the staged folder IS the product -- run
     <OutDir>\OpenRGB2.cmd; no separate deploy step is needed.
@@ -106,11 +110,19 @@ if(-not $SkipBuild) {
     $qtDir = if($env:OPENRGB2_QT_DIR) { $env:OPENRGB2_QT_DIR }
              else                    { "C:\Qt\6.8.3\msvc2022_64" }
 
-    if($Reconfigure -or -not (Test-Path (Join-Path $BuildDir "CMakeCache.txt"))) {
+    $cache = Join-Path $BuildDir "CMakeCache.txt"
+    if($Reconfigure -or -not (Test-Path $cache)) {
         Step "Configuring $BuildDir (VS 17 2022 x64, Qt $qtDir)"
         & $CMakeExe -S $RepoRoot -B $BuildDir -G "Visual Studio 17 2022" -A x64 `
             "-DCMAKE_PREFIX_PATH=$qtDir"
         if($LASTEXITCODE -ne 0) { Fail "cmake configure failed" }
+    }
+    # A cache configured without Qt builds no UI at all -- staging would
+    # only fail much later on the missing openrgb2-ui.exe.
+    if(Select-String -LiteralPath $cache -Pattern '^Qt6_DIR:[A-Z]+=.*-NOTFOUND' -Quiet) {
+        Fail ("$cache has Qt6_DIR-NOTFOUND -- the UI cannot be built. Set " +
+              "OPENRGB2_QT_DIR (default C:\Qt\6.8.3\msvc2022_64) and re-run " +
+              "with -Reconfigure")
     }
 
     Step "Building $Configuration"
@@ -140,8 +152,14 @@ if(-not $backendDir -and $BuildBackend) {
     Step "Building pinned backend (vendor\OpenRGB\scripts\build-windows.bat)"
     $recipe = Join-Path $RepoRoot "vendor\OpenRGB\scripts\build-windows.bat"
     if(-not (Test-Path $recipe)) { Fail "backend recipe not found: $recipe" }
-    & cmd.exe /c "`"$recipe`" 6.8.3 2022 64"
-    if($LASTEXITCODE -ne 0) { Fail "backend build recipe failed" }
+    # The qmake recipe resolves OpenRGB.pro relative to the working
+    # directory -- it must run from vendor\OpenRGB.
+    Push-Location (Join-Path $RepoRoot "vendor\OpenRGB")
+    try {
+        & cmd.exe /c "`"$recipe`" 6.8.3 2022 64"
+        $recipeExit = $LASTEXITCODE
+    } finally { Pop-Location }
+    if($recipeExit -ne 0) { Fail "backend build recipe failed (exit $recipeExit)" }
     foreach($d in $backendCandidates) {
         if(Test-Path (Join-Path $d "OpenRGB.exe")) { $backendDir = $d; break }
     }
@@ -155,7 +173,30 @@ if(-not $backendDir) {
 Info "backend: $backendDir"
 
 #--------------------------------------------------------------------#
-# 3. stage + verify                                                   #
+# 3. stop the running install (before staging)                        #
+#--------------------------------------------------------------------#
+if($InstallDir) {
+    if(-not (Test-Path $InstallDir)) {
+        Fail "-InstallDir does not exist: $InstallDir"
+    }
+    $InstallDir = (Resolve-Path $InstallDir).Path
+
+    # update-openrgb2.ps1 refuses to apply over a running install
+    # (UI included), and its scripts\ stop is the managed path (UI
+    # close -> engine IPC QUIT -> backend shutdown event; verified-own
+    # only). Stopping BEFORE staging means a stack that runs from (or
+    # holds files of) the package dir cannot fail the staging wipe.
+    $stopScript = Join-Path $InstallDir "scripts\stop-openrgb2.ps1"
+    if(Test-Path $stopScript) {
+        Step "Stopping running install ($InstallDir)"
+        $stopArgs = @("-InstallDir", $InstallDir)
+        if($ForceStop) { $stopArgs += "-Force" }
+        Invoke-PsScript $stopScript $stopArgs
+    }
+}
+
+#--------------------------------------------------------------------#
+# 4. stage + verify                                                   #
 #--------------------------------------------------------------------#
 # Same default OutDir as stage-release.ps1 (version from CMakeLists).
 $cmakeTop = Get-Content (Join-Path $RepoRoot "CMakeLists.txt") -Raw
@@ -173,25 +214,9 @@ if($Sign) { $stageArgs += "-Sign" }
 Invoke-PsScript (Join-Path $PkgDir "stage-release.ps1") $stageArgs
 
 #--------------------------------------------------------------------#
-# 4. deploy (optional)                                                #
+# 5. deploy (optional)                                                #
 #--------------------------------------------------------------------#
 if($InstallDir) {
-    if(-not (Test-Path $InstallDir)) {
-        Fail "-InstallDir does not exist: $InstallDir"
-    }
-    $InstallDir = (Resolve-Path $InstallDir).Path
-
-    # Graceful stop first -- update-openrgb2.ps1 refuses to apply over
-    # a running install, and its scripts\ stop is the managed path
-    # (engine IPC QUIT -> backend CloseMainWindow; verified-own only).
-    $stopScript = Join-Path $InstallDir "scripts\stop-openrgb2.ps1"
-    if(Test-Path $stopScript) {
-        Step "Stopping running install ($InstallDir)"
-        $stopArgs = @("-InstallDir", $InstallDir)
-        if($ForceStop) { $stopArgs += "-Force" }
-        Invoke-PsScript $stopScript $stopArgs
-    }
-
     Step "Applying package -> $InstallDir"
     Invoke-PsScript (Join-Path $PkgDir "update-openrgb2.ps1") `
         @("-PackageDir", $OutDir, "-InstallDir", $InstallDir)

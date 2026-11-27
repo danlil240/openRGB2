@@ -157,6 +157,23 @@ public:
         }
     }
 
+    /* Sends one request without waiting for its reply (the
+       subscribe keepalive: the PONG arrives through Read). */
+    bool Send(ipc::MsgType type, const nlohmann::json& body,
+              std::string& err, uint32_t deadline_ms = 5000)
+    {
+        const std::vector<uint8_t> wire =
+            ipc::EncodeMessage(type, ++req_id_, body);
+        if(wire.empty())
+        {
+            err = "encode failed (body over 1 MiB bound)";
+            return false;
+        }
+        return channel_->SendAll(wire.data(), wire.size(),
+                                 deadline_ms, err)
+            == ipc::IpcIoResult::Ok;
+    }
+
     /* Reads the next message (event pump for subscribe). */
     ipc::ReadResult Read(ipc::Message& msg, uint32_t deadline_ms,
                          std::string& detail)
@@ -714,24 +731,58 @@ int main(int argc, char** argv)
     if(subscribe_mode)
     {
         /* Hold the session and print pushes — the attach/detach
-           reconnection check for Task 3.9. */
+           reconnection check for Task 3.9. The server closes a
+           session after IpcServerOptions::idle_deadline_ms (60 s)
+           without an inbound request, so PING every 5 s like the
+           UI's EngineWireClient keepalive; the PONGs are consumed
+           silently and never printed as events. */
+        constexpr auto kKeepalive = std::chrono::milliseconds(5000);
         const auto deadline =
             std::chrono::steady_clock::now() +
             std::chrono::seconds(subscribe_s);
+        auto next_ping = std::chrono::steady_clock::now() + kKeepalive;
         std::fprintf(stderr,
             "--- subscribed %u s; events below ---\n", subscribe_s);
         while(std::chrono::steady_clock::now() < deadline)
         {
+            const auto now = std::chrono::steady_clock::now();
+            if(now >= next_ping)
+            {
+                next_ping = now + kKeepalive;
+                std::string perr;
+                if(!client.Send(ipc::MsgType::Ping,
+                                nlohmann::json::object(), perr))
+                {
+                    std::fprintf(stderr, "keepalive failed: %s\n",
+                                 perr.c_str());
+                    break;
+                }
+            }
             ipc::Message ev;
             std::string detail;
-            const uint32_t left = (uint32_t)std::max<int64_t>(1,
+            const auto wake = (std::min)(deadline, next_ping);
+            const uint32_t left = (uint32_t)(std::max<int64_t>)(1,
                 std::chrono::duration_cast<std::chrono::milliseconds>(
-                    deadline - std::chrono::steady_clock::now())
+                    wake - std::chrono::steady_clock::now())
                     .count());
             const ipc::ReadResult rr = client.Read(ev, left, detail);
             if(rr == ipc::ReadResult::Ok)
             {
-                std::printf("EVENT %s\n", ev.Body().dump().c_str());
+                if(ev.type == ipc::MsgType::Pong)
+                {
+                    continue; /* keepalive reply, not an event */
+                }
+                if(ev.type == ipc::MsgType::Event)
+                {
+                    std::printf("EVENT %s\n",
+                                ev.Body().dump().c_str());
+                }
+                else
+                {
+                    std::printf("REPLY 0x%04x %s\n",
+                                (unsigned)ev.type,
+                                ev.Body().dump().c_str());
+                }
                 std::fflush(stdout);
             }
             else if(rr == ipc::ReadResult::Timeout ||

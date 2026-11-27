@@ -41,6 +41,14 @@ public:
        must be callable from any thread. */
     virtual SubmitResult  SubmitLatest(const RgbFrame& frame) = 0;
     virtual DeliveryStats Stats() const = 0;
+
+    /* Same contract as SubmitLatest for a frame the caller gives
+       up — a sink that stores frames may move it instead of
+       copying. Default: the copying path. */
+    virtual SubmitResult  SubmitLatestOwned(RgbFrame&& frame)
+    {
+        return SubmitLatest(frame);
+    }
 };
 
 /*---------------------------------------------------------*\

@@ -29,6 +29,13 @@ stock OpenRGB `0f8f2dccc46576f0a9dac6b70adcbf49901c6b73`.
   `debug/`, `OpenRGB-baseline-backup/`, generated `Makefile*`) were excluded by
   construction because only tracked files plus the listed untracked sources
   were copied.
+  Correction: the six upstream recipes `scripts/build-appimage.sh`,
+  `build-macos.sh`, `build-msi.ps1`, `build-msi.sh`,
+  `build-package-files.sh` and `build-supported-devices-md.sh` were
+  tracked upstream but silently dropped by the vendored `.gitignore`
+  rule `*build-*`; they were re-added byte-identical to the pinned
+  commit (`!scripts/build-*` negation added). Only
+  `scripts/build-windows.bat` is used by this repository.
 - `src/core/` — the Qt-free scene/effects/resolver core copied from the
   parent working tree (uncommitted modifications included):
   `scene/` (complete), `effects/` (complete), `presets/` (complete, including

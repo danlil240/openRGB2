@@ -7,7 +7,9 @@
 |   SPDX-License-Identifier: GPL-2.0-or-later               |
 \*---------------------------------------------------------*/
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <thread>
 #include "RGBController_GigabyteRGBFusion2BlackwellGPU.h"
@@ -15,16 +17,33 @@
 #include "GigabyteRGBFusion2BlackwellGPUDefinitions.h"
 
 /*---------------------------------------------------------*\
-| Temporal smoothing (see DeviceUpdateLEDs): the firmware   |
-| visibly chases each new direct-mode target, so noisy      |
-| per-frame jitter (aurora's noise layer on a 1-LED zone)   |
-| shows up as flicker toward dark. Each sent channel is an  |
-| exponential moving average of the requested colors —      |
-| high-frequency jitter is attenuated below PWM visibility  |
-| while genuine motion passes with ~2 frames of lag.        |
+| Temporal smoothing (see Sweep): the firmware visibly      |
+| chases each new direct-mode target, so noisy per-frame    |
+| jitter (aurora's noise layer on a 1-LED zone) shows up as |
+| flicker toward dark. Each sent channel is an exponential  |
+| moving average of the requested colors — high-frequency   |
+| jitter is attenuated below PWM visibility while genuine   |
+| motion passes with ~2 frames of lag.                      |
+|                                                           |
+| The alphas are per reference frame (the engine's 45 ms    |
+| I2C GPU write budget); the filter converts them to a time |
+| constant, tau = -ref / ln(1 - alpha) (~104 ms fans,       |
+| ~277 ms single-LED zones), and steps by                   |
+| 1 - exp(-dt / tau) so the call rate does not matter.      |
 \*---------------------------------------------------------*/
 #define BWGPU_SMOOTH_ALPHA        0.35
 #define BWGPU_SMOOTH_ALPHA_SINGLE 0.15
+#define BWGPU_SMOOTH_REF_FRAME_MS 45.0
+#define BWGPU_SMOOTH_MAX_DT_MS    1000.0
+
+/*---------------------------------------------------------*\
+| Settle interval: how long the settle thread waits for a   |
+| streamed frame before stepping the filter itself, and the |
+| step period while it settles. Refresh: identical packets  |
+| are re-sent at least this often while frames arrive.      |
+\*---------------------------------------------------------*/
+#define BWGPU_SETTLE_INTERVAL_MS  45
+#define BWGPU_REFRESH_MS          2000
 
 /**------------------------------------------------------------------*\
     @name Gigabyte Fusion 2 Blackwell GPU
@@ -215,10 +234,20 @@ RGBController_RGBFusion2BlackwellGPU::RGBController_RGBFusion2BlackwellGPU(RGBFu
     }
 
     RGBController_RGBFusion2BlackwellGPU::SetupZones();
+
+    clock_fn      = []() { return std::chrono::steady_clock::now(); };
+    settle_thread = std::thread(&RGBController_RGBFusion2BlackwellGPU::SettleThreadFunction, this);
 }
 
 RGBController_RGBFusion2BlackwellGPU::~RGBController_RGBFusion2BlackwellGPU()
 {
+    /*-----------------------------------------------------*\
+    | The settle thread takes AccessMutex and uses the      |
+    | controller: stop it before Shutdown locks AccessMutex |
+    | for good and before the controller is deleted.        |
+    \*-----------------------------------------------------*/
+    StopSettleThread();
+
     Shutdown();
 
     delete controller;
@@ -461,12 +490,27 @@ void RGBController_RGBFusion2BlackwellGPU::SetupZones()
 
 void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateLEDs()
 {
+    Sweep(true);
+}
+
+void RGBController_RGBFusion2BlackwellGPU::Sweep(bool throttle)
+{
+    std::lock_guard<std::mutex> sweep_lock(sweep_mutex);
+    SweepLocked(throttle);
+}
+
+void RGBController_RGBFusion2BlackwellGPU::SweepLocked(bool throttle)
+{
+    const TimePoint now = clock_fn();
+
     /*---------------------------------------------------------*\
     | Diagnostic (flicker hunt): OPENRGB_BWGPU_MIN_INTERVAL_MS   |
     | drops whole sweeps that arrive closer than N ms. If the    |
     | MCU latches writes on its own tick or restarts a fade per  |
     | packet, write-rate sensitivity shows up as a changed       |
-    | artifact. 0/unset = every frame passes.                    |
+    | artifact. 0/unset = every frame passes. A dropped sweep    |
+    | leaves the filter unsettled so the settle thread catches   |
+    | up with the dropped target.                                |
     \*---------------------------------------------------------*/
     static const unsigned long min_interval_ms = []()
     {
@@ -474,17 +518,28 @@ void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateLEDs()
         return (s != nullptr && *s != '\0') ? strtoul(s, nullptr, 10) : 0ul;
     }();
 
-    if(min_interval_ms > 0)
+    if(throttle && min_interval_ms > 0)
     {
-        static std::chrono::steady_clock::time_point last_sweep{};
-        const std::chrono::steady_clock::time_point now =
-            std::chrono::steady_clock::now();
-        if(now - last_sweep < std::chrono::milliseconds(min_interval_ms))
+        if(now - last_throttle_sweep < std::chrono::milliseconds(min_interval_ms))
         {
+            unsettled        = true;
+            throttle_dropped = true;
+            {
+                std::lock_guard<std::mutex> settle_lock(settle_mutex);
+                settle_wake = true;
+            }
+            settle_cv.notify_one();
             return;
         }
-        last_sweep = now;
+        last_throttle_sweep = now;
     }
+
+    last_sweep       = now;
+    throttle_dropped = false;
+
+    const bool write_all = force_write;
+    force_write          = false;
+    bool any_unsettled   = false;
 
     uint8_t gpu_zones;
     switch(gpu_layout) // replicating GCC that sends more packets even when there is less zones
@@ -517,6 +572,8 @@ void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateLEDs()
             LOG_TRACE("[%s] Invalid GPU layout (%d) when updating LEDs.", name.c_str(), gpu_layout);
             return; // should not happen
     }
+
+    const bool direct = (modes[active_mode].value == RGB_FUSION2_BLACKWELL_GPU_MODE_DIRECT);
 
     for(uint8_t zone_idx = 0; zone_idx < gpu_zones; zone_idx++)
     {
@@ -585,7 +642,10 @@ void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateLEDs()
             }
         }
 
-        if(ui_zone_idx >= zones.size())
+        const bool    ui_zone_valid = (ui_zone_idx < zones.size());
+        unsigned int  zone_leds     = 1;
+
+        if(!ui_zone_valid)
         {
             zone_config.colors[0] = colors.back();
         }
@@ -601,35 +661,14 @@ void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateLEDs()
             {
                 led_start += zones[i].leds_count;
             }
-            for(unsigned int i = 0; i < zones[ui_zone_idx].leds_count; i++)
+            zone_leds = zones[ui_zone_idx].leds_count;
+            if(zone_leds > RGB_FUSION_2_BLACKWELL_AORUS_MASTER_FAN_LEDS)
+            {
+                zone_leds = RGB_FUSION_2_BLACKWELL_AORUS_MASTER_FAN_LEDS;
+            }
+            for(unsigned int i = 0; i < zone_leds; i++)
             {
                 zone_config.colors[i] = colors[led_start + i];
-            }
-
-            /*---------------------------------------------------------*\
-            | If not all led are the same color, then we must pass all  |
-            | led colors in the i2c write.                              |
-            |                                                           |
-            | Diagnostic switch: OPENRGB_BWGPU_NO_PALETTE=1 collapses   |
-            | every zone to a single SZ=1 color (colors[0]) — used to   |
-            | isolate whether multi-color palette writes trigger the    |
-            | AORUS MASTER banner flicker.                              |
-            \*---------------------------------------------------------*/
-            static const bool no_palette =
-                (getenv("OPENRGB_BWGPU_NO_PALETTE") != nullptr);
-
-            if(!no_palette &&
-               !std::all_of(zone_config.colors, zone_config.colors + zones[ui_zone_idx].leds_count, [first = zone_config.colors[0]](RGBColor x) { return x == first; }))
-            {
-                zone_config.numberOfColors = zones[ui_zone_idx].leds_count;
-            }
-        }
-
-        if(modes[active_mode].color_mode == MODE_COLORS_MODE_SPECIFIC)
-        {
-            for(uint8_t i = 0; i < zone_config.numberOfColors; i++) // specific for MODE_COLORS_MODE_SPECIFIC
-            {
-                zone_config.colors[i] = modes[active_mode].colors[i];
             }
         }
 
@@ -647,31 +686,22 @@ void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateLEDs()
         /*---------------------------------------------------------*\
         | Temporal smoothing on direct-mode writes (see above):     |
         | filter every channel toward its target so noisy drift     |
-        | never reaches the wire. Non-direct writes bypass the      |
+        | never reaches the wire. The step is time-based            |
+        | (alpha = 1 - exp(-dt/tau)) so the response does not       |
+        | depend on how often frames arrive; the settle thread      |
+        | keeps stepping after frames stop until every channel is   |
+        | within 0.5 of its target. Non-direct writes bypass the    |
         | filter and reset its state so the next direct frame is    |
         | applied exactly (no lag out of a mode switch).            |
         \*---------------------------------------------------------*/
-        if(modes[active_mode].value == RGB_FUSION2_BLACKWELL_GPU_MODE_DIRECT)
+        if(direct)
         {
-            unsigned int cmp_count = zone_config.numberOfColors;
-            if(ui_zone_idx < zones.size() && zones[ui_zone_idx].leds_count > cmp_count)
-            {
-                cmp_count = zones[ui_zone_idx].leds_count;
-            }
-            if(cmp_count > RGB_FUSION_2_BLACKWELL_AORUS_MASTER_FAN_LEDS)
-            {
-                cmp_count = RGB_FUSION_2_BLACKWELL_AORUS_MASTER_FAN_LEDS;
-            }
-            if(cmp_count == 0)
-            {
-                cmp_count = 1;
-            }
-
             /*---------------------------------------------------------*\
-            | Single-LED zones (the logos) get the heavier alpha —      |
-            | they have no spatial dimension to hide stepping behind.   |
-            | OPENRGB_BWGPU_SMOOTH_ALPHA forces one alpha for every     |
-            | zone (flicker diagnostics; 1.0 disables smoothing).       |
+            | Single-LED zones (the logos) get the slower time constant |
+            | — they have no spatial dimension to hide stepping behind. |
+            | OPENRGB_BWGPU_SMOOTH_ALPHA forces one per-reference-frame |
+            | alpha for every zone (flicker diagnostics; 1.0 disables   |
+            | smoothing).                                               |
             \*---------------------------------------------------------*/
             static const double alpha_override = []()
             {
@@ -684,12 +714,28 @@ void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateLEDs()
                 const double v  = strtod(s, &end);
                 return (end != s && v > 0.0 && v <= 1.0) ? v : -1.0;
             }();
-            const double alpha = (alpha_override > 0.0)
-                               ? alpha_override
-                               : (cmp_count > 1 ? BWGPU_SMOOTH_ALPHA
-                                                : BWGPU_SMOOTH_ALPHA_SINGLE);
+            const double ref_alpha = (alpha_override > 0.0)
+                                   ? alpha_override
+                                   : (zone_leds > 1 ? BWGPU_SMOOTH_ALPHA
+                                                    : BWGPU_SMOOTH_ALPHA_SINGLE);
 
-            for(unsigned int i = 0; i < cmp_count; i++)
+            double alpha = 1.0;
+            if(has_smoothed[hardware_zone_idx] && ref_alpha < 1.0)
+            {
+                double dt_ms = std::chrono::duration<double, std::milli>(now - last_step[hardware_zone_idx]).count();
+                if(dt_ms < 0.0)
+                {
+                    dt_ms = 0.0;
+                }
+                if(dt_ms > BWGPU_SMOOTH_MAX_DT_MS)
+                {
+                    dt_ms = BWGPU_SMOOTH_MAX_DT_MS;
+                }
+                const double tau_ms = -BWGPU_SMOOTH_REF_FRAME_MS / std::log(1.0 - ref_alpha);
+                alpha = 1.0 - std::exp(-dt_ms / tau_ms);
+            }
+
+            for(unsigned int i = 0; i < zone_leds; i++)
             {
                 for(unsigned int c = 0; c < 3; c++)
                 {
@@ -698,6 +744,14 @@ void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateLEDs()
                                          ? smoothed[hardware_zone_idx][i][c]
                                          : target;
                     current += (target - current) * alpha;
+                    if(std::fabs(target - current) < 0.5)
+                    {
+                        current = target;
+                    }
+                    else
+                    {
+                        any_unsettled = true;
+                    }
                     smoothed[hardware_zone_idx][i][c] = current;
                 }
 
@@ -708,14 +762,180 @@ void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateLEDs()
             }
 
             has_smoothed[hardware_zone_idx] = true;
+            last_step[hardware_zone_idx]    = now;
         }
         else
         {
             has_smoothed[hardware_zone_idx] = false;
         }
 
-        controller->SetZone(hardware_zone_idx, modes[active_mode].value, zone_config);
+        /*---------------------------------------------------------*\
+        | If not all led are the same color, then we must pass all  |
+        | led colors in the i2c write. Decided on the smoothed      |
+        | outputs: while a fan ring converges onto a uniform color  |
+        | its slots still differ, and collapsing to slot 0 early    |
+        | would make slots 1-7 jump.                                |
+        |                                                           |
+        | Diagnostic switch: OPENRGB_BWGPU_NO_PALETTE=1 collapses   |
+        | every zone to a single SZ=1 color (colors[0]) — used to   |
+        | isolate whether multi-color palette writes trigger the    |
+        | AORUS MASTER banner flicker.                              |
+        \*---------------------------------------------------------*/
+        static const bool no_palette =
+            (getenv("OPENRGB_BWGPU_NO_PALETTE") != nullptr);
+
+        if(ui_zone_valid && !no_palette &&
+           !std::all_of(zone_config.colors, zone_config.colors + zone_leds, [first = zone_config.colors[0]](RGBColor x) { return x == first; }))
+        {
+            zone_config.numberOfColors = (uint8_t)zone_leds;
+        }
+
+        if(modes[active_mode].color_mode == MODE_COLORS_MODE_SPECIFIC)
+        {
+            for(uint8_t i = 0; i < zone_config.numberOfColors && i < 8; i++) // specific for MODE_COLORS_MODE_SPECIFIC
+            {
+                zone_config.colors[i] = modes[active_mode].colors[i];
+            }
+        }
+
+        /*---------------------------------------------------------*\
+        | Streamed (Direct) writes skip zones whose packet is       |
+        | byte-identical to the last successful write, re-sending   |
+        | every BWGPU_REFRESH_MS in case the firmware drifted. Mode |
+        | changes and non-Direct modes always write every zone.     |
+        \*---------------------------------------------------------*/
+        const std::chrono::milliseconds refresh =
+            (direct && !write_all) ? std::chrono::milliseconds(BWGPU_REFRESH_MS)
+                                   : std::chrono::milliseconds(0);
+        controller->SetZoneIfChanged(hardware_zone_idx, modes[active_mode].value, zone_config, now, refresh);
     }
+
+    unsettled = any_unsettled;
+
+    if(unsettled)
+    {
+        {
+            std::lock_guard<std::mutex> settle_lock(settle_mutex);
+            settle_wake = true;
+        }
+        settle_cv.notify_one();
+    }
+}
+
+/*---------------------------------------------------------*\
+| One settle sweep, decided under sweep_mutex (caller holds |
+| it). Only the Direct-mode smoothing filter needs settling |
+| — a non-Direct sweep has refresh 0 and would re-write     |
+| every zone's mode packet, possibly restarting the         |
+| hardware effect phase. So the settle path sweeps only     |
+| while unsettled in Direct mode (or to deliver a frame     |
+| dropped by the diagnostic throttle). With require_idle    |
+| (the settle thread) it also yields to streamed frames     |
+| that arrived within the last settle interval.             |
+\*---------------------------------------------------------*/
+bool RGBController_RGBFusion2BlackwellGPU::SettleSweepLocked(bool require_idle)
+{
+    const bool direct = (modes[active_mode].value == RGB_FUSION2_BLACKWELL_GPU_MODE_DIRECT);
+
+    if(!throttle_dropped && !(unsettled && direct))
+    {
+        unsettled = false;
+        return false;
+    }
+
+    if(require_idle && (clock_fn() - last_sweep) < std::chrono::milliseconds(BWGPU_SETTLE_INTERVAL_MS))
+    {
+        std::lock_guard<std::mutex> settle_lock(settle_mutex);
+        settle_wake = true;
+        return true;
+    }
+
+    SweepLocked(false);
+    return unsettled;
+}
+
+bool RGBController_RGBFusion2BlackwellGPU::SettleStep()
+{
+    AccessMutex.lock_shared();
+    bool still_unsettled;
+    {
+        std::lock_guard<std::mutex> sweep_lock(sweep_mutex);
+        still_unsettled = SettleSweepLocked(false);
+    }
+    AccessMutex.unlock_shared();
+
+    return still_unsettled;
+}
+
+void RGBController_RGBFusion2BlackwellGPU::SettleThreadFunction()
+{
+    std::unique_lock<std::mutex> lock(settle_mutex);
+
+    while(!settle_stop)
+    {
+        settle_cv.wait(lock, [this]{ return settle_wake || settle_stop; });
+
+        if(settle_stop)
+        {
+            break;
+        }
+
+        /*-----------------------------------------------------*\
+        | Give streamed frames one interval to arrive; they     |
+        | step the filter themselves.                           |
+        \*-----------------------------------------------------*/
+        settle_cv.wait_for(lock, std::chrono::milliseconds(BWGPU_SETTLE_INTERVAL_MS),
+                           [this]{ return settle_stop; });
+
+        if(settle_stop)
+        {
+            break;
+        }
+
+        /*-----------------------------------------------------*\
+        | Clear before sweeping: a sweep that leaves the filter |
+        | unsettled (this one or a concurrent frame) sets it    |
+        | again, so no wakeup is lost.                          |
+        \*-----------------------------------------------------*/
+        settle_wake = false;
+        lock.unlock();
+
+        /*-----------------------------------------------------*\
+        | Decide and sweep under one sweep_mutex hold, so a     |
+        | mode change cannot slip between the check and the    |
+        | write (see SettleSweepLocked).                        |
+        \*-----------------------------------------------------*/
+        AccessMutex.lock_shared();
+        {
+            std::lock_guard<std::mutex> sweep_lock(sweep_mutex);
+            SettleSweepLocked(true);
+        }
+        AccessMutex.unlock_shared();
+
+        lock.lock();
+    }
+}
+
+void RGBController_RGBFusion2BlackwellGPU::StopSettleThread()
+{
+    {
+        std::lock_guard<std::mutex> settle_lock(settle_mutex);
+        settle_stop = true;
+    }
+    settle_cv.notify_all();
+
+    if(settle_thread.joinable())
+    {
+        settle_thread.join();
+    }
+}
+
+void RGBController_RGBFusion2BlackwellGPU::SetClockForTest(ClockFn test_clock)
+{
+    StopSettleThread();
+
+    std::lock_guard<std::mutex> sweep_lock(sweep_mutex);
+    clock_fn = test_clock;
 }
 
 void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateZoneLEDs(int /*zone*/)
@@ -730,7 +950,21 @@ void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateSingleLED(int /*led*/)
 
 void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateMode()
 {
-    DeviceUpdateLEDs();
+    /*-----------------------------------------------------*\
+    | A mode change supersedes any pending settle left from |
+    | Direct frames; the full sweep below re-arms one only  |
+    | if the new mode is Direct and still unsettled.        |
+    \*-----------------------------------------------------*/
+    {
+        std::lock_guard<std::mutex> settle_lock(settle_mutex);
+        settle_wake = false;
+    }
+
+    std::lock_guard<std::mutex> sweep_lock(sweep_mutex);
+    unsettled        = false;
+    throttle_dropped = false;
+    force_write      = true;
+    SweepLocked(false);
 }
 
 void RGBController_RGBFusion2BlackwellGPU::DeviceSaveMode()

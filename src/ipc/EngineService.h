@@ -215,6 +215,14 @@ public:
     /* Event fanout — wire to IpcServer::Emit. */
     void SetEventSink(std::function<void(const IpcEvent&)> sink);
 
+    /* Optional: "does anyone want kind K?" — wire to
+       IpcServer::HasSubscriber. When set, the ~30 Hz
+       frame_status body is not even BUILT while no session
+       subscribes to it (IpcServer already skips encoding).
+       Unset = always build (previous behavior). */
+    void SetEventInterest(
+        std::function<bool(const std::string& kind)> interest);
+
     /* Targeted fanout for session-bound events (Task 7's
        "preview" feed): wire to IpcServer::EmitTo. The key is
        the per-kind coalescing slot — "status" or
@@ -271,6 +279,14 @@ public:
        frame_status_min_interval_ms; same single-caller
        contract as PollEvents. */
     void PollFrameStatus(TimePoint now = Clock::now());
+
+    /* The draft-preview publish tick (Task 7). PollEvents
+       calls this too; the owner loop calls it on the same
+       fast cadence as PollFrameStatus but unconditionally, so
+       a client subscribed to "preview" and not to
+       "frame_status" still gets the fast feed. Same
+       single-caller contract as PollEvents. */
+    void PollPreviews(TimePoint now = Clock::now());
 
     /* Emits the "reactive" event with the current reactive
        state — the ReactiveInputs manager's changed hook
@@ -332,6 +348,7 @@ private:
     TimePoint           started_;
 
     std::function<void(const IpcEvent&)> event_sink_;
+    std::function<bool(const std::string&)> event_interest_;
     /* Task 7 targeted feed — preview chunks/statuses go to
        the OWNING session only. */
     std::function<void(uint64_t, const IpcEvent&,

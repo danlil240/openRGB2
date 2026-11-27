@@ -5,6 +5,17 @@ openrgb2-ui must be started with --qa (or OPENRGB2_QA=1). The app
 then listens on 127.0.0.1:5583 (override: --qa <port>,
 OPENRGB2_QA_PORT, or the --port flag here).
 
+Every request carries the app's per-launch token (the socket closes
+on a missing/wrong one). The app prints it to stderr and writes it to
+%LOCALAPPDATA%/OpenRGB2/qa/qa-<port>.token (~/.local/share/... on
+Linux); this driver reads that file. Override with --token TOKEN or
+OPENRGB2_QA_TOKEN.
+
+`shot PATH` saves where asked only if PATH does not exist yet (the
+app refuses to overwrite files outside its QA output dir,
+$OPENRGB2_QA_OUTDIR or %TEMP%/openrgb2-qa); this driver deletes an
+existing PATH first, so re-shooting the same file still works.
+
 Every op sends one JSON line and prints the reply line (pretty).
 Selectors: bare string = objectName ("navLighting"), or "text:Save",
 "type:AppSlider", "path:0.2.1", or a JSON object
@@ -59,6 +70,35 @@ import time
 DEFAULT_PORT = 5583
 HOST = "127.0.0.1"
 
+# --token / OPENRGB2_QA_TOKEN override; else read per port from the
+# app's token file (cached).
+_TOKEN_OVERRIDE = os.environ.get("OPENRGB2_QA_TOKEN") or None
+_TOKEN_CACHE = {}
+
+
+def token_file(port):
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser(
+            "~\\AppData\\Local")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser(
+            "~/.local/share")
+    return os.path.join(base, "OpenRGB2", "qa", f"qa-{port}.token")
+
+
+def token_for(port):
+    if _TOKEN_OVERRIDE:
+        return _TOKEN_OVERRIDE
+    if port not in _TOKEN_CACHE:
+        path = token_file(port)
+        try:
+            with open(path, "r", encoding="ascii") as f:
+                _TOKEN_CACHE[port] = f.read().strip()
+        except OSError:
+            die(f"no QA token: cannot read {path} — is openrgb2-ui "
+                f"running with --qa on port {port}? (or pass --token)", 1)
+    return _TOKEN_CACHE[port]
+
 
 def die(msg, code=2):
     print(f"qa: {msg}", file=sys.stderr)
@@ -85,6 +125,8 @@ def parse_sel(s):
 
 
 def send(req, port):
+    req = dict(req)
+    req.setdefault("token", token_for(port))
     line = json.dumps(req, separators=(",", ":")) + "\n"
     try:
         with socket.create_connection((HOST, port), timeout=35) as sock:
@@ -394,6 +436,10 @@ def build(op, args):
             parent = os.path.dirname(p)
             if parent:
                 os.makedirs(parent, exist_ok=True)
+            # The app never overwrites outside its QA output dir —
+            # replacing the caller's own file is the caller's call.
+            if os.path.isfile(p):
+                os.remove(p)
             req["path"] = p
         return req
     if op == "wait":
@@ -420,13 +466,20 @@ def build(op, args):
 def main():
     args = list(sys.argv[1:])
     port = int(os.environ.get("OPENRGB2_QA_PORT", DEFAULT_PORT))
-    while args and args[0].startswith("--port"):
-        if args[0].startswith("--port="):
-            port = int(args[0].split("=", 1)[1])
-            args.pop(0)
+    global _TOKEN_OVERRIDE
+    while args and (args[0].startswith("--port")
+                    or args[0].startswith("--token")):
+        flag = args.pop(0)
+        if "=" in flag:
+            flag, val = flag.split("=", 1)
         else:
-            args.pop(0)
-            port = int(args.pop(0))
+            val = args.pop(0)
+        if flag == "--port":
+            port = int(val)
+        elif flag == "--token":
+            _TOKEN_OVERRIDE = val
+        else:
+            die(f"unknown flag {flag}")
     if not args:
         print(__doc__)
         sys.exit(2)

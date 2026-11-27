@@ -19,10 +19,12 @@ namespace
 RgbColor PreviewScale(studio::SceneColor c, float brightness)
 {
     const RgbColor in = FromSceneColor(c);
+    const float b = !(brightness > 0.0f) ? 0.0f
+                  : (brightness > 1.0f ? 1.0f : brightness);
     RgbColor out;
-    out.r = uint8_t((unsigned)(in.r * brightness) & 0xFFu);
-    out.g = uint8_t((unsigned)(in.g * brightness) & 0xFFu);
-    out.b = uint8_t((unsigned)(in.b * brightness) & 0xFFu);
+    out.r = uint8_t((unsigned)(in.r * b));
+    out.g = uint8_t((unsigned)(in.g * b));
+    out.b = uint8_t((unsigned)(in.b * b));
     return out;
 }
 

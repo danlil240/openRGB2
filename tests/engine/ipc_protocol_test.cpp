@@ -107,7 +107,16 @@ int main()
             put32(9);
             put32(kMaxBodyBytes + 1);
         }
-        stream.insert(stream.end(), 64, 'Z');   /* filler     */
+        /* The declared body: it SMUGGLES a well-formed message
+           (request id 666) — skipping by length must never
+           parse it. */
+        const std::vector<uint8_t> smuggled =
+            EncodeMessage(MsgType::Ping, 666, nlohmann::json::object());
+        stream.insert(stream.end(), 64, 'Z');
+        stream.insert(stream.end(), smuggled.begin(), smuggled.end());
+        stream.insert(stream.end(),
+                      (size_t)kMaxBodyBytes + 1 - 64 - smuggled.size(),
+                      'Z');
         const std::vector<uint8_t> good =
             EncodeMessage(MsgType::Ping, 3, nlohmann::json::object());
         stream.insert(stream.end(), good.begin(), good.end());
@@ -120,11 +129,138 @@ int main()
         std::string    detail;
         CHECK(rd.Read(msg, 2000, detail) == ReadResult::TooLarge);
         CHECK(msg.request_id == 9);
-        /* The oversized "body" is skipped by resync — the next
-           message is still read. */
+        /* The oversized body is skipped by its declared length
+           — the smuggled frame inside it is never parsed; the
+           next real message is read. */
         CHECK(rd.Read(msg, 2000, detail) == ReadResult::Ok);
         CHECK(msg.type == MsgType::Ping);
         CHECK(msg.request_id == 3);
+        CHECK(!rd.Poisoned());
+        CHECK(rd.ResyncBytes() == 0);
+    }
+
+    /*---- oversized body beyond the skip bound: close ------*/
+    {
+        std::vector<uint8_t> stream;
+        auto put32 = [&](uint32_t v)
+        { for(int i = 0; i < 4; ++i)
+              stream.push_back((uint8_t)(v >> (8 * i))); };
+        auto put16 = [&](uint16_t v)
+        { for(int i = 0; i < 2; ++i)
+              stream.push_back((uint8_t)(v >> (8 * i))); };
+        put32(kMagic);
+        put16(kProtocolVersion);
+        put16((uint16_t)MsgType::SetScene);
+        put32(10);
+        put32(kMaxSkipBytes + 1);
+        auto st = std::make_shared<FakePipeState>();
+        st->inbound.assign(stream.begin(), stream.end());
+        FakeIpcChannel ch(st);
+        MessageReader  rd(ch);
+        Message        msg;
+        std::string    detail;
+        CHECK(rd.Read(msg, 2000, detail) == ReadResult::TooLarge);
+        CHECK(msg.request_id == 10);
+        CHECK(rd.Poisoned());
+        CHECK(rd.Read(msg, 50, detail) == ReadResult::ResyncExceeded);
+    }
+
+    /*---- a timeout keeps partial progress -----------------*/
+    {
+        /* The polling-client case: a message arrives in pieces
+           across several short-deadline Reads. Nothing may be
+           lost between them. */
+        const std::vector<uint8_t> good =
+            EncodeMessage(MsgType::Ping, 77, nlohmann::json::object(
+                {{"payload", std::string(300, 'p')}}));
+        auto st = std::make_shared<FakePipeState>();
+        st->inbound.assign(good.begin(), good.begin() + 2);
+        FakeIpcChannel ch(st);
+        MessageReader  rd(ch);
+        Message        msg;
+        std::string    detail;
+        CHECK(rd.Read(msg, 20, detail) == ReadResult::Timeout);
+        {
+            std::lock_guard<std::mutex> lock(st->m);
+            st->inbound.insert(st->inbound.end(), good.begin() + 2,
+                               good.begin() + 30);
+        }
+        CHECK(rd.Read(msg, 20, detail) == ReadResult::Timeout);
+        {
+            std::lock_guard<std::mutex> lock(st->m);
+            st->inbound.insert(st->inbound.end(), good.begin() + 30,
+                               good.end());
+        }
+        CHECK(rd.Read(msg, 2000, detail) == ReadResult::Ok);
+        CHECK(msg.request_id == 77);
+        CHECK(msg.Body()["payload"].get<std::string>().size() == 300);
+    }
+
+    /*---- idle bound: the message deadline starts at the ---*\
+    |     first byte                                          |
+    \*-------------------------------------------------------*/
+    {
+        const std::vector<uint8_t> good =
+            EncodeMessage(MsgType::Ping, 88, nlohmann::json::object());
+        auto st = std::make_shared<FakePipeState>();
+        FakeIpcChannel ch(st);
+        MessageReader  rd(ch);
+        Message        msg;
+        std::string    detail;
+        /* Nothing arrives: the idle bound (not the 30 ms message
+           deadline) decides — still a Timeout, nothing lost. */
+        const auto t0 = std::chrono::steady_clock::now();
+        CHECK(rd.Read(msg, 30, detail, 200) == ReadResult::Timeout);
+        CHECK(std::chrono::steady_clock::now() - t0 >=
+              std::chrono::milliseconds(150));
+        /* A request arriving after an idle gap longer than the
+           message deadline is read normally. */
+        std::thread late([&]
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(120));
+            std::lock_guard<std::mutex> lock(st->m);
+            st->inbound.insert(st->inbound.end(), good.begin(),
+                               good.end());
+            st->cv_in.notify_all();
+        });
+        CHECK(rd.Read(msg, 30, detail, 5000) == ReadResult::Ok);
+        late.join();
+        CHECK(msg.request_id == 88);
+    }
+
+    /*---- JSON nesting cap ---------------------------------*/
+    {
+        Message ok;
+        ok.body_raw = std::string(10, '[') + std::string(10, ']');
+        CHECK(!ok.Body().is_discarded());
+        Message edge;
+        edge.body_raw = std::string(kMaxJsonDepth, '[') +
+                        std::string(kMaxJsonDepth, ']');
+        CHECK(!edge.Body().is_discarded());
+        Message deep;
+        deep.body_raw = std::string(kMaxJsonDepth + 1, '[') +
+                        std::string(kMaxJsonDepth + 1, ']');
+        CHECK(deep.Body().is_discarded());
+        /* The attack shape: a full-size body of nothing but
+           nesting. Must be rejected without recursing (no stack
+           overflow), objects included. */
+        Message bomb;
+        bomb.body_raw = std::string(kMaxBodyBytes / 2, '[') +
+                        std::string(kMaxBodyBytes / 2, ']');
+        CHECK(bomb.Body().is_discarded());
+        std::string obj;
+        for(int i = 0; i < 100000; ++i) { obj += "{\"a\":"; }
+        obj += "1";
+        obj += std::string(100000, '}');
+        Message objbomb;
+        objbomb.body_raw = obj;
+        CHECK(objbomb.Body().is_discarded());
+
+        /* FieldOrNull: reference lookup, no throw on non-objects. */
+        const nlohmann::json o = nlohmann::json::object({{"k", 5}});
+        CHECK(FieldOrNull(o, "k") == 5);
+        CHECK(FieldOrNull(o, "missing").is_null());
+        CHECK(FieldOrNull(nlohmann::json::array(), "k").is_null());
     }
 
     /*---- truncated message --------------------------------*/

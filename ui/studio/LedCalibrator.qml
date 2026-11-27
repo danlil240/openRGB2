@@ -31,6 +31,7 @@
 |||  physical device.                                     ||
 \*---------------------------------------------------------*/
 import QtQuick
+import QtQuick.Window
 import QtQuick.Controls.Basic
 import OpenRGB2.UI.theme
 import OpenRGB2.UI.components
@@ -259,6 +260,29 @@ Rectangle {
             forceActiveFocus()
         else
             endSession()
+    }
+    /* Item.visible does NOT follow the window: closing to the
+       tray (hide) or minimizing leaves this panel "visible" while
+       nobody can see it — the engine lease would stay held and
+       blinkTimer would keep sending calibration_show. End the
+       hardware session when the window goes away (the panel and
+       the mapping stay; Start resumes). The target resolves
+       through this item — a bare `Window.window` inside
+       Connections binds null (see DevicesPage). */
+    function windowShown() {
+        var w = cal.Window.window
+        return !w || (w.visible && w.visibility !== Window.Minimized)
+    }
+    function syncWindowShown() {
+        if (!windowShown() && (sessionActive || sessionStarting)) {
+            endSession()
+            statusLine = "session ended — window hidden"
+        }
+    }
+    Connections {
+        target: cal.Window.window
+        function onVisibleChanged()    { cal.syncWindowShown() }
+        function onVisibilityChanged() { cal.syncWindowShown() }
     }
 
     /* ================= projection ================= */

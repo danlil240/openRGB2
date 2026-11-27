@@ -14,6 +14,16 @@ function Invoke-ManagedStart {
           [int]$BackendWaitSeconds, [int]$ListenerPidOverride)
     Write-Host "FAKE START: takeover=$TakeOver hidden=$HideWindows install=$InstallDir"
     if(Test-Path (Join-Path $InstallDir 'fail.marker')) { return 3 }
+    if(Test-Path (Join-Path $InstallDir 'elevated.marker')) {
+        Write-Host "UNVERIFIABLE: listener image path unreadable"
+        return 4
+    }
+    if((Test-Path (Join-Path $InstallDir 'conflict.marker')) -and -not $TakeOver) {
+        Write-Host "  ownership CONFLICT: iCUE (pid 4242, iCUE.exe) -- competing RGB owner" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "OWNERSHIP CONFLICT -- OpenRGB2 will not take over silently." -ForegroundColor Red
+        return 3
+    }
     return 0
 }
 '@ | Set-Content -Encoding UTF8 (Join-Path $scripts 'start-openrgb2.ps1')
@@ -23,11 +33,42 @@ function Invoke-ManagedStart {
     $log = Join-Path $root 'state\startup.log'
     if(-not (Test-Path $log)) { throw 'startup log was not created' }
     $contents = Get-Content $log -Raw
-    if($contents -notmatch 'FAKE START: takeover=True hidden=True' -or
+    if($contents -notmatch 'FAKE START: takeover=False hidden=True' -or
+       $contents -match 'takeover=True' -or
        $contents -notmatch [regex]::Escape("install=$root")) {
-        throw 'GUI startup did not pass the approved ownership and window settings'
+        throw 'GUI startup must start WITHOUT takeover, hidden, in the install dir'
     }
-    Write-Host 'PASS hidden GUI startup passes takeover and writes a log'
+    Write-Host 'PASS hidden GUI startup runs without -TakeOver and writes a log'
+
+    # Conflicts + no confirmation: never retried with -TakeOver.
+    Remove-Item $log
+    Set-Content -Encoding ASCII (Join-Path $root 'conflict.marker') 'c'
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scripts 'start-openrgb2-gui.ps1') -NoDialog
+    if($LASTEXITCODE -ne 3) { throw "unconfirmed conflict exited $LASTEXITCODE instead of 3" }
+    $contents = Get-Content $log -Raw
+    if($contents -match 'takeover=True') { throw 'conflict without confirmation took over' }
+    if($contents -notmatch 'takeover declined') { throw 'declined takeover not logged' }
+    Write-Host 'PASS competing owners without confirmation never take over'
+
+    # Conflicts + confirmed: exactly one retry with -TakeOver.
+    Remove-Item $log
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scripts 'start-openrgb2-gui.ps1') -NoDialog -TakeOverAnswer Yes
+    if($LASTEXITCODE -ne 0) { throw "confirmed takeover exited $LASTEXITCODE" }
+    $contents = Get-Content $log -Raw
+    if($contents -notmatch '(?s)takeover=False.*ownership CONFLICT: iCUE.*takeover confirmed.*takeover=True') {
+        throw 'confirmed takeover did not scan first, list the competitor, then retry with -TakeOver'
+    }
+    Write-Host 'PASS confirmed takeover retries with -TakeOver after listing competitors'
+    Remove-Item (Join-Path $root 'conflict.marker')
+
+    # Exit 4 (unverifiable elevated stack) is its own case, never retried.
+    Remove-Item $log
+    Set-Content -Encoding ASCII (Join-Path $root 'elevated.marker') 'e'
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scripts 'start-openrgb2-gui.ps1') -NoDialog -TakeOverAnswer Yes
+    if($LASTEXITCODE -ne 4) { throw "unverifiable stack exited $LASTEXITCODE instead of 4" }
+    if((Get-Content $log -Raw) -match 'takeover=True') { throw 'exit 4 must not retry with -TakeOver' }
+    Write-Host 'PASS unverifiable elevated stack (exit 4) is reported, not taken over'
+    Remove-Item (Join-Path $root 'elevated.marker')
 
     Set-Content -Encoding ASCII (Join-Path $root 'fail.marker') 'fail'
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scripts 'start-openrgb2-gui.ps1') -NoDialog

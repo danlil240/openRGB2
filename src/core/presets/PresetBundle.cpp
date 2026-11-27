@@ -292,9 +292,9 @@ bool ExportBundle(const std::string& dest_dir,
 
     /* Assets the used types reference, resolved under
        <workspace>/assets/ — missing files warn, never fail. */
-    const fs::path assets_src =
-        (fs::path(source_preset_dir) / ".." / ".." / "assets")
-            .lexically_normal();
+    fs::path assets_src;
+    const bool assets_rooted =
+        WorkspaceAssetsDir(source_preset_dir, assets_src);
     struct AssetCopy { fs::path src; std::string rel; };
     std::vector<AssetCopy> copies;
     {
@@ -316,6 +316,13 @@ bool ExportBundle(const std::string& dest_dir,
                 {
                     Warn(warnings, "asset '" + ref + "' fails the"
                                    " portable-path rules — skipped");
+                    continue;
+                }
+                if(!assets_rooted)
+                {
+                    Warn(warnings, "asset '" + ref + "' not found —"
+                                   " source type dir is not"
+                                   " <workspace>/<kind>/devices");
                     continue;
                 }
                 const fs::path src =
@@ -422,9 +429,13 @@ bool ExportBundle(const std::string& dest_dir,
     if(overwrite && fs::is_directory(types_dir, ec))
     {
         const std::set<std::string> keep(ids.begin(), ids.end());
-        for(const auto& entry : fs::directory_iterator(types_dir, ec))
+        std::error_code iec;
+        fs::directory_iterator it(types_dir, iec), end;
+        for(; !iec && it != end; it.increment(iec))
         {
-            if(!entry.is_regular_file())
+            const fs::directory_entry& entry = *it;
+            std::error_code fec;
+            if(!entry.is_regular_file(fec))
             {
                 continue;
             }
@@ -450,6 +461,11 @@ bool ExportBundle(const std::string& dest_dir,
                                + "' could not be removed ("
                                + rec.message() + ")");
             }
+        }
+        if(iec)
+        {
+            Warn(warnings, types_dir.string() + ": stale-type prune"
+                           " scan failed (" + iec.message() + ")");
         }
     }
 
@@ -644,9 +660,13 @@ bool InspectBundle(const std::string& src_dir,
     const fs::path types_dir = src / "presets" / "devices";
     if(fs::is_directory(types_dir, ec))
     {
-        for(const auto& entry : fs::directory_iterator(types_dir, ec))
+        std::error_code iec;
+        fs::directory_iterator it(types_dir, iec), end;
+        for(; !iec && it != end; it.increment(iec))
         {
-            if(!entry.is_regular_file())
+            const fs::directory_entry& entry = *it;
+            std::error_code fec;
+            if(!entry.is_regular_file(fec))
             {
                 continue;
             }
@@ -693,6 +713,11 @@ bool InspectBundle(const std::string& src_dir,
                 continue;
             }
             bundled[p.id] = p;
+        }
+        if(iec)
+        {
+            Err(errors, types_dir.string() + ": directory scan failed ("
+                        + iec.message() + ")");
         }
     }
     /* Types a migrated expanded doc extracted are bundled content
@@ -873,10 +898,13 @@ bool InspectBundle(const std::string& src_dir,
     const fs::path assets_dir = src / "assets";
     if(fs::is_directory(assets_dir, ec))
     {
-        for(const auto& entry :
-            fs::recursive_directory_iterator(assets_dir, ec))
+        std::error_code iec;
+        fs::recursive_directory_iterator it(assets_dir, iec), end;
+        for(; !iec && it != end; it.increment(iec))
         {
-            if(!entry.is_regular_file())
+            const fs::directory_entry& entry = *it;
+            std::error_code fec;
+            if(!entry.is_regular_file(fec))
             {
                 continue;
             }
@@ -899,6 +927,11 @@ bool InspectBundle(const std::string& src_dir,
             }
             total += sz;
             p.assets.push_back(rel);
+        }
+        if(iec)
+        {
+            Err(errors, assets_dir.string() + ": directory scan failed ("
+                        + iec.message() + ")");
         }
         std::sort(p.assets.begin(), p.assets.end());
     }
@@ -949,6 +982,20 @@ bool ApplyImport(const ImportPlan& plan,
 {
     namespace fs = std::filesystem;
     std::error_code ec;
+
+    /* Bundled assets land under the TARGET workspace's assets
+       root — refused up front (before any type is written) when
+       the target dir is not <workspace>/<kind>/devices, so a
+       shallow dir can never make the import write outside its
+       own tree. */
+    fs::path assets_dst;
+    if(!plan.assets.empty() &&
+       !WorkspaceAssetsDir(target_preset_dir, assets_dst))
+    {
+        Err(errors, target_preset_dir + ": not a <workspace>/<kind>/"
+                    "devices dir — bundled assets have no root");
+        return false;
+    }
 
     /*------------------------------*\
     | Resolve the rename map:       |
@@ -1137,8 +1184,6 @@ bool ApplyImport(const ImportPlan& plan,
     | <workspace>/assets/ — never  |
     | overwriting a local file.     |
     \*------------------------------*/
-    const fs::path assets_dst =
-        (dir / ".." / ".." / "assets").lexically_normal();
     const fs::path assets_src = fs::path(plan.source_dir) / "assets";
     for(const std::string& rel : plan.assets)
     {

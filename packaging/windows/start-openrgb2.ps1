@@ -60,9 +60,31 @@
     paths) so stop-openrgb2.ps1 can order the shutdown and verify it
     only ever closes OUR processes.
 
+    Unverifiable processes: from a NON-elevated shell the image path
+    of an elevated process cannot be read, so an elevated managed
+    stack is indistinguishable from a foreign one. A same-named
+    process (OpenRGB.exe / openrgb2-engine.exe, or the :6744 listener)
+    whose image path is unreadable is therefore never classified as
+    foreign and never ignored: startup REFUSES with exit 4 (even with
+    -TakeOver) and asks for an elevated re-run -- the same rule as
+    stop-openrgb2.ps1. Without that rule our own backend became a
+    "foreign listener" and a second engine was spawned.
+
+    Logs: state\startup.log and state\shutdown.log (written by the
+    desktop UI) are renamed to <name>.1 once they exceed 1 MB -- only
+    while no process holds them open (else skipped until a later
+    start); never truncated in place.
+
+    Output: every finding, CONFLICT / UNVERIFIABLE / refusal line goes
+    to the host (Write-Host), which is this process's STDOUT when run
+    with -File -- the desktop UI parses it from there. Callers must
+    capture stdout; the script does not write any log file itself.
+
     Exit codes: 0 started/attached, 1 fatal error (missing files),
     3 refused (conflicts without -TakeOver, or a foreign OpenRGB.exe
-    blocking the safe backend spawn).
+    blocking the safe backend spawn), 4 refused (same-named
+    processes whose image path is unreadable from this shell --
+    re-run elevated).
 
     This file is dot-source safe: sourcing it defines the functions
     without running the startup (the offline packaging suite uses
@@ -269,6 +291,61 @@ function Get-ProcessImagePath([int]$ProcId) {
     catch { return $null }
 }
 
+# True when the PID is a LIVE process whose image path cannot be read
+# from this shell (elevated, or another user's) -- unverifiable, as
+# opposed to gone (no process) or readable.
+function Test-UnverifiableProcess([int]$ProcId) {
+    if($ProcId -le 0) { return $false }
+    $p = $null
+    try { $p = Get-Process -Id $ProcId -ErrorAction Stop } catch { return $false }
+    $img = $null
+    try { $img = $p.Path } catch { $img = $null }
+    return (-not $img)
+}
+
+# Same-named managed-image PIDs whose image path is unreadable. With
+# the -ProcessList seam only the listed entries are considered (the
+# offline suite must not depend on the host's live process table).
+function Find-UnverifiableManaged {
+    param([object[]]$ProcessList, [int]$ListenerPid)
+    $names = @("openrgb.exe", "openrgb2-engine.exe")
+    $ids = @()
+    if($ProcessList) {
+        foreach($p in $ProcessList) {
+            $leaf = (Split-Path -Leaf ([string]$p.exe)).ToLowerInvariant()
+            if($names -contains $leaf) { $ids += [int]$p.pid }
+        }
+    } else {
+        $ids += @(Get-Process -Name "OpenRGB","openrgb2-engine" `
+                    -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+    }
+    if($ListenerPid -gt 0) { $ids += $ListenerPid }
+    return ,@($ids | Sort-Object -Unique | Where-Object { Test-UnverifiableProcess $_ })
+}
+
+# Keep the desktop UI's logs bounded: past $MaxBytes the log is
+# RENAMED to <log>.1 (replacing the previous .1) -- never truncated in
+# place, so a reader that remembers an offset into the file is never
+# handed a shorter file under the same name. Only when nobody holds it:
+# an exclusive open must succeed first (a writer or reader that has it
+# open -- e.g. this script's own redirected stdout, or a transcript --
+# means rotation is skipped this time and retried next start). Best
+# effort -- a log that cannot be rotated is left alone, never lost.
+function Invoke-LogRotation([string]$Path, [long]$MaxBytes = 1MB) {
+    try {
+        $fi = Get-Item -LiteralPath $Path -ErrorAction Stop
+        if($fi.Length -le $MaxBytes) { return }
+        $fs = [IO.File]::Open($Path, [IO.FileMode]::Open,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $fs.Dispose()
+        $old = "$Path.1"
+        if(Test-Path -LiteralPath $old) {
+            Remove-Item -LiteralPath $old -Force -ErrorAction Stop
+        }
+        [IO.File]::Move($Path, $old)
+    } catch { }
+}
+
 #--------------------------------------------------------------------#
 # Startup                                                            #
 #--------------------------------------------------------------------#
@@ -296,6 +373,10 @@ function Invoke-ManagedStart {
     $StateDir   = Join-Path $InstallDir "state"
     $BackendCfg = Join-Path $StateDir   "backend"
     $RunFile    = Join-Path $StateDir   "openrgb2.run.json"
+
+    foreach($log in @("startup.log", "shutdown.log")) {
+        Invoke-LogRotation (Join-Path $StateDir $log)
+    }
 
     foreach($req in @($EngineExe, $BackendExe)) {
         if(-not (Test-Path $req)) {
@@ -378,6 +459,25 @@ function Invoke-ManagedStart {
         Write-Host "  ownership scan: no competing RGB owners detected"
     } else {
         Write-Findings $findings
+    }
+
+    # An unreadable image path is UNVERIFIABLE, not foreign: from a
+    # non-elevated shell our own elevated backend/engine look exactly
+    # like this. Refuse (even with -TakeOver) rather than mistake our
+    # backend for a foreign listener or spawn a second engine and
+    # overwrite the run file.
+    $unverifiable = Find-UnverifiableManaged -ProcessList $ProcessList `
+                        -ListenerPid $backendPid
+    if($unverifiable.Count -gt 0) {
+        Write-Host ""
+        Write-Host ("UNVERIFIABLE: OpenRGB.exe / openrgb2-engine.exe / the " +
+            ":$ManagedPort listener (pid $($unverifiable -join ', ')) run with " +
+            "an image path this shell cannot read -- most likely an ELEVATED " +
+            "OpenRGB2 stack. It cannot be proven ours or foreign, so nothing " +
+            "is started. Re-run from an elevated PowerShell (or with " +
+            "-Elevated); to restart it, stop it first: " +
+            "scripts\stop-openrgb2.ps1 -Elevated.") -ForegroundColor Red
+        return 4
     }
 
     if($ScanOnly) {
@@ -551,6 +651,19 @@ function Invoke-ManagedStart {
 
 # Dot-source guard: sourcing this file defines the functions only.
 if($MyInvocation.InvocationName -ne '.') {
+    # An elevated run (the desktop UI and the sign-in task run this
+    # script elevated) must not auto-load modules -- NetTCPIP for
+    # Get-NetTCPConnection -- from the user's own, user-writable
+    # module path.
+    try {
+        $isAdmin = (New-Object Security.Principal.WindowsPrincipal(
+            [Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { $isAdmin = $false }
+    if($isAdmin) {
+        $env:PSModulePath = (Join-Path $env:ProgramFiles "WindowsPowerShell\Modules") +
+            ";" + (Join-Path $PSHOME "Modules")
+    }
     exit (Invoke-ManagedStart `
         -InstallDir $InstallDir -Scene $Scene `
         -NoSceneRestore $NoSceneRestore -NoUI $NoUI `

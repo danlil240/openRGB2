@@ -177,6 +177,84 @@ static void TestLatestWinsScene()
           Reference(*WaveDoc(), SolidLayers(200, 0, 0), 0.0));
 }
 
+/* Output gate: while gated, no input pull, no evaluation, no
+   callback — but submitted scenes still apply (revision truth),
+   and the first ungated tick samples the CURRENT scene time. */
+static void TestOutputGate()
+{
+    SceneWorker worker;
+    std::vector<EvaluatedFrame> frames;
+    worker.SetFrameCallback([&frames](const EvaluatedFrame& f)
+    {
+        frames.push_back(f);
+    });
+    int pulls = 0;
+    worker.SetInputProvider([&pulls]()
+    {
+        ++pulls;
+        return std::shared_ptr<const studio::InputState>();
+    });
+    bool gated = true;
+    worker.SetOutputGate([&gated] { return gated; });
+
+    const TimePoint epoch = Clock::now();
+    worker.SetEpoch(epoch);
+    worker.SubmitScene(WaveDoc(), WaveLayers(), /*rev*/ 3);
+
+    CHECK(!worker.Step(epoch));
+    CHECK(!worker.Step(epoch + std::chrono::milliseconds(16)));
+    CHECK(frames.empty());
+    CHECK(pulls == 0);
+    CHECK(worker.AppliedRevision() == 3);
+
+    gated = false;
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(500)));
+    CHECK(frames.size() == 1);
+    CHECK(pulls == 1);
+    if(!frames.empty())
+    {
+        CHECK(frames[0].sequence == 1);
+        CHECK(Near(frames[0].scene_time_s, 0.500));
+        CHECK(frames[0].colors ==
+              Reference(*WaveDoc(), WaveLayers(), 0.500));
+    }
+}
+
+/* World matrices are cached per applied document: a newly
+   applied document with a moved object must evaluate at the NEW
+   position (cache invalidated on apply), matching a fresh
+   reference evaluation tick after tick. */
+static void TestWorldCachePerScene()
+{
+    SceneWorker worker;
+    std::vector<EvaluatedFrame> frames;
+    worker.SetFrameCallback([&frames](const EvaluatedFrame& f)
+    {
+        frames.push_back(f);
+    });
+    const TimePoint epoch = Clock::now();
+    worker.SetEpoch(epoch);
+
+    auto a = WaveDoc();
+    worker.SubmitScene(a, WaveLayers(), 1);
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(100)));
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(200)));
+
+    auto b = std::make_shared<studio::SceneDocument>(*a);
+    b->objects[0].transform.position.x += 0.37f;
+    worker.SubmitScene(b, WaveLayers(), 2);
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(300)));
+
+    CHECK(frames.size() == 3);
+    if(frames.size() == 3)
+    {
+        CHECK(frames[0].colors == Reference(*a, WaveLayers(), 0.100));
+        CHECK(frames[1].colors == Reference(*a, WaveLayers(), 0.200));
+        CHECK(frames[2].colors == Reference(*b, WaveLayers(), 0.300));
+        CHECK(frames[2].colors != Reference(*a, WaveLayers(), 0.300));
+    }
+}
+
 static void TestNoScene()
 {
     SceneWorker worker;
@@ -429,6 +507,8 @@ int main()
     TestAbsoluteTimeSampling();
     TestLatestWinsScene();
     TestNoScene();
+    TestOutputGate();
+    TestWorldCachePerScene();
     TestInputSlot();
     TestReentrantInputProvider();
     TestStepFaultIsContained();

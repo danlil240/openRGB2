@@ -20,6 +20,8 @@ EngineBridge::EngineBridge(QObject* parent)
     , pipe_name_(QString::fromStdString(ipc::kCommandPipeName))
     , backoff_ms_({ 1000, 2000, 4000, 8000, 15000, 30000 })
 {
+    frame_controllers_ = new FrameFeedModel(this);
+
     /* Bounded exponential backoff — retries are forever but the
        WAIT between them is capped (plan section 6). */
     factory_ = [this](std::string& err)
@@ -127,10 +129,11 @@ void EngineBridge::WorkerMain()
             continue;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            fail_count_ = 0;
-        }
+        /* fail_count_ is NOT reset here: a pipe that accepts the
+           connect but then fails the handshake (version mismatch,
+           an impostor/hung server, immediate close) must keep
+           climbing the backoff schedule — only a WELCOME proves a
+           usable session (see onWelcome below). */
 
         /* stop() may have landed while the (blocking, up to the
            connect deadline) factory was running — never start a
@@ -144,10 +147,48 @@ void EngineBridge::WorkerMain()
         EngineWireClient::Handlers h;
         h.onWelcome = [this](const nlohmann::json& j)
         {
+            /* Handshake completed — the session is usable, so the
+               next drop restarts the backoff schedule at its
+               first step. */
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                fail_count_ = 0;
+            }
             Post([this, j] { ApplyWelcome(j); });
         };
         h.onEvent = [this](const nlohmann::json& j)
         {
+            /* frame_status arrives at up to ~30 Hz; while no
+               window can show it, park only the newest one here
+               so neither the JSON->QVariant conversion nor any
+               QML binding work happens. setFrameFeedActive(true)
+               applies the parked one — the engine emits only on
+               change, so nothing else would repaint it. */
+            if(j.is_object())
+            {
+                const auto k = j.find("kind");
+                if(k != j.end() && k->is_string()
+                   && k->get_ref<const std::string&>()
+                          == ipc::event_kind::kFrameStatus)
+                {
+                    /* Park-or-post under frame_mu_, the same lock
+                       setFrameFeedActive posts the parked event
+                       under: frame_status posts stay in arrival
+                       order across a hide/show. */
+                    std::lock_guard<std::mutex> lock(frame_mu_);
+                    if(!frame_feed_active_.load())
+                    {
+                        if(parked_frame_status_)
+                            *parked_frame_status_ = j;
+                        else
+                            parked_frame_status_ =
+                                std::make_unique<nlohmann::json>(j);
+                        return;
+                    }
+                    Post([this, j] { ApplyEvent(j); });
+                    return;
+                }
+            }
             Post([this, j] { ApplyEvent(j); });
         };
         h.onReply = [this](uint32_t id, ipc::MsgType t,
@@ -298,6 +339,9 @@ void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
         event_body.value("kind", std::string());
     const nlohmann::json data = event_body.value("data",
                                                  nlohmann::json());
+    /* Converted ONCE: the store update and eventReceived share
+       the same QVariantMap (implicitly shared, no deep copy). */
+    const QVariantMap data_map = JsonToVariant(data).toMap();
 
     if(kind == ipc::event_kind::kTopology)
     {
@@ -317,27 +361,43 @@ void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
     }
     else if(kind == ipc::event_kind::kScene)
     {
-        scene_ = JsonToVariant(data).toMap();
+        scene_ = data_map;
         emit sceneChanged();
     }
     else if(kind == ipc::event_kind::kPlayback)
     {
-        playback_ = JsonToVariant(data).toMap();
+        playback_ = data_map;
         emit playbackChanged();
     }
     else if(kind == ipc::event_kind::kConnection)
     {
-        connection_ = JsonToVariant(data).toMap();
+        connection_ = data_map;
         emit connectionChanged();
     }
     else if(kind == ipc::event_kind::kFrameStatus)
     {
-        frame_status_ = JsonToVariant(data).toMap();
+        frame_status_ = data_map;
+        frame_controllers_->apply(
+            data_map.value(QStringLiteral("controllers")).toList());
+        const QVariantMap ag =
+            data_map.value(QStringLiteral("aggregate")).toMap();
+        if(ag != frame_aggregate_)
+        {
+            frame_aggregate_ = ag;
+            emit frameAggregateChanged();
+        }
+        const QVariantMap wl =
+            data_map.value(QStringLiteral("wireless")).toMap();
+        if(wl != frame_wireless_)
+        {
+            frame_wireless_ = wl;
+            emit frameWirelessChanged();
+        }
         emit frameStatusChanged();
     }
     else if(kind == ipc::event_kind::kReactive)
     {
-        reactive_ = JsonToVariant(data).toMap();
+        reactive_ = data_map;
         emit reactiveChanged();
     }
     else if(kind == ipc::event_kind::kWorkspace)
@@ -346,13 +406,12 @@ void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
            results = the job status record — both stored
            verbatim; WorkspaceController correlates by
            job_id/revision. */
-        workspace_ = JsonToVariant(data).toMap();
+        workspace_ = data_map;
         emit workspaceChanged();
     }
     RecomputeDegraded();
 
-    emit eventReceived(QString::fromStdString(kind),
-                       JsonToVariant(data).toMap());
+    emit eventReceived(QString::fromStdString(kind), data_map);
     }
     catch(const std::exception& e)
     {
@@ -645,13 +704,18 @@ int EngineBridge::reactiveCommand(const QString& verb,
 int EngineBridge::workspaceCommand(const QString& verb,
                                    const QVariantMap& args)
 {
-    nlohmann::json b = VariantToJson(args);
-    if(!b.is_object())
+    return workspaceCommandJson(verb, VariantToJson(args));
+}
+
+int EngineBridge::workspaceCommandJson(const QString& verb,
+                                       nlohmann::json args)
+{
+    if(!args.is_object())
     {
-        b = nlohmann::json::object();
+        args = nlohmann::json::object();
     }
-    b["verb"] = verb.toStdString();
-    return Issue(ipc::MsgType::WorkspaceCommand, b);
+    args["verb"] = verb.toStdString();
+    return Issue(ipc::MsgType::WorkspaceCommand, args);
 }
 
 /*---------------------------------------------------------*\
@@ -822,6 +886,34 @@ QVariantMap EngineBridge::playbackView() const
 }
 
 QVariantMap EngineBridge::frameStatus() const     { return frame_status_; }
+QObject*    EngineBridge::frameControllers() const
+            { return frame_controllers_; }
+QVariantMap EngineBridge::frameAggregate() const  { return frame_aggregate_; }
+QVariantMap EngineBridge::frameWireless() const   { return frame_wireless_; }
+bool        EngineBridge::frameFeedActive() const
+            { return frame_feed_active_.load(); }
+
+void EngineBridge::setFrameFeedActive(bool active)
+{
+    {
+        std::lock_guard<std::mutex> lock(frame_mu_);
+        if(frame_feed_active_.exchange(active) == active)
+        {
+            return;
+        }
+        /* false -> true: repaint the current frame_status. Posted
+           under the lock the worker posts frame_status under, so
+           it queues after anything posted before the hide and
+           before anything newer. */
+        if(active && parked_frame_status_)
+        {
+            std::shared_ptr<const nlohmann::json> parked(
+                std::move(parked_frame_status_));
+            Post([this, parked] { ApplyEvent(*parked); });
+        }
+    }
+    emit frameFeedActiveChanged();
+}
 QVariantMap EngineBridge::deliveryStats() const   { return delivery_stats_; }
 QVariantList EngineBridge::presets() const        { return presets_; }
 QVariantMap EngineBridge::diagnostics() const     { return diagnostics_; }

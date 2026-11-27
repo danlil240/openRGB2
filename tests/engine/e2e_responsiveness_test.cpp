@@ -51,6 +51,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <process.h>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -359,7 +360,7 @@ int main(int argc, char** argv)
     std::error_code ec;
     const std::filesystem::path tmpdir =
         std::filesystem::temp_directory_path(ec) /
-        "openrgb2-resp-state";
+        ("openrgb2-resp-state-" + std::to_string(_getpid()));
     std::filesystem::create_directories(tmpdir, ec);
     std::filesystem::remove(tmpdir / "engine-state.json", ec);
     const std::string scene_file = (tmpdir / "scene.json").string();
@@ -375,9 +376,9 @@ int main(int argc, char** argv)
     opts.sdk_enabled    = true;
     opts.ipc_enabled    = true;
     const std::string cmd_pipe  =
-        "\\\\.\\pipe\\openrgb2-e2e-resp";
+        ("\\\\.\\pipe\\openrgb2-e2e-resp-" + std::to_string(_getpid()));
     const std::string diag_pipe =
-        "\\\\.\\pipe\\openrgb2-e2e-resp-diag";
+        ("\\\\.\\pipe\\openrgb2-e2e-resp-diag-" + std::to_string(_getpid()));
     opts.command_pipe_name     = cmd_pipe;
     opts.diagnostics_pipe_name = diag_pipe;
     opts.power_monitor   = false;   /* no OS events needed —
@@ -388,7 +389,7 @@ int main(int argc, char** argv)
                                        steady-state latency
                                        is unaffected        */
     opts.single_instance = true;
-    opts.instance_name   = "Local\\openrgb2-engine-resp-test";
+    opts.instance_name   = ("Local\\openrgb2-engine-resp-test-" + std::to_string(_getpid()));
     opts.scene_path      = scene_file;
     opts.state_path      = (tmpdir / "engine-state.json").string();
     opts.backend_config_dir = "";

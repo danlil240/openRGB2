@@ -14,12 +14,28 @@ implementer needs nothing else.
   | `\\.\pipe\openrgb2-engine-diag` | **read-only** diagnostics channel |
 
 - ACL: every pipe instance carries an explicit restricted DACL —
-  `D:P(A;;GA;;;<creating-user-SID>)(A;;GA;;;SY)` — GENERIC_ALL to the user
-  that started the engine and to LocalSystem only. No Everyone/Users/
-  Anonymous/Network access. A client running as another local user gets
+  `D:P(D;;GA;;;NU)(A;;GA;;;<creating-user-SID>)(A;;GA;;;SY)` — GENERIC_ALL
+  to the user that started the engine and to LocalSystem only, with Network
+  logons (`NU`, present in every SMB/network token — the creating user's
+  own remote logon included) denied first. No Everyone/Users/Anonymous
+  access. A client running as another local user gets
   `ERROR_ACCESS_DENIED` from `CreateFile`; there is no privilege negotiation.
   The engine never creates the pipes without this DACL — if it cannot build
   the descriptor it does not listen at all (never default-open).
+- Local only: every instance is created with `PIPE_REJECT_REMOTE_CLIENTS`,
+  so remote (SMB) clients are refused at the pipe layer as well as by the
+  DACL.
+- No squatting window: the listener creates the next listening instance
+  before it serves or closes the current one, so the pipe name never has
+  zero instances while the engine runs.
+- Client side: clients open the pipe with
+  `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` (the engine may
+  identify, never impersonate, the client) and verify the server before
+  sending anything: the pipe object's owner must be the client's own user,
+  LocalSystem, or BUILTIN\Administrators (the default owner of objects an
+  ELEVATED engine of the same user creates — the managed engine runs
+  elevated while the UI may not); failing that, the server process's
+  token user must equal the client's. Otherwise the connect fails closed.
 
 ## 1. Framing
 
@@ -44,12 +60,15 @@ Bounds (plan section 6 — everything is bounded):
 | --- | --- |
 | Max body (`body_len`) | 1 MiB (1 048 576 bytes) |
 | Message read deadline | 5 s from first byte of the message |
+| Idle session | 60 s without the first byte of a next request → closed (clients keep alive with `PING`; the UI pings every 2 s) |
 | HELLO deadline | 5 s from connect |
 | Write deadline | 5 s per outbound message |
-| Requests per second per connection | 128 (1 s windows) |
+| Requests per second per connection | 128 (1 s windows; over-cap `too_large` messages count) |
 | Concurrent sessions per pipe | 8 (independent caps — a full command pipe cannot starve diagnostics) |
 | Queued events per session | 64 (per-kind latest-wins, oldest evicted) |
 | Resync scan | ≤ 4 MiB skipped per message |
+| Over-cap body skip | `body_len` ≤ 4 MiB is discarded by its declared length; larger → close |
+| JSON nesting | ≤ 64 levels per body; deeper → `ERROR(malformed)` |
 | Per-command dispatch | by contract — see note below |
 
 ## 2. Handshake
@@ -101,12 +120,12 @@ without closing:
 | Condition | Result |
 | --- | --- |
 | Bad/missing magic | resync: server scans forward for the next magic (bounded); the next valid message is still answered. Unrecoverable garbage past the scan bound → connection closed. |
-| `body_len` > max | `ERROR(too_large)`; the body is skipped by resync; connection survives. |
+| `body_len` > max | `ERROR(too_large)`; the declared body is discarded by length (never scanned for magic, so a frame hidden inside it is never parsed); connection survives. `body_len` > 4 MiB → `ERROR(too_large)` then close. Counts toward the request-rate window. |
 | Serialized **reply** body > max | `ERROR(too_large)` replaces the reply (same code on the error path itself); connection survives. |
 | Truncated message / peer close mid-message | session ends (deadline or close); server unaffected. |
 | Version ≠ negotiated | `ERROR(version_mismatch)`; connection survives. |
 | Unknown type code | `ERROR(unknown_command)`; connection survives. |
-| Invalid JSON body / missing fields | `ERROR(malformed)` / `ERROR(bad_request)`; connection survives. |
+| Invalid JSON body (incl. nesting > 64) / missing fields | `ERROR(malformed)` / `ERROR(bad_request)`; connection survives. |
 | Flood (>128 req/s) | `ERROR(rate_limited)` then close. |
 | Connection cap | `ERROR(busy)` then close. |
 | Any command on the diagnostics pipe | `ERROR(read_only)`; connection survives. |
@@ -563,8 +582,10 @@ backend answering means the fetch stopped landing, not that the data is
 current. Honest-absence forms: `null` (no SDK attached), then
 `{"available":false,"probed":false}` (SDK up, extension not yet probed),
 `{"available":false,"probed":true,"supported":false}` (a stock backend
-silently drops packet 4000 — the probe times out once per connection and
-latches; it is never re-probed and never breaks the connection), and
+silently drops packet 4000 — the probe times out after its own short
+deadline (300 ms) and latches; the latch is re-probed only on every
+enumeration and once a minute, clears as soon as a late reply arrives, and
+never breaks the connection), and
 `{"available":false,"probed":true,"supported":true}` (the backend
 answered but the body never parsed).
 

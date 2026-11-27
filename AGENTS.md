@@ -49,10 +49,17 @@ cd vendor/OpenRGB && cmd //c "scripts\\build-windows.bat 6.8.3 2022 64"
 
 `openrgb2-ui --qa [port]` (or `OPENRGB2_QA=1` + `OPENRGB2_QA_PORT`)
 opens a loopback-only JSON-lines socket (`127.0.0.1:5583` default)
-exposing the live QML tree for scripted QA — see
+exposing the live QML tree for scripted QA (refused — with a stderr
+line — when the UI is elevated or launched `--managed`) — see
 `src/ui/QaServer.h` for the op catalogue (`ping`, `state`, `tree`,
 `find`, `click`, `set`, `get`, `geom`, `type`, `key`, `scroll`,
-`shot`, `wait`, `eval`). `tools/qa/qa.py` is the CLI driver:
+`shot`, `wait`, `eval`). Every request must carry the per-launch
+token, printed to stderr and written to
+`%LOCALAPPDATA%\OpenRGB2\qa\qa-<port>.token`; a bad token or a
+malformed line closes the connection. `shot` writes `.png` files
+under `$OPENRGB2_QA_OUTDIR` (default `%TEMP%\openrgb2-qa`).
+`tools/qa/qa.py` is the CLI driver and reads the token file itself
+(or `--token` / `OPENRGB2_QA_TOKEN`):
 `qa.py click navLighting`, `qa.py shot out.png`, `qa.py tree`.
 Selectors: `objectName`, `text:`, `type:`, `path:`, or a JSON
 object. `tools/engine_ctl` covers the engine pipe — the QA socket

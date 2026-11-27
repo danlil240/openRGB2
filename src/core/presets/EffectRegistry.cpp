@@ -100,18 +100,32 @@ bool EffectRegistry::LoadDefaultsDirectory(const std::string& dir,
     {
         return true;
     }
-    for(const auto& entry : std::filesystem::directory_iterator(dir, ec))
+    /* Explicit increment(ec) — a range-for's operator++ throws
+       on a transient FS error; the scan error is reported. */
+    std::error_code iec;
+    std::filesystem::directory_iterator it(dir, iec), end;
+    for(; !iec && it != end; it.increment(iec))
     {
-        if(!entry.is_regular_file())
+        std::error_code fec;
+        if(!it->is_regular_file(fec))
         {
             continue;
         }
-        const std::string path = entry.path().string();
+        const std::string path = it->path().string();
         if(BasenameEffect(path).empty())
         {
             continue;
         }
         ok &= LoadOne(path, defaults, file_errors, errors);
+    }
+    if(iec)
+    {
+        ok = false;
+        if(errors)
+        {
+            errors->push_back(dir + ": directory scan failed ("
+                              + iec.message() + ")");
+        }
     }
     return ok;
 }
@@ -131,18 +145,32 @@ bool EffectRegistry::LoadDirectory(const std::string& dir,
     {
         return true;   /* no look dir = only defaults; not an error */
     }
-    for(const auto& entry : std::filesystem::directory_iterator(dir, ec))
+    /* Explicit increment(ec) — a range-for's operator++ throws
+       on a transient FS error; the scan error is reported. */
+    std::error_code iec;
+    std::filesystem::directory_iterator it(dir, iec), end;
+    for(; !iec && it != end; it.increment(iec))
     {
-        if(!entry.is_regular_file())
+        std::error_code fec;
+        if(!it->is_regular_file(fec))
         {
             continue;
         }
-        const std::string path = entry.path().string();
+        const std::string path = it->path().string();
         if(BasenameEffect(path).empty())
         {
             continue;
         }
         ok &= LoadOne(path, effects, file_errors, errors);
+    }
+    if(iec)
+    {
+        ok = false;
+        if(errors)
+        {
+            errors->push_back(dir + ": directory scan failed ("
+                              + iec.message() + ")");
+        }
     }
     return ok;
 }

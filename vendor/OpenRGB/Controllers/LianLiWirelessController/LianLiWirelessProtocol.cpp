@@ -39,6 +39,13 @@ bool LianLiWireless::IsValidUnicastMac(const Mac& mac)
     return !zero && !broadcast;
 }
 
+bool LianLiWireless::IsCompleteSighting(const Sighting& s)
+{
+    return s.fan_count != 0
+        && IsValidUnicastMac(s.master)
+        && s.receiver != 0;
+}
+
 bool LianLiWireless::ParseDeviceRecord(const uint8_t* data, size_t len, Sighting& out)
 {
     if(len < RECORD_SIZE || data[41] != RECORD_MARKER || data[18] == DEVICE_TYPE_MASTER)

@@ -285,6 +285,48 @@ int main()
     service.StepAll();
     service.StepAll();
 
-    std::puts("mode table: 11 modes, uploads admitted for playback modes 5-10");
+    /*---------------------------------------------------------*\
+    | 3. Rescan: the service (and its mode revision) outlives   |
+    |    the RGBController. A rebuilt controller starts in      |
+    |    Direct without a mode update — its Direct frames must  |
+    |    be admitted at once, whatever mode the slot was in.    |
+    \*---------------------------------------------------------*/
+    for(int playback_first = 0; playback_first < 2; ++playback_first)
+    {
+        if(playback_first)
+        {
+            rgb->SetActiveMode(5);
+            for(int attempt = 0; attempt < 5000; ++attempt)
+            {
+                service.StepAll();
+                if(service.GetStatus(mac, status) && status.frame_count > 1)
+                {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        service.StepAll();
+        service.GetStatus(mac, status);
+        previous_id = status.effect_id;
+
+        rgb.reset();    /* deletes ctrl */
+        ctrl = new LianLiWirelessController(std::shared_ptr<void>(),
+                                            service, mac, 3, info);
+        rgb.reset(new ProbeController(ctrl));
+        rgb->DeviceUpdateLEDs();
+        service.StepAll();
+        if(!service.GetStatus(mac, status)
+           || status.frame_count != 1
+           || status.effect_id == previous_id)
+        {
+            std::printf("FAIL: rebuilt controller's Direct frame was rejected "
+                        "(slot was %s)\n", playback_first ? "playback" : "Direct");
+            return 1;
+        }
+    }
+
+    std::puts("mode table: 11 modes, uploads admitted for playback modes 5-10, "
+              "Direct admitted after rebuild");
     return 0;
 }

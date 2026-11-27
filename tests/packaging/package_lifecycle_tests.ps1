@@ -17,17 +17,37 @@
           file written
       T5  update: new binaries in, stale files out, profiles\local +
           state preserved, .previous snapshot + journal
-      T6  rollback: manifest-verified restore of previous binaries,
-          post-update user state preserved, corrupt backup refused
+      T6  rollback: manifest-verified restore of previous binaries
+          AND manifest.json (version), post-update user state
+          preserved, corrupt backup refused
       T7  clean shutdown ordering: IPC QUIT reaches the engine while
-          the backend is still up, both exit, profile file untouched
+          the backend is still up, both exit, profile file untouched;
+          the UI is closed too (-Force), and reported without it
       T8  update refuses while the install is running -- engine AND
-          UI (image-path verified); rollback refuses too
+          UI (image-path verified), a same-named process with an
+          UNREADABLE image path (elevated stack), and an install exe
+          that is locked; rollback refuses too
       T9  backend guard: a foreign OpenRGB.exe refuses the spawn even
           under -TakeOver (the pinned backend's own kill-capable
           single-instance prompt is never triggered); an OpenRGB.exe
           at OUR pinned path mid-start is waited on, never
           double-spawned
+      T10 interrupted update: a retry never retakes the snapshot (the
+          only good copy) and resumes to completion
+      T11 interrupted update followed by rollback restores the old
+          binaries, removes what the update added, restores the
+          manifest version, clears the marker
+      T12 manifest paths: rooted / '..' paths refused by update and
+          rollback; preserved-path match is case-insensitive
+      T13 start refuses (exit 4) when OpenRGB.exe / the :6744
+          listener has an unreadable image path (unverifiable --
+          never mistaken for a foreign listener)
+      T14 update ACL-hardening user resolution: inherited grants count,
+          admin/system/well-known SIDs never do, ambiguity refuses
+          (-UserSid required) instead of picking the elevating account
+      T15 start: findings reach STDOUT under -File and the exit code
+          matches them (3 conflict / 4 unverifiable); oversized logs
+          rotate by rename only while nobody holds them
 
     Exit code: number of failed checks.
 #>
@@ -126,6 +146,24 @@ function Sha([string]$path) {
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $startSrc = Get-Content (Join-Path $ScriptsDir "start-openrgb2.ps1") -Raw
 
+# Update/rollback sections that are not ABOUT the running check pass an
+# empty process table: a real (elevated) OpenRGB2 on the host would
+# otherwise make them refuse as unverifiable.
+$NoProcs = @()
+
+# Hosts may run a real elevated OpenRGB2 stack: the stop checks expect
+# exit 1 then (unverifiable, reported honestly), never a silent 0.
+function Get-HostUnverifiable {
+    return @(Get-Process -Name "openrgb2-engine","openrgb2-ui","OpenRGB" `
+        -ErrorAction SilentlyContinue | Where-Object {
+            $img = $null; try { $img = $_.Path } catch { $img = $null }
+            -not $img })
+}
+
+# Body runs under try/finally: an exception mid-run must not leak the
+# stand-in processes or the temp tree (it counts as a failure).
+try {
+
 #====================================================================#
 Section "T1 classifier parity (synthetic process list)"
 #====================================================================#
@@ -203,9 +241,9 @@ Check (Assert-TakeoverConsent -Findings $notices -Consent $false) `
 Check ($startSrc -notmatch 'Stop-Process\s+-|taskkill|Stop-Computer') `
       "start script contains no process-termination call"
 $stopSrc = Get-Content (Join-Path $ScriptsDir "stop-openrgb2.ps1") -Raw
-Check ([regex]::Matches($stopSrc, 'Stop-Process\s+-').Count -eq 2 -and
-       [regex]::Matches($stopSrc, '\$Force -and \(Test-OwnProcess').Count -eq 2) `
-      "stop script Stop-Process only behind -Force + own-process verification"
+Check ([regex]::Matches($stopSrc, 'Stop-Process\s+-').Count -eq 3 -and
+       [regex]::Matches($stopSrc, '\$Force -and \(Test-OwnProcess').Count -eq 3) `
+      "stop script Stop-Process only behind -Force + own-process verification (UI, engine, backend)"
 
 #====================================================================#
 Section "T3 silent startup refused (conflicts, no -TakeOver)"
@@ -285,8 +323,12 @@ New-FakeTree $pkgV2 "2.0.0" "V2" (Join-Path $Sys32 "notepad.exe") (Join-Path $Sy
 Set-Content -Encoding ASCII (Join-Path $pkgV2 "new-dependency.dll") "new-binary"
 Write-FakeManifest $pkgV2 "2.0.0"
 
-$rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instB -SkipVerify $false
+$rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instB -SkipVerify $false `
+    -SkipAclHardening $true -ProcessList $NoProcs
 Check ($rc -eq 0) "update returns 0"
+Check ((Read-Manifest $instB).version -eq "2.0.0") "install manifest reports 2.0.0"
+Check (-not (Test-Path (Join-Path $instB ".update-in-progress.json"))) "update marker cleared"
+Check (-not (Test-Path "$instB.previous.tmp")) "no snapshot temp dir left behind"
 Check ((Read-Tag $instB) -eq "V2") "new binaries applied"
 Check (Test-Path (Join-Path $instB "new-dependency.dll")) "update-added file present"
 Check (-not (Test-Path (Join-Path $instB "obsolete.dll"))) "manifest-diff removed stale file"
@@ -309,14 +351,18 @@ Set-Content -Encoding ASCII (Join-Path $instB "profiles\local\session-2.json") '
 
 # corrupt backup refuses BEFORE touching the install
 Set-Content -Encoding ASCII "$instB.previous\obsolete.dll" "TAMPERED"
-$rc = Invoke-PackageRollback -InstallDir $instB -BackupDir "" -SkipVerify $false
+$rc = Invoke-PackageRollback -InstallDir $instB -BackupDir "" -SkipVerify $false `
+    -ProcessList $NoProcs
 Check ($rc -eq 1) "corrupt backup refused"
 Check ((Read-Tag $instB) -eq "V2") "refused rollback changed nothing"
 Set-Content -Encoding ASCII "$instB.previous\obsolete.dll" "old-binary"
 
-$rc = Invoke-PackageRollback -InstallDir $instB -BackupDir "" -SkipVerify $false
+$rc = Invoke-PackageRollback -InstallDir $instB -BackupDir "" -SkipVerify $false `
+    -ProcessList $NoProcs
 Check ($rc -eq 0) "rollback returns 0"
 Check ((Read-Tag $instB) -eq "V1") "previous binaries restored"
+Check ((Read-Manifest $instB).version -eq "1.0.0") `
+      "install manifest.json restored (reports 1.0.0 after rollback)"
 Check (Test-Path (Join-Path $instB "obsolete.dll")) "old file restored"
 Check (-not (Test-Path (Join-Path $instB "new-dependency.dll"))) "update-added file removed"
 Check (Test-Path (Join-Path $instB "profiles\local\session-2.json")) `
@@ -395,16 +441,35 @@ Check (-not (Test-Path (Join-Path $instC "state\openrgb2.run.json"))) `
 # script's own rule: unreadable image path -> unverifiable.
 $rc = Invoke-ManagedStop -InstallDir $instC -TimeoutSeconds 1 `
     -Force $false -CtlExe $ctlStub
-$hostUnverifiable = @(Get-Process -Name "openrgb2-engine","OpenRGB" `
-    -ErrorAction SilentlyContinue | Where-Object {
-        $img = $null; try { $img = $_.Path } catch { $img = $null }
-        -not $img })
+$hostUnverifiable = @(Get-HostUnverifiable)
 if($hostUnverifiable.Count -eq 0) {
     Check ($rc -eq 0) "stop with nothing running exits 0"
 } else {
     Check ($rc -eq 1) `
         "stop exits 1 when host has unverifiable same-named procs (elevated stack present)"
 }
+
+# UI step: closing the window hides the UI to the tray, so without
+# -Force the still-running UI is reported (exit 1) and left alone;
+# with -Force OUR UI (image path verified) is stopped.
+$uiProc = Start-Process -FilePath (Join-Path $instC "openrgb2-ui.exe") -PassThru `
+          -WindowStyle Hidden -ArgumentList "-NoProfile","-Command","Start-Sleep 300"
+$script:Spawned += $uiProc.Id
+Start-Sleep -Milliseconds 400
+$rc = Invoke-ManagedStop -InstallDir $instC -TimeoutSeconds 1 `
+    -Force $false -CtlExe $ctlStub
+$uiAlive = $false
+try { $uiAlive = $null -ne (Get-Process -Id $uiProc.Id -ErrorAction Stop) } catch {}
+Check ($rc -eq 1 -and $uiAlive) "UI still running without -Force -> reported (exit 1), not killed"
+$rc = Invoke-ManagedStop -InstallDir $instC -TimeoutSeconds 1 `
+    -Force $true -CtlExe $ctlStub
+$uiAlive = $false
+try { $uiAlive = $null -ne (Get-Process -Id $uiProc.Id -ErrorAction Stop) } catch {}
+Check (-not $uiAlive) "stop -Force closes OUR UI (verified by image path)"
+if(@(Get-HostUnverifiable).Count -eq 0) {
+    Check ($rc -eq 0) "stop -Force with the UI exits 0"
+}
+Kill-Spawned
 
 #====================================================================#
 Section "T8 update refuses while install is running"
@@ -436,6 +501,34 @@ $rc = Invoke-PackageRollback -InstallDir $instD -BackupDir "" -SkipVerify $true
 Check ($rc -eq 1) "rollback refused while UI running"
 Check ((Read-Tag $instD) -eq "D") "refused rollback changed nothing"
 Kill-Spawned
+Start-Sleep -Milliseconds 300
+
+# A same-named process whose image path is unreadable (an elevated
+# stack seen from a non-elevated shell) is unverifiable -> refuse.
+$hidden = @([pscustomobject]@{ ProcessName="openrgb2-engine"; Id=4242; Path=$null })
+$rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instD -SkipVerify $true `
+    -SkipAclHardening $true -ProcessList $hidden
+Check ($rc -eq 1) "update refused while a same-named process is unverifiable"
+Check ((Read-Tag $instD) -eq "D" -and -not (Test-Path "$instD.previous.tmp")) `
+      "unverifiable-refused update changed nothing"
+$rc = Invoke-PackageRollback -InstallDir $instD -BackupDir "" -SkipVerify $true `
+    -ProcessList $hidden
+Check ($rc -eq 1) "rollback refused while a same-named process is unverifiable"
+# a foreign same-named process (readable, other path) does not block
+$foreignTable = @([pscustomobject]@{ ProcessName="OpenRGB"; Id=4243
+                                     Path="C:\Program Files\OpenRGB\OpenRGB.exe" })
+Check ($null -eq (Test-InstallRunning $instD -ProcessList $foreignTable)) `
+      "a foreign same-named process with a readable path does not block"
+
+# An install exe held open (a loaded image anywhere) -> refuse.
+$lock = [IO.File]::Open((Join-Path $instD "openrgb2-ctl.exe"), [IO.FileMode]::Open,
+            [IO.FileAccess]::Read, [IO.FileShare]::Read)
+try {
+    $rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instD -SkipVerify $true `
+        -SkipAclHardening $true -ProcessList $NoProcs
+    Check ($rc -eq 1) "update refused while an install exe is locked"
+    Check ((Read-Tag $instD) -eq "D") "lock-refused update changed nothing"
+} finally { $lock.Dispose() }
 
 #====================================================================#
 Section "T9 backend guard: foreign OpenRGB.exe refuses the spawn"
@@ -491,7 +584,221 @@ Kill-Spawned
 Remove-Item -Force -ErrorAction SilentlyContinue $runFileA
 
 #====================================================================#
+Section "T10 interrupted update: retry keeps the snapshot, then resumes"
+#====================================================================#
+function New-UserStateInstall([string]$dir) {
+    New-FakeTree $dir "1.0.0" "V1" (Join-Path $Sys32 "notepad.exe") (Join-Path $Sys32 "notepad.exe")
+    New-Item -ItemType Directory -Force (Join-Path $dir "profiles\local") | Out-Null
+    Set-Content -Encoding ASCII (Join-Path $dir "profiles\local\engine-state.json") '{"schema_version":3}'
+}
+$instE = Join-Path $TestRoot "install-e"
+New-UserStateInstall $instE
+$profE = Sha (Join-Path $instE "profiles\local\engine-state.json")
+# A destination file held without write sharing makes the apply step
+# fail mid-way -- the same shape as a crash or a power cut.
+$blocker = Join-Path $instE "presets\effects\e.json"
+$lock = [IO.File]::Open($blocker, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+try {
+    $rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instE -SkipVerify $false `
+        -SkipAclHardening $true -ProcessList $NoProcs
+    Check ($rc -eq 1) "interrupted update returns 1"
+    Check (Test-Path (Join-Path $instE ".update-in-progress.json")) "interrupted update leaves its marker"
+    Check ((Read-Tag "$instE.previous") -eq "V1") "snapshot holds the pre-update version"
+    # retry while still failing: the snapshot must NOT be retaken from
+    # the half-updated install (the old code deleted the good one)
+    $rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instE -SkipVerify $false `
+        -SkipAclHardening $true -ProcessList $NoProcs
+    Check ($rc -eq 1) "retry that fails again returns 1"
+    Check ((Read-Tag "$instE.previous") -eq "V1") "failed retry kept the good snapshot (V1)"
+    Check ((Read-Manifest "$instE.previous").version -eq "1.0.0") "snapshot manifest still 1.0.0"
+} finally { $lock.Dispose() }
+$rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instE -SkipVerify $false `
+    -SkipAclHardening $true -ProcessList $NoProcs
+Check ($rc -eq 0) "retry after the cause is gone resumes and completes"
+Check ((Read-Tag $instE) -eq "V2" -and (Read-Manifest $instE).version -eq "2.0.0") "resumed update installed 2.0.0"
+Check ((Read-Tag "$instE.previous") -eq "V1") "snapshot still the pre-update version after resume"
+Check (-not (Test-Path (Join-Path $instE ".update-in-progress.json"))) "marker cleared after resume"
+$journal = @(Get-Content (Join-Path $instE "state\updates.json") -Raw | ConvertFrom-Json)
+$lastEntry = $journal[$journal.Count - 1]
+Check ($lastEntry.from_version -eq "1.0.0" -and $lastEntry.to_version -eq "2.0.0") `
+      "resumed update journaled 1.0.0 -> 2.0.0"
+Check ((Sha (Join-Path $instE "profiles\local\engine-state.json")) -eq $profE) "user state preserved through interruption"
+
+#====================================================================#
+Section "T11 interrupted update followed by rollback"
+#====================================================================#
+$instF = Join-Path $TestRoot "install-f"
+New-UserStateInstall $instF
+$profF = Sha (Join-Path $instF "profiles\local\engine-state.json")
+$lock = [IO.File]::Open((Join-Path $instF "presets\effects\e.json"), [IO.FileMode]::Open,
+            [IO.FileAccess]::Read, [IO.FileShare]::Read)
+try {
+    $rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instF -SkipVerify $false `
+        -SkipAclHardening $true -ProcessList $NoProcs
+} finally { $lock.Dispose() }
+Check ($rc -eq 1) "update interrupted"
+$rc = Invoke-PackageRollback -InstallDir $instF -BackupDir "" -SkipVerify $false `
+    -ProcessList $NoProcs
+Check ($rc -eq 0) "rollback over an interrupted update returns 0"
+Check ((Read-Tag $instF) -eq "V1") "rollback restored V1 binaries"
+Check ((Read-Manifest $instF).version -eq "1.0.0") "rollback restored the 1.0.0 manifest"
+Check (-not (Test-Path (Join-Path $instF "new-dependency.dll"))) `
+      "file the interrupted update added is removed (marker file list)"
+Check (-not (Test-Path (Join-Path $instF ".update-in-progress.json"))) "rollback cleared the marker"
+Check ((Sha (Join-Path $instF "profiles\local\engine-state.json")) -eq $profF) "user state untouched by rollback"
+
+#====================================================================#
+Section "T12 manifest path safety + case-insensitive preserved paths"
+#====================================================================#
+Check ((Test-PreservedPath "Profiles/Local/x.json") -and (Test-PreservedPath "STATE\backend\OpenRGB.json") -and
+       -not (Test-PreservedPath "stateful.txt") -and -not (Test-PreservedPath "profiles/daniel-pc.json")) `
+      "preserved-path match is case-insensitive and prefix-exact"
+foreach($bad in @("../evil.dll", "..\evil.dll", "C:/Windows/evil.dll", "/abs.dll",
+                  "\\server\share\x.dll", "a/../../b.dll", "x.dll:stream", "dir/./x.dll")) {
+    Check (-not (Test-SafeRelPath $bad)) "unsafe manifest path rejected: $bad"
+}
+Check ((Test-SafeRelPath "backend/platforms/qwindows.dll") -and (Test-SafeRelPath "Qt6Core.dll")) `
+      "normal manifest paths accepted"
+$pkgEvil = Join-Path $TestRoot "pkg-evil"
+New-FakeTree $pkgEvil "6.6.6" "EVIL" (Join-Path $Sys32 "notepad.exe") (Join-Path $Sys32 "notepad.exe")
+$m = Get-Content (Join-Path $pkgEvil "manifest.json") -Raw | ConvertFrom-Json
+$m.files += [pscustomobject]@{ path = "../escaped.dll"; sha256 = "00"; bytes = 0; origin = "test" }
+$m | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $pkgEvil "manifest.json")
+$rc = Invoke-PackageUpdate -PackageDir $pkgEvil -InstallDir $instE -SkipVerify $true `
+    -SkipAclHardening $true -ProcessList $NoProcs
+Check ($rc -eq 1 -and (Read-Tag $instE) -eq "V2") "update refuses a manifest with a '..' path, changes nothing"
+$rc = Invoke-PackageRollback -InstallDir $instE -BackupDir $pkgEvil -SkipVerify $true `
+    -ProcessList $NoProcs
+Check ($rc -eq 1 -and (Read-Tag $instE) -eq "V2") "rollback refuses a backup manifest with a '..' path"
+
+#====================================================================#
+Section "T13 start: unreadable image path is unverifiable, never foreign"
+#====================================================================#
+# PID 4 (System) is a live process whose image path no user-mode
+# caller can read -- the same shape an elevated backend has from a
+# non-elevated shell.
+$rc = Invoke-ManagedStart -InstallDir $instA -Scene "" -NoUI $true `
+    -TakeOver $true -ScanOnly $false -Elevated $false `
+    -BackendWaitSeconds 1 -ListenerPidOverride 0 `
+    -ProcessList @([pscustomobject]@{pid=4; exe="OpenRGB.exe"})
+Check ($rc -eq 4) "OpenRGB.exe with unreadable image -> refused as unverifiable (4), even with -TakeOver"
+Check (-not (Test-Path $runFileA)) "unverifiable refusal spawns nothing"
+$rc = Invoke-ManagedStart -InstallDir $instA -Scene "" -NoUI $true `
+    -TakeOver $true -ScanOnly $false -Elevated $false `
+    -BackendWaitSeconds 1 -ListenerPidOverride 4 `
+    -ProcessList @([pscustomobject]@{pid=54; exe="Steam.exe"})
+Check ($rc -eq 4) ":6744 listener with unreadable image -> unverifiable (4), not a foreign listener"
+Check (-not (Test-Path $runFileA)) "no engine spawned, run file untouched"
+
+#====================================================================#
+Section "T14 update: ACL-hardening user resolution never guesses"
+#====================================================================#
+# Injected security descriptors (no filesystem, no elevation): the
+# resolver must find the installing user through INHERITED grants on a
+# fresh state\, ignore admin/system/creator/well-known SIDs, and return
+# nothing -- never the elevating account -- when it is not exactly one.
+$u1 = "S-1-5-21-1111-2222-3333-1001"
+$u2 = "S-1-5-21-1111-2222-3333-1002"
+$adm500 = "S-1-5-21-1111-2222-3333-500"
+function New-SddlAcl([string]$Sddl) {
+    $a = New-Object Security.AccessControl.DirectorySecurity
+    $a.SetSecurityDescriptorSddlForm($Sddl)
+    return $a
+}
+function Resolve-WithAcls([string]$InstallSddl, [string]$StateSddl) {
+    $map = @{ "Q:\OpenRGB2" = $InstallSddl; "Q:\OpenRGB2\state" = $StateSddl }
+    $reader = { param($p) if($map[$p]) { New-SddlAcl $map[$p] } else { $null } }.GetNewClosure()
+    return Resolve-InstallUserSid -InstallDir "Q:\OpenRGB2" -AclReader $reader
+}
+$pfLike = "O:BAG:SYD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;0x1200a9;;;BU)(A;OICIIOID;GA;;;CO)(A;OICIID;0x1200a9;;;S-1-15-2-1)"
+Check ((Resolve-WithAcls "O:${u1}G:SYD:AI(A;OICIID;FA;;;$u1)" $null) -eq $u1) `
+    "install owned by the user -> that user"
+Check ((Resolve-WithAcls "O:BAG:SYD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)" `
+        "O:BAG:SYD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;$u1)") -eq $u1) `
+    "Administrators-owned install, fresh state\ with only INHERITED grants -> the user"
+Check ((Resolve-WithAcls "O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)" `
+        "O:BAG:SYD:AI(A;OICI;0x1301bf;;;$u1)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;SY)(A;OICIID;0x1200a9;;;BU)") -eq $u1) `
+    "hardened install: explicit Modify on state\ -> the user"
+Check ((Resolve-WithAcls "O:BAG:SYD:AI(A;OICIID;FA;;;BA)(A;OICIID;FA;;;$adm500)(A;OICIID;0x1301bf;;;$u1)" `
+        "O:BAG:SYD:AI(A;OICIID;FA;;;BA)(A;OICIID;FA;;;$adm500)(A;OICIID;0x1301bf;;;$u1)") -eq $u1) `
+    "built-in Administrator account (RID 500) is never the installing user"
+Check ($null -eq (Resolve-WithAcls $pfLike $null)) `
+    "Program Files-like folder, no state\: admin/system/creator/app-package SIDs only -> unresolved"
+Check ($null -eq (Resolve-WithAcls $pfLike "O:BAG:SYD:AI(A;OICI;0x1301bf;;;$u1)(A;OICI;0x1301bf;;;$u2)")) `
+    "two users granted write on state\ -> ambiguous, unresolved"
+Check ($null -eq (Resolve-WithAcls $pfLike "O:BAG:SYD:AI(A;OICIIO;FA;;;$u1)")) `
+    "inherit-only grant is not access to state\ itself -> unresolved"
+Check ($null -eq (Resolve-WithAcls $pfLike "O:BAG:SYD:AI(A;OICI;0x1200a9;;;$u1)")) `
+    "read-only grant does not make an owner of user state -> unresolved"
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$r = & { function Resolve-InstallUserSid { return $null }
+         Resolve-AclUserSid "Q:\OpenRGB2" "" }
+Check (($null -eq $r.Sid) -and $r.Error -match '-UserSid' -and $r.Error -match 'nothing was changed') `
+    "unresolved -> hardening refused with a -UserSid instruction (not the elevating account $me)"
+$r = Resolve-AclUserSid "Q:\OpenRGB2" "not-a-sid"
+Check (($null -eq $r.Sid) -and $r.Error -match 'not a valid SID') "-UserSid that is not a SID is refused"
+$r = Resolve-AclUserSid "Q:\OpenRGB2" $u2
+Check ($r.Sid -eq $u2) "-UserSid wins over resolution"
+
+#====================================================================#
+Section "T15 start: findings on stdout + exit contract; log rotation by rename"
+#====================================================================#
+# Log rotation: a log nobody holds is RENAMED to .1 (the previous .1
+# replaced); a held log is left alone; a small log is never touched.
+$logDir = Join-Path $TestRoot "logrot"
+New-Item -ItemType Directory -Force $logDir | Out-Null
+$big = Join-Path $logDir "startup.log"
+[IO.File]::WriteAllText($big, ("x" * 2048))
+[IO.File]::WriteAllText("$big.1", "older")
+Invoke-LogRotation $big 1024
+Check ((-not (Test-Path $big)) -and (Get-Item "$big.1").Length -eq 2048) `
+    "unheld log past the limit is renamed to .1 (previous .1 replaced), not truncated"
+[IO.File]::WriteAllText($big, ("y" * 2048))
+$hold = [IO.File]::Open($big, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+                        [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+try { Invoke-LogRotation $big 1024 } finally { $hold.Dispose() }
+Check ((Get-Item $big).Length -eq 2048 -and (Get-Item "$big.1").Length -eq 2048 -and
+       (Get-Content -Raw "$big.1").StartsWith("x")) `
+    "a log someone holds open is left alone (no truncation, no rename)"
+$small = Join-Path $logDir "shutdown.log"
+[IO.File]::WriteAllText($small, "short")
+Invoke-LogRotation $small 1024
+Check ((Test-Path $small) -and -not (Test-Path "$small.1")) "a log under the limit is not rotated"
+
+# Output contract (the UI parses the start script's STDOUT): run the
+# real script as a separate -File process over a throwaway install,
+# -ScanOnly (spawns nothing). Whatever this machine's live process
+# table holds, the findings land on stdout and the exit code matches
+# them: UNVERIFIABLE -> 4, an ownership CONFLICT -> 3, else 0.
+$scanInst = Join-Path $TestRoot "install-scan"
+New-Item -ItemType Directory -Force (Join-Path $scanInst "backend") | Out-Null
+foreach($f in @("openrgb2-engine.exe", "backend\OpenRGB.exe")) {
+    [IO.File]::WriteAllText((Join-Path $scanInst $f), "")
+}
+$stdout = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+    -File (Join-Path $ScriptsDir "start-openrgb2.ps1") `
+    -InstallDir $scanInst -ScanOnly 2>$null
+$scanRc = $LASTEXITCODE
+$text = ($stdout -join "`n")
+Check ($text -match "OpenRGB2 managed startup" -and
+       $text -match "ownership (scan: no competing|CONFLICT:|notice)") `
+    "start -File: the ownership scan reaches stdout"
+$expectRc = if($text -match "UNVERIFIABLE:") { 4 }
+            elseif($text -match "ownership CONFLICT:") { 3 } else { 0 }
+Check ($scanRc -eq $expectRc) "start -File exit code $scanRc matches its stdout findings (expected $expectRc)"
+
+} catch {
+    $script:Fail++
+    Write-Host "  FAIL unhandled exception: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "    at $($_.InvocationInfo.PositionMessage)" -ForegroundColor Red
+} finally {
+    Kill-Spawned
+    Remove-Item Env:\OPENRGB2_TEST_ENGINE_PID, Env:\OPENRGB2_TEST_BACKEND_PID `
+        -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $TestRoot
+}
+
+#====================================================================#
 Write-Host ""
 Write-Host ("RESULT: {0} passed, {1} failed" -f $script:Pass, $script:Fail)
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $TestRoot
 exit $script:Fail

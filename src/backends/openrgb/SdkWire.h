@@ -33,6 +33,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -208,7 +209,11 @@ struct SdkWirelessGroupStatus
 
 struct SdkWirelessStatus
 {
-    nlohmann::json                        raw;
+    /* Immutable once parsed and shared — snapshot copies (the
+       client's state-lock reads on every DIAG_GET / clock
+       poll) never deep-copy the document. Null only on a
+       default-constructed status. */
+    std::shared_ptr<const nlohmann::json> raw;
     std::vector<SdkWirelessGroupStatus>   groups;
 };
 

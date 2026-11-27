@@ -35,6 +35,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <process.h>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -494,7 +495,7 @@ static void TestValidation()
     {
         const std::string dir =
             (std::filesystem::temp_directory_path()
-             / "dls_fx_malformed").string();
+             / ("dls_fx_malformed_" + std::to_string(_getpid()))).string();
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
         const std::string path = dir + "/bad.effect.json";
@@ -827,7 +828,7 @@ static void TestRegistry()
 {
     std::error_code ec;
     const std::filesystem::path dir =
-        std::filesystem::temp_directory_path() / "dls_fx_registry";
+        std::filesystem::temp_directory_path() / ("dls_fx_registry_" + std::to_string(_getpid()));
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir, ec);
 
@@ -925,7 +926,7 @@ static void TestRegistry()
         d.layers.push_back(l);
         reg2.SetDefaults({ d });
         const std::filesystem::path empty =
-            std::filesystem::temp_directory_path() / "dls_fx_empty";
+            std::filesystem::temp_directory_path() / ("dls_fx_empty_" + std::to_string(_getpid()));
         std::filesystem::create_directories(empty, ec);
         CHECK(reg2.LoadDirectory(empty.string(), nullptr),
               "empty dir loads clean");
@@ -943,7 +944,7 @@ static void TestRegistry()
     {
         EffectRegistry reg3;
         const std::filesystem::path d3 =
-            std::filesystem::temp_directory_path() / "dls_fx_one";
+            std::filesystem::temp_directory_path() / ("dls_fx_one_" + std::to_string(_getpid()));
         std::filesystem::create_directories(d3, ec);
         const std::string p = (d3 / "named.effect.json").string();
         {
@@ -1084,7 +1085,7 @@ static void TestPersonalLookFile()
 {
     std::error_code ec;
     const std::filesystem::path dir =
-        std::filesystem::temp_directory_path() / "dls_fx_personal";
+        std::filesystem::temp_directory_path() / ("dls_fx_personal_" + std::to_string(_getpid()));
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir, ec);
 

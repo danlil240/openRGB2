@@ -32,6 +32,9 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QRandomGenerator>
+#include <QStandardPaths>
 #include <QMetaProperty>
 #include <QMetaType>
 #include <QVariant>
@@ -60,10 +63,74 @@ QString StripQmlSuffix(const char* class_name)
 
 } /* anonymous namespace */
 
+namespace
+{
+/* Running time independent of the first mismatch position. */
+bool ConstantTimeEquals(const QByteArray& a, const QByteArray& b)
+{
+    if(a.size() != b.size())
+    {
+        return false;
+    }
+    unsigned char diff = 0;
+    for(int i = 0; i < a.size(); ++i)
+    {
+        diff |= (unsigned char)(a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
+} /* anonymous namespace */
+
 QaServer::QaServer(QQmlApplicationEngine& engine, QObject* parent)
     : QObject(parent)
     , engine_(engine)
 {
+    /* 256-bit per-launch secret from the OS CSPRNG. */
+    quint32 words[8];
+    QRandomGenerator::system()->fillRange(words, 8);
+    token_ = QString::fromLatin1(
+        QByteArray(reinterpret_cast<const char*>(words),
+                   (int)sizeof(words)).toHex());
+}
+
+QString QaServer::TokenFilePath(quint16 port)
+{
+    const QString base = QStandardPaths::writableLocation(
+        QStandardPaths::GenericDataLocation);
+    return QDir(base).filePath(
+        QStringLiteral("OpenRGB2/qa/qa-%1.token").arg(port));
+}
+
+bool QaServer::WriteTokenFile(const QString& path, QString& err) const
+{
+    if(!QDir().mkpath(QFileInfo(path).absolutePath()))
+    {
+        err = QStringLiteral("cannot create %1")
+                  .arg(QFileInfo(path).absolutePath());
+        return false;
+    }
+    QFile f(path);
+    if(!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    {
+        err = f.errorString();
+        return false;
+    }
+    /* Owner-only on POSIX; on Windows the per-user profile
+       directory's ACL (%LOCALAPPDATA%) is what keeps other
+       users out. */
+    f.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    f.write(token_.toLatin1());
+    f.close();
+    return true;
+}
+
+QString QaServer::ShotDir()
+{
+    const QString env = qEnvironmentVariable("OPENRGB2_QA_OUTDIR");
+    return QDir::cleanPath(QFileInfo(
+        env.isEmpty() ? QDir::temp().filePath(
+                            QStringLiteral("openrgb2-qa"))
+                      : env).absoluteFilePath());
 }
 
 bool QaServer::Start(quint16 port, QString& err)
@@ -102,6 +169,7 @@ void QaServer::OnNewConnection()
     while(QTcpSocket* sock = server_->nextPendingConnection())
     {
         clients_.append(sock);
+        state_.insert(sock, std::make_shared<ClientState>());
         connect(sock, &QTcpSocket::readyRead,
                 this, [this, sock] { OnReadyRead(sock); });
         connect(sock, &QTcpSocket::disconnected,
@@ -112,52 +180,65 @@ void QaServer::OnNewConnection()
 void QaServer::OnDisconnected(QTcpSocket* sock)
 {
     clients_.removeAll(sock);
+    state_.remove(sock);
     sock->deleteLater();
+}
+
+void QaServer::CloseAfterReply(QTcpSocket* sock)
+{
+    if(auto it = state_.find(sock); it != state_.end())
+    {
+        (*it)->closing = true;
+        (*it)->acc.clear();
+    }
+    /* Graceful: the queued error reply is flushed first. */
+    sock->disconnectFromHost();
 }
 
 void QaServer::OnReadyRead(QTcpSocket* sock)
 {
-    /* Per-socket buffered line framing: partial lines stay on
-       the socket property until a '\n' completes a request.
+    /* Per-socket buffered line framing: partial lines stay in
+       the socket's ClientState until a '\n' completes a request.
        Dispatch() delivers REAL input events — a click/type op
        can close this very socket mid-line (the peer hung up,
        a quit shortcut, a handler that tears the UI down). The
        raw pointer is unusable past that boundary, so every
-       use after Dispatch re-checks the QPointer guard. */
+       use after Dispatch re-checks the QPointer guard; the
+       state is held by shared_ptr so it outlives a disconnect
+       inside the dispatch. */
     const QPointer<QTcpSocket> guard(sock);
-    QByteArray acc = sock->property("_qa_acc").toByteArray();
-    acc += sock->readAll();
-    int nl;
-    while((nl = acc.indexOf('\n')) >= 0)
+    const auto sit = state_.constFind(sock);
+    if(sit == state_.constEnd())
     {
-        const QByteArray line = acc.left(nl).trimmed();
-        acc.remove(0, nl + 1);
-        if(line.isEmpty())
+        return;
+    }
+    const std::shared_ptr<ClientState> st = *sit;
+    if(st->closing)
+    {
+        sock->readAll();               /* discard: connection ends */
+        return;
+    }
+    st->acc += sock->readAll();
+    if(st->dispatching)
+    {
+        /* Re-entered from a nested event loop inside Dispatch
+           (wait/shot/input) — queue only; the outer call drains
+           these lines in order once the current op returns. */
+        if(st->acc.size() > kMaxLineBytes * 2)
         {
-            continue;
+            CloseAfterReply(sock);
         }
-        QJsonParseError perr;
-        const QJsonDocument doc =
-            QJsonDocument::fromJson(line, &perr);
-        QJsonObject reply;
-        if(perr.error != QJsonParseError::NoError ||
-           !doc.isObject())
-        {
-            reply = Err(QStringLiteral("malformed"),
-                        QStringLiteral("request must be a JSON "
-                                       "object on one line: %1")
-                            .arg(perr.errorString()));
-        }
-        else
-        {
-            reply = Dispatch(doc.object(), sock);
-        }
-        /* The dispatch may have disconnected+deleted the
-           client — writing to a dangling socket is the crash
-           this guard exists for. */
+        return;
+    }
+
+    /* Writes one reply line; false = stop processing (socket
+       gone, or closed on purpose after this reply). */
+    auto reply_and_maybe_close =
+        [&](const QJsonObject& reply, bool close_after) -> bool
+    {
         if(guard.isNull())
         {
-            return;
+            return false;
         }
         sock->write(QJsonDocument(reply).toJson(
                         QJsonDocument::Compact));
@@ -165,12 +246,91 @@ void QaServer::OnReadyRead(QTcpSocket* sock)
         sock->flush();
         if(guard.isNull())
         {
+            return false;
+        }
+        if(close_after)
+        {
+            CloseAfterReply(sock);
+            return false;
+        }
+        return true;
+    };
+    const QJsonObject too_long =
+        Err(QStringLiteral("line_too_long"),
+            QStringLiteral("request line exceeds %1 bytes")
+                .arg(kMaxLineBytes));
+
+    for(;;)
+    {
+        /* Bytes that arrived while an op ran a nested event loop:
+           Qt does NOT re-emit readyRead for a socket whose
+           readyRead handler is still on the stack, so pull them
+           here or they would sit unread until the NEXT request
+           (answering every later request one line late). */
+        if(guard.isNull())
+        {
             return;
         }
-    }
-    if(!guard.isNull())
-    {
-        sock->setProperty("_qa_acc", acc);
+        st->acc += sock->readAll();
+        const int nl = st->acc.indexOf('\n');
+        if(nl < 0)
+        {
+            if(st->acc.size() > kMaxLineBytes)
+            {
+                reply_and_maybe_close(too_long, true);
+            }
+            return;
+        }
+        if(nl > kMaxLineBytes)
+        {
+            reply_and_maybe_close(too_long, true);
+            return;
+        }
+        const QByteArray line = st->acc.left(nl).trimmed();
+        st->acc.remove(0, nl + 1);
+        if(line.isEmpty())
+        {
+            continue;
+        }
+        QJsonParseError perr;
+        const QJsonDocument doc =
+            QJsonDocument::fromJson(line, &perr);
+        if(perr.error != QJsonParseError::NoError ||
+           !doc.isObject())
+        {
+            /* Not our protocol (e.g. the request line of a
+               browser's cross-protocol HTTP POST) — answer once
+               and hang up; never keep parsing the stream. */
+            reply_and_maybe_close(
+                Err(QStringLiteral("malformed"),
+                    QStringLiteral("request must be a JSON "
+                                   "object on one line: %1")
+                        .arg(perr.errorString())),
+                true);
+            return;
+        }
+        const QJsonObject req = doc.object();
+        if(!ConstantTimeEquals(
+               req.value(QStringLiteral("token")).toString()
+                   .toLatin1(),
+               token_.toLatin1()))
+        {
+            reply_and_maybe_close(
+                Err(QStringLiteral("unauthorized"),
+                    QStringLiteral("missing or wrong \"token\"")),
+                true);
+            return;
+        }
+        st->dispatching = true;
+        const QJsonObject reply = Dispatch(req, sock);
+        st->dispatching = false;
+        /* The dispatch may have disconnected+deleted the
+           client — writing to a dangling socket is the crash
+           this guard exists for. */
+        if(st->closing || !reply_and_maybe_close(reply, false))
+        {
+            return;
+        }
     }
 }
 
@@ -1112,13 +1272,41 @@ QJsonObject QaServer::OpShot(const QJsonObject& req)
                    QStringLiteral("grabWindow returned null "
                                   "(window hidden?)"));
     }
+    /* Output is confined: relative paths (and the default name)
+       land under ShotDir(); an absolute path inside ShotDir()
+       may overwrite; anything else must be a NEW .png file —
+       the QA socket never clobbers an existing file elsewhere. */
+    const QString shot_dir = ShotDir();
     QString path =
         req.value(QStringLiteral("path")).toString();
     if(path.isEmpty())
     {
-        path = QDir::temp().filePath(
-            QStringLiteral("openrgb2-qa-%1.png")
-                .arg(QDateTime::currentMSecsSinceEpoch()));
+        path = QStringLiteral("openrgb2-qa-%1.png")
+                   .arg(QDateTime::currentMSecsSinceEpoch());
+    }
+    if(QFileInfo(path).isRelative())
+    {
+        path = QDir(shot_dir).filePath(path);
+    }
+    path = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+    const bool inside =
+        path.startsWith(shot_dir + QLatin1Char('/'),
+                        Qt::CaseInsensitive);
+    if(!path.endsWith(QLatin1String(".png"), Qt::CaseInsensitive))
+    {
+        return Err(QStringLiteral("bad_path"),
+                   QStringLiteral("shot path must end in .png"));
+    }
+    if(!inside && QFileInfo::exists(path))
+    {
+        return Err(QStringLiteral("bad_path"),
+                   QStringLiteral("refusing to overwrite %1 outside "
+                                  "the QA output directory %2")
+                       .arg(path, shot_dir));
+    }
+    if(inside)
+    {
+        QDir().mkpath(QFileInfo(path).absolutePath());
     }
     if(!img.save(path, "PNG"))
     {

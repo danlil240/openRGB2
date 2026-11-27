@@ -130,6 +130,14 @@ public:
        "unsupported", NOT as a broken connection. */
     std::string wireless_status_json;
 
+    /* Slow fork backend: when true, packet-4000 replies are
+       built but held in delayed_wireless_replies instead of
+       being sent — the test injects them later
+       (FakeStream::InjectServerBytes) to model a reply that
+       arrives after the client's probe deadline. */
+    bool wireless_status_delayed = false;
+    std::vector<std::vector<uint8_t>> delayed_wireless_replies;
+
     std::vector<FakeController> controllers;
     std::vector<ServerEvent>    events;
 
@@ -655,7 +663,18 @@ inline void FakeSdkServer::HandleSend(FakeStream& stream,
             events.push_back(ServerEvent{ req.header.dev_id,
                                           req.header.pkt_id,
                                           req.body });
-            if(!wireless_status_json.empty())
+            if(!wireless_status_json.empty() &&
+               wireless_status_delayed)
+            {
+                delayed_wireless_replies.push_back(
+                    openrgb2::sdk::EncodePacket(
+                        req.header.dev_id,
+                        openrgb2::sdk::kPktLianLiWirelessStatus,
+                        {(const uint8_t*)wireless_status_json.c_str(),
+                         (const uint8_t*)wireless_status_json.c_str()
+                             + wireless_status_json.size() + 1}));
+            }
+            else if(!wireless_status_json.empty())
             {
                 reply(stream, req.header.dev_id,
                       openrgb2::sdk::kPktLianLiWirelessStatus,

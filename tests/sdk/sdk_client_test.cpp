@@ -606,7 +606,7 @@ static void TestWirelessStatusFetch()
     CHECK(snap.status.groups[0].state == "failed");
     CHECK(snap.status.groups[0].last_error ==
           "resend budget exhausted: no HW ack");
-    CHECK(snap.status.raw["counters"]["usb_send"] == 42);
+    CHECK((*snap.status.raw)["counters"]["usb_send"] == 42);
 
     /* RefreshStatus re-fetches so the snapshot stays live. */
     const size_t before =
@@ -711,6 +711,251 @@ static void TestWirelessClockSample()
     CHECK(client->State() == ConnectionState::Connected);
 }
 
+/*---------------------------------------------------------*\
+||| Review fixes: a stalled backend's cached status is never |||
+||| re-stamped as a fresh clock sample; a late reply to a    |||
+||| timed-out probe is never read as the next probe's        |||
+||| answer; a torn reply breaks the wire instead of          |||
+||| desyncing it; a slow fork recovers from the latch;       |||
+||| duplicate-key controllers do not re-enumerate forever.   |||
+\*---------------------------------------------------------*/
+
+static std::string StatusWithTicks(uint32_t ticks)
+{
+    return "{\"available\":true,\"groups\":[{\"mac\":\"W1\","
+           "\"state\":\"holding\",\"rgb_clock\":{\"valid\":true,"
+           "\"ticks\":" + std::to_string(ticks) +
+           ",\"sampled_at_ms\":0,\"age_ms\":10}}]}";
+}
+
+static void TestStalledBackendSampleNotRestamped()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup() };
+    server.wireless_status_json = StatusWithTicks(5000);
+    auto client = MakeClient(server);
+    CHECK(client->Connect());
+    const DeviceKey key{ "Lian Li:Lian Li SL Wireless", "W1",
+                         "hid:1", "" };
+
+    PlaybackClockSnapshot s;
+    CHECK(client->WirelessClockSample(key, s));
+    CHECK(s.valid && s.ticks == 5000);
+
+    /* The backend stops answering: the probe times out. The
+       cache stays (diagnostics ages it via fetched_at) but the
+       clock sample is a MISS — never the old ticks re-stamped
+       as current. */
+    server.wireless_status_delayed = true;
+    PlaybackClockSnapshot stale;
+    CHECK(!client->WirelessClockSample(key, stale));
+    CHECK(!stale.valid);
+    WirelessStatusSnapshot snap;
+    client->WirelessStatus(snap);
+    CHECK(snap.have_data && snap.supported);
+    CHECK(client->State() == ConnectionState::Connected);
+}
+
+static void TestLateProbeReplyNotMisread()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup() };
+    server.wireless_status_json = StatusWithTicks(5000);
+    FakeStream* stream = nullptr;
+    auto client = MakeClient(server, &stream);
+    CHECK(client->Connect());
+    const DeviceKey key{ "Lian Li:Lian Li SL Wireless", "W1",
+                         "hid:1", "" };
+
+    /* Probe A times out (its reply, ticks 1111, is late). */
+    server.wireless_status_delayed = true;
+    server.wireless_status_json    = StatusWithTicks(1111);
+    PlaybackClockSnapshot s;
+    CHECK(!client->WirelessClockSample(key, s));
+    CHECK(server.delayed_wireless_replies.size() == 1);
+
+    /* A's reply lands, then probe B is answered at once
+       (ticks 2222). B must read ITS reply, not A's. */
+    server.wireless_status_delayed = false;
+    server.wireless_status_json    = StatusWithTicks(2222);
+    stream->InjectServerBytes(server.delayed_wireless_replies[0]);
+    CHECK(client->WirelessClockSample(key, s));
+    CHECK(s.ticks == 2222);
+
+    /* And the stream stays in sync for the next probe. */
+    server.wireless_status_json = StatusWithTicks(3333);
+    CHECK(client->WirelessClockSample(key, s));
+    CHECK(s.ticks == 3333);
+
+    /* A late reply that lands during a Request() reply wait is
+       counted off there too. */
+    server.wireless_status_delayed = true;
+    server.wireless_status_json    = StatusWithTicks(4444);
+    CHECK(!client->WirelessClockSample(key, s));
+    CHECK(server.delayed_wireless_replies.size() == 2);
+    stream->InjectServerBytes(server.delayed_wireless_replies[1]);
+    server.wireless_status_delayed = false;
+    server.wireless_status_json    = StatusWithTicks(5555);
+    CHECK(client->RefreshStatus());
+    CHECK(client->WirelessClockSample(key, s));
+    CHECK(s.ticks == 5555);
+    CHECK(client->State() == ConnectionState::Connected);
+}
+
+static void TestTornProbeReplyBreaksWire()
+{
+    /* Half a header, then silence: the probe must NOT treat
+       this as a benign "unsupported" timeout — that would leave
+       the torn bytes in the stream and desync every later
+       reply. */
+    {
+        FakeSdkServer server;
+        server.controllers = { WirelessGroup() };
+        server.wireless_status_json = StatusWithTicks(1);
+        FakeStream* stream = nullptr;
+        auto client = MakeClient(server, &stream);
+        CHECK(client->Connect());
+        server.wireless_status_delayed = true;
+        std::vector<uint8_t> pkt = EncodePacket(
+            0, kPktLianLiWirelessStatus, { 1, 2, 3 });
+        pkt.resize(8);
+        stream->InjectServerBytes(pkt);
+        CHECK(!client->FetchWirelessStatus());
+        CHECK(client->State() == ConnectionState::Reconnecting);
+    }
+    /* Whole header, truncated body: same. */
+    {
+        FakeSdkServer server;
+        server.controllers = { WirelessGroup() };
+        server.wireless_status_json = StatusWithTicks(1);
+        FakeStream* stream = nullptr;
+        auto client = MakeClient(server, &stream);
+        CHECK(client->Connect());
+        server.wireless_status_delayed = true;
+        std::vector<uint8_t> pkt = EncodePacket(
+            0, kPktLianLiWirelessStatus,
+            std::vector<uint8_t>(100, 'x'));
+        pkt.resize(sizeof(PacketHeader) + 10);
+        stream->InjectServerBytes(pkt);
+        CHECK(!client->FetchWirelessStatus());
+        CHECK(client->State() == ConnectionState::Reconnecting);
+    }
+}
+
+static void TestSlowForkRecoversFromLatch()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup() };
+    server.wireless_status_json    = StatusWithTicks(7);
+    server.wireless_status_delayed = true;    /* slow first probe */
+    FakeStream* stream = nullptr;
+    auto client = MakeClient(server, &stream);
+    CHECK(client->Connect());
+    WirelessStatusSnapshot snap;
+    client->WirelessStatus(snap);
+    CHECK(snap.probed && !snap.supported);
+
+    /* The reply arrives late; the next refresh sees it (in its
+       count request), un-latches, and re-probes successfully. */
+    CHECK(server.delayed_wireless_replies.size() == 1);
+    stream->InjectServerBytes(server.delayed_wireless_replies[0]);
+    server.wireless_status_delayed = false;
+    CHECK(client->RefreshStatus());
+    client->WirelessStatus(snap);
+    CHECK(snap.supported && snap.have_data);
+    CHECK(client->State() == ConnectionState::Connected);
+}
+
+static void TestDetectingReplyIsNotData()
+{
+    /* A backend still in first detection answers promptly with
+       {"detecting":true,"available":false}: supported, no data
+       yet, not a clock sample — and the next refresh asks
+       again and picks up real data. */
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup() };
+    server.wireless_status_json =
+        "{\"detecting\":true,\"available\":false}";
+    auto client = MakeClient(server);
+    CHECK(client->Connect());
+    WirelessStatusSnapshot snap;
+    client->WirelessStatus(snap);
+    CHECK(snap.probed && snap.supported && !snap.have_data);
+    const DeviceKey key{ "Lian Li:Lian Li SL Wireless", "W1",
+                         "hid:1", "" };
+    PlaybackClockSnapshot s;
+    CHECK(!client->WirelessClockSample(key, s));
+    CHECK(!s.valid);
+
+    const size_t probes = server.CountEvents(kPktLianLiWirelessStatus);
+    server.wireless_status_json = StatusWithTicks(9000);
+    CHECK(client->RefreshStatus());
+    CHECK(server.CountEvents(kPktLianLiWirelessStatus) > probes);
+    client->WirelessStatus(snap);
+    CHECK(snap.supported && snap.have_data);
+    CHECK(client->WirelessClockSample(key, s));
+    CHECK(s.ticks == 9000);
+    CHECK(client->State() == ConnectionState::Connected);
+}
+
+static void TestUnsupportedReprobeSchedule()
+{
+    FakeSdkServer server;          /* stock: never answers */
+    server.controllers = { WirelessGroup() };
+    {
+        auto client = MakeClient(server);
+        CHECK(client->Connect());
+        const size_t probes =
+            server.CountEvents(kPktLianLiWirelessStatus);
+        /* An explicit enumeration re-probes the latch. */
+        CHECK(client->Enumerate());
+        CHECK(server.CountEvents(kPktLianLiWirelessStatus) ==
+              probes + 1);
+        CHECK(client->State() == ConnectionState::Connected);
+    }
+    server.ClearEvents();
+    {
+        /* With the slow schedule elapsed (0 ms here) a refresh
+           re-probes too. */
+        OpenRgbClientOptions o = Opts();
+        o.wireless_reprobe_ms = 0;
+        auto client = std::make_unique<OpenRgbClient>(
+            o, std::make_unique<FakeStream>(server));
+        CHECK(client->Connect());
+        const size_t probes =
+            server.CountEvents(kPktLianLiWirelessStatus);
+        CHECK(client->RefreshStatus());
+        CHECK(server.CountEvents(kPktLianLiWirelessStatus) ==
+              probes + 1);
+    }
+}
+
+static void TestDuplicateKeysNoReenumeration()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup(), WirelessGroup(), Dimm() };
+    auto client = MakeClient(server);
+    CHECK(client->Connect());
+    const std::vector<DeviceSnapshot> before = client->Snapshots();
+    CHECK(before.size() == 2);            /* duplicate collapsed */
+    CHECK(client->RefreshStatus());
+    CHECK(client->RefreshStatus());
+    const std::vector<DeviceSnapshot> after = client->Snapshots();
+    CHECK(after.size() == 2);
+    CHECK(!after.empty() && !before.empty() &&
+          after[0].topology_generation ==
+              before[0].topology_generation);
+
+    /* A real count change still re-enumerates. */
+    server.RemoveController(2);
+    CHECK(client->RefreshStatus());
+    const std::vector<DeviceSnapshot> removed = client->Snapshots();
+    CHECK(removed.size() == 1);
+    CHECK(!removed.empty() &&
+          removed[0].topology_generation >
+              before[0].topology_generation);
+}
+
 int main()
 {
     TestHandshakeCapsAt4();
@@ -729,6 +974,13 @@ int main()
     TestWirelessStatusUnsupportedBackend();
     TestWirelessStatusMalformedReply();
     TestWirelessClockSample();
+    TestStalledBackendSampleNotRestamped();
+    TestLateProbeReplyNotMisread();
+    TestTornProbeReplyBreaksWire();
+    TestSlowForkRecoversFromLatch();
+    TestUnsupportedReprobeSchedule();
+    TestDetectingReplyIsNotData();
+    TestDuplicateKeysNoReenumeration();
     std::printf("sdk client: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -279,6 +279,15 @@ private:
     std::map<std::string, Resolution>               resolved_;
     std::map<DeviceKey, Emitted>                    emitted_;
     std::map<DeviceKey, Identify>                   identify_;
+    /* MapFrame's per-controller write queues, kept across ticks
+       so their buffers are reused (`used` marks this tick's
+       controllers — an untouched entry emits nothing). */
+    struct WriteQueue
+    {
+        bool                                       used = false;
+        std::vector<std::pair<uint32_t, RgbColor>> writes;
+    };
+    std::map<DeviceKey, WriteQueue>                 write_scratch_;
 
     /* Auto-verify runtime state + observability (F04):
        bound/writable object counts from the latest

@@ -47,6 +47,27 @@ if not exist "%~5" exit /b 81
         Write-Host "PASS $($case.name) launcher targets staged startup and forwards -NoUI"
     }
 
+    # Two staged packages: the source launcher picks the NEWEST by last
+    # write time (the same pick stop-openrgb2.ps1 makes), not the first
+    # alphabetically -- and the script's exit code survives the pause.
+    $newerDir = Join-Path $testRoot 'build\package\OpenRGB2-0.0.9-win64'
+    New-Item -ItemType Directory -Force (Join-Path $newerDir 'scripts') | Out-Null
+    Set-Content -Encoding ASCII (Join-Path $newerDir 'scripts\start-openrgb2.ps1') '# newer staged startup'
+    (Get-Item $releaseDir).LastWriteTime = (Get-Date).AddHours(-2)
+    (Get-Item $newerDir).LastWriteTime = (Get-Date).AddHours(-1)
+    Add-Content -Encoding ASCII (Join-Path $shimDir 'powershell.cmd') 'exit /b 3'
+    Remove-Item $env:ORGB2_TEST_LOG -ErrorAction SilentlyContinue
+    $launch = Join-Path $sourceDir 'OpenRGB2.cmd'
+    & $env:ComSpec /d /c ('"' + $launch + '" -NoUI < NUL') | Out-Null
+    $rc = $LASTEXITCODE
+    $actual = @(Get-Content $env:ORGB2_TEST_LOG)
+    if($actual[0] -ne ("FILE=" + (Join-Path $newerDir 'scripts\start-openrgb2.ps1'))) {
+        throw "source launcher did not pick the newest staged package: $($actual -join ', ')"
+    }
+    if($rc -ne 3) { throw "launcher lost the startup script's exit code (got $rc, want 3)" }
+    Write-Host 'PASS source launcher picks the newest staged package and keeps the exit code'
+    Remove-Item -Recurse -Force $newerDir
+
     Remove-Item (Join-Path $releaseDir 'scripts\start-openrgb2.ps1')
     Remove-Item $env:ORGB2_TEST_LOG
     $launch = Join-Path $sourceDir 'OpenRGB2.cmd'

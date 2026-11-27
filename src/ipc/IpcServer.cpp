@@ -68,17 +68,28 @@ struct IpcServer::Session
     std::thread                 writer_thread;
     std::atomic<bool>           stop{ false };   /* session teardown   */
     std::atomic<bool>           dead{ false };   /* reader exited      */
-    bool                        joined = false;  /* threads joined      */
+
+    /* Serializes the thread joins: Stop() and Sweep() may both
+       reach a dead session (Sweep runs on Emit callers' threads)
+       and std::thread::join must never run concurrently on the
+       same thread object. Whoever holds it joins what is still
+       joinable; the other finds nothing left to join. */
+    std::mutex                  join_mutex;
+    bool                        sweep_claimed = false;  /* mutex_ */
 
     /* One writer thread drains the bounded event queue; replies
        go out inline on the reader thread. send_mutex serializes
        channel writes between the two. */
     std::mutex                  send_mutex;
 
+    /* Encoded event bytes are shared: one Emit encodes once
+       and every subscribed session's queue holds the same
+       immutable buffer. */
+    using Bytes = std::shared_ptr<const std::vector<uint8_t>>;
     struct OutMsg
     {
         std::string           kind;      /* event kind ("" = none)   */
-        std::vector<uint8_t>  bytes;
+        Bytes                 bytes;
     };
     std::mutex                out_mutex;
     std::condition_variable   out_cv;
@@ -199,21 +210,8 @@ bool IpcServer::Serve(std::unique_ptr<IIpcChannel> channel,
     return true;
 }
 
-void IpcServer::Emit(const IpcEvent& ev)
+bool IpcServer::HasSubscriber(const std::string& kind) const
 {
-    Sweep();
-
-    const std::vector<uint8_t> bytes =
-        EncodeMessage(MsgType::Event, 0,
-            nlohmann::json::object({
-                { "kind", ev.kind },
-                { "data", ev.data },
-            }));
-    if(bytes.empty())
-    {
-        return;
-    }
-
     std::vector<std::shared_ptr<Session>> targets;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -225,13 +223,59 @@ void IpcServer::Emit(const IpcEvent& ev)
         {
             continue;
         }
+        std::lock_guard<std::mutex> lock(s->sub_mutex);
+        if(s->subscribed.find(kind) != s->subscribed.end())
         {
-            std::lock_guard<std::mutex> lock(s->sub_mutex);
-            if(s->subscribed.find(ev.kind) == s->subscribed.end())
+            return true;
+        }
+    }
+    return false;
+}
+
+void IpcServer::Emit(const IpcEvent& ev)
+{
+    Sweep();
+
+    /* Subscribers first: an event nobody subscribed to (the
+       ~30 Hz frame_status with no UI attached) is never
+       serialized. */
+    std::vector<std::shared_ptr<Session>> targets;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        targets.reserve(sessions_.size());
+        for(const std::shared_ptr<Session>& s : sessions_)
+        {
+            if(s->dead.load())
             {
                 continue;
             }
+            std::lock_guard<std::mutex> slock(s->sub_mutex);
+            if(s->subscribed.find(ev.kind) != s->subscribed.end())
+            {
+                targets.push_back(s);
+            }
         }
+    }
+    if(targets.empty())
+    {
+        return;
+    }
+
+    std::vector<uint8_t> encoded =
+        EncodeMessage(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", ev.kind },
+                { "data", ev.data },
+            }));
+    if(encoded.empty())
+    {
+        return;
+    }
+    const Session::Bytes bytes =
+        std::make_shared<const std::vector<uint8_t>>(std::move(encoded));
+
+    for(const std::shared_ptr<Session>& s : targets)
+    {
         /*---- Bounded enqueue: latest-wins per kind, then     ----*\
         | oldest-eviction at the cap. Drops are counted, never    |
         | queued unboundedly.                                     |
@@ -279,17 +323,6 @@ void IpcServer::EmitTo(uint64_t session_id, const IpcEvent& ev,
 {
     Sweep();
 
-    const std::vector<uint8_t> bytes =
-        EncodeMessage(MsgType::Event, 0,
-            nlohmann::json::object({
-                { "kind", ev.kind },
-                { "data", ev.data },
-            }));
-    if(bytes.empty())
-    {
-        return;
-    }
-
     std::shared_ptr<Session> target;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -314,6 +347,19 @@ void IpcServer::EmitTo(uint64_t session_id, const IpcEvent& ev,
             return;                /* not subscribed to this kind */
         }
     }
+    /* Encoded only once a subscribed target exists. */
+    std::vector<uint8_t> encoded =
+        EncodeMessage(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", ev.kind },
+                { "data", ev.data },
+            }));
+    if(encoded.empty())
+    {
+        return;
+    }
+    const Session::Bytes bytes =
+        std::make_shared<const std::vector<uint8_t>>(std::move(encoded));
     /* The coalesce key partitions latest-wins INSIDE the kind:
        a queued chunk of a superseded sequence is replaced only
        by the same (sequence,chunk) slot — never by a different
@@ -376,21 +422,31 @@ void IpcServer::Stop()
         s->channel->Close();
         s->out_cv.notify_all();
     }
+    /* `all` includes sessions a concurrent Sweep() is joining
+       right now (Sweep erases only after its joins): the
+       join_mutex makes Stop wait for that join instead of
+       racing it, so every session thread is joined when Stop
+       returns. */
     for(const std::shared_ptr<Session>& s : all)
     {
-        if(s->reader_thread.joinable())
-        {
-            s->reader_thread.join();
-        }
-        if(s->writer_thread.joinable())
-        {
-            s->writer_thread.join();
-        }
-        s->joined = true;
+        JoinSession(*s);
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         sessions_.clear();
+    }
+}
+
+void IpcServer::JoinSession(Session& s)
+{
+    std::lock_guard<std::mutex> jl(s.join_mutex);
+    if(s.reader_thread.joinable())
+    {
+        s.reader_thread.join();
+    }
+    if(s.writer_thread.joinable())
+    {
+        s.writer_thread.join();
     }
 }
 
@@ -429,38 +485,40 @@ size_t IpcServer::SessionCount() const
 
 void IpcServer::Sweep()
 {
+    /* Once stopped, Stop() owns every join — Sweep stays out. */
+    if(stopped_.load())
+    {
+        return;
+    }
     std::vector<std::shared_ptr<Session>> corpses;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        for(auto it = sessions_.begin(); it != sessions_.end();)
+        for(const std::shared_ptr<Session>& s : sessions_)
         {
-            if((*it)->dead.load())
+            if(s->dead.load() && !s->sweep_claimed)
             {
-                if(!(*it)->joined)
-                {
-                    corpses.push_back(*it);
-                }
-                it = sessions_.erase(it);
-            }
-            else
-            {
-                ++it;
+                s->sweep_claimed = true;   /* one sweeper each */
+                corpses.push_back(s);
             }
         }
     }
     /* Join outside the lock — a joining thread must never hold
-       mutex_ (a dying session can be inside Emit). */
+       mutex_ (a dying session can be inside Emit). The corpses
+       stay in sessions_ until joined, so a concurrent Stop()
+       still sees (and waits for) them. */
     for(const std::shared_ptr<Session>& s : corpses)
     {
-        if(s->reader_thread.joinable())
+        JoinSession(*s);
+    }
+    if(!corpses.empty())
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for(const std::shared_ptr<Session>& s : corpses)
         {
-            s->reader_thread.join();
+            sessions_.erase(
+                std::remove(sessions_.begin(), sessions_.end(), s),
+                sessions_.end());
         }
-        if(s->writer_thread.joinable())
-        {
-            s->writer_thread.join();
-        }
-        s->joined = true;
     }
 }
 
@@ -487,7 +545,8 @@ void IpcServer::WriterMain(std::shared_ptr<Session> s)
         IpcIoResult r;
         {
             std::lock_guard<std::mutex> lock(s->send_mutex);
-            r = s->channel->SendAll(msg.bytes.data(), msg.bytes.size(),
+            r = s->channel->SendAll(msg.bytes->data(),
+                                    msg.bytes->size(),
                                     options_.send_deadline_ms, err);
         }
         if(r != IpcIoResult::Ok)
@@ -679,26 +738,67 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
     /*---- Request loop -------------------------------------*/
     uint64_t window_start_ms = 0;
     uint32_t window_count    = 0;
+    /* Flood bound: fixed 1 s windows, rate_limit_per_sec
+       messages each — oversized (too_large) ones included. The
+       limit message is bounded; then the connection closes — a
+       flooded session never grows server state. */
+    auto over_rate = [&](uint32_t request_id) -> bool
+    {
+        const uint64_t now_ms = (uint64_t)
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        if(now_ms - window_start_ms >= 1000)
+        {
+            window_start_ms = now_ms;
+            window_count    = 0;
+        }
+        if(++window_count <= options_.rate_limit_per_sec)
+        {
+            return false;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++stats_.rate_limited;
+            ++stats_.responses_out;
+        }
+        send_error(request_id, ErrCode::RateLimited,
+                   "request rate exceeded");
+        return true;
+    };
     for(;;)
     {
         Message     msg;
         std::string detail;
+        /* Idle sessions wait up to idle_deadline_ms for the
+           first byte of the next request; the per-message
+           deadline starts at that first byte (docs §1). */
         const ReadResult rr =
-            rd.Read(msg, options_.message_deadline_ms, detail);
+            rd.Read(msg, options_.message_deadline_ms, detail,
+                    options_.idle_deadline_ms);
         if(rr != ReadResult::Ok)
         {
             if(rr == ReadResult::TooLarge)
             {
-                /* Bounded rejection; the oversized body is
-                   skipped by the reader's next magic hunt, so
-                   the connection survives. */
+                /* Bounded rejection; the reader discards the
+                   oversized body by its declared length (never
+                   rescanning it for magic), so the connection
+                   survives — unless the body is beyond the skip
+                   bound, which closes after the error. */
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     ++stats_.messages_in;
+                }
+                if(over_rate(msg.request_id))
+                {
+                    break;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
                     ++stats_.responses_out;
                 }
                 if(!send_error(msg.request_id, ErrCode::TooLarge,
-                                 detail))
+                                 detail) || rd.Poisoned())
                 {
                     break;
                 }
@@ -712,28 +812,8 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
             ++stats_.messages_in;
         }
 
-        /* Flood bound: fixed 1 s windows, rate_limit_per_sec
-           requests each. The limit message is bounded; then
-           the connection closes — a flooded session never
-           grows server state. */
-        const uint64_t now_ms = (uint64_t)
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch())
-                .count();
-        if(now_ms - window_start_ms >= 1000)
+        if(over_rate(msg.request_id))
         {
-            window_start_ms = now_ms;
-            window_count    = 0;
-        }
-        if(++window_count > options_.rate_limit_per_sec)
-        {
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                ++stats_.rate_limited;
-                ++stats_.responses_out;
-            }
-            send_error(msg.request_id, ErrCode::RateLimited,
-                         "request rate exceeded");
             break;
         }
 
@@ -839,8 +919,12 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
                     }
                     continue;
                 }
-                const nlohmann::json ev =
-                    body.value("events", nlohmann::json("all"));
+                /* By reference — value() would deep-copy an
+                   arbitrary client container. */
+                static const nlohmann::json kAll("all");
+                const auto evit = body.find("events");
+                const nlohmann::json& ev =
+                    evit == body.end() ? kAll : *evit;
                 std::vector<std::string> kinds;
                 if(ev.is_string() && ev.get<std::string>() == "all")
                 {
@@ -945,8 +1029,9 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
                         if(s->out_queue.size()
                            < options_.max_queued_events)
                         {
-                            s->out_queue.push_back(
-                                Session::OutMsg{ k, ev });
+                            s->out_queue.push_back(Session::OutMsg{ k,
+                                std::make_shared<
+                                    const std::vector<uint8_t>>(ev) });
                         }
                     }
                 }

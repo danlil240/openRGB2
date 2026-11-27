@@ -225,7 +225,20 @@ bool FromJson(const nlohmann::json& j, SceneDocument& doc,
     SceneDocument out;
     out.version    = (int)version;
     out.name       = FieldStr(j, "name", std::string(), "root", errs);
-    out.brightness = (float)FieldNum(j, "brightness", 1.0, "root", errs);
+    {
+        /* Same 0..1 contract as the compact output.brightness
+           (StudioConfig) — an expanded scene may not smuggle in a
+           value the output scaler would have to clamp. */
+        const double b = FieldNum(j, "brightness", 1.0, "root", errs);
+        if(b < 0.0 || b > 1.0)
+        {
+            AddErr(errs, "brightness", "expected number in 0..1");
+        }
+        else
+        {
+            out.brightness = (float)b;
+        }
+    }
 
     if(j.contains("bindings") && !j["bindings"].is_array())
     {

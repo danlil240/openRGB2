@@ -41,6 +41,8 @@ public:
     void                        SetFrameSink(std::shared_ptr<IFrameSink> sink);
     std::shared_ptr<IFrameSink> Sink() const;
     SubmitResult                SubmitLatest(const RgbFrame& frame);
+    /* Move-in variant (IFrameSink::SubmitLatestOwned). */
+    SubmitResult                SubmitLatest(RgbFrame&& frame);
 
     /* Reported playback state (plan section 4). Defaults to
        LiveEffects/none; later tasks update it as uploads and

@@ -586,6 +586,48 @@ int main(int argc, char** argv)
     }
 
     /*========================================================*\
+    || H2. a disconnect never offers ANOTHER workspace's draft ||
+    ||     into the open one (it would commit as this content) ||
+    \*========================================================*/
+    std::printf("-- disconnect never offers a foreign draft\n");
+    {
+        ClientRig rig3(*eng.server);
+        rig3.ctl.setDraftDirForTesting(drafts);
+        rig3.ctl.setDebounceForTesting(10);
+        rig3.ctl.setExternalPollForTesting(40);
+        rig3.bridge.start();
+        CHECK(rig3.PumpUntil([&] {
+            return rig3.ctl.managed() && rig3.ctl.ready(); }));
+        rig3.PumpSettle([] { return false; }, 200);
+        if(rig3.ctl.recoveryOffered())
+        {
+            rig3.ctl.discardDraft();   /* H's leftover record */
+        }
+        CHECK(!rig3.ctl.recoveryOffered());
+        const QString open_id = rig3.ctl.workspaceId();
+        CHECK(!open_id.isEmpty());
+        /* "aaa-..." sorts first: the pre-fix fallback offered
+           recordedIds().first() once the session ended. */
+        const QString foreign = QStringLiteral("aaa-other-ws");
+        rig3.ctl.Drafts().Stage(foreign, 1, 1, QString(),
+            studio::ToJson(ParseDocForStore()));
+        rig3.ctl.Drafts().Flush();
+        const std::string before =
+            rig3.ctl.Session().Working().meta.name;
+
+        rig3.bridge.stop();
+        CHECK(rig3.PumpUntil([&] { return !rig3.ctl.managed(); }));
+        CHECK(rig3.PumpSettle([&] {
+            return rig3.ctl.recoveryOffered(); }, 300));
+        /* Even a direct call stages nothing foreign. */
+        rig3.ctl.recoverDraft();
+        CHECK(rig3.ctl.Session().Working().meta.name == before);
+        CHECK(!rig3.ctl.dirty());
+        CHECK(rig3.ctl.Drafts().Read(foreign).exists);
+        rig3.ctl.Drafts().Discard(foreign);
+    }
+
+    /*========================================================*\
     || I. exportBundle with no managed workspace -> error      ||
     ||    (the dialog-unstick fix — never a silent no-op)      ||
     \*========================================================*/

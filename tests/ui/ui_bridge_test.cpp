@@ -20,6 +20,9 @@
 #include <QThread>
 #include <QVariantMap>
 
+#include <QAbstractItemModel>
+
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -397,6 +400,228 @@ int main(int argc, char** argv)
         QCoreApplication::processEvents();
         CHECK(bridge.connectionState() == "connected");
 
+        bridge.stop();
+    }
+
+    /*---- handshake failures keep climbing the backoff --------
+      A pipe that accepts the connect but never completes the
+      handshake must NOT reset the schedule — only WELCOME
+      does. Before the fix every attempt retried at step 0. */
+    std::printf("-- handshake failure backoff\n");
+    {
+        ui::EngineBridge bridge;
+        std::mutex       pm;
+        std::vector<std::shared_ptr<TestPipe>> pipes;
+        bridge.setChannelFactoryForTesting(
+            [&](std::string& err) -> std::unique_ptr<IIpcChannel>
+            {
+                (void)err;
+                auto p = std::make_shared<TestPipe>();
+                std::lock_guard<std::mutex> lock(pm);
+                pipes.push_back(p);
+                return p->ClientChannel();
+            });
+        ui::EngineWireClient::Options wopts;
+        wopts.keepalive_ms = 0;
+        bridge.setWireOptionsForTesting(wopts);
+        bridge.setBackoffForTesting({ 10, 30, 60, 90 });
+        int max_retry = 0;
+        QObject::connect(&bridge, &ui::EngineBridge::retryInMsChanged,
+                         [&] {
+                             max_retry = std::max(max_retry,
+                                                  bridge.retryInMs());
+                         });
+        bridge.start();
+        for(size_t k = 0; k < 4; ++k)
+        {
+            CHECK(PumpUntil([&] {
+                std::lock_guard<std::mutex> lock(pm);
+                return pipes.size() > k;
+            }));
+            std::shared_ptr<TestPipe> p;
+            {
+                std::lock_guard<std::mutex> lock(pm);
+                p = pipes[k];
+            }
+            ServerPeer srv = p->Peer();
+            Message    m;
+            CHECK(srv.RecvMsg(m, 4000) && m.type == MsgType::Hello);
+            srv.Close();             /* no WELCOME: handshake fails */
+        }
+        CHECK(PumpUntil([&] { return max_retry >= 60; }));
+        bridge.stop();
+
+        /* A completed handshake resets it: connect, WELCOME, drop
+           -> the next wait is the first step again. */
+        ui::EngineBridge b2;
+        std::vector<std::shared_ptr<TestPipe>> p2;
+        b2.setChannelFactoryForTesting(
+            [&](std::string& err) -> std::unique_ptr<IIpcChannel>
+            {
+                (void)err;
+                auto p = std::make_shared<TestPipe>();
+                std::lock_guard<std::mutex> lock(pm);
+                p2.push_back(p);
+                return p->ClientChannel();
+            });
+        b2.setWireOptionsForTesting(wopts);
+        b2.setBackoffForTesting({ 10, 3000 });
+        b2.start();
+        for(size_t k = 0; k < 2; ++k)
+        {
+            CHECK(PumpUntil([&] {
+                std::lock_guard<std::mutex> lock(pm);
+                return p2.size() > k;
+            }));
+            std::shared_ptr<TestPipe> p;
+            {
+                std::lock_guard<std::mutex> lock(pm);
+                p = p2[k];
+            }
+            ServerPeer srv = p->Peer();
+            CHECK(DriveServerHandshake(srv));
+            CHECK(PumpUntil([&] {
+                return b2.connectionState() == "connected";
+            }));
+            srv.Close();
+            /* each drop waits 10 ms, never 3000 ms */
+            CHECK(PumpUntil([&] {
+                return b2.connectionState() == "unreachable"
+                       || b2.connectionState() == "connecting";
+            }));
+            CHECK(b2.retryInMs() <= 10);
+        }
+        b2.stop();
+    }
+
+    /*---- frame_status: split stores, stable rows, feed gate -*/
+    std::printf("-- frame_status model + feed gate\n");
+    {
+        ui::EngineBridge bridge;
+        auto             pipe = std::make_shared<TestPipe>();
+        bridge.setChannelFactoryForTesting(
+            [&](std::string& err) -> std::unique_ptr<IIpcChannel>
+            {
+                (void)err;
+                return pipe->ClientChannel();
+            });
+        ui::EngineWireClient::Options wopts;
+        wopts.keepalive_ms = 0;
+        bridge.setWireOptionsForTesting(wopts);
+        bridge.start();
+        ServerPeer srv = pipe->Peer();
+        CHECK(DriveServerHandshake(srv));
+        CHECK(PumpUntil([&] {
+            return bridge.connectionState() == "connected";
+        }));
+        CHECK(AnswerAutoPulls(srv));
+
+        auto* model = qobject_cast<QAbstractItemModel*>(
+            bridge.frameControllers());
+        CHECK(model != nullptr);
+        int inserted = 0, removed = 0, resets = 0, changed = 0;
+        QObject::connect(model, &QAbstractItemModel::rowsInserted,
+                         [&] { ++inserted; });
+        QObject::connect(model, &QAbstractItemModel::rowsRemoved,
+                         [&] { ++removed; });
+        QObject::connect(model, &QAbstractItemModel::modelReset,
+                         [&] { ++resets; });
+        QObject::connect(model, &QAbstractItemModel::dataChanged,
+                         [&] { ++changed; });
+
+        auto frame = [](const std::vector<std::string>& colors,
+                        double mean)
+        {
+            nlohmann::json ctrls = nlohmann::json::array();
+            for(size_t i = 0; i < colors.size(); ++i)
+            {
+                ctrls.push_back(nlohmann::json::object({
+                    { "key", nlohmann::json::object({
+                        { "serial", "s" + std::to_string(i) } }) },
+                    { "colors", nlohmann::json::array({ colors[i] }) },
+                    { "delivered", true } }));
+            }
+            return nlohmann::json::object({
+                { "kind", "frame_status" },
+                { "data", nlohmann::json::object({
+                    { "controllers", ctrls },
+                    { "aggregate", nlohmann::json::object({
+                        { "mean_interval_s", mean } }) },
+                    { "wireless", nlohmann::json::object({
+                        { "owned", false } }) } }) } });
+        };
+
+        srv.SendMsg(MsgType::Event, 0, frame({ "#FF0000", "#00FF00" },
+                                             0.033));
+        CHECK(PumpUntil([&] { return model->rowCount() == 2; }));
+        CHECK(inserted == 1);
+        CHECK(bridge.frameAggregate().value("mean_interval_s")
+                  .toDouble() > 0.03);
+        CHECK(bridge.frameWireless().contains("owned"));
+        CHECK(model->data(model->index(0, 0),
+                          ui::FrameFeedModel::ColorsRole)
+                  .toList().value(0).toString() == "#FF0000");
+
+        /* Same controller count, new colors: rows update in
+           place — no insert/remove/reset (no delegate churn). */
+        srv.SendMsg(MsgType::Event, 0, frame({ "#0000FF", "#00FF00" },
+                                             0.033));
+        CHECK(PumpUntil([&] {
+            return model->data(model->index(0, 0),
+                               ui::FrameFeedModel::ColorsRole)
+                       .toList().value(0).toString() == "#0000FF";
+        }));
+        CHECK(inserted == 1 && removed == 0 && resets == 0);
+        CHECK(changed == 1);    /* only row 0 changed */
+
+        /* Feed gated off (window hidden/minimized): pushes are
+           dropped before the GUI thread — a later scene event
+           proves ordering. */
+        int fs_signals = 0;
+        QObject::connect(&bridge, &ui::EngineBridge::frameStatusChanged,
+                         [&] { ++fs_signals; });
+        bridge.setFrameFeedActive(false);
+        srv.SendMsg(MsgType::Event, 0,
+                    frame({ "#111111", "#222222", "#333333" }, 0.5));
+        srv.SendMsg(MsgType::Event, 0,
+                    frame({ "#ABCDEF", "#222222", "#333333" }, 0.5));
+        srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "scene" },
+                { "data", nlohmann::json::object({
+                    { "name", "after-gated-frame" } }) } }));
+        CHECK(PumpUntil([&] {
+            return bridge.scene().value("name").toString()
+                   == "after-gated-frame";
+        }));
+        CHECK(fs_signals == 0);
+        CHECK(model->rowCount() == 2);
+
+        /* Re-shown with NO new push (static / uploaded / power-
+           gated output: the engine only emits on change): the
+           newest parked frame_status repaints at once. */
+        bridge.setFrameFeedActive(true);
+        CHECK(PumpUntil([&] { return model->rowCount() == 3; }));
+        CHECK(fs_signals == 1);
+        CHECK(model->data(model->index(0, 0),
+                          ui::FrameFeedModel::ColorsRole)
+                  .toList().value(0).toString() == "#ABCDEF");
+        CHECK(inserted == 2);
+
+        /* The parked event is consumed: a second hide/show with
+           nothing new repaints nothing; live pushes still flow. */
+        bridge.setFrameFeedActive(false);
+        bridge.setFrameFeedActive(true);
+        PumpUntil([] { return false; }, 100);
+        CHECK(fs_signals == 1);
+        srv.SendMsg(MsgType::Event, 0,
+                    frame({ "#123456", "#222222", "#333333" }, 0.5));
+        CHECK(PumpUntil([&] {
+            return model->data(model->index(0, 0),
+                               ui::FrameFeedModel::ColorsRole)
+                       .toList().value(0).toString() == "#123456";
+        }));
+        CHECK(fs_signals == 2);
         bridge.stop();
     }
 

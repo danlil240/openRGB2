@@ -24,6 +24,8 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <chrono>
+#include <thread>
 #include <utility>
 
 namespace openrgb2
@@ -102,6 +104,44 @@ bool WriteFileCommitted(const fs::path& path, const std::string& bytes,
     return ok;
 }
 
+/* Windows renames of a just-written file/dir can fail briefly
+   with ACCESS_DENIED / SHARING_VIOLATION while an AV scanner,
+   the indexer or a backup agent holds a handle. Those are retried
+   a few times with a short backoff (~0.4 s total worst case);
+   anything else fails at once. */
+constexpr int kRenameRetries = 5;
+
+bool TransientRenameError(unsigned long e)
+{
+    return e == ERROR_ACCESS_DENIED || e == ERROR_SHARING_VIOLATION ||
+           e == ERROR_LOCK_VIOLATION;
+}
+
+void RenameBackoff(int attempt)
+{
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(25 * (attempt + 1)));
+}
+
+/* fs::rename with the bounded transient retry above (MSVC
+   reports the Win32 code in a system_category error_code). */
+void RenameWithRetry(const fs::path& from, const fs::path& to,
+                     std::error_code& ec)
+{
+    for(int attempt = 0;; ++attempt)
+    {
+        ec.clear();
+        fs::rename(from, to, ec);
+        if(!ec || attempt >= kRenameRetries ||
+           ec.category() != std::system_category() ||
+           !TransientRenameError((unsigned long)ec.value()))
+        {
+            return;
+        }
+        RenameBackoff(attempt);
+    }
+}
+
 /* temp + commit + rename — the marker's atomic replace. */
 bool WriteAtomicFile(const fs::path& tmp, const fs::path& dst,
                      const std::string& bytes, std::string& err)
@@ -110,13 +150,29 @@ bool WriteAtomicFile(const fs::path& tmp, const fs::path& dst,
     {
         return false;
     }
-    if(!MoveFileExA(tmp.string().c_str(), dst.string().c_str(),
-                    MOVEFILE_REPLACE_EXISTING |
-                    MOVEFILE_WRITE_THROUGH))
+    bool moved = false;
+    DWORD last = 0;
+    for(int attempt = 0;; ++attempt)
+    {
+        if(MoveFileExA(tmp.string().c_str(), dst.string().c_str(),
+                       MOVEFILE_REPLACE_EXISTING |
+                       MOVEFILE_WRITE_THROUGH))
+        {
+            moved = true;
+            break;
+        }
+        last = GetLastError();
+        if(attempt >= kRenameRetries || !TransientRenameError(last))
+        {
+            break;
+        }
+        RenameBackoff(attempt);
+    }
+    if(!moved)
     {
         err = "rename of " + tmp.string() + " over " +
               dst.string() + " failed (win32 " +
-              std::to_string(GetLastError()) + ")";
+              std::to_string(last) + ")";
         std::error_code ec;
         fs::remove(tmp, ec);
         return false;
@@ -319,13 +375,17 @@ std::vector<std::pair<uint64_t, std::string>> GenerationDirs(
     {
         return out;
     }
-    for(const auto& e : fs::directory_iterator(gens, ec))
+    /* Explicit increment(ec): a range-for's operator++ throws on
+       a transient FS error. A failed scan yields what it saw. */
+    fs::directory_iterator it(gens, ec), end;
+    for(; !ec && it != end; it.increment(ec))
     {
         uint64_t n = 0;
-        if(e.is_directory() &&
-           GenerationOrdinal(e.path().filename().string(), n))
+        std::error_code dec;
+        if(it->is_directory(dec) &&
+           GenerationOrdinal(it->path().filename().string(), n))
         {
-            out.push_back({ n, e.path().filename().string() });
+            out.push_back({ n, it->path().filename().string() });
         }
     }
     std::sort(out.begin(), out.end());
@@ -954,9 +1014,15 @@ std::vector<std::string> WorkspaceStore::List() const
     {
         return out;
     }
-    for(const auto& e : fs::directory_iterator(root_, ec))
+    /* Explicit increment — never throws mid-scan (see
+       GenerationDirs). */
+    std::error_code iec;
+    fs::directory_iterator it(root_, iec), end;
+    for(; !iec && it != end; it.increment(iec))
     {
-        if(!e.is_directory())
+        const fs::directory_entry& e = *it;
+        std::error_code dec;
+        if(!e.is_directory(dec))
         {
             continue;
         }
@@ -1828,7 +1894,7 @@ WorkspaceStore::CommitResult WorkspaceStore::Commit(
         return fail("cannot create generations dir: " +
                     ec.message());
     }
-    fs::rename(staging, wsdir / "generations" / gen_name, ec);
+    RenameWithRetry(staging, wsdir / "generations" / gen_name, ec);
     if(ec)
     {
         return fail("generation publish failed: " + ec.message());

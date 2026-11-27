@@ -53,11 +53,105 @@ try {
     New-Item -ItemType File $exe | Out-Null
     $name = Get-OpenRGB2StartupTaskName $sid
     if($name -ne "OpenRGB2-$sid") { throw "unexpected task name: $name" }
-    if((Invoke-OpenRGB2StartupTask status $root $sid $user).enabled) {
+    $status = Invoke-OpenRGB2StartupTask status $root $sid $user
+    if($status.enabled -or $status.state -ne 'disabled' -or $status.target) {
         throw 'startup was enabled without a task'
     }
+
+    # A temp dir is owned (and writable) by the signed-in user: an
+    # elevated sign-in task over it would be a silent elevation path.
+    $refused = $null
+    try { $null = Invoke-OpenRGB2StartupTask enable $root $sid $user }
+    catch { $refused = $_.Exception.Message }
+    if(-not $refused -or $refused -notmatch 'writable' -or $script:registered) {
+        throw "enable over a user-writable install was not refused: $refused"
+    }
+    Write-Host 'PASS enable refuses a user-writable install'
+
+    # An admin-only install inside a user-controlled folder (the temp
+    # dir lives under the user's profile, like the default
+    # %LOCALAPPDATA%\Programs\OpenRGB2): the folder can be renamed aside
+    # and a look-alike planted, so enable must still refuse -- through
+    # the REAL ancestor walk over the real profile ACLs.
+    function Get-OpenRGB2UserWritablePaths { return ,@() }
+    $refused = $null
+    try { $null = Invoke-OpenRGB2StartupTask enable $root $sid $user }
+    catch { $refused = $_.Exception.Message }
+    if(-not $refused -or $script:registered -or
+       $refused -notmatch 'admin-only location' -or
+       $refused -notmatch [regex]::Escape('%ProgramFiles%\OpenRGB2') -or
+       $refused -notmatch [regex]::Escape('build-all-and-install.ps1 -InstallDir "$env:ProgramFiles\OpenRGB2"')) {
+        throw "enable inside a user-controlled parent folder was not refused with the reinstall advice: $refused"
+    }
+    Write-Host 'PASS enable refuses an install whose parent folder the user controls'
+
+    # Ancestor walk over injected ACLs (real security descriptors, no
+    # filesystem): a fake volume Q: whose folders get crafted SDDL.
+    $bu = 'S-1-5-32-545'
+    function New-TestAcl([string]$Sddl) {
+        $a = New-Object Security.AccessControl.DirectorySecurity
+        $a.SetSecurityDescriptorSddlForm($Sddl)
+        return $a
+    }
+    # C:\ and C:\Program Files as Windows ships them, and an install
+    # hardened by update-openrgb2.ps1.
+    $rootSddl = 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)' +
+                '(A;OICIIO;SDGRGWGX;;;AU)(A;;0x4;;;AU)'
+    $pfSddl   = 'O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464G:SY' +
+                'D:PAI(A;;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)' +
+                '(A;;0x1301bf;;;SY)(A;;0x1301bf;;;BA)(A;;0x1200a9;;;BU)(A;OICIIO;GA;;;CO)'
+    $instSddl = 'O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)'
+    function Test-Walk([hashtable]$Acls) {
+        $reader = { param($p) if($Acls.ContainsKey($p)) { New-TestAcl $Acls[$p] } else { $null } }.GetNewClosure()
+        $r = Get-OpenRGB2ReplaceableAncestors 'Q:\Program Files\OpenRGB2' $sid $reader
+        return ,@($r)
+    }
+    $base = @{ 'Q:\' = $rootSddl; 'Q:\Program Files' = $pfSddl
+               'Q:\Program Files\OpenRGB2' = $instSddl }
+    $cases = @(
+        @{ name = 'Program Files layout (Authenticated Users may only add folders to the root)'
+           set = @{}; expect = $null },
+        @{ name = 'parent grants the user full control (like %LOCALAPPDATA%\Programs)'
+           set = @{ 'Q:\Program Files' = "O:SYG:SYD:PAI(A;OICI;FA;;;$sid)" }
+           expect = 'Q:\Program Files (you may delete or rename what is in it)' },
+        @{ name = 'parent grants Users FILE_DELETE_CHILD only'
+           set = @{ 'Q:\Program Files' = ($pfSddl + '(A;;0x40;;;BU)') }
+           expect = 'Q:\Program Files (you may delete or rename what is in it)' },
+        @{ name = 'parent grants the user add-subdirectory only (name is taken: harmless)'
+           set = @{ 'Q:\Program Files' = ($pfSddl + "(A;;0x4;;;$sid)") }; expect = $null },
+        @{ name = 'parent grants delete-child to everyone but inherit-only'
+           set = @{ 'Q:\Program Files' = ($pfSddl + '(A;OICIIO;0x40;;;WD)') }; expect = $null },
+        @{ name = 'parent is owned by the user'
+           set = @{ 'Q:\Program Files' = ($pfSddl -replace '^O:[^G]+G:', "O:${sid}G:") }
+           expect = 'Q:\Program Files (owned by you)' },
+        @{ name = 'install dir grants the user DELETE'
+           set = @{ 'Q:\Program Files\OpenRGB2' = ($instSddl + "(A;;SD;;;$sid)") }
+           expect = 'Q:\Program Files\OpenRGB2 (you may delete or rename it)' },
+        @{ name = 'grandparent (volume root) grants Users WRITE_DAC'
+           set = @{ 'Q:\' = ($rootSddl + '(A;;WD;;;BU)') }
+           expect = 'Q:\ (you may delete or rename what is in it)' },
+        @{ name = 'grandparent (volume root) grants the user delete-child'
+           set = @{ 'Q:\' = ($rootSddl + "(A;;0x40;;;$sid)") }
+           expect = 'Q:\ (you may delete or rename what is in it)' }
+    )
+    foreach($c in $cases) {
+        $acls = $base.Clone()
+        foreach($k in $c.set.Keys) { $acls[$k] = $c.set[$k] }
+        $got = Test-Walk $acls
+        if($null -eq $c.expect) {
+            if($got.Count -ne 0) { throw "ancestor walk: $($c.name): unexpected $($got -join '; ')" }
+        } elseif($got -notcontains $c.expect) {
+            throw "ancestor walk: $($c.name): expected '$($c.expect)', got '$($got -join '; ')'"
+        }
+        Write-Host "PASS ancestor walk: $($c.name)"
+    }
+
+    # The rest exercises registration as if the install were protected.
+    function Get-OpenRGB2ReplaceableAncestors { return ,@() }
+
     $enabled = Invoke-OpenRGB2StartupTask enable $root $sid $user
-    if(-not $enabled.enabled) { throw 'enable did not report active task' }
+    if(-not $enabled.enabled -or $enabled.state -ne 'enabled' -or
+       $enabled.target -ne $exe) { throw 'enable did not report active task' }
     if($script:registered.TaskName -ne $name -or
        $script:registered.Actions[0].Execute -ne $exe -or
        $script:registered.Actions[0].Arguments -ne '--managed --background' -or
@@ -76,14 +170,20 @@ try {
         Actions=@([pscustomobject]@{Execute='C:\Other\openrgb2-ui.exe'})
         Principal=[pscustomobject]@{RunLevel='Highest';LogonType='Interactive'}
     }
-    if((Invoke-OpenRGB2StartupTask status $root $sid $user).enabled) {
+    $stale = Invoke-OpenRGB2StartupTask status $root $sid $user
+    if($stale.enabled) {
         throw 'another install was reported as this install'
     }
-    $null = Invoke-OpenRGB2StartupTask disable $root $sid $user
-    if(-not $script:registered) {
-        throw 'disable removed another install task'
+    if($stale.state -ne 'stale' -or $stale.target -ne 'C:\Other\openrgb2-ui.exe') {
+        throw "a task for a moved/other install was not reported stale: $($stale | ConvertTo-Json -Compress)"
     }
-    Write-Host 'PASS per-user elevated sign-in task enable/status/disable'
+    # The user's own OpenRGB2-<SID> task pointing elsewhere (moved or
+    # deleted install) is removed by disable -- never left behind.
+    $cleared = Invoke-OpenRGB2StartupTask disable $root $sid $user
+    if($script:registered -or $cleared.enabled -or $cleared.state -ne 'disabled') {
+        throw 'disable left the stale task of a moved install registered'
+    }
+    Write-Host 'PASS per-user elevated sign-in task enable/status/disable/stale'
 } finally {
     if(Test-Path $root) {
         $temp = (Resolve-Path -LiteralPath $env:TEMP).Path.TrimEnd('\')

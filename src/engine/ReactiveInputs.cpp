@@ -35,13 +35,11 @@ ReactiveInputs::ReactiveInputs(Deps deps)
     {
         /* Input events must be stamped on the SCENE clock —
            EvalRipple ages them as `in.t - e.t` against the
-           worker's epoch, so the bus shares the provider. */
-        std::function<double()> now = deps_.now;
-        bus_.SetNow(
-            [now]()
-            {
-                return static_cast<float>(now());
-            });
+           worker's epoch, so the bus shares the provider.
+           Kept in double end to end: a float stamp quantises to
+           ~0.06 s after days of uptime, which reorders events
+           against `in.t` and trips EvalRipple's `age < 0` skip. */
+        bus_.SetNow(deps_.now);
     }
 
     if(deps_.source_factory)
@@ -292,13 +290,20 @@ ReactiveInputs::Snapshot()
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto state = std::make_shared<studio::InputState>();
+    /* One shared, immutable empty state: the paused gate and an
+       idle bus (no input enabled, nothing published) cost no
+       allocation or copy per 60 Hz tick. */
+    static const std::shared_ptr<const studio::InputState> kEmpty =
+        std::make_shared<const studio::InputState>();
     if(paused_)
-        return state; /* display-off/suspend: NOTHING feeds
-                         the scene — the gate the Task 3.7
-                         atomic was waiting for */
+        return kEmpty; /* display-off/suspend: NOTHING feeds
+                          the scene — the gate the Task 3.7
+                          atomic was waiting for */
+    if(bus_.Idle())
+        return kEmpty;
 
-    *state = bus_.Snapshot(kEventMaxAgeS);
+    auto state = std::make_shared<studio::InputState>(
+        bus_.Snapshot(kEventMaxAgeS));
     return state;
 }
 

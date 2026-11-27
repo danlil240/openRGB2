@@ -203,6 +203,17 @@ SubmitResult DeliveryPipeline::Validate(const Lane& lane,
 
 SubmitResult DeliveryPipeline::SubmitLatest(const RgbFrame& frame)
 {
+    return SubmitLatestImpl(frame, nullptr);
+}
+
+SubmitResult DeliveryPipeline::SubmitLatestOwned(RgbFrame&& frame)
+{
+    return SubmitLatestImpl(frame, &frame);
+}
+
+SubmitResult DeliveryPipeline::SubmitLatestImpl(const RgbFrame& frame,
+                                                RgbFrame* owned)
+{
     std::lock_guard<std::mutex> lock(mutex_);
     const auto it = lanes_.find(frame.controller);
     if(it == lanes_.end())
@@ -270,13 +281,15 @@ SubmitResult DeliveryPipeline::SubmitLatest(const RgbFrame& frame)
     {
         /* Latest-wins backpressure: the pending live frame is
            obsolete — replace it, never queue behind it. */
-        lane.live = frame;
+        if(owned) lane.live = std::move(*owned);
+        else      lane.live = frame;
         ++lane.stats.replaced_pending;
         ++aggregate_.replaced_pending;
         lane.cv.notify_all();
         return SubmitResult::Replace();
     }
-    lane.live     = frame;
+    if(owned) lane.live = std::move(*owned);
+    else      lane.live = frame;
     lane.has_live = true;
     lane.cv.notify_all();
     return SubmitResult::Accept();
@@ -586,8 +599,18 @@ bool DeliveryPipeline::DeliverOne(Lane& lane, RgbFrame frame,
                                              : Clock::now();
     lane.stats.RecordTransportCompletion(completed);
     aggregate_.RecordTransportCompletion(completed);
-    lane.has_sent      = true;
     lane.last_send     = now;
+    /* A send that straddled a topology change (RegisterDevice
+       bumped the generation and reset the delivered state while
+       the transport call ran unlocked) describes the OLD
+       generation: recording it would re-arm has_sent with an
+       old-namespace sequence/colors and stale-suppress the new
+       generation's first frames. */
+    if(frame.topology_generation != lane.snap.topology_generation)
+    {
+        return true;
+    }
+    lane.has_sent      = true;
     /* A synthetic sequence is outside the live namespace —
        recording it would let it stale-suppress every future
        live frame. Live high-water tracking stays live-only. */
@@ -595,7 +618,7 @@ bool DeliveryPipeline::DeliverOne(Lane& lane, RgbFrame frame,
     {
         lane.last_sent_seq = frame.sequence;
     }
-    lane.last_colors   = frame.colors;
+    lane.last_colors   = std::move(frame.colors);  /* sent; by value */
     return true;
 }
 

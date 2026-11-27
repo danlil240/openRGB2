@@ -9,7 +9,15 @@ __pycache__/
 .vscode/
 .idea/
 .clangd/
+.cache/
 compile_commands.json
+
+# QA harness scratch output (tools/qa/qa.py, engine_ctl dumps).
+# tools/qa/shots/ is NOT ignored: its screenshots/logs are committed
+# QA evidence.
+tools/qa/*.log
+tools/qa/ctl-state.json
+tools/qa/fs.json
 
 # Local user state: resolved hardware identities, session records
 profiles/local/

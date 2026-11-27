@@ -542,8 +542,9 @@ bool ParseWirelessStatus(const uint8_t* data, size_t len,
     {
         body.remove_suffix(1);
     }
-    const nlohmann::json j =
-        nlohmann::json::parse(body, nullptr, false);
+    auto doc = std::make_shared<nlohmann::json>(
+        nlohmann::json::parse(body, nullptr, false));
+    const nlohmann::json& j = *doc;
     if(j.is_discarded() || !j.is_object())
     {
         return false;
@@ -555,7 +556,7 @@ bool ParseWirelessStatus(const uint8_t* data, size_t len,
     }
 
     out = {};
-    out.raw = j;
+    out.raw = doc;
     if(git == j.end())
     {
         return true;

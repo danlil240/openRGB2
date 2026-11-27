@@ -1,5 +1,7 @@
 #include "StartupTaskController.h"
 
+#include "LaunchHardening.h"
+
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -12,6 +14,7 @@
 
 namespace openrgb2::ui
 {
+using launch::PrepareHiddenPowerShell;
 
 StartupTaskController::StartupTaskController(const QString& installDir,
                                              QObject* parent)
@@ -46,8 +49,22 @@ StartupTaskController::StartupTaskController(const QString& installDir,
             error_ = tr("Task Scheduler returned an invalid status");
         else
         {
-            enabled_ = doc.object().value(QStringLiteral("enabled")).toBool();
-            error_.clear();
+            const QJsonObject obj = doc.object();
+            enabled_ = obj.value(QStringLiteral("enabled")).toBool();
+            stale_ = obj.value(QStringLiteral("state")).toString()
+                     == QStringLiteral("stale");
+            stale_target_ = stale_
+                ? obj.value(QStringLiteral("target")).toString()
+                : QString();
+            if(stale_)
+                error_ = tr("A Windows sign-in task for another OpenRGB2 "
+                            "location is registered (%1). Turn this "
+                            "setting on to use this install instead, or "
+                            "on and off again to remove it.")
+                             .arg(stale_target_.isEmpty()
+                                  ? tr("unknown path") : stale_target_);
+            else
+                error_.clear();
         }
         busy_ = false;
         emit stateChanged();
@@ -86,7 +103,10 @@ void StartupTaskController::Run(const QString& mode)
     busy_ = true;
     error_.clear();
     emit stateChanged();
-    process_.setProgram(QStringLiteral("powershell.exe"));
+    /* System powershell.exe, sanitised env (no CLR profiler /
+       user PSModulePath / Qt search vars), hidden window: this
+       runs from the (usually elevated) UI. */
+    PrepareHiddenPowerShell(process_);
     process_.setArguments({QStringLiteral("-NoProfile"),
         QStringLiteral("-NonInteractive"),
         QStringLiteral("-ExecutionPolicy"),
@@ -95,14 +115,6 @@ void StartupTaskController::Run(const QString& mode)
         QStringLiteral("-Mode"), mode,
         QStringLiteral("-InstallDir"), install_dir_});
     process_.setWorkingDirectory(install_dir_);
-#ifdef Q_OS_WIN
-    process_.setCreateProcessArgumentsModifier(
-        [](QProcess::CreateProcessArguments* args) {
-            args->flags |= CREATE_NO_WINDOW;
-            args->startupInfo->dwFlags |= STARTF_USESHOWWINDOW;
-            args->startupInfo->wShowWindow = SW_HIDE;
-        });
-#endif
     process_.start();
 }
 

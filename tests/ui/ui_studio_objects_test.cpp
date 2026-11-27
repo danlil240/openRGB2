@@ -146,6 +146,20 @@ int main(int argc, char** argv)
     /*======================================================*\
     || A. ObjectEditorController + shared session (offline) ||
     \*======================================================*/
+    /* A catalog request in flight when the session dies never
+       gets its reply — the latch must clear on disconnect, or the
+       reconnect (and every later) RequestCatalog is refused. */
+    std::printf("-- controller: catalog latch clears on disconnect\n");
+    {
+        Rig rig;
+        rig.ctl.SetPendingCatalogForTesting(42);
+        emit rig.bridge.connectionStateChanged();   /* not connected */
+        CHECK(rig.ctl.PendingCatalogForTesting() == 0);
+        rig.ctl.SetPendingCatalogForTesting(43);
+        emit rig.bridge.engineLost(QStringLiteral("peer closed"));
+        CHECK(rig.ctl.PendingCatalogForTesting() == 0);
+    }
+
     std::printf("-- controller: load, resolve, model rows\n");
     {
         Rig rig;

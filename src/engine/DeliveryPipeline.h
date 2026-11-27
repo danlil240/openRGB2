@@ -105,6 +105,9 @@ public:
     | replacing any unsent frame -> ReplacedPending.           |
     \*---------------------------------------------------------*/
     SubmitResult SubmitLatest(const RgbFrame& frame) override;
+    /* Moves the frame into the lane's pending slot (no copy under
+       the pipeline mutex). */
+    SubmitResult SubmitLatestOwned(RgbFrame&& frame) override;
 
     /*---- Producer suppression (plan 3.4/6) -----------------*\
     | While a wireless uploaded loop owns a controller's     |
@@ -238,6 +241,9 @@ public:
     bool Running() const;
 
 private:
+    /* `owned` non-null = move *owned into the pending slot. */
+    SubmitResult SubmitLatestImpl(const RgbFrame& frame,
+                                  RgbFrame* owned);
     struct Lane
     {
         DeviceSnapshot        snap;

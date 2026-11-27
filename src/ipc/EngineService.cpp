@@ -428,6 +428,13 @@ void EngineService::SetEventSink(
     event_sink_ = std::move(sink);
 }
 
+void EngineService::SetEventInterest(
+    std::function<bool(const std::string&)> interest)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    event_interest_ = std::move(interest);
+}
+
 void EngineService::SetSessionEventSink(
     std::function<void(uint64_t, const IpcEvent&,
                        const std::string&)> sink)
@@ -1211,7 +1218,14 @@ nlohmann::json EngineService::BackendCountersJson() const
             { "supported", true  },
         });
     }
-    nlohmann::json out = snap.status.raw;
+    /* The one deep copy happens here, outside the client's
+       state lock (the snapshot shares the parsed document). */
+    nlohmann::json out = snap.status.raw ? *snap.status.raw
+                                         : nlohmann::json::object();
+    if(!out.is_object())
+    {
+        out = nlohmann::json::object();
+    }
     out["probed"]    = true;
     out["supported"] = true;
     out["fetched_age_ms"] =
@@ -1433,7 +1447,7 @@ IpcReply EngineService::Dispatch(MsgType type,
 
     case MsgType::SetPlaybackMode:
     {
-        if(!body.is_object() || !body.value("mode", nlohmann::json())
+        if(!body.is_object() || !FieldOrNull(body, "mode")
                                     .is_string())
         {
             return IpcReply::Fail(ErrCode::BadRequest,
@@ -1674,7 +1688,7 @@ IpcReply EngineService::Dispatch(MsgType type,
            wrong-typed verb. */
         const std::string verb =
             (body.is_object()
-             && body.value("verb", nlohmann::json()).is_string())
+             && FieldOrNull(body, "verb").is_string())
                 ? body["verb"].get<std::string>()
                 : std::string();
         if(verb.empty())
@@ -1694,7 +1708,7 @@ IpcReply EngineService::Dispatch(MsgType type,
     {
         const std::string verb =
             (body.is_object()
-             && body.value("verb", nlohmann::json()).is_string())
+             && FieldOrNull(body, "verb").is_string())
                 ? body["verb"].get<std::string>()
                 : std::string();
         if(verb.empty())
@@ -1725,7 +1739,7 @@ IpcReply EngineService::Dispatch(MsgType type,
         }
         const bool stop_backend =
             body.is_object() &&
-            body.value("stop_backend", nlohmann::json()).is_boolean() &&
+            FieldOrNull(body, "stop_backend").is_boolean() &&
             body["stop_backend"].get<bool>();
         nlohmann::json reply_body = nlohmann::json::object({
             { "shutting_down", true          },
@@ -1891,8 +1905,7 @@ IpcReply EngineService::HandleIdentify(const nlohmann::json& body)
 {
     /* {controller:<DeviceKey>, zone?:"<zone name>",
        led_index?:int, duration_ms?:int} */
-    if(!body.is_object() || !KeyFieldsOk(body.value("controller",
-                                                   nlohmann::json())))
+    if(!body.is_object() || !KeyFieldsOk(FieldOrNull(body, "controller")))
     {
         return IpcReply::Fail(ErrCode::BadRequest,
             "identify requires {controller:<DeviceKey>} with "
@@ -2066,7 +2079,7 @@ IpcReply EngineService::HandleLayoutMutateImpl(
     const std::string& verb, const nlohmann::json& body)
 {
     if(!body.is_object() ||
-       !body.value("object_id", nlohmann::json()).is_string() ||
+       !FieldOrNull(body, "object_id").is_string() ||
        body["object_id"].get<std::string>().empty())
     {
         return IpcReply::Fail(ErrCode::BadRequest,
@@ -2338,8 +2351,7 @@ IpcReply EngineService::HandleLayoutMutateImpl(
                 /* New binding: identity must come from a live
                    snapshot — missing topology is honest
                    Unavailable, never a guessed identity. */
-                if(!KeyFieldsOk(body.value("controller",
-                                           nlohmann::json())))
+                if(!KeyFieldsOk(FieldOrNull(body, "controller")))
                 {
                     return IpcReply::Fail(ErrCode::BadRequest,
                         "unknown binding '" + bid +
@@ -2436,7 +2448,7 @@ IpcReply EngineService::HandleLayoutMutateImpl(
 IpcReply EngineService::HandleAddObjects(const nlohmann::json& body)
 {
     if(!body.is_object() ||
-       !body.value("controllers", nlohmann::json()).is_array() ||
+       !FieldOrNull(body, "controllers").is_array() ||
        body["controllers"].empty())
     {
         return IpcReply::Fail(ErrCode::BadRequest,
@@ -2696,7 +2708,7 @@ IpcReply EngineService::HandleReactiveCommand(
             "reactive inputs are not wired on this engine");
     }
     if(!body.is_object() ||
-       !body.value("input", nlohmann::json()).is_string())
+       !FieldOrNull(body, "input").is_string())
     {
         return IpcReply::Fail(ErrCode::BadRequest,
             verb + " requires {input:\"audio\"|\"screen\"|\"key\"}");
@@ -2851,6 +2863,7 @@ void EngineService::PollEvents(TimePoint now)
     /* frame_status emits last — the same ordering it had as
        the final entry of the pending batch. */
     PollFrameStatus(now);
+    PollPreviews(now);
 }
 
 void EngineService::PollFrameStatus(TimePoint now)
@@ -2873,8 +2886,19 @@ void EngineService::PollFrameStatus(TimePoint now)
            since_last >= options_.frame_status_min_interval_ms)
         {
             last_frame_status_ = now;
-            Emit(event_kind::kFrameStatus,
-                 FrameStatusJson(LayoutSnapshots()));
+            std::function<bool(const std::string&)> interest;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                interest = event_interest_;
+            }
+            /* No subscriber: skip building the body at all — a
+               later SUBSCRIBE gets the current state from
+               SnapshotEventFor's initial push. */
+            if(!interest || interest(event_kind::kFrameStatus))
+            {
+                Emit(event_kind::kFrameStatus,
+                     FrameStatusJson(LayoutSnapshots()));
+            }
         }
         else
         {
@@ -2884,9 +2908,14 @@ void EngineService::PollFrameStatus(TimePoint now)
             last_stats_sig_.clear();
         }
     }
+}
 
-    /* Task 7 draft previews ride the same fast tick; the
-       per-session 30 Hz cap lives inside PollPreviews. */
+void EngineService::PollPreviews(TimePoint now)
+{
+    /* Task 7 draft previews: their own fast-tick entry point,
+       independent of frame_status interest — the per-session
+       30 Hz cap and the session-bound targeting live inside
+       WorkspaceCommands::PollPreviews. */
     if(ws_commands_)
     {
         ws_commands_->PollPreviews(now);

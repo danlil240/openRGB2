@@ -57,13 +57,21 @@ The managed launcher then:
 3. **Backend** → **engine** → **UI**, in that order. The engine never
    spawns the backend; the UI is optional (`-NoUI`) and closing it
    leaves engine + backend running.
-4. **Stop:** `powershell -File scripts\stop-openrgb2.ps1` — engine gets
-   the IPC `QUIT` (ordered bounded shutdown), then the backend is
-   closed gracefully. `-Force` exists as the last resort on verified
-   own processes only.
+4. **Stop:** `powershell -File scripts\stop-openrgb2.ps1` — the UI is
+   asked to close, the engine gets the IPC `QUIT` (ordered bounded
+   shutdown), then the backend is closed gracefully. `-Force` exists as
+   the last resort on verified own processes only (the UI hides to its
+   tray on close, so ending it needs `-Force` or the tray's
+   **Exit UI**).
 
 The desktop app requests elevation by default. The command-line launcher
-still has the opt-in `-Elevated` switch.
+still has the opt-in `-Elevated` switch. Because the stack runs
+elevated from this folder, an update run elevated makes the folder
+admin-only (only `state\` and `profiles\local\` stay writable by you),
+and the sign-in toggle refuses to enable over a folder you can write
+to, or one inside a folder you control (install under
+`%ProgramFiles%\OpenRGB2` for it) — see `INSTALL.md`, "Install
+protection".
 
 ## Measured support matrix
 

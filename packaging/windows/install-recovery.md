@@ -20,6 +20,7 @@ app-locally. No installer and no PATH changes.
 | `OpenRGB2.vbs` | legacy terminal-free desktop entry point |
 | `OpenRGB2.ico` | OpenRGB2 application and desktop shortcut icon |
 | `manifest.json` | per-file SHA-256 + provenance for the whole package |
+| `.update-in-progress.json` | present only while an update is unfinished (see Update) |
 
 ### State written OUTSIDE the install dir
 
@@ -33,7 +34,9 @@ hidden:
 | `HKCU\Software\OpenRGB2\OpenRGB2` | UI (`UiSettings`) | `QSettings` for window geometry / last view / playback-param seeds. UI-only preferences — engine state is never in the registry. |
 
 To remove OpenRGB2 completely: disable Windows startup in Settings if
-enabled, then delete the install folder and the three locations above.
+enabled, then delete the install folder (from an elevated shell when
+the install is protected -- see "Install protection") and the three
+locations above.
 The optional sign-in task is the only other system registration.
 
 ## Process model and startup
@@ -67,12 +70,24 @@ to reopen it, use **Exit UI** to leave lighting running, or choose
 **Quit OpenRGB2** to stop the managed engine and backend before exiting.
 The Settings page has the confirmed engine shutdown action. Startup
 output goes to `state\startup.log`, and a dialog reports startup errors.
+`state\startup.log` and `state\shutdown.log` are renamed to `<name>.1`
+once they pass 1 MB (at a start when nothing holds them open; never
+truncated in place).
 
 Settings → Windows startup has **Open OpenRGB2 when I sign in** (off by
 default). Enabling it registers a task for the current Windows user with
 highest privileges; at sign-in the app starts in the tray without a UAC
-prompt. Disable the setting before deleting or moving this install. The
-same action is available from `scripts\startup-task.ps1 -Mode disable`.
+prompt. It **refuses to enable** while the install folder,
+`openrgb2-ui.exe` or `scripts\` are writable without administrator
+rights, and while any folder above the install lets you rename it
+aside — which includes the default `%LOCALAPPDATA%\Programs\OpenRGB2`
+(see "Install protection" below): install under `%ProgramFiles%\OpenRGB2`
+for the sign-in task. Disable the setting before deleting or moving this install. If
+the install was moved anyway, the setting reports the task as
+belonging to another location (state `stale`, with its path); turning
+the setting on registers this install instead, and disabling removes
+the user's task whatever it points at. The same actions are available
+from `scripts\startup-task.ps1 -Mode status|enable|disable`.
 
 To create a desktop shortcut, run this once from the package directory:
 
@@ -100,6 +115,14 @@ the engine idles at the 60 Hz clock until the UI applies one.
 **Already running:** re-running start reuses a listening managed
 backend and refuses to spawn a second engine (the engine's own
 single-instance guard is the last line anyway).
+
+**Elevated stack, non-elevated shell:** a non-elevated shell cannot
+read an elevated process's image path, so it cannot tell our own
+elevated backend/engine from a foreign one. Start then **refuses with
+exit 4** (even with `-TakeOver`) whenever `OpenRGB.exe`,
+`openrgb2-engine.exe` or the `:6744` listener has an unreadable image
+path — re-run elevated (`-Elevated`). Stop, update and rollback apply
+the same rule.
 
 ## Ownership and explicit takeover
 
@@ -152,8 +175,14 @@ RGB) and must keep running.
 powershell -File scripts\stop-openrgb2.ps1
 ```
 
-Order: **engine first, backend second.**
+Order: **UI, engine, backend.**
 
+0. The UI (`openrgb2-ui.exe`, verified by image path) gets a close
+   request. Closing its window hides it to the tray, so it normally
+   keeps running: `-Force` ends it (verified own process only);
+   without `-Force` the stop reports it and exits 1 (use the tray's
+   **Exit UI**). The UI that launched the stop (tray **Quit OpenRGB2**)
+   is never signaled — it exits by itself.
 1. `openrgb2-ctl.exe quit` sends the IPC `QUIT` verb — the engine runs
    its ordered, bounded shutdown (power monitor → IPC intake → IPC
    server → scene worker → reactive inputs → delivery lanes → SDK
@@ -167,6 +196,8 @@ Order: **engine first, backend second.**
 its bound, `-Force` permits `Stop-Process` on it — reported loudly,
 never applied to foreign processes. Closing the UI alone does NOT
 stop engine/backend (UI independence); use the stop script.
+A stack started elevated is unverifiable from a non-elevated shell —
+run the stop elevated (`-Elevated`).
 
 **Profile safety through shutdown:** `profiles\local\engine-state.json`
 is written atomically (temp + rename) on every state change with an
@@ -182,13 +213,29 @@ powershell -File scripts\update-openrgb2.ps1 `
 ```
 
 1. The new package is SHA-256-verified against its `manifest.json`
-   before anything changes (`-SkipVerify` is the documented escape).
-2. A running install is refused — stop it first.
+   before anything changes (`-SkipVerify` is the documented escape);
+   manifest paths that are rooted or contain `..` are refused.
+2. A running install is refused — stop it first
+   (`scripts\stop-openrgb2.ps1 -Force`, which also closes the UI, or the
+   tray's **Quit OpenRGB2**). "Running" includes a same-named process
+   whose image path this shell cannot read (an elevated stack: re-run
+   elevated) and any install executable that cannot be opened for
+   exclusive write.
 3. The entire current install is snapshotted to
-   `<InstallDir>.previous` (one-level rollback — kept on purpose).
+   `<InstallDir>.previous.tmp`, which replaces `<InstallDir>.previous`
+   only once it is complete (one-level rollback — kept on purpose).
+   Then `<InstallDir>\.update-in-progress.json` is written.
 4. Manifest-diff removes files the update dropped; new package files
-   copy over the install.
-5. `state\updates.json` journals from→to versions.
+   copy over the install; the installed files are re-verified against
+   the new manifest; `manifest.json` is copied last.
+5. `state\updates.json` journals from→to versions and the marker is
+   removed.
+
+**Interrupted update** (crash, power cut, a locked file): the install
+may be half-updated, but the snapshot is intact. While the marker
+exists the snapshot is **never retaken** — re-running the update
+resumes and finishes it; `rollback-openrgb2.ps1` restores the snapshot
+instead (it also removes the files the interrupted update added).
 
 **`profiles\local\` and `state\` are never touched** — an update can
 never lose the durable profile, resolved identities, backend config,
@@ -204,8 +251,70 @@ powershell -File scripts\rollback-openrgb2.ps1 -InstallDir <install>
 Restores previous binaries from `<InstallDir>.previous`, verified
 against the backup's own `manifest.json` BEFORE restoring — a
 corrupt/tampered backup is refused, not half-restored. Files the
-update added are removed. **User state is never rolled back** — it
-restores binaries only.
+update added are removed, and the backup's `manifest.json` is restored
+last, so the install reports the rolled-back version. **User state is
+never rolled back** — it restores binaries only.
+
+## Install protection
+
+The UI runs elevated and starts `scripts\*.ps1`, `openrgb2-engine.exe`
+and `backend\OpenRGB.exe` elevated from the install folder; the
+optional sign-in task runs `openrgb2-ui.exe` with highest privileges
+without a UAC prompt. If that folder is writable by the signed-in
+user, any program running as that user can replace a script or binary
+and be started elevated at the next launch or sign-in.
+
+- `update-openrgb2.ps1` **run elevated** makes the install admin-only:
+  owner `Administrators`, inheritance broken, `Administrators` +
+  `SYSTEM` full control, `Users` read/execute. `state\` and
+  `profiles\local\` stay writable (Modify) by the installing user
+  (`-UserSid`; default: the folder's owner when that is a user account,
+  else the one user account granted write on `state\`, inherited grants
+  included). When that is not exactly one account the elevated update
+  refuses before changing anything and asks for `-UserSid` (`whoami
+  /user` in that user's normal shell) — it never assumes the elevating
+  account, which can be a different administrator;
+  `state\backend\plugins\` is pinned admin-only because the backend
+  loads plugin DLLs from its config dir. The `.previous` snapshot is
+  protected the same way. `-SkipAclHardening` opts out. A non-elevated
+  update leaves the ACL unchanged (and, over a protected install, is
+  refused: re-run it elevated).
+- `scripts\build-all-and-install.ps1` builds as you and runs only the
+  stop + deploy step elevated, so the default install
+  (`%LOCALAPPDATA%\Programs\OpenRGB2`) ends up protected.
+- The sign-in task refuses to enable over a user-writable install.
+- The sign-in task **also refuses an install inside a folder you
+  control**. A protected folder can still be swapped out from above:
+  whoever may rename it (or any folder above it) aside can put a
+  look-alike `OpenRGB2` in its place, and the task would start that
+  copy's `openrgb2-ui.exe` with highest privileges at the next
+  sign-in. So `enable` walks every folder from the install up to the
+  volume root and refuses if, for your account (its groups included,
+  Administrators excluded), a folder grants delete / change
+  permissions / take ownership or is owned by you, or its parent
+  grants delete-child / change permissions / take ownership or is
+  owned by you. (Add-subfolder rights alone, like the one
+  Authenticated Users hold on `C:\`, are harmless: the name is
+  taken.) The default `%LOCALAPPDATA%\Programs\OpenRGB2` always fails
+  this — your profile is yours. For the sign-in task, install under an
+  admin-only location such as `%ProgramFiles%\OpenRGB2`:
+
+  ```powershell
+  scripts\build-all-and-install.ps1 -InstallDir "$env:ProgramFiles\OpenRGB2"
+  ```
+
+  The elevated deploy step creates the folder; `state\` and
+  `profiles\local\` stay writable by you. Then enable the setting from
+  that install (move your desktop shortcut to it; the old install's
+  user state is not copied — copy `profiles\local\` across first if
+  you want it).
+
+**Not covered** (residual risk): `state\backend` (the backend's
+working directory) stays writable, so a DLL that is missing from both
+`backend\` and the system directories could be picked up from there.
+Without the sign-in task, an install under a folder you control (the
+default) can still be swapped out from above; the next elevated
+launch then shows the UAC prompt for whatever is in its place.
 
 ## Recovery notes
 
