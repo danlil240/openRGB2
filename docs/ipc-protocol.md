@@ -773,7 +773,11 @@ undocumented one (plan section 4).
 `SUBSCRIBE {events:"all"}` or `{events:[kind,...]}` registers per-session
 subscriptions (bounded queue, see §1). Replies `OK {subscribed:[...]}` then
 immediately pushes one EVENT per subscribed kind carrying current state —
-a subscriber never needs a second request to paint.
+a subscriber never needs a second request to paint. Live events flow from
+the moment the subscription is set; when one of a kind (same coalesce
+slot) reaches the session while that kind's snapshot is being built, the
+snapshot is skipped — the live event is at least as new, and an older
+snapshot behind it would leave the client stale.
 
 `EVENT` (type `0x8200`, `request_id = 0`): `{kind, data}` where `data`
 matches the corresponding pull body:

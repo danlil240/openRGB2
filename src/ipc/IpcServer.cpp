@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
+#include <map>
 #include <set>
 #include <thread>
 #include <vector>
@@ -94,6 +95,11 @@ struct IpcServer::Session
     std::mutex                out_mutex;
     std::condition_variable   out_cv;
     std::deque<OutMsg>        out_queue;
+    /* Live events offered to this session per coalesce slot
+       (kind or kind+key), out_mutex. SUBSCRIBE compares it
+       around building the initial snapshot: a slot that moved
+       already carries newer state than the snapshot. */
+    std::map<std::string, uint64_t> enq_count;
 
     std::mutex                sub_mutex;
     std::set<std::string>     subscribed;
@@ -354,6 +360,7 @@ void IpcServer::Emit(const IpcEvent& ev)
                     s->out_queue.push_back(Session::OutMsg{ qkey, bytes });
                 }
             }
+            ++s->enq_count[qkey];
         }
         s->out_cv.notify_one();
         {
@@ -450,6 +457,7 @@ void IpcServer::EmitTo(uint64_t session_id, const IpcEvent& ev,
                     Session::OutMsg{ qkey, bytes });
             }
         }
+        ++target->enq_count[qkey];
     }
     target->out_cv.notify_one();
     {
@@ -1040,6 +1048,18 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
                 std::lock_guard<std::mutex> lock(s->sub_mutex);
                 s->subscribed = std::move(want);
             }
+            /* Live events start queuing the moment the
+               subscription is set — BEFORE the initial
+               snapshots below are built. Record each slot's
+               count now: a slot that moves while its snapshot
+               is being read already holds state at least as
+               new, so that (older) snapshot must not be
+               queued behind it (audit I-13). */
+            std::map<std::string, uint64_t> enq_at_subscribe;
+            {
+                std::lock_guard<std::mutex> lock(s->out_mutex);
+                enq_at_subscribe = s->enq_count;
+            }
             nlohmann::json subs = nlohmann::json::array();
             {
                 std::lock_guard<std::mutex> lock(s->sub_mutex);
@@ -1083,7 +1103,16 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
                     if(!ev.empty())
                     {
                         std::lock_guard<std::mutex> lock(s->out_mutex);
-                        if(s->out_queue.size()
+                        const auto now_it = s->enq_count.find(k);
+                        const auto was_it = enq_at_subscribe.find(k);
+                        const uint64_t now_n =
+                            now_it == s->enq_count.end()
+                                ? 0 : now_it->second;
+                        const uint64_t was_n =
+                            was_it == enq_at_subscribe.end()
+                                ? 0 : was_it->second;
+                        if(now_n == was_n &&
+                           s->out_queue.size()
                            < options_.max_queued_events)
                         {
                             s->out_queue.push_back(Session::OutMsg{ k,

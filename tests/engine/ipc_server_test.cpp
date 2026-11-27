@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -123,10 +124,20 @@ public:
     bool SnapshotEvent(const std::string& kind,
                        nlohmann::json& out) override
     {
+        /* Taken BEFORE the hook: models a state read that a
+           live change (emitted by the hook) then supersedes. */
         out = nlohmann::json::object(
             {{"kind", kind}, {"initial", true}});
+        if(on_snapshot)
+        {
+            on_snapshot(kind);
+        }
         return true;
     }
+
+    /* Runs inside SnapshotEvent on the session reader thread —
+       lets a test emit a newer live event mid-snapshot. */
+    std::function<void(const std::string&)> on_snapshot;
 
     int DispatchedCount()
     {
@@ -696,6 +707,61 @@ int main()
         CHECK(snap);
         CHECK(job);
         CHECK(last_preview == 19);   /* the newest frame survives */
+    }
+
+    /*---- SUBSCRIBE snapshot never lands after a newer event
+           (audit I-13) -------------------------------------*/
+    {
+        /* The subscription is live before the initial snapshot
+           is built, so a change emitted meanwhile is queued
+           FIRST — the older snapshot pushed behind it would be
+           the last word the client sees. The hook emits that
+           newer event from inside the snapshot read. */
+        ScriptedService svc;
+        IpcServer server(svc);
+        svc.on_snapshot = [&server](const std::string& kind)
+        {
+            if(kind == event_kind::kScene)
+            {
+                server.Emit(IpcEvent{ event_kind::kScene,
+                    nlohmann::json::object({{"live", 2}}) });
+            }
+        };
+        TestClient c;
+        server.Serve(c.MakeChannel(), ChannelKind::Command);
+        c.Hello();
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        c.SendMsg(MsgType::Subscribe, 62,
+                  nlohmann::json::object({{"events",
+                      nlohmann::json::array({
+                          event_kind::kTopology,
+                          event_kind::kScene })}}));
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Ok);
+        nlohmann::json last_scene, last_topology;
+        while(c.RecvMsg(m, 700))
+        {
+            if(m.type != MsgType::Event)
+            {
+                continue;
+            }
+            const nlohmann::json b = m.Body();
+            if(b.value("kind", "") == "scene")
+            {
+                last_scene = b["data"];
+            }
+            if(b.value("kind", "") == "topology")
+            {
+                last_topology = b["data"];
+            }
+        }
+        /* the live change is the final scene state ... */
+        CHECK(last_scene.is_object() &&
+              last_scene.value("live", 0) == 2);
+        /* ... and an undisturbed kind still gets its snapshot */
+        CHECK(last_topology.is_object() &&
+              last_topology.value("initial", false));
     }
 
     /*---- diagnostics channel: read-only by construction ---*/
