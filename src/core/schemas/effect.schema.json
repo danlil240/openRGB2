@@ -125,7 +125,7 @@
         },
         "scale": {
           "$ref": "#/definitions/numberOrRemix",
-          "description": "Wavelength / ring spacing / noise frequency / spoke count / comet tail length / ripple band half-width / screenfield width (m). Must be > 0."
+          "description": "Per primitive: wave wavelength (m) / pulse ring spacing (m) / gradient palette cycles per metre (a frequency: the inverse sense of wave) / noise frequency / spin repeats per turn / comet tail length (m) / ripple band half-width (m) / screenfield width (m). Must be > 0."
         },
         "phase": {
           "$ref": "#/definitions/numberOrRemix",
@@ -141,7 +141,7 @@
         },
         "direction": {
           "$ref": "#/definitions/vec3OrRemix",
-          "description": "wave/gradient axis; noise wind. remix_yaw allowed here."
+          "description": "wave/gradient axis (a wave with speed > 0 travels toward +direction, a gradient toward -direction); noise wind. remix_yaw allowed here."
         },
         "path": {
           "type": "array",
