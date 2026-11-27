@@ -353,6 +353,18 @@ void SceneEditController::OnReplyReceived(int id, const QString& type,
                    errs.first().toString() +
                    QStringLiteral(")");
         }
+        /* The engine is managed but this session latched
+           unmanaged — the refusal is the definitive signal the
+           workspace truth went stale (the subscribe snapshot
+           raced boot re-adoption). Re-pull it so the NEXT save
+           takes the WORKSPACE_COMMAND path instead of landing
+           here again. */
+        if(ws_ != nullptr &&
+           body.value(QStringLiteral("detail")).toString() ==
+               QLatin1String("workspace_required"))
+        {
+            ws_->resync();
+        }
         SetSaveError(msg.isEmpty()
                          ? QStringLiteral("engine rejected the "
                                           "scene — edits preserved")

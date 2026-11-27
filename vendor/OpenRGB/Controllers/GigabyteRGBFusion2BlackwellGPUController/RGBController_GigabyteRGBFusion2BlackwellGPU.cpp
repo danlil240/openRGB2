@@ -7,9 +7,24 @@
 |   SPDX-License-Identifier: GPL-2.0-or-later               |
 \*---------------------------------------------------------*/
 
+#include <chrono>
+#include <cstdlib>
+#include <thread>
 #include "RGBController_GigabyteRGBFusion2BlackwellGPU.h"
 #include "LogManager.h"
 #include "GigabyteRGBFusion2BlackwellGPUDefinitions.h"
+
+/*---------------------------------------------------------*\
+| Temporal smoothing (see DeviceUpdateLEDs): the firmware   |
+| visibly chases each new direct-mode target, so noisy      |
+| per-frame jitter (aurora's noise layer on a 1-LED zone)   |
+| shows up as flicker toward dark. Each sent channel is an  |
+| exponential moving average of the requested colors —      |
+| high-frequency jitter is attenuated below PWM visibility  |
+| while genuine motion passes with ~2 frames of lag.        |
+\*---------------------------------------------------------*/
+#define BWGPU_SMOOTH_ALPHA        0.35
+#define BWGPU_SMOOTH_ALPHA_SINGLE 0.15
 
 /**------------------------------------------------------------------*\
     @name Gigabyte Fusion 2 Blackwell GPU
@@ -49,6 +64,9 @@ RGBController_RGBFusion2BlackwellGPU::RGBController_RGBFusion2BlackwellGPU(RGBFu
     Direct.value                    = RGB_FUSION2_BLACKWELL_GPU_MODE_DIRECT;
     Direct.flags                    = MODE_FLAG_HAS_PER_LED_COLOR | MODE_FLAG_HAS_BRIGHTNESS | MODE_FLAG_MANUAL_SAVE;
     Direct.color_mode               = MODE_COLORS_PER_LED;
+    Direct.speed_min                = RGB_FUSION2_BLACKWELL_GPU_SPEED_SLOWEST;
+    Direct.speed_max                = RGB_FUSION2_BLACKWELL_GPU_SPEED_FASTEST;
+    Direct.speed                    = RGB_FUSION2_BLACKWELL_GPU_SPEED_NORMAL;
     Direct.brightness_min           = RGB_FUSION2_BLACKWELL_GPU_BRIGHTNESS_MIN;
     Direct.brightness_max           = RGB_FUSION2_BLACKWELL_GPU_BRIGHTNESS_MAX;
     Direct.brightness               = RGB_FUSION2_BLACKWELL_GPU_BRIGHTNESS_MAX;
@@ -443,15 +461,29 @@ void RGBController_RGBFusion2BlackwellGPU::SetupZones()
 
 void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateLEDs()
 {
-    fusion2_config zone_config;
-    zone_config.brightness      = modes[active_mode].brightness;
-    zone_config.speed           = modes[active_mode].speed;
-    zone_config.direction       = modes[active_mode].direction;
-    zone_config.numberOfColors  = 0;
-
-    if(modes[active_mode].color_mode == MODE_COLORS_MODE_SPECIFIC)
+    /*---------------------------------------------------------*\
+    | Diagnostic (flicker hunt): OPENRGB_BWGPU_MIN_INTERVAL_MS   |
+    | drops whole sweeps that arrive closer than N ms. If the    |
+    | MCU latches writes on its own tick or restarts a fade per  |
+    | packet, write-rate sensitivity shows up as a changed       |
+    | artifact. 0/unset = every frame passes.                    |
+    \*---------------------------------------------------------*/
+    static const unsigned long min_interval_ms = []()
     {
-        zone_config.numberOfColors = (uint8_t)modes[active_mode].colors.size();
+        const char* s = getenv("OPENRGB_BWGPU_MIN_INTERVAL_MS");
+        return (s != nullptr && *s != '\0') ? strtoul(s, nullptr, 10) : 0ul;
+    }();
+
+    if(min_interval_ms > 0)
+    {
+        static std::chrono::steady_clock::time_point last_sweep{};
+        const std::chrono::steady_clock::time_point now =
+            std::chrono::steady_clock::now();
+        if(now - last_sweep < std::chrono::milliseconds(min_interval_ms))
+        {
+            return;
+        }
+        last_sweep = now;
     }
 
     uint8_t gpu_zones;
@@ -488,6 +520,43 @@ void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateLEDs()
 
     for(uint8_t zone_idx = 0; zone_idx < gpu_zones; zone_idx++)
     {
+        /*---------------------------------------------------------*\
+        | Build the zone config fresh for every zone — a multi-LED  |
+        | palette (numberOfColors > 0) must never leak into a       |
+        | following single-color zone write.                        |
+        \*---------------------------------------------------------*/
+        fusion2_config zone_config;
+        zone_config.brightness      = modes[active_mode].brightness;
+        zone_config.speed           = modes[active_mode].speed;
+
+        /*---------------------------------------------------------*\
+        | Diagnostic: OPENRGB_BWGPU_SPEED forces the packet SPD      |
+        | byte — if direct-mode writes trigger an internal fade at   |
+        | this speed, changing it changes the artifact's character.  |
+        \*---------------------------------------------------------*/
+        static const int speed_override = []()
+        {
+            const char* s = getenv("OPENRGB_BWGPU_SPEED");
+            if(s == nullptr || *s == '\0')
+            {
+                return -1;
+            }
+            const long v = strtol(s, nullptr, 10);
+            return (v >= 0 && v <= 255) ? (int)v : -1;
+        }();
+        if(speed_override >= 0)
+        {
+            zone_config.speed = (uint8_t)speed_override;
+        }
+
+        zone_config.direction       = modes[active_mode].direction;
+        zone_config.numberOfColors  = 0;
+
+        if(modes[active_mode].color_mode == MODE_COLORS_MODE_SPECIFIC)
+        {
+            zone_config.numberOfColors = (uint8_t)modes[active_mode].colors.size();
+        }
+
         /*---------------------------------------------------------*\
         | For AORUS WATERFORCE layout, map UI zones to hardware    |
         | UI zone 0 -> HW zone 1 (Bottom Logo)                     |
@@ -540,8 +609,17 @@ void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateLEDs()
             /*---------------------------------------------------------*\
             | If not all led are the same color, then we must pass all  |
             | led colors in the i2c write.                              |
+            |                                                           |
+            | Diagnostic switch: OPENRGB_BWGPU_NO_PALETTE=1 collapses   |
+            | every zone to a single SZ=1 color (colors[0]) — used to   |
+            | isolate whether multi-color palette writes trigger the    |
+            | AORUS MASTER banner flicker.                              |
             \*---------------------------------------------------------*/
-            if(!std::all_of(zone_config.colors, zone_config.colors + zones[ui_zone_idx].leds_count, [first = zone_config.colors[0]](RGBColor x) { return x == first; }))
+            static const bool no_palette =
+                (getenv("OPENRGB_BWGPU_NO_PALETTE") != nullptr);
+
+            if(!no_palette &&
+               !std::all_of(zone_config.colors, zone_config.colors + zones[ui_zone_idx].leds_count, [first = zone_config.colors[0]](RGBColor x) { return x == first; }))
             {
                 zone_config.numberOfColors = zones[ui_zone_idx].leds_count;
             }
@@ -553,6 +631,87 @@ void RGBController_RGBFusion2BlackwellGPU::DeviceUpdateLEDs()
             {
                 zone_config.colors[i] = modes[active_mode].colors[i];
             }
+        }
+
+        /*---------------------------------------------------------*\
+        | Trace diagnostics: record whether smoother state existed  |
+        | when this write was built, and which RGBController        |
+        | instance built it (a second instance would interleave its |
+        | own smoothed stream on the same hardware zones).          |
+        \*---------------------------------------------------------*/
+        zone_config.diag_sm  = has_smoothed[hardware_zone_idx] ? 1 : 0;
+        zone_config.diag_who = (uint8_t)((uintptr_t)this >> 4);
+        zone_config.diag_tid = (uint8_t)(std::hash<std::thread::id>{}(
+                                             std::this_thread::get_id()) >> 8);
+
+        /*---------------------------------------------------------*\
+        | Temporal smoothing on direct-mode writes (see above):     |
+        | filter every channel toward its target so noisy drift     |
+        | never reaches the wire. Non-direct writes bypass the      |
+        | filter and reset its state so the next direct frame is    |
+        | applied exactly (no lag out of a mode switch).            |
+        \*---------------------------------------------------------*/
+        if(modes[active_mode].value == RGB_FUSION2_BLACKWELL_GPU_MODE_DIRECT)
+        {
+            unsigned int cmp_count = zone_config.numberOfColors;
+            if(ui_zone_idx < zones.size() && zones[ui_zone_idx].leds_count > cmp_count)
+            {
+                cmp_count = zones[ui_zone_idx].leds_count;
+            }
+            if(cmp_count > RGB_FUSION_2_BLACKWELL_AORUS_MASTER_FAN_LEDS)
+            {
+                cmp_count = RGB_FUSION_2_BLACKWELL_AORUS_MASTER_FAN_LEDS;
+            }
+            if(cmp_count == 0)
+            {
+                cmp_count = 1;
+            }
+
+            /*---------------------------------------------------------*\
+            | Single-LED zones (the logos) get the heavier alpha —      |
+            | they have no spatial dimension to hide stepping behind.   |
+            | OPENRGB_BWGPU_SMOOTH_ALPHA forces one alpha for every     |
+            | zone (flicker diagnostics; 1.0 disables smoothing).       |
+            \*---------------------------------------------------------*/
+            static const double alpha_override = []()
+            {
+                const char* s = getenv("OPENRGB_BWGPU_SMOOTH_ALPHA");
+                if(s == nullptr || *s == '\0')
+                {
+                    return -1.0;
+                }
+                char*       end = nullptr;
+                const double v  = strtod(s, &end);
+                return (end != s && v > 0.0 && v <= 1.0) ? v : -1.0;
+            }();
+            const double alpha = (alpha_override > 0.0)
+                               ? alpha_override
+                               : (cmp_count > 1 ? BWGPU_SMOOTH_ALPHA
+                                                : BWGPU_SMOOTH_ALPHA_SINGLE);
+
+            for(unsigned int i = 0; i < cmp_count; i++)
+            {
+                for(unsigned int c = 0; c < 3; c++)
+                {
+                    const double target  = (double)((zone_config.colors[i] >> (c * 8)) & 0xFF);
+                    double       current = has_smoothed[hardware_zone_idx]
+                                         ? smoothed[hardware_zone_idx][i][c]
+                                         : target;
+                    current += (target - current) * alpha;
+                    smoothed[hardware_zone_idx][i][c] = current;
+                }
+
+                zone_config.colors[i] = ToRGBColor(
+                    (unsigned int)(smoothed[hardware_zone_idx][i][0] + 0.5),
+                    (unsigned int)(smoothed[hardware_zone_idx][i][1] + 0.5),
+                    (unsigned int)(smoothed[hardware_zone_idx][i][2] + 0.5));
+            }
+
+            has_smoothed[hardware_zone_idx] = true;
+        }
+        else
+        {
+            has_smoothed[hardware_zone_idx] = false;
         }
 
         controller->SetZone(hardware_zone_idx, modes[active_mode].value, zone_config);

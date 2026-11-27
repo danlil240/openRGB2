@@ -56,6 +56,7 @@
 
 #include "EngineTypes.h"
 #include "FrameSink.h"
+#include "PlaybackClockSync.h"
 #include "ReconnectBackoff.h"
 #include "SdkWire.h"
 #include "Transport.h"
@@ -91,6 +92,35 @@ struct ConnectionSnapshotInfo
     uint32_t        protocol_version  = 0;    /* negotiated, <= 4 */
     uint32_t        reconnect_attempt = 0;
     std::string     last_error;
+};
+
+/* Cached result of the LIANLI_WIRELESS_STATUS vendor
+   extension (N01 observability — a wedged wireless group
+   must surface in diagnostics instead of staying silent).
+
+   probed    — the extension request has been sent at least
+               once on this connection.
+   supported — the backend answered (the lianli-wireless
+               fork). A stock backend drops unknown packets
+               silently under protocol <= 4, so the probe
+               times out: supported latches false for the
+               REST of the connection (never re-probed — a
+               periodic 4 s stall would be worse than no
+               data), and the connection stays healthy.
+   have_data — a reply was received AND parsed (a replying
+               server is "supported" even when one reply is
+               malformed).
+   fetched_at/status — the last parsed reply and when it
+               arrived; diagnostics computes staleness from
+               fetched_at rather than trusting a cached body
+               to be current. */
+struct WirelessStatusSnapshot
+{
+    bool              probed    = false;
+    bool              supported = false;
+    bool              have_data = false;
+    TimePoint         fetched_at{};
+    SdkWirelessStatus status;
 };
 
 class OpenRgbClient final : public IFrameSink
@@ -225,6 +255,30 @@ public:
     bool ResizeZone(const DeviceKey& controller, const std::string& zone_name,
                     int32_t new_size);
 
+    /*---- Wireless status (lianli-wireless fork extension) ----*\
+    | FetchWirelessStatus() is a wire op (io_mutex_): sends    |
+    | NET_PACKET_ID_LIANLI_WIRELESS_STATUS and caches the      |
+    | reply. It also rides Connect()/Enumerate() once and      |
+    | RefreshStatus() on every call so the snapshot stays      |
+    | live. Returns false only when the wire op broke the      |
+    | connection — a silently-dropped request on a stock       |
+    | backend returns true with supported=false latched.       |
+    | WirelessStatus() copies the cache under the state lock   |
+    | only — never touches the wire.                           |
+    \*---------------------------------------------------------*/
+    bool FetchWirelessStatus();
+    void WirelessStatus(WirelessStatusSnapshot& out) const;
+
+    /* Fresh fetch, then extract the PlaybackClockSnapshot for
+       the group whose `mac` equals `controller.serial` — the
+       playback-clock-sync dep (PlaybackClockSync.h expects a
+       per-call provider). False when the extension is
+       unsupported, the group is unknown, or its rgb_clock is
+       invalid — the caller treats a miss like any absent
+       sample (staleness, not breakage). */
+    bool WirelessClockSample(const DeviceKey& controller,
+                             PlaybackClockSnapshot& out);
+
 private:
     struct DeviceRecord
     {
@@ -255,6 +309,7 @@ private:
     \*--------------------------------------------------------*/
     bool EnumerateIo(std::string& err);
     bool ConnectIo(std::string& err);
+    bool FetchWirelessStatusIo();
     void MarkBrokenIo(const std::string& reason, TimePoint now);
     void PollIo(TimePoint now);
 
@@ -274,6 +329,10 @@ private:
     TimePoint            next_attempt_{};
 
     DeliveryStats        stats_;
+
+    /* Last wireless-status fetch — state lock; cleared on
+       (re)connect so a swapped backend gets a fresh probe. */
+    WirelessStatusSnapshot wireless_status_;
 };
 
 } /* namespace sdk */

@@ -571,6 +571,7 @@ WorkspaceService::Result WorkspaceService::Open(const std::string& id)
     res.resource_revision  = lr.resource_revision;
     }
     FlushActiveNotify();
+    FlushSnapshotNotify();
     return res;
 }
 
@@ -872,6 +873,7 @@ WorkspaceService::Result WorkspaceService::RestoreBackup(
         }
     }
     FlushActiveNotify();
+    FlushSnapshotNotify();
     ApplyAfterCommit(apply_cand, res.generation, res);
     return res;
 }
@@ -921,6 +923,7 @@ WorkspaceService::Result WorkspaceService::Save(
                            /*prior_warnings=*/res.warnings);
     }
     FlushActiveNotify();
+    FlushSnapshotNotify();
     /* The apply runs after the lock is released — a scene
        publish emits events that re-enter this service. */
     ApplyAfterCommit(apply_cand, res.generation, res);
@@ -987,6 +990,7 @@ WorkspaceService::Result WorkspaceService::Import(
                        /*prior_warnings=*/res.warnings);
     }
     FlushActiveNotify();
+    FlushSnapshotNotify();
     return res;
 }
 
@@ -1072,6 +1076,7 @@ WorkspaceService::Result WorkspaceService::ImportFile(
                        /*prior_warnings=*/res.warnings);
     }
     FlushActiveNotify();
+    FlushSnapshotNotify();
     return res;
 }
 
@@ -1099,6 +1104,21 @@ void WorkspaceService::PublishLocked()
             WorkspaceSourceFormName(current_.candidate->source_form);
     }
     std::lock_guard<std::mutex> g(snap_mutex_);
+    /* Diff-driven like the connection signature — a publish
+       that changed nothing (an idempotent re-publish) must not
+       emit. */
+    if(snap_.managed            != s.managed            ||
+       snap_.id                 != s.id                 ||
+       snap_.workspace_revision != s.workspace_revision ||
+       snap_.resource_revision  != s.resource_revision  ||
+       snap_.generation         != s.generation         ||
+       snap_.name               != s.name               ||
+       snap_.source_form        != s.source_form)
+    {
+        /* mutex_ is already held by the caller — flag it; the
+           emit runs post-lock from FlushSnapshotNotify(). */
+        snap_notify_ = true;
+    }
     snap_ = std::move(s);
 }
 
@@ -1124,6 +1144,27 @@ void WorkspaceService::FlushActiveNotify()
     {
         try { deps_.active_workspace_changed(id); }
         catch(...) {}
+    }
+}
+
+void WorkspaceService::FlushSnapshotNotify()
+{
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        if(!snap_notify_)
+        {
+            return;
+        }
+        snap_notify_ = false;
+    }
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> g(jobs_mutex_);
+        hook = snapshot_hook_;
+    }
+    if(hook)
+    {
+        try { hook(); } catch(...) {}
     }
 }
 
@@ -1175,6 +1216,13 @@ void WorkspaceService::SetJobEventHook(
 {
     std::lock_guard<std::mutex> g(jobs_mutex_);
     surface_.job_event = std::move(hook);
+}
+
+void WorkspaceService::SetSnapshotEventHook(
+    std::function<void()> hook)
+{
+    std::lock_guard<std::mutex> g(jobs_mutex_);
+    snapshot_hook_ = std::move(hook);
 }
 
 void WorkspaceService::SetPreJobHookForTesting(
@@ -1545,6 +1593,11 @@ void WorkspaceService::WorkerMain()
             }
             surface = surface_;
         }
+        /* A job that published (commit/restore/resource move)
+           owes subscribers the fresh `get`-shaped snapshot —
+           emitted BEFORE the terminal job event so a client
+           reconciles managed/revisions first, then fetches. */
+        FlushSnapshotNotify();
         /* the completion EVENT — emitted OFF the job mutex so a
            slow subscriber never stalls the worker */
         if(surface.job_event)
@@ -2293,6 +2346,7 @@ WorkspaceService::Result WorkspaceService::CommitJson(
         }
     }
     FlushActiveNotify();
+    FlushSnapshotNotify();
     /* The scene publish runs AFTER the commit lock releases —
        the emitted event's payload re-reads this service (the
        managed flag), so applying under the lock is a same-
@@ -2697,6 +2751,7 @@ WorkspaceService::Result WorkspaceService::ImportStagedJson(
                            /*prior_warnings=*/res.warnings);
         g.unlock();
         FlushActiveNotify();
+        FlushSnapshotNotify();
         return res;
     }
 
@@ -2861,6 +2916,7 @@ WorkspaceService::Result WorkspaceService::ImportStagedJson(
                        /*prior_warnings=*/res.warnings);
     g.unlock();
     FlushActiveNotify();
+    FlushSnapshotNotify();
     return res;
 }
 

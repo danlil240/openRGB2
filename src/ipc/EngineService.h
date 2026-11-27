@@ -305,9 +305,14 @@ public:
 
     /* Read-only aggregate snapshot — the diagnostics channel's
        single verb and the Diagnostics event payload share
-       this builder. `backend_counters` is null until the
-       backend's own read-only pipe exists (later integration
-       point — plan section 4; vendor/OpenRGB untouched). */
+       this builder. `backend_counters` carries the backend's
+       own wireless-status document when the SDK extension
+       answered (NET_PACKET_ID_LIANLI_WIRELESS_STATUS, the
+       lianli-wireless fork): a wedged group surfaces as
+       state "failed"/"foreign_master" + wedged:true instead
+       of staying silent. Null when no SDK is attached;
+       {"available":false,...} honestly reports a stock
+       backend or a not-yet-fetched cache. */
     nlohmann::json DiagnosticsJson(TimePoint now = Clock::now()) const;
 
 private:
@@ -409,6 +414,11 @@ private:
        the whole StateJson for one field (QA F12). */
     nlohmann::json IpcStatsJson() const;
     nlohmann::json OwnershipJson() const;
+    /* The backend's own read-only diagnostics pipe: the
+       SDK client's cached LIANLI_WIRELESS_STATUS snapshot
+       (state-lock read only — this never queues behind
+       wire I/O, same discipline as ConnectionJson). */
+    nlohmann::json BackendCountersJson() const;
 };
 
 } /* namespace ipc */

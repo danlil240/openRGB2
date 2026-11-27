@@ -23,6 +23,7 @@
 #include "DetectionManager.h"
 #include "LogManager.h"
 #include "LianLiWirelessController.h"
+#include "LianLiWirelessDiagnostics.h"
 #include "LianLiWirelessService.h"
 #include "LianLiWirelessTransport.h"
 #include "RGBController_LianLiWireless.h"
@@ -185,3 +186,45 @@ DetectedControllers DetectLianLiWireless()
 }
 
 REGISTER_DETECTOR("Lian Li Wireless", DetectLianLiWireless);
+
+/*---------------------------------------------------------*\
+|| CollectStatusJson — the SDK wireless-status reply body  ||
+|| (NET_PACKET_ID_LIANLI_WIRELESS_STATUS). Reads the       ||
+|| service through the persistent detection context, so    ||
+|| the surface stays live across device-list rescans that  ||
+|| rebuild the RGBControllers. GetStatus only snapshots    ||
+|| under the service mutex — never drives the link.        ||
+\*---------------------------------------------------------*/
+nlohmann::json LianLiWireless::CollectStatusJson()
+{
+    std::lock_guard<std::mutex> lock(wireless_ctx_mutex);
+
+    if(wireless_ctx == nullptr || wireless_ctx->service == nullptr)
+    {
+        return nlohmann::json::object({
+            { "available", false                     },
+            { "groups",    nlohmann::json::array()   },
+        });
+    }
+
+    nlohmann::json groups = nlohmann::json::array();
+    for(const WirelessGroupInfo& g : wireless_ctx->groups)
+    {
+        LianLiWirelessService::GroupStatus st;
+        if(wireless_ctx->service->GetStatus(g.mac, st))
+        {
+            nlohmann::json gj = GroupStatusToJson(g.mac, st);
+            gj["fan_type"]  = g.info.name;
+            gj["fan_count"] = g.fan_count;
+            groups.push_back(std::move(gj));
+        }
+    }
+
+    return nlohmann::json::object({
+        { "available", true                                  },
+        { "master",    MacToString(wireless_ctx->master)     },
+        { "groups",    std::move(groups)                     },
+        { "counters",  CountersToJson(
+                          Diagnostics::Get().Snapshot())     },
+    });
+}

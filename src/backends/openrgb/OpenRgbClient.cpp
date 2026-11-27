@@ -351,6 +351,15 @@ bool OpenRgbClient::EnumerateIo(std::string& err)
         }
         devices_ = std::move(devices);
     }
+    /* Probe the wireless-status extension on every enumeration:
+       covers Connect(), Enumerate(), and the structural-
+       refresh path. A latched-unsupported probe is a no-op;
+       false means the wire broke mid-probe (already marked). */
+    if(!FetchWirelessStatusIo())
+    {
+        err = "wireless status probe broke the connection";
+        return false;
+    }
     return true;
 }
 
@@ -363,7 +372,10 @@ bool OpenRgbClient::ConnectIo(std::string& err)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         opts = options_;
-        protocol_version_ = 0;
+        protocol_version_  = 0;
+        /* A (re)connect may reach a different backend — the
+           extension probe starts over. */
+        wireless_status_   = WirelessStatusSnapshot{};
     }
     stream_->Close();
 
@@ -617,6 +629,12 @@ bool OpenRgbClient::RefreshStatus()
             }
         }
         DrainPending();
+        /* Keep the wireless-status cache live on the refresh
+           cadence — the N01 wedge surface ages in seconds. */
+        if(!FetchWirelessStatusIo())
+        {
+            return false;
+        }
     }
     catch(const TransportError& e)
     {
@@ -645,6 +663,149 @@ bool OpenRgbClient::ActiveMode(const DeviceKey& controller,
         *mode = std::move(m);
     }
     return true;
+}
+
+/*---------------------------------------------------------*\
+|| Wireless status — the lianli-wireless fork extension     ||
+|| (N01 observability).                                     ||
+\*---------------------------------------------------------*/
+
+bool OpenRgbClient::FetchWirelessStatusIo()
+{
+    /* Runs under io_mutex_ (EnumerateIo / RefreshStatus / the
+       public wrapper). Gated on the stream, not state_:
+       ConnectIo reaches this through EnumerateIo BEFORE the
+       Connected commit. */
+    if(!stream_->IsOpen())
+    {
+        return true;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(wireless_status_.probed && !wireless_status_.supported)
+        {
+            /* Latched unsupported: a stock backend drops the
+               packet silently — re-probing would stall every
+               refresh by the io timeout for nothing. */
+            return true;
+        }
+    }
+
+    SendPacket(0, kPktLianLiWirelessStatus, {});
+
+    /* Bounded reply wait — same 64-packet drop discipline as
+       Request(), but a timeout is INFORMATION (the packet is
+       unsupported), never a connection failure. */
+    Packet pkt;
+    for(unsigned i = 0; i < 64; ++i)
+    {
+        std::string err;
+        if(!RecvPacket(pkt, err))
+        {
+            if(err == "recv timed out")
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                wireless_status_.probed = true;
+                /* Only a never-answered probe latches
+                   unsupported; a timeout AFTER a successful
+                   fetch leaves the last data in place — it
+                   ages out via fetched_at instead of
+                   vanishing. */
+                if(!wireless_status_.have_data)
+                {
+                    wireless_status_.supported = false;
+                }
+                return true;
+            }
+            /* Closed/error on the wire is a real fault. */
+            MarkBrokenIo(err, Clock::now());
+            return false;
+        }
+        if(pkt.header.pkt_id == kPktLianLiWirelessStatus &&
+           pkt.header.dev_id == 0)
+        {
+            SdkWirelessStatus parsed;
+            const bool ok = ParseWirelessStatus(
+                pkt.body.data(), pkt.body.size(), parsed);
+            std::lock_guard<std::mutex> lock(mutex_);
+            wireless_status_.probed    = true;
+            wireless_status_.supported = true;
+            if(ok)
+            {
+                wireless_status_.status     = std::move(parsed);
+                wireless_status_.fetched_at = Clock::now();
+                wireless_status_.have_data  = true;
+            }
+            return true;
+        }
+        /* Unrelated/async traffic — drop and keep waiting. */
+    }
+    /* 64 unrelated packets: treat like a missing reply. */
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        wireless_status_.probed = true;
+        if(!wireless_status_.have_data)
+        {
+            wireless_status_.supported = false;
+        }
+    }
+    return true;
+}
+
+bool OpenRgbClient::FetchWirelessStatus()
+{
+    std::lock_guard<std::mutex> io(io_mutex_);
+    try
+    {
+        return FetchWirelessStatusIo();
+    }
+    catch(const TransportError& e)
+    {
+        MarkBrokenIo(e.what(), Clock::now());
+        return false;
+    }
+}
+
+void OpenRgbClient::WirelessStatus(WirelessStatusSnapshot& out) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    out = wireless_status_;
+}
+
+bool OpenRgbClient::WirelessClockSample(const DeviceKey& controller,
+                                        PlaybackClockSnapshot& out)
+{
+    out = {};
+    if(!FetchWirelessStatus())
+    {
+        return false;
+    }
+    WirelessStatusSnapshot snap;
+    WirelessStatus(snap);
+    if(!snap.have_data)
+    {
+        return false;
+    }
+    for(const SdkWirelessGroupStatus& g : snap.status.groups)
+    {
+        /* group mac == controller serial — the join the
+           backend's RGBController exposes. */
+        if(g.mac != controller.serial || !g.clock.valid)
+        {
+            continue;
+        }
+        const auto age = std::chrono::milliseconds(
+            (std::chrono::milliseconds::rep)g.clock.age_ms);
+        out.valid      = true;
+        out.ticks      = g.clock.ticks;
+        out.sampled_at = Clock::now() - age;
+        /* Backend-side age at serialization + a conservative
+           transport margin — the reading is only ever older
+           than the backend reported. */
+        out.uncertainty_s = (double)g.clock.age_ms / 1000.0 + 0.05;
+        return true;
+    }
+    return false;
 }
 
 void OpenRgbClient::MarkBrokenIo(const std::string& reason,

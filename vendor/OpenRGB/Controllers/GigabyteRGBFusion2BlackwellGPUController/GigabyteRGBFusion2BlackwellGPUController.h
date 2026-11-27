@@ -23,6 +23,16 @@ struct fusion2_config
     uint8_t     numberOfColors;
     uint8_t     speed;
     uint8_t     direction;
+    /*-----------------------------------------------------*\
+    | Trace diagnostics only — never serialized into the    |
+    | wire packet. diag_sm = smoother state existed when    |
+    | this write was built; diag_who = low byte of the      |
+    | RGBController instance that built it; diag_tid = low  |
+    | byte of a hash of the thread that built it.           |
+    \*-----------------------------------------------------*/
+    uint8_t     diag_sm;
+    uint8_t     diag_who;
+    uint8_t     diag_tid;
 };
 
 enum

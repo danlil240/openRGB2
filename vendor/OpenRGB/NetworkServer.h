@@ -269,6 +269,7 @@ private:
     NetPacketStatus                     ProcessRequest_RescanDevices();
 
     NetPacketStatus                     ProcessRequest_GetHIDDeviceInfo(NetworkClientInfo* client_info);
+    NetPacketStatus                     ProcessRequest_LianLiWirelessStatus(NetworkClientInfo* client_info);
     NetPacketStatus                     ProcessRequest_GetI2CBusInfo(NetworkClientInfo* client_info);
     NetPacketStatus                     ProcessRequest_GetSerialPorts(NetworkClientInfo* client_info);
     NetPacketStatus                     ProcessRequest_GetUSBDeviceInfo(NetworkClientInfo* client_info);

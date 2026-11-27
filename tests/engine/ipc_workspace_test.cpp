@@ -431,6 +431,70 @@ int main()
         CHECK(got);
     }
 
+    /*---- adoption pushes a fresh snapshot EVENT -------------
+       A session whose initial snapshot predates adoption (the
+       boot re-adopt race: listeners accept before Open runs)
+       must be pushed the `get`-shaped snapshot on the publish
+       — otherwise it latches managed:false and every save hits
+       the workspace_required refusal on the legacy path. */
+    {
+        const fs::path root = g_tmp / "adopt";
+        {
+            Rig rig1(root);
+            rig1.Start();
+            const WorkspaceService::Result sr = rig1.ws->Save(
+                "w1", WorkspaceDoc("managed-a"), 0);
+            CHECK(sr.ok);
+        }
+        Rig rig(root);
+        rig.Start();
+        TestClient c;
+        Welcome(c, *rig.server);
+        c.SendMsg(MsgType::Subscribe, ++seq,
+                  json::object({{ "events",
+                                  json::array({"workspace"}) }}));
+        Message m;
+        CHECK(RecvReply(c, seq, m));
+        CHECK(m.type == MsgType::Ok);
+        bool saw_unmanaged = false;
+        for(int i = 0; i < 4 && !saw_unmanaged; ++i)
+        {
+            Message ev;
+            if(!c.RecvMsg(ev, 3000)) continue;
+            const json b = ev.Body();
+            if(ev.type == MsgType::Event &&
+               b.value("kind", std::string()) == "workspace" &&
+               b["data"].is_object() &&
+               b["data"].contains("managed"))
+            {
+                saw_unmanaged = true;
+                CHECK(b["data"].value("managed", true) == false);
+            }
+        }
+        CHECK(saw_unmanaged);
+
+        /* Boot-style direct adoption — EngineHost's re-adopt
+           calls Open() the same way. */
+        const WorkspaceService::Result or_ = rig.ws->Open("w1");
+        CHECK(or_.ok);
+        bool saw_managed = false;
+        for(int i = 0; i < 12 && !saw_managed; ++i)
+        {
+            Message ev;
+            if(!c.RecvMsg(ev, 2000)) continue;
+            const json b = ev.Body();
+            if(ev.type == MsgType::Event &&
+               b.value("kind", std::string()) == "workspace" &&
+               b["data"].is_object() &&
+               b["data"].value("managed", false) &&
+               b["data"].value("id", std::string()) == "w1")
+            {
+                saw_managed = true;
+            }
+        }
+        CHECK(saw_managed);
+    }
+
     /*---- diagnostics channel stays read-only ----------------*/
     {
         Rig rig(g_tmp / "diag");
@@ -556,6 +620,37 @@ int main()
             }
         }
         CHECK(ev_ok);
+
+        /* The publish ALSO rebroadcasts the `get`-shaped
+           snapshot — distinct from the job record (managed/id
+           keys vs job_id/state) — so non-initiating sessions
+           converge on managed:true without polling. */
+        auto snap_match = [&](const json& b)
+        {
+            return b.value("kind", std::string()) == "workspace" &&
+                   b.contains("data") && b["data"].is_object() &&
+                   b["data"].value("managed", false) &&
+                   b["data"].value("id", std::string()) == "w1";
+        };
+        bool snap_ev = false;
+        for(const json& b : events)
+        {
+            if(snap_match(b))
+            {
+                snap_ev = true;
+            }
+        }
+        for(int i = 0; i < 8 && !snap_ev; ++i)
+        {
+            Message ev;
+            if(!c.RecvMsg(ev, 2000)) continue;
+            const json b = ev.Body();
+            if(ev.type == MsgType::Event && snap_match(b))
+            {
+                snap_ev = true;
+            }
+        }
+        CHECK(snap_ev);
 
         const json g = WsCall(c, seq, json::object(
             {{ "verb", "get" }}));

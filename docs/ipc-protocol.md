@@ -534,11 +534,39 @@ capability path as every other unsupported scene.
                "config":{...}},
   "ipc":      {"sessions_active":N, "queued_events":N, "events_dropped":N, ...},
   "clock":    {"steady_ms":F},
-  "backend_counters": null }
+  "backend_counters": {...} }
 ```
 
-`backend_counters` is `null` until the backend's own read-only counters
-pipe lands (a separate plan item — engine-side aggregate view only).
+`backend_counters` carries the backend's own wireless-status document —
+the `lianli-wireless` fork extension `NET_PACKET_ID_LIANLI_WIRELESS_STATUS`
+(packet 4000, see `vendor/OpenRGB/Documentation/OpenRGBSDK.md`). It is the
+N01 wedge surface: a group in a terminal `failed`/`foreign_master` state
+shows `state` + `wedged:true` + `last_error` here instead of staying
+silent while the LED path keeps reporting bookkeeping state.
+
+```json
+"backend_counters": { "available":true, "probed":true, "supported":true,
+  "fetched_age_ms":N, "master":"<mac>",
+  "groups":[{"mac":"<serial>","state":"boot|searching|uploading|holding|
+             lost|foreign_master|failed|cancelled","wedged":B,
+             "confirmed":B,"resends":N,"send_failures":N,
+             "last_error":"...","fan_type":"...","fan_count":N,
+             "sighting":{...}|null,"upload":{...}|null,
+             "rgb_clock":{"valid":B,"ticks":N,"age_ms":N,...}}],
+  "counters":{"set_desired":N,"uploads_admitted":N,...} }
+```
+
+`mac` joins a group row to the enumerated controller whose `serial`
+matches it (`location` is `"Wireless: <mac>"`). `fetched_age_ms` is the
+client-side age of the cached snapshot — a value that grows without the
+backend answering means the fetch stopped landing, not that the data is
+current. Honest-absence forms: `null` (no SDK attached), then
+`{"available":false,"probed":false}` (SDK up, extension not yet probed),
+`{"available":false,"probed":true,"supported":false}` (a stock backend
+silently drops packet 4000 — the probe times out once per connection and
+latches; it is never re-probed and never breaks the connection), and
+`{"available":false,"probed":true,"supported":true}` (the backend
+answered but the body never parsed).
 
 **WORKSPACE_COMMAND** (`0x010E`, requires `studio_workspace_v1`) —
 the managed-workspace surface. Body `{verb:<string>, ...args}`; every
@@ -737,7 +765,7 @@ matches the corresponding pull body:
 | `connection` | `sdk` object | SDK link state change |
 | `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |
 | `frame_status` | `{aggregate, wireless, controllers:[{key,delivered,lane,wireless,suppressed,owned,pending,sequence,colors,stats}]}` | ≤ ~30 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses. `wireless` is the wireless lane's own `{key,stats,suppressed,pending,owned}` summary (`null` when no wireless lane exists — the `aggregate` mixes wired lanes and is never a wireless measure). Every enumerated controller produces a `controllers` row: a lane that never delivered reports `delivered:false` + zeroed `stats` + empty `colors` (`lane:false` when the pipeline has no lane for it) — a "bound but never delivered" controller is a visible row, not an absent one |
-| `workspace` | `get` body (initial snapshot) / job status record (terminal job event) | SUBSCRIBE initial push; a workspace job reaching a terminal state |
+| `workspace` | `get` body (initial snapshot AND published-state change) / job status record (terminal job event) | SUBSCRIBE initial push; every published-state change (adopt, commit, restore, resource install/remove) — so a session whose snapshot raced boot re-adoption re-converges; a workspace job reaching a terminal state |
 | `preview` | `{type:"status"\|"frame", ...}` (below) | ≤ 30 Hz, **session-targeted** — delivered only to the session that owns the preview, never broadcast |
 | `calibration` | `<calibration status>` body (WORKSPACE_COMMAND `calibration_*` reply shape) | **session-targeted** — delivered only to the session holding the calibration lease, on every status change and once more after release |
 

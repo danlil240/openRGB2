@@ -9,6 +9,7 @@
 #include "SdkWire.h"
 
 #include <cstring>
+#include <string_view>
 
 namespace openrgb2
 {
@@ -484,6 +485,104 @@ bool PatchModeParams(std::vector<uint8_t>& raw, uint32_t version,
         {
             memcpy(raw.data() + at + 2 + i * 4, &patch.colors[i], 4);
         }
+    }
+    return true;
+}
+
+/*---------------------------------------------------------*\
+|| LIANLI_WIRELESS_STATUS reply parsing — the vendor        ||
+|| extension's null-terminated JSON body.                   ||
+\*---------------------------------------------------------*/
+
+namespace
+{
+    uint64_t JsonU64(const nlohmann::json& j, const char* key)
+    {
+        const auto it = j.find(key);
+        if(it == j.end() || !it->is_number_unsigned())
+        {
+            if(it != j.end() && it->is_number_integer() &&
+               it->get<int64_t>() > 0)
+            {
+                return (uint64_t)it->get<int64_t>();
+            }
+            return 0;
+        }
+        return it->get<uint64_t>();
+    }
+
+    std::string JsonStr(const nlohmann::json& j, const char* key)
+    {
+        const auto it = j.find(key);
+        if(it == j.end() || !it->is_string())
+        {
+            return {};
+        }
+        return it->get<std::string>();
+    }
+
+    bool JsonBool(const nlohmann::json& j, const char* key)
+    {
+        const auto it = j.find(key);
+        return it != j.end() && it->is_boolean() && it->get<bool>();
+    }
+}
+
+bool ParseWirelessStatus(const uint8_t* data, size_t len,
+                         SdkWirelessStatus& out)
+{
+    if(data == nullptr || len == 0)
+    {
+        return false;
+    }
+    /* The server appends a NUL (SETTINGS convention); JSON
+       parsing excludes it. */
+    std::string_view body(reinterpret_cast<const char*>(data), len);
+    if(!body.empty() && body.back() == '\0')
+    {
+        body.remove_suffix(1);
+    }
+    const nlohmann::json j =
+        nlohmann::json::parse(body, nullptr, false);
+    if(j.is_discarded() || !j.is_object())
+    {
+        return false;
+    }
+    const auto git = j.find("groups");
+    if(git != j.end() && !git->is_array())
+    {
+        return false;
+    }
+
+    out = {};
+    out.raw = j;
+    if(git == j.end())
+    {
+        return true;
+    }
+    for(const nlohmann::json& g : *git)
+    {
+        if(!g.is_object())
+        {
+            return false;
+        }
+        SdkWirelessGroupStatus s;
+        s.mac           = JsonStr(g, "mac");
+        s.state         = JsonStr(g, "state");
+        s.wedged        = JsonBool(g, "wedged");
+        s.confirmed     = JsonBool(g, "confirmed");
+        s.resends       = JsonU64(g, "resends");
+        s.send_failures = JsonU64(g, "send_failures");
+        s.last_error    = JsonStr(g, "last_error");
+        const auto cit = g.find("rgb_clock");
+        if(cit != g.end() && cit->is_object())
+        {
+            s.clock.valid         = JsonBool(*cit, "valid");
+            s.clock.ticks         = (uint32_t)JsonU64(*cit, "ticks");
+            s.clock.sampled_at_ms = JsonU64(*cit, "sampled_at_ms");
+            s.clock.age_ms        = JsonU64(*cit, "age_ms");
+        }
+        out.groups.push_back(std::move(s));
     }
     return true;
 }

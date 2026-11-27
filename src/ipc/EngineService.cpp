@@ -340,6 +340,20 @@ EngineService::EngineService(Engine& engine, Deps deps,
                 Emit(event_kind::kWorkspace,
                      JobStatusToJson(st));
             });
+        /* The published snapshot rebroadcasts on every change —
+           without it a session whose subscribe-time snapshot
+           raced the boot re-adoption latches managed:false, and
+           every save drives into the workspace_required refusal
+           on the legacy scene path. */
+        deps_.workspace->SetSnapshotEventHook(
+            [this]
+            {
+                if(ws_commands_)
+                {
+                    Emit(event_kind::kWorkspace,
+                         ws_commands_->SnapshotJson());
+                }
+            });
 
         /* studio-import Task 7: the session-bound draft
            preview. Topology reads share the layout seam's
@@ -403,6 +417,7 @@ EngineService::~EngineService()
     if(deps_.workspace)
     {
         deps_.workspace->SetJobEventHook(nullptr);
+        deps_.workspace->SetSnapshotEventHook(nullptr);
     }
 }
 
@@ -1149,10 +1164,60 @@ nlohmann::json EngineService::DiagnosticsJson(TimePoint now) const
         { "clock", nlohmann::json::object({
             { "steady_ms", steady_ms },
         })},
-        /* The backend's own read-only counters pipe is a
-           separate plan item; honest null until it exists. */
-        { "backend_counters", nullptr                        },
+        { "backend_counters", BackendCountersJson()           },
     });
+}
+
+/*---------------------------------------------------------*\
+||| backend_counters — the vendor SDK extension's cached   |||
+||| snapshot. WirelessStatus() is a state-lock read; this   |||
+||| never waits behind wire I/O (same discipline as the     |||
+||| F12 fix). The raw backend document is passed through    |||
+||| verbatim so server-side fields surface without a client |||
+||| rev.                                                    |||
+\*---------------------------------------------------------*/
+
+nlohmann::json EngineService::BackendCountersJson() const
+{
+    if(!deps_.sdk)
+    {
+        return nullptr;              /* honest: no backend   */
+    }
+    sdk::WirelessStatusSnapshot snap;
+    deps_.sdk->WirelessStatus(snap);
+    if(!snap.probed)
+    {
+        return nlohmann::json::object({
+            { "available", false },
+            { "probed",    false },
+        });
+    }
+    if(!snap.supported)
+    {
+        /* Stock backend: it dropped packet 4000 — "unsupported"
+           is itself diagnostic. */
+        return nlohmann::json::object({
+            { "available", false },
+            { "probed",    true  },
+            { "supported", false },
+        });
+    }
+    if(!snap.have_data)
+    {
+        /* Answered but never parsed (e.g. malformed body). */
+        return nlohmann::json::object({
+            { "available", false },
+            { "probed",    true  },
+            { "supported", true  },
+        });
+    }
+    nlohmann::json out = snap.status.raw;
+    out["probed"]    = true;
+    out["supported"] = true;
+    out["fetched_age_ms"] =
+        std::chrono::duration<double, std::milli>(
+            Clock::now() - snap.fetched_at).count();
+    return out;
 }
 
 /*---------------------------------------------------------*\

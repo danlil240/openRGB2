@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include <nlohmann/json.hpp>
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -55,6 +57,12 @@ constexpr uint32_t kPktUpdateLEDs        = 1050; /* RGBCONTROLLER_UPDATELEDS  */
 constexpr uint32_t kPktSetCustomMode     = 1100; /* SETCUSTOMMODE             */
 constexpr uint32_t kPktUpdateMode        = 1101; /* RGBCONTROLLER_UPDATEMODE  */
 constexpr uint32_t kPktSaveMode          = 1102; /* RGBCONTROLLER_SAVEMODE    */
+/* lianli-wireless fork extension (openrgb2): read-only
+   wireless group status + diagnostics counters. A stock
+   backend silently drops unknown packets under protocol
+   <= 4 — the client must treat a reply timeout as
+   "unsupported", never as a broken connection. */
+constexpr uint32_t kPktLianLiWirelessStatus = 4000;
 
 struct PacketHeader
 {
@@ -169,6 +177,46 @@ struct SdkController
 \*---------------------------------------------------------*/
 bool ParseControllerData(const uint8_t* data, size_t len,
                          uint32_t version, SdkController& out);
+
+/*---------------------------------------------------------*\
+|| Parsed LIANLI_WIRELESS_STATUS reply — the vendor        ||
+|| extension's null-terminated JSON body (SETTINGS reply   ||
+|| convention). `raw` retains the whole document verbatim  ||
+|| so diagnostics can pass backend-side fields through     ||
+|| without a client rev; `groups` carries the typed view   ||
+|| the clock-sample and wedge-detection paths consume.    ||
+\*---------------------------------------------------------*/
+struct SdkWirelessClock
+{
+    bool     valid          = false;
+    uint32_t ticks          = 0;
+    uint64_t sampled_at_ms  = 0;   /* backend monotonic ms  */
+    uint64_t age_ms         = 0;   /* backend-side age      */
+};
+
+struct SdkWirelessGroupStatus
+{
+    std::string       mac;            /* == controller serial */
+    std::string       state;          /* WirelessState lowercased */
+    bool              wedged        = false;
+    bool              confirmed     = false;
+    uint64_t          resends       = 0;
+    uint64_t          send_failures = 0;
+    std::string       last_error;
+    SdkWirelessClock  clock;
+};
+
+struct SdkWirelessStatus
+{
+    nlohmann::json                        raw;
+    std::vector<SdkWirelessGroupStatus>   groups;
+};
+
+/* Bounded: false on non-JSON, non-object, or a malformed
+   "groups" member. Tolerates (and requires neither) the
+   trailing NUL the server appends. */
+bool ParseWirelessStatus(const uint8_t* data, size_t len,
+                         SdkWirelessStatus& out);
 
 /*---------------------------------------------------------*\
 ||| Request bodies (bytes after the packet header).         ||

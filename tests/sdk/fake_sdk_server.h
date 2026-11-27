@@ -121,6 +121,15 @@ public:
        peer the client must reject. */
     bool     corrupt_reply_magic = false;
 
+    /* Vendor extension (openrgb2): when non-empty the fake
+       models the lianli-wireless fork and replies to
+       NET_PACKET_ID_LIANLI_WIRELESS_STATUS with this JSON
+       body (null-terminated, SETTINGS convention). Empty
+       models a stock backend: the request is never
+       answered — the client must treat that as
+       "unsupported", NOT as a broken connection. */
+    std::string wireless_status_json;
+
     std::vector<FakeController> controllers;
     std::vector<ServerEvent>    events;
 
@@ -633,6 +642,26 @@ inline void FakeSdkServer::HandleSend(FakeStream& stream,
                     c.colors.resize(total, 0x00010101u);
                     c.led_names.resize(total);
                 }
+            }
+            break;
+        }
+        case openrgb2::sdk::kPktLianLiWirelessStatus:
+        {
+            /* The event is recorded either way — it is how
+               the tests count backend probes. Only a
+               fork-aware (scripted) server actually replies;
+               a stock backend silently drops unknown
+               packets, so the request times out client-side. */
+            events.push_back(ServerEvent{ req.header.dev_id,
+                                          req.header.pkt_id,
+                                          req.body });
+            if(!wireless_status_json.empty())
+            {
+                reply(stream, req.header.dev_id,
+                      openrgb2::sdk::kPktLianLiWirelessStatus,
+                      {(const uint8_t*)wireless_status_json.c_str(),
+                       (const uint8_t*)wireless_status_json.c_str()
+                           + wireless_status_json.size() + 1});
             }
             break;
         }

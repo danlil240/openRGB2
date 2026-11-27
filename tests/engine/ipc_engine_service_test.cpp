@@ -17,6 +17,8 @@
 #include "EngineHost.h"
 #include "FrameSink.h"
 
+#include "../sdk/fake_sdk_server.h"
+
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -306,9 +308,90 @@ int main()
         CHECK(r.body["engine"].contains("uptime_s"));
         CHECK(r.body["clock"].contains("steady_ms"));
         CHECK(r.body.contains("delivery"));
-        /* backend's own counters pipe is a later plan item —
-           honest null, never a fake */
+        /* no SDK client wired -> honest null, never a fake */
         CHECK(r.body["backend_counters"].is_null());
+    }
+
+    /*---- backend_counters: the wireless-status extension ------
+           N01 observability: a wedged wireless group (terminal
+           "failed" state inside LianLiWirelessService) was
+           invisible over the SDK — DIAG said Direct + black and
+           nothing else. The fork's packet 4000 now carries the
+           GroupStatus; this drives the REAL OpenRgbClient over
+           the scripted in-process backend so the serializer,
+           wire parser, cache, and diagnostics surface are all
+           exercised at once. */
+    {
+        sdk_test::FakeSdkServer server;
+        sdk_test::FakeController wc;
+        wc.name     = "Lian Li SL Wireless";
+        wc.vendor   = "Lian Li";
+        wc.serial   = "AABBCCDDEEFF";
+        wc.location = "Wireless: AA:BB:CC:DD:EE:FF";
+        sdk_test::FakeMode dm; dm.name = "Direct";
+        wc.modes     = { dm };
+        wc.zones     = { { "g", 0, 0, 1, 1 } };
+        wc.led_names = { "l" };
+        wc.colors    = { 0 };
+        server.controllers = { wc };
+        server.wireless_status_json =
+            "{\"available\":true,\"master\":\"FA:C0:87:E5:66:E4\","
+            "\"groups\":[{\"mac\":\"AABBCCDDEEFF\",\"state\":\"failed\","
+            "\"wedged\":true,\"confirmed\":false,\"resends\":8,"
+            "\"last_error\":\"resend budget exhausted: no HW ack\","
+            "\"rgb_clock\":{\"valid\":true,\"ticks\":5000,"
+            "\"age_ms\":50}}],"
+            "\"counters\":{\"usb_send\":7}}";
+
+        sdk::OpenRgbClient sdk_client(
+            std::make_unique<sdk_test::FakeStream>(server));
+        CHECK(sdk_client.Connect());
+
+        Engine           engine7;
+        DeliveryPipeline pipe7;
+        DeviceMapper     mapper7;
+        EngineService::Deps d7;
+        d7.pipeline = &pipe7;
+        d7.mapper   = &mapper7;
+        d7.sdk      = &sdk_client;
+        EngineService svc7(engine7, d7);
+
+        IpcReply r = svc7.Dispatch(MsgType::DiagGet,
+                                   nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        const nlohmann::json& bc = r.body["backend_counters"];
+        CHECK(bc.is_object());
+        /* THE wedge: the group's terminal state + cause are
+           visible verbatim in diagnostics. */
+        CHECK(bc["available"].get<bool>() == true);
+        CHECK(bc["groups"].is_array() && bc["groups"].size() == 1);
+        CHECK(bc["groups"][0]["state"].get<std::string>() ==
+              "failed");
+        CHECK(bc["groups"][0]["wedged"].get<bool>() == true);
+        CHECK(bc["groups"][0]["last_error"].get<std::string>() ==
+              "resend budget exhausted: no HW ack");
+        CHECK(bc["counters"]["usb_send"].get<int>() == 7);
+        CHECK(bc.contains("fetched_age_ms"));
+
+        /* A stock backend (no packet 4000) reports the honest
+           unsupported marker — and the connection survives. */
+        sdk_test::FakeSdkServer stock;
+        stock.controllers = { wc };
+        sdk::OpenRgbClient sdk_stock(
+            std::make_unique<sdk_test::FakeStream>(stock));
+        CHECK(sdk_stock.Connect());
+        EngineService::Deps d8;
+        d8.pipeline = &pipe7;
+        d8.mapper   = &mapper7;
+        d8.sdk      = &sdk_stock;
+        EngineService svc8(engine7, d8);
+        r = svc8.Dispatch(MsgType::DiagGet, nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["backend_counters"]["available"].get<bool>()
+              == false);
+        CHECK(r.body["backend_counters"]["supported"].get<bool>()
+              == false);
+        CHECK(sdk_stock.State() == ConnectionState::Connected);
     }
 
     /*---- Task 4.7 ownership wire surface ----------------------

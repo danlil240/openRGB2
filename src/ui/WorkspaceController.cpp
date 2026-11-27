@@ -1642,6 +1642,21 @@ void WorkspaceController::refreshList()
                 QStringLiteral("list"));
 }
 
+void WorkspaceController::resync()
+{
+    /* The engine refused a legacy mutation with detail
+       "workspace_required" — this session's snapshot predates
+       adoption (subscribe raced boot re-adoption, or a push
+       was missed). The `get` reply re-runs ApplySnapshot so
+       managed_ heals and the next save takes the
+       WORKSPACE_COMMAND path. */
+    if(available_ && bridge_ && bridge_->connected())
+    {
+        SendCommand(QStringLiteral("get"), {},
+                    QStringLiteral("get"));
+    }
+}
+
 void WorkspaceController::FlushDrafts()
 {
     drafts_.Flush();

@@ -30,4 +30,12 @@ public:
 private:
     RGBFusion2BlackwellGPUController* controller;
     uint8_t     gpu_layout;
+
+    /*-----------------------------------------------------*\
+    | Temporal smoothing state (firmware chase-the-target   |
+    | flicker workaround): last smoothed channel value per  |
+    | hardware zone and LED slot. See DeviceUpdateLEDs.     |
+    \*-----------------------------------------------------*/
+    double                              smoothed[RGB_FUSION_2_BLACKWELL_GPU_NUMBER_OF_ZONES][RGB_FUSION_2_BLACKWELL_AORUS_MASTER_FAN_LEDS][3] = {};
+    bool                                has_smoothed[RGB_FUSION_2_BLACKWELL_GPU_NUMBER_OF_ZONES] = {};
 };

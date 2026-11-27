@@ -567,6 +567,150 @@ static void TestGettersNeverBlockBehindWireIo()
     CHECK(server.CountEvents(kPktUpdateLEDs) == 1);
 }
 
+/*---------------------------------------------------------*\
+||| N01 observability — LIANLI_WIRELESS_STATUS fetch. A    |||
+||| wedged group must be visible through the client's      |||
+||| cached snapshot; an old backend that never answers     |||
+||| must mark "unsupported" without breaking the           |||
+||| connection.                                            |||
+\*---------------------------------------------------------*/
+
+static const char* kWedgeStatusJson =
+    "{\"available\":true,\"master\":\"FA:C0:87:E5:66:E4\","
+    "\"groups\":[{\"mac\":\"W1\",\"state\":\"failed\",\"wedged\":true,"
+    "\"confirmed\":false,\"resends\":8,\"send_failures\":2,"
+    "\"last_error\":\"resend budget exhausted: no HW ack\","
+    "\"rgb_clock\":{\"valid\":true,\"ticks\":5000,"
+    "\"sampled_at_ms\":0,\"age_ms\":50}}],"
+    "\"counters\":{\"usb_send\":42}}";
+
+static void TestWirelessStatusFetch()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup() };
+    server.wireless_status_json = kWedgeStatusJson;
+
+    auto client = MakeClient(server);
+    CHECK(client->Connect());
+
+    /* The connect-time probe answers immediately. */
+    WirelessStatusSnapshot snap;
+    client->WirelessStatus(snap);
+    CHECK(snap.probed);
+    CHECK(snap.supported);
+    CHECK(snap.have_data);
+    CHECK(snap.status.groups.size() == 1);
+    /* THE wedge signal: terminal state + cause, previously
+       invisible outside the backend process. */
+    CHECK(snap.status.groups[0].wedged);
+    CHECK(snap.status.groups[0].state == "failed");
+    CHECK(snap.status.groups[0].last_error ==
+          "resend budget exhausted: no HW ack");
+    CHECK(snap.status.raw["counters"]["usb_send"] == 42);
+
+    /* RefreshStatus re-fetches so the snapshot stays live. */
+    const size_t before =
+        server.CountEvents(kPktLianLiWirelessStatus);
+    CHECK(before >= 1);
+    CHECK(client->RefreshStatus());
+    CHECK(server.CountEvents(kPktLianLiWirelessStatus) > before);
+
+    /* Disconnected state keeps the last snapshot — it is a
+       cache, not a wire op. */
+    client->Disconnect();
+    WirelessStatusSnapshot after;
+    client->WirelessStatus(after);
+    CHECK(after.have_data);
+}
+
+static void TestWirelessStatusUnsupportedBackend()
+{
+    FakeSdkServer server;         /* no scripted reply = stock */
+    server.controllers = { WirelessGroup() };
+
+    auto client = MakeClient(server);
+    /* A stock backend drops packet 4000 — the probe times
+       out, latches "unsupported", and MUST NOT break the
+       connection. */
+    CHECK(client->Connect());
+    CHECK(client->State() == ConnectionState::Connected);
+
+    WirelessStatusSnapshot snap;
+    client->WirelessStatus(snap);
+    CHECK(snap.probed);
+    CHECK(!snap.supported);
+    CHECK(!snap.have_data);
+
+    /* Unsupported is latched for this connection: refresh
+       does not re-probe (no per-2s stall against a stock
+       backend). */
+    const size_t probes =
+        server.CountEvents(kPktLianLiWirelessStatus);
+    CHECK(probes == 1);
+    CHECK(client->RefreshStatus());
+    CHECK(server.CountEvents(kPktLianLiWirelessStatus) == probes);
+    CHECK(client->State() == ConnectionState::Connected);
+}
+
+static void TestWirelessStatusMalformedReply()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup() };
+    server.wireless_status_json = "{ this is not valid json ";
+
+    auto client = MakeClient(server);
+    CHECK(client->Connect());
+    WirelessStatusSnapshot snap;
+    client->WirelessStatus(snap);
+    /* The server answered — supported — but the reply did
+       not parse, so no data is held. */
+    CHECK(snap.probed && snap.supported && !snap.have_data);
+    CHECK(client->State() == ConnectionState::Connected);
+}
+
+static void TestWirelessClockSample()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup() };
+    server.wireless_status_json = kWedgeStatusJson;
+
+    auto client = MakeClient(server);
+    CHECK(client->Connect());
+    const DeviceKey key{ "Lian Li:Lian Li SL Wireless", "W1",
+                         "hid:1", "" };
+
+    /* Group mac == controller serial joins status to the
+       enumerated device; rgb_clock age 50 ms converts to a
+       PlaybackClockSnapshot. */
+    const TimePoint t0 = Clock::now();
+    PlaybackClockSnapshot snap;
+    CHECK(client->WirelessClockSample(key, snap));
+    CHECK(snap.valid);
+    CHECK(snap.ticks == 5000);
+    CHECK(snap.uncertainty_s > 0.0);
+    /* sampled_at = now - 50 ms, within a slack window. */
+    const double sampled_age_ms =
+        std::chrono::duration<double, std::milli>(
+            t0 - snap.sampled_at).count();
+    CHECK(sampled_age_ms > 30.0 && sampled_age_ms < 500.0);
+
+    /* A key whose serial matches no group -> clean miss. */
+    PlaybackClockSnapshot miss;
+    CHECK(!client->WirelessClockSample(
+        DeviceKey{ "v:n", "NOPE", "", "" }, miss));
+    /* A group whose clock is invalid -> miss. */
+    server.wireless_status_json =
+        "{\"available\":true,\"groups\":[{\"mac\":\"W1\","
+        "\"state\":\"holding\",\"rgb_clock\":{\"valid\":false}}]}";
+    CHECK(!client->WirelessClockSample(key, miss));
+    /* Unsupported backend -> miss. */
+    server.wireless_status_json.clear();
+    /* Re-fetch on the next call: unsupported latches, the
+       miss is clean and the connection survives. */
+    CHECK(!client->WirelessClockSample(key, miss));
+    CHECK(client->State() == ConnectionState::Connected);
+}
+
 int main()
 {
     TestHandshakeCapsAt4();
@@ -581,6 +725,10 @@ int main()
     TestDisconnectedSubmit();
     TestMalformedServerReply();
     TestGettersNeverBlockBehindWireIo();
+    TestWirelessStatusFetch();
+    TestWirelessStatusUnsupportedBackend();
+    TestWirelessStatusMalformedReply();
+    TestWirelessClockSample();
     std::printf("sdk client: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

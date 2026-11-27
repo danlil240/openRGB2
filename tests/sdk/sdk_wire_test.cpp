@@ -473,6 +473,94 @@ static void TestPatchModeSpeed()
     CHECK(!PatchModeSpeed(bad, 4, 1));
 }
 
+/*---------------------------------------------------------*\
+|| Vendor extension: LIANLI_WIRELESS_STATUS reply parsing   ||
+|| (N01 observability — the wedged group must surface).    ||
+\*---------------------------------------------------------*/
+
+static void TestWirelessStatusParse()
+{
+    /* The real backend answers pkt 4000 with a null-
+       terminated JSON body (SETTINGS convention). */
+    const char* body =
+        "{\"available\":true,\"master\":\"FA:C0:87:E5:66:E4\","
+        "\"groups\":[{\"mac\":\"9B:10:76:E5:66:E1\",\"state\":\"failed\","
+        "\"wedged\":true,\"confirmed\":false,\"resends\":8,"
+        "\"send_failures\":2,\"last_error\":\"resend budget exhausted\","
+        "\"fan_type\":\"SL V3\",\"fan_count\":3,"
+        "\"sighting\":{\"master\":\"FA:C0:87:E5:66:E4\",\"fan_count\":3},"
+        "\"upload\":{\"frame_count\":4096,\"compressed_bytes\":9000},"
+        "\"rgb_clock\":{\"valid\":true,\"ticks\":123456,"
+        "\"sampled_at_ms\":777,\"age_ms\":42}}],"
+        "\"counters\":{\"set_desired\":5,\"uploads_admitted\":4}}";
+    std::vector<uint8_t> bytes(body, body + strlen(body) + 1);
+
+    SdkWirelessStatus st;
+    CHECK(ParseWirelessStatus(bytes.data(), bytes.size(), st));
+    CHECK(st.groups.size() == 1);
+    CHECK(st.groups[0].mac == "9B:10:76:E5:66:E1");
+    CHECK(st.groups[0].state == "failed");
+    CHECK(st.groups[0].wedged);
+    CHECK(!st.groups[0].confirmed);
+    CHECK(st.groups[0].resends == 8);
+    CHECK(st.groups[0].send_failures == 2);
+    CHECK(st.groups[0].last_error == "resend budget exhausted");
+    CHECK(st.groups[0].clock.valid);
+    CHECK(st.groups[0].clock.ticks == 123456);
+    CHECK(st.groups[0].clock.age_ms == 42);
+    /* The full reply is retained verbatim for diagnostics
+       passthrough — backend-side fields surface without a
+       client rev. */
+    CHECK(st.raw["available"] == true);
+    CHECK(st.raw["counters"]["set_desired"] == 5);
+
+    /* A healthy group parses the same way. */
+    const char* ok =
+        "{\"available\":true,\"groups\":[{\"mac\":\"W1\","
+        "\"state\":\"holding\",\"wedged\":false,\"confirmed\":true,"
+        "\"rgb_clock\":{\"valid\":false,\"ticks\":0,\"age_ms\":0}}]}";
+    std::vector<uint8_t> okb(ok, ok + strlen(ok) + 1);
+    SdkWirelessStatus st2;
+    CHECK(ParseWirelessStatus(okb.data(), okb.size(), st2));
+    CHECK(st2.groups.size() == 1 && st2.groups[0].state == "holding");
+    CHECK(!st2.groups[0].wedged && st2.groups[0].confirmed);
+
+    /* No-groups reply (no dongle pair detected). */
+    const char* empty = "{\"available\":false,\"groups\":[]}";
+    SdkWirelessStatus st3;
+    CHECK(ParseWirelessStatus(
+        (const uint8_t*)empty, strlen(empty) + 1, st3));
+    CHECK(st3.groups.empty());
+    CHECK(st3.raw["available"] == false);
+}
+
+static void TestWirelessStatusParseRejects()
+{
+    SdkWirelessStatus st;
+
+    /* Not JSON at all. */
+    const char* junk = "this is not json";
+    CHECK(!ParseWirelessStatus(
+        (const uint8_t*)junk, strlen(junk), st));
+
+    /* JSON but not the object shape. */
+    const char* arr = "[1,2,3]";
+    CHECK(!ParseWirelessStatus(
+        (const uint8_t*)arr, strlen(arr), st));
+
+    /* Truncated mid-string. */
+    const char* good =
+        "{\"available\":true,\"groups\":[{\"mac\":\"W1\",\"state\":\"holding\"}]}";
+    for(size_t len = 1; len < strlen(good); ++len)
+    {
+        SdkWirelessStatus t;
+        CHECK(!ParseWirelessStatus((const uint8_t*)good, len, t));
+    }
+
+    /* Empty body. */
+    CHECK(!ParseWirelessStatus(nullptr, 0, st));
+}
+
 int main()
 {
     TestParserByteWise();
@@ -489,6 +577,8 @@ int main()
     TestControllerDataMalformedCounts();
     TestBuilders();
     TestPatchModeSpeed();
+    TestWirelessStatusParse();
+    TestWirelessStatusParseRejects();
     std::printf("sdk wire: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
