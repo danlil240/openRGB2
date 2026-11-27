@@ -30,7 +30,9 @@
 #include <QJSValue>
 #include <QQmlComponent>
 #include <QQmlEngine>
+#include <QQuickItem>
 #include <QQuickStyle>
+#include <QQuickWindow>
 #include <QSignalSpy>
 
 #include <cstdio>
@@ -424,6 +426,96 @@ int main(int argc, char** argv)
                       .contains("body"));
             }
         }
+    }
+
+    /* Audit Q-8: Open / Reload / Restore over a dirty draft
+       latch a replace confirmation. Its only buttons used to
+       live on the shell strip — BEHIND this modal popup, so the
+       action appeared to do nothing until the dialog closed.
+       The dialog must offer the confirmation itself. The stub
+       is a notifying QtObject so the dialog's bindings follow
+       the latch like they do on the real controller. */
+    std::printf("-- qml: WorkspaceActionsDialog replace confirm\n");
+    {
+        QQmlComponent stubComp(&engine);
+        stubComp.setData(R"QML(
+            import QtQuick
+            QtObject {
+                objectName: "wsStub"
+                property bool available: true
+                property bool managed: true
+                property bool dirty: true
+                property bool conflict: false
+                property bool saving: false
+                property string externalChange: ""
+                property string workspaceId: "desk"
+                property string workspaceName: "desk"
+                property int workspaceRevision: 3
+                property var workspaceList: ["desk", "attic"]
+                property bool replaceOffered: false
+                property string replaceText: ""
+                property int confirmed: 0
+                property int cancelled: 0
+                function refreshList() {}
+                function openWorkspace(id) {
+                    replaceText = "Open workspace '" + id + "'?"
+                    replaceOffered = true
+                }
+                function reload() { openWorkspace(workspaceId) }
+                function restoreBackup() { openWorkspace(workspaceId) }
+                function confirmReplace() {
+                    confirmed++; replaceOffered = false }
+                function cancelReplace() {
+                    cancelled++; replaceOffered = false }
+            }
+        )QML", QUrl());
+        std::unique_ptr<QObject> stub(stubComp.create());
+        CHECK(stub != nullptr);
+
+        QQuickWindow win;
+        win.resize(800, 700);
+        QObject* dlg = load("WorkspaceActionsDialog.qml");
+        if(dlg != nullptr && stub != nullptr)
+        {
+            dlg->setProperty("parent",
+                QVariant::fromValue(win.contentItem()));
+            dlg->setProperty("ctlOverride",
+                             QVariant::fromValue(stub.get()));
+            win.show();
+            QMetaObject::invokeMethod(dlg, "open");
+            QCoreApplication::processEvents();
+            CHECK(dlg->property("opened").toBool()
+                  || dlg->property("visible").toBool());
+
+            QMetaObject::invokeMethod(stub.get(), "openWorkspace",
+                Q_ARG(QVariant, QVariant(QStringLiteral("attic"))));
+            QCoreApplication::processEvents();
+            QObject* yes = dlg->findChild<QObject*>(
+                "wsDlgConfirmReplace");
+            QObject* no = dlg->findChild<QObject*>(
+                "wsDlgCancelReplace");
+            CHECK(yes != nullptr && no != nullptr);
+            if(yes != nullptr && no != nullptr)
+            {
+                auto* yi = qobject_cast<QQuickItem*>(yes);
+                CHECK(yi != nullptr && yi->isVisible());
+                QMetaObject::invokeMethod(yes, "clicked");
+                CHECK(stub->property("confirmed").toInt() == 1);
+                QCoreApplication::processEvents();
+                CHECK(yi != nullptr && !yi->isVisible());
+
+                /* Keep my draft path */
+                QMetaObject::invokeMethod(stub.get(), "reload");
+                QCoreApplication::processEvents();
+                CHECK(qobject_cast<QQuickItem*>(no)->isVisible());
+                QMetaObject::invokeMethod(no, "clicked");
+                CHECK(stub->property("cancelled").toInt() == 1);
+            }
+            QMetaObject::invokeMethod(dlg, "close");
+            QCoreApplication::processEvents();
+            dlg->setProperty("parent", QVariant());
+        }
+        delete dlg;
     }
 
     std::printf("-- qml: WorkspaceImportDialog stub flow\n");
