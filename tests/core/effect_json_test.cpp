@@ -462,7 +462,7 @@ static void TestPackagedDocs()
     }
 
     /* Registry-backed listing reproduces the shipped metadata. */
-    CHECK(PresetList().size() == 9, "nine looks registered");
+    CHECK(PresetList().size() == 10, "ten looks registered");
     const PresetInfo* p = FindPreset("shockwave");
     CHECK(p != nullptr && p->needs == "audio" && p->name == "Bass shockwave",
           "shockwave metadata from JSON");

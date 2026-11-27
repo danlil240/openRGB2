@@ -5575,6 +5575,18 @@ void LogitechHIDPP20Controller::SetPerKey8080
 
             SendVeryLongFrame(caps.idx_perkey_8080, FN_8080_SET_KEY_COLORS,
                               payload, pos);
+
+            /*---------------------------------------------*\
+            | Pace back-to-back SetKeyColors frames. The    |
+            | writes are fire-and-forget; a G512 RGB        |
+            | (0xC33C, US) drops the tail keys of a frame   |
+            | when the next one lands too soon — F5-F12,    |
+            | PrtSc, 0 and - kept stale colors every time   |
+            | while the rest latched. A short gap lets the  |
+            | firmware finish parsing each frame.           |
+            \*---------------------------------------------*/
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(HIDPP20_8080_FRAME_GAP_MS));
         }
     }
 }

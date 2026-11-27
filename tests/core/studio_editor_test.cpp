@@ -1713,6 +1713,86 @@ static bool FxResolver(const std::string& id, unsigned int seed,
     return !out.empty();
 }
 
+/*---------------------------------------------------------*\
+||| SetFlow — the Wave card's one-record multi-layer edit.  |
+\*---------------------------------------------------------*/
+static void TestFlowEdit()
+{
+    using namespace studio;
+    auto stack = []() {
+        EffectLayer flow;
+        flow.primitive = "wave";
+        flow.speed = 0.1f;  flow.scale = 1.0f;  flow.density = 0.0f;
+        flow.palette = MakePalette({ MakeSceneColor(255, 0, 0),
+                                     MakeSceneColor(0, 0, 255) });
+        EffectLayer swell = flow;
+        swell.speed = 0.2f; swell.scale = 0.5f;
+        swell.palette = MakePalette({ MakeSceneColor(255, 255, 255) });
+        EffectLayer kbd;
+        kbd.primitive = "static";
+        kbd.targets = { "keyboard_body" };
+        return std::vector<EffectLayer>{ flow, swell, kbd };
+    };
+
+    StudioDocument w = Fixture();
+    w.effect.layers = stack();
+    EditorController ctl(w);
+
+    EditorController::FlowEdit d;
+    d.direction = Vec3{ 0.0f, 0.0f, -2.0f };
+    std::optional<EditorEdit> e = ctl.SetFlow(d);
+    CHECK(e.has_value() && e->has_effect, "flow: direction is one record");
+    CHECK(NearVec(w.effect.layers[0].direction, { 0, 0, -1 })
+          && NearVec(w.effect.layers[1].direction, { 0, 0, -1 }),
+          "flow: every wave layer gets the normalized direction");
+    CHECK(NearVec(w.effect.layers[2].direction, { 1, 0, 0 }),
+          "flow: non-wave layers untouched");
+    RevertEditorEdit(w, *e);
+    CHECK(NearVec(w.effect.layers[0].direction, { 1, 0, 0 })
+          && NearVec(w.effect.layers[1].direction, { 1, 0, 0 }),
+          "flow: undo restores both layers");
+
+    EditorController::FlowEdit s;
+    s.speed = 0.3f;  s.wavelength = 2.0f;
+    CHECK(ctl.SetFlow(s).has_value(), "flow: speed+length edit");
+    CHECK(Near(w.effect.layers[0].speed, 0.3f)
+          && Near(w.effect.layers[1].speed, 0.6f),
+          "flow: speed rescales layers proportionally");
+    CHECK(Near(w.effect.layers[0].scale, 2.0f)
+          && Near(w.effect.layers[1].scale, 1.0f),
+          "flow: wavelength rescales layers proportionally");
+
+    EditorController::FlowEdit c;
+    c.colors = { ColorF{ 1, 0, 0, 1 }, ColorF{ 0, 1, 0, 1 },
+                 ColorF{ 0, 0, 1, 1 } };
+    CHECK(ctl.SetFlow(c).has_value(), "flow: colors edit");
+    CHECK(w.effect.layers[0].palette.stops.size() == 3
+          && Near(w.effect.layers[0].palette.stops[1].pos, 1.0f / 3.0f)
+          && Near(w.effect.layers[0].palette.stops[1].color.g, 1.0f),
+          "flow: colors land evenly spaced on the first wave layer");
+    CHECK(w.effect.layers[1].palette.stops.size() == 1,
+          "flow: swell keeps its own palette");
+
+    EditorController::FlowEdit bad;
+    bad.colors = { ColorF{ 1, 0, 0, 1 } };
+    CHECK(!ctl.SetFlow(bad).has_value(), "flow: one color refused");
+    bad.colors.assign(6, ColorF{ 1, 0, 0, 1 });
+    CHECK(!ctl.SetFlow(bad).has_value(), "flow: six colors refused");
+    EditorController::FlowEdit zero;
+    zero.direction = Vec3{ 0, 0, 0 };
+    CHECK(!ctl.SetFlow(zero).has_value(), "flow: zero direction refused");
+    EditorController::FlowEdit neg;
+    neg.speed = -1.0f;
+    CHECK(!ctl.SetFlow(neg).has_value(), "flow: negative speed refused");
+
+    StudioDocument w2 = Fixture();
+    EffectLayer st;  st.primitive = "static";
+    w2.effect.layers = { st };
+    EditorController ctl2(w2);
+    CHECK(!ctl2.SetFlow(d).has_value() && !ctl2.LastError().empty(),
+          "flow: refused on a look without wave layers");
+}
+
 static void TestEffectLayers()
 {
     using namespace studio;
@@ -2215,6 +2295,7 @@ int main()
     TestZoneBinding();
     TestPresetSchemaRoundTrip();
     TestEffectLayers();
+    TestFlowEdit();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

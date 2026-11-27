@@ -2465,6 +2465,119 @@ EditorController::SetLayerStopColor(size_t i, size_t stop,
 }
 
 /*---------------------------------------------------------*\
+|| Directional flow (Wave card)                             ||
+\*---------------------------------------------------------*/
+std::optional<EditorEdit>
+EditorController::SetFlow(const FlowEdit& f)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+
+    Vec3 dir{};
+    if(f.direction)
+    {
+        dir = *f.direction;
+        const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y
+                                    + dir.z * dir.z);
+        if(!std::isfinite(len) || len < 1e-6f)
+        {
+            last_error = "wave direction must be a non-zero vector";
+            return std::nullopt;
+        }
+        dir = Vec3{ dir.x / len, dir.y / len, dir.z / len };
+    }
+    if(!f.colors.empty())
+    {
+        if(f.colors.size() < 2 || f.colors.size() > 5)
+        {
+            last_error = "wave needs 2 to 5 colors";
+            return std::nullopt;
+        }
+        for(const ColorF& c : f.colors)
+        {
+            if(!std::isfinite(c.r) || !std::isfinite(c.g)
+               || !std::isfinite(c.b))
+            {
+                last_error = "wave colors must be finite";
+                return std::nullopt;
+            }
+        }
+    }
+    if(f.speed && (!std::isfinite(*f.speed) || *f.speed <= 0.0f))
+    {
+        last_error = "wave speed must be positive";
+        return std::nullopt;
+    }
+    if(f.wavelength
+       && (!std::isfinite(*f.wavelength) || *f.wavelength <= 0.0f))
+    {
+        last_error = "wave length must be positive";
+        return std::nullopt;
+    }
+
+    const EffectDelta before = SnapEffect();
+    if(!EnsureLayers())
+    {
+        return UndoEffectOp(before);
+    }
+    std::vector<size_t> waves;
+    for(size_t i = 0; i < ws.effect.layers.size(); i++)
+    {
+        const EffectLayer& l = ws.effect.layers[i];
+        if(l.enabled && l.primitive == "wave")
+        {
+            waves.push_back(i);
+        }
+    }
+    if(waves.empty())
+    {
+        last_error = "this look has no wave layer";
+        return UndoEffectOp(before);
+    }
+
+    EffectLayer& first = ws.effect.layers[waves.front()];
+    const float speed0 = first.speed;
+    const float scale0 = first.scale;
+    for(size_t i : waves)
+    {
+        EffectLayer& l = ws.effect.layers[i];
+        if(f.direction)
+        {
+            l.direction = dir;
+        }
+        if(f.speed)
+        {
+            l.speed = (speed0 > 0.0f) ? l.speed * (*f.speed / speed0)
+                                      : *f.speed;
+        }
+        if(f.wavelength)
+        {
+            l.scale = (scale0 > 0.0f)
+                    ? l.scale * (*f.wavelength / scale0)
+                    : *f.wavelength;
+        }
+    }
+    if(!f.colors.empty())
+    {
+        Palette p;
+        const size_t n = f.colors.size();
+        for(size_t k = 0; k < n; k++)
+        {
+            PaletteStop s;
+            s.pos   = (float)k / (float)n;
+            s.color = f.colors[k];
+            s.color.a = 1.0f;
+            p.stops.push_back(s);
+        }
+        first.palette = p;
+    }
+    return FinishEffectEdit(before, "edit wave");
+}
+
+/*---------------------------------------------------------*\
 || Path-point ops (comet waypoints)                         ||
 \*---------------------------------------------------------*/
 std::optional<EditorEdit>

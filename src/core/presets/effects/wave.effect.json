@@ -1,0 +1,44 @@
+{
+  "$schema": "../../schemas/effect.schema.json",
+  "schema_version": 1,
+  "id": "wave",
+  "name": "Wave",
+  "description": "A color flow sweeping every device in one direction; the keyboard stays white",
+  "needs": "",
+  "layers": [
+    {
+      "primitive": "wave",
+      "direction": [0.0, 0.0, -1.0],
+      "scale": 1.25,
+      "speed": 0.12,
+      "density": 0.0,
+      "opacity": 1.0,
+      "palette": [
+        { "pos": 0.0, "color": "#0018FF" },
+        { "pos": 0.25, "color": "#00C8FF" },
+        { "pos": 0.5, "color": "#7A00FF" },
+        { "pos": 0.75, "color": "#FF00A8" }
+      ]
+    },
+    {
+      "primitive": "wave",
+      "blend": "screen",
+      "direction": [0.0, 0.0, -1.0],
+      "scale": 0.9,
+      "speed": 0.15,
+      "density": 1.2,
+      "opacity": 0.25,
+      "palette": [
+        { "pos": 0.0, "color": "#FFFFFF" },
+        { "pos": 0.5, "color": "#B0F0FF" }
+      ]
+    },
+    {
+      "primitive": "static",
+      "targets": ["keyboard_body"],
+      "palette": [
+        { "pos": 0.0, "color": "#F2F4FF" }
+      ]
+    }
+  ]
+}

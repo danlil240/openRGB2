@@ -1260,6 +1260,109 @@ void EffectEditorController::setLayerStopColor(int index, int stop,
 }
 
 /*---------------------------------------------------------*\
+|| directional flow (Wave card)                             ||
+\*---------------------------------------------------------*/
+
+QVariantMap EffectEditorController::flowState() const
+{
+    QVariantMap m;
+    const std::vector<studio::EffectLayer> layers = EffectiveLayers();
+    int first = -1;
+    int kbd   = -1;
+    for(int i = 0; i < (int)layers.size(); i++)
+    {
+        const studio::EffectLayer& l = layers[i];
+        if(first < 0 && l.enabled && l.primitive == "wave")
+        {
+            first = i;
+        }
+        if(kbd < 0 && l.primitive == "static"
+           && std::find(l.targets.begin(), l.targets.end(),
+                        std::string("keyboard_body"))
+              != l.targets.end())
+        {
+            kbd = i;
+        }
+    }
+    m["available"]     = ready() && first >= 0;
+    m["keyboardLayer"] = kbd;
+    m["keyboardOn"]    = kbd >= 0 && layers[kbd].enabled;
+    if(first < 0)
+    {
+        return m;
+    }
+    const studio::EffectLayer& w = layers[first];
+    m["direction"]  = VecMap(w.direction);
+    m["speed"]      = w.speed;
+    m["wavelength"] = w.scale;
+    QStringList colors;
+    for(const studio::PaletteStop& s : w.palette.stops)
+    {
+        colors.push_back(QString::fromStdString(
+            studio::SceneColorHex(studio::ToSceneColor(s.color))));
+    }
+    m["colors"] = colors;
+    return m;
+}
+
+bool EffectEditorController::ApplyFlow(
+    const studio::EditorController::FlowEdit& f)
+{
+    if(!ready() || gestureActive())
+    {
+        return false;
+    }
+    auto e = Editor()->SetFlow(f);
+    const bool changed = e.has_value();
+    ApplyOp(std::move(e));
+    return changed;
+}
+
+bool EffectEditorController::setFlowDirection(double x, double y,
+                                              double z)
+{
+    studio::EditorController::FlowEdit f;
+    f.direction = studio::Vec3{ (float)x, (float)y, (float)z };
+    return ApplyFlow(f);
+}
+
+bool EffectEditorController::setFlowColors(const QStringList& colors)
+{
+    studio::EditorController::FlowEdit f;
+    for(const QString& s : colors)
+    {
+        const QColor c(s);
+        if(!c.isValid())
+        {
+            emit statusMessage(QStringLiteral(
+                "wave color must be a valid color"));
+            return false;
+        }
+        f.colors.push_back(ColorOf(c));
+    }
+    if(f.colors.size() < 2 || f.colors.size() > 5)
+    {
+        emit statusMessage(QStringLiteral("wave needs 2 to 5 colors"));
+        return false;
+    }
+    return ApplyFlow(f);
+}
+
+bool EffectEditorController::setFlowSpeed(double metersPerSecond)
+{
+    studio::EditorController::FlowEdit f;
+    f.speed = (float)metersPerSecond;
+    return ApplyFlow(f);
+}
+
+bool EffectEditorController::setFlowWavelength(double meters)
+{
+    studio::EditorController::FlowEdit f;
+    f.wavelength = (float)meters;
+    return ApplyFlow(f);
+}
+
+/*---------------------------------------------------------*\
 || path-point ops                                           ||
 \*---------------------------------------------------------*/
 

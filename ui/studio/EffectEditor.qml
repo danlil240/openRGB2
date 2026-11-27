@@ -59,6 +59,12 @@ Rectangle {
             width: parent.width
         }
 
+        /* Simple direction/colors/speed controls for looks built
+           from wave layers (hides itself otherwise). */
+        WaveControls {
+            width: parent.width
+        }
+
         LayerStack {
             visible: editor.ready
             width: parent.width

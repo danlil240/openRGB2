@@ -759,7 +759,7 @@ static void TestPresetsAndRemix()
 {
     using namespace studio;
 
-    CHECK(PresetList().size() == 9, "nine presets registered");
+    CHECK(PresetList().size() == 10, "ten presets registered");
     for(const PresetInfo& p : PresetList())
     {
         const auto layers = BuildPreset(p.id, 1);
