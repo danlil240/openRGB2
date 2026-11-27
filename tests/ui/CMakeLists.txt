@@ -287,6 +287,28 @@ foreach(scale 1.00 1.25 1.50 2.00)
             "PATH=path_list_prepend:${QT_BIN_DIR};QT_SCALE_FACTOR=set:${scale}")
 endforeach()
 
+# Audit Q-12: the real shell in a shown window — a vertical
+# scroll bar on every page, keyboard focus below the fold scrolls
+# into view, and the Layout 2D/3D toggle shows (and keeps) its
+# checked state.
+add_executable(qml_scroll_toggle_test qml_scroll_toggle_test.cpp)
+target_link_libraries(qml_scroll_toggle_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+target_include_directories(qml_scroll_toggle_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(qml_scroll_toggle_test PRIVATE NDEBUG)
+set_target_properties(qml_scroll_toggle_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(qml_scroll_toggle_test)
+add_test(NAME qml_scroll_toggle_test COMMAND qml_scroll_toggle_test)
+set_tests_properties(qml_scroll_toggle_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
+
 # studio-import Task 5: the scene/object editing surface —
 # the real ObjectEditorController + SceneObjectModel +
 # PresetListModel over the shared WorkspaceEditSession (one

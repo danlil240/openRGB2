@@ -235,7 +235,7 @@ Item {
     onWidthChanged: computeView()
     onHeightChanged: computeView()
 
-    Flickable {
+    PageFlickable {     /* scroll bar + focus-follow (audit Q-12) */
         objectName: "layoutScroll"
         anchors.fill: parent
         contentHeight: col.implicitHeight
@@ -421,18 +421,25 @@ Item {
                             visible: root.quick3dUp
                             height: visible ? implicitHeight : 0
                             spacing: Theme.spaceS
+                            /* Audit Q-12: `checked` mirrors show3d
+                               and AppButton now paints it. Not
+                               `checkable` — a click must not flip
+                               the state locally (clicking the
+                               active view used to un-check it). */
                             AppButton {
                                 objectName: "view2dButton"
                                 text: qsTr("2D")
-                                checkable: true
                                 checked: !root.show3d
+                                Accessible.checkable: true
+                                Accessible.checked: checked
                                 onClicked: root.setShow3d(false)
                             }
                             AppButton {
                                 objectName: "view3dButton"
                                 text: qsTr("3D")
-                                checkable: true
                                 checked: root.show3d
+                                Accessible.checkable: true
+                                Accessible.checked: checked
                                 onClicked: root.setShow3d(true)
                             }
                             /* Render quality tier — persisted as
