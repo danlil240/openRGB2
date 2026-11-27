@@ -120,6 +120,8 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/UiSettings.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/StartupTaskController.h
         ${CMAKE_SOURCE_DIR}/src/ui/StartupTaskController.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/LaunchHardening.h
+        ${CMAKE_SOURCE_DIR}/src/ui/LaunchHardening.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceEditSession.h
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceEditSession.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceDraftStore.h
@@ -178,3 +180,8 @@ target_link_libraries(openrgb2_ui PUBLIC
 PRIVATE
     Qt6::Network
     openrgb2_ipc_wire)
+if(WIN32)
+    # LaunchHardening: token elevation probe (advapi32) and the
+    # Program Files known-folder lookup (shell32 + ole32).
+    target_link_libraries(openrgb2_ui PRIVATE advapi32 shell32 ole32)
+endif()
