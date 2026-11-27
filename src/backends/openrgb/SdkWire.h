@@ -22,7 +22,8 @@
 |||     - UPDATELEDS/UPDATEMODE bodies start with a u32      ||
 |||       data_size equal to the packet body size            ||
 |||     - RESIZEZONE is just { i32 zone_idx, i32 new_size }  ||
-|||     - No ACKs and no unsolicited traffic below v6        ||
+|||     - No ACKs below v6; the one unsolicited packet at    ||
+|||       any version is DEVICE_LIST_UPDATED (100, empty)    ||
 |||                                                           |
 |||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 \*---------------------------------------------------------*/
