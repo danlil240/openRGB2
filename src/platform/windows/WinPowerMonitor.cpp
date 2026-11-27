@@ -135,7 +135,17 @@ bool WinPowerMonitor::Start(Sink sink, std::string& err)
     {
         return false;
     }
+    if(thread_.joinable())
+    {
+        thread_.join();          /* a previous run already exited */
+    }
     sink_ = std::move(sink);
+    /* Fresh init handshake per run: a Start() after Stop() must
+       not see the previous run's init_done_ (it would judge the
+       registrations before the new window exists — and join a
+       thread that is about to run its message loop). */
+    init_done_ = false;
+    hwnd_.store(nullptr);
     thread_ = std::thread(&WinPowerMonitor::ThreadMain, this);
 
     /* Wait until the window attempt finished so Start()'s
