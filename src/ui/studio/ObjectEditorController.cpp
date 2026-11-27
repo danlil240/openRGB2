@@ -157,7 +157,16 @@ ObjectEditorController::ObjectEditorController(EngineBridge* bridge,
             {
                 RequestCatalog();
             }
+            else
+            {
+                /* The pending catalog reply died with the session
+                   — unlatch, or every later RequestCatalog (the
+                   reconnect one included) is refused forever. */
+                pending_catalog_ = 0;
+            }
         });
+        connect(bridge_, &EngineBridge::engineLost,
+                this, [this](const QString&) { pending_catalog_ = 0; });
         if(bridge_->connected())
         {
             RequestCatalog();

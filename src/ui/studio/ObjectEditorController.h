@@ -236,6 +236,9 @@ public:
     void RegisterPresetForSession(const studio::DevicePreset& p);
     void UnregisterPresetForSession(const std::string& id);
     SceneObjectModel&     ModelForTesting() { return object_model_; }
+    /* Test seam: the in-flight device-catalog request id. */
+    int  PendingCatalogForTesting() const { return pending_catalog_; }
+    void SetPendingCatalogForTesting(int id) { pending_catalog_ = id; }
 
 signals:
     void selectionChanged();
