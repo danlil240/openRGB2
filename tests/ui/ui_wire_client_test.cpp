@@ -419,8 +419,8 @@ void Test_ResyncAndTooLarge()
     CHECK(WaitFor([&] { return cap.EventCount() == 1; }));
 
     /* Crafted oversized header: valid framing, body_len over
-       the 1 MiB cap — reader reports TooLarge and resyncs
-       onto the NEXT real message. */
+       the 1 MiB cap — reader reports TooLarge, skips the body
+       by length, and reads the NEXT real message. */
     {
         std::vector<uint8_t> hdr;
         const uint32_t magic = kMagic;
@@ -431,6 +431,10 @@ void Test_ResyncAndTooLarge()
         for(int i = 0; i < 4; ++i) hdr.push_back(0); /* req id  */
         for(int i = 0; i < 4; ++i) hdr.push_back((uint8_t)(blen >> (8 * i)));
         srv.SendRaw(hdr);
+        /* The reader discards the declared body by LENGTH (it is
+           never rescanned for a smuggled frame), so it must be
+           sent in full before the next real message. */
+        srv.SendRaw(std::vector<uint8_t>(blen, '#'));
     }
     srv.SendMsg(MsgType::Event, 0,
                 nlohmann::json::object({

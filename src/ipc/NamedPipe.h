@@ -55,10 +55,13 @@ constexpr const char* kDiagnosticsPipeName = "\\\\.\\pipe\\openrgb2-engine-diag"
 || a second user account.                                   ||
 ||                                                          ||
 || Produces SDDL                                            ||
-||   D:P(A;;GA;;;<token-user-sid>)(A;;GA;;;SY)              ||
+||   D:P(D;;GA;;;NU)(A;;GA;;;<token-user-sid>)(A;;GA;;;SY)  ||
 || = protected DACL, GENERIC_ALL to the creating user and   ||
-|| to LocalSystem only. No Everyone/Users/Anonymous/Network ||
-|| ACE — the pipe is not default-open.                      ||
+|| to LocalSystem only, with Network logons denied first    ||
+|| (the creating user over SMB included). No Everyone/      ||
+|| Users/Anonymous allow ACE — the pipe is not default-     ||
+|| open. Every instance is also created with                ||
+|| PIPE_REJECT_REMOTE_CLIENTS.                              ||
 \*---------------------------------------------------------*/
 bool BuildRestrictedSddl(std::string& sddl_out, std::string& err);
 
@@ -139,10 +142,21 @@ private:
 };
 
 /* Client-side connect (test fixtures, Milestone 4 helpers):
-   opens an existing pipe with a bounded wait. */
+   opens an existing pipe with a bounded wait, identification-
+   only impersonation level (SECURITY_SQOS_PRESENT |
+   SECURITY_IDENTIFICATION), and VERIFIES the server before
+   returning (VerifyPipeServer) — a squatted name fails with
+   err set instead of yielding a channel. */
 std::unique_ptr<IIpcChannel> ConnectNamedPipeChannel(
     const std::string& pipe_name, uint32_t timeout_ms,
     std::string& err);
+
+/* Server check on a connected client pipe HANDLE: true when
+   the pipe object's owner is this user, LocalSystem or
+   BUILTIN\Administrators (an ELEVATED engine of the same
+   user owns its objects as Administrators by default), or
+   else when the server process's token user is this user. */
+bool VerifyPipeServer(void* pipe_handle, std::string& err);
 
 /*---------------------------------------------------------*\
 || NamedPipeListener — creates pipe instances under the    ||
@@ -150,7 +164,10 @@ std::unique_ptr<IIpcChannel> ConnectNamedPipeChannel(
 || IpcServer::Serve on its own accept thread.              ||
 ||                                                          ||
 || Stop() is bounded: a self-connect releases a blocked    ||
-|| ConnectNamedPipe and the thread joins.                  ||
+|| ConnectNamedPipe and the thread joins. The next         ||
+|| listening instance is created before the current one is ||
+|| served or closed, so the name never has zero instances  ||
+|| (no squatting window) while the listener runs.          ||
 \*---------------------------------------------------------*/
 class NamedPipeListener
 {

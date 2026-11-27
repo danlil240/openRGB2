@@ -25,6 +25,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 
@@ -289,6 +290,136 @@ IpcIoResult NamedPipeChannel::SendAll(const void* data, size_t len,
 }
 
 /*---------------------------------------------------------*\
+| Server verification                                       |
+|                                                           |
+| A client must not talk to whoever happens to own the pipe |
+| NAME: another local account could create it first (squat) |
+| and harvest requests. Accepted servers:                   |
+|  - the pipe object's OWNER is this user, LocalSystem, or  |
+|    BUILTIN\Administrators. The engine's descriptor sets no |
+|    explicit owner, so the owner is its token's default    |
+|    owner: the user SID when unelevated, Administrators    |
+|    when the (managed) engine runs ELEVATED as the same    |
+|    user — that case must keep working for an unelevated   |
+|    UI. Only an elevated/admin process can create an       |
+|    Administrators-owned object, and such a process is     |
+|    already trusted with the whole machine.                |
+|  - otherwise, best effort: the server PROCESS's token     |
+|    user equals ours (GetNamedPipeServerProcessId).        |
+\*---------------------------------------------------------*/
+
+namespace
+{
+
+bool CurrentUserSid(std::vector<uint8_t>& out)
+{
+    HANDLE token = nullptr;
+    if(!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+    {
+        return false;
+    }
+    DWORD len = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &len);
+    bool ok = false;
+    if(len > 0)
+    {
+        std::vector<uint8_t> buf(len);
+        if(GetTokenInformation(token, TokenUser, buf.data(), len, &len))
+        {
+            const PSID sid = ((const TOKEN_USER*)buf.data())->User.Sid;
+            const DWORD n  = GetLengthSid(sid);
+            out.assign((const uint8_t*)sid, (const uint8_t*)sid + n);
+            ok = true;
+        }
+    }
+    CloseHandle(token);
+    return ok;
+}
+
+bool ServerProcessIsUser(HANDLE pipe, PSID self)
+{
+    ULONG pid = 0;
+    if(!GetNamedPipeServerProcessId(pipe, &pid) || pid == 0)
+    {
+        return false;
+    }
+    HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                              FALSE, pid);
+    if(!proc)
+    {
+        return false;
+    }
+    bool   ok    = false;
+    HANDLE token = nullptr;
+    if(OpenProcessToken(proc, TOKEN_QUERY, &token))
+    {
+        DWORD len = 0;
+        GetTokenInformation(token, TokenUser, nullptr, 0, &len);
+        if(len > 0)
+        {
+            std::vector<uint8_t> buf(len);
+            if(GetTokenInformation(token, TokenUser, buf.data(), len,
+                                   &len))
+            {
+                ok = EqualSid(((const TOKEN_USER*)buf.data())->User.Sid,
+                              self) != FALSE;
+            }
+        }
+        CloseHandle(token);
+    }
+    CloseHandle(proc);
+    return ok;
+}
+
+} /* anonymous namespace */
+
+bool VerifyPipeServer(void* pipe_handle, std::string& err)
+{
+    const HANDLE h = (HANDLE)pipe_handle;
+    std::vector<uint8_t> self;
+    if(!CurrentUserSid(self))
+    {
+        err = "cannot read the current user SID: " +
+              pipe_detail::LastErrorText(GetLastError());
+        return false;
+    }
+    const PSID self_sid = (PSID)self.data();
+
+    /* Owner of the pipe object (READ_CONTROL is part of the
+       GENERIC_READ the client opened with). */
+    DWORD need = 0;
+    GetKernelObjectSecurity(h, OWNER_SECURITY_INFORMATION, nullptr, 0,
+                            &need);
+    if(need > 0)
+    {
+        std::vector<uint8_t> sd(need);
+        PSID  owner     = nullptr;
+        BOOL  defaulted = FALSE;
+        if(GetKernelObjectSecurity(h, OWNER_SECURITY_INFORMATION,
+                                   (PSECURITY_DESCRIPTOR)sd.data(),
+                                   need, &need) &&
+           GetSecurityDescriptorOwner((PSECURITY_DESCRIPTOR)sd.data(),
+                                      &owner, &defaulted) &&
+           owner != nullptr)
+        {
+            if(EqualSid(owner, self_sid) ||
+               IsWellKnownSid(owner, WinLocalSystemSid) ||
+               IsWellKnownSid(owner, WinBuiltinAdministratorsSid))
+            {
+                return true;
+            }
+        }
+    }
+    if(ServerProcessIsUser(h, self_sid))
+    {
+        return true;
+    }
+    err = "pipe server is not owned by this user (refusing a "
+          "possibly squatted pipe name)";
+    return false;
+}
+
+/*---------------------------------------------------------*\
 | Client connect                                            |
 \*---------------------------------------------------------*/
 
@@ -303,13 +434,28 @@ std::unique_ptr<IIpcChannel> ConnectNamedPipeChannel(
         /* FILE_FLAG_OVERLAPPED is mandatory: RecvSome/SendAll
            drive this handle with real OVERLAPPED ops — a
            synchronous handle would make every "pending" wait
-           behave undefined (deadlock on timeout paths). */
+           behave undefined (deadlock on timeout paths).
+           SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION: the
+           server may identify this client but never impersonate
+           it (the default would be SecurityImpersonation). */
         HANDLE h = CreateFileA(pipe_name.c_str(),
                                GENERIC_READ | GENERIC_WRITE,
                                0, nullptr, OPEN_EXISTING,
-                               FILE_FLAG_OVERLAPPED, nullptr);
+                               FILE_FLAG_OVERLAPPED |
+                                   SECURITY_SQOS_PRESENT |
+                                   SECURITY_IDENTIFICATION,
+                               nullptr);
         if(h != INVALID_HANDLE_VALUE)
         {
+            /* Verify WHO serves the name before a single byte
+               goes out — fail closed. */
+            std::string verr;
+            if(!VerifyPipeServer((void*)h, verr))
+            {
+                CloseHandle(h);
+                err = verr;
+                return nullptr;
+            }
             /* Byte + wait mode is the client default — nothing
                else to set: deadline control comes from the
                overlapped waits, not PIPE_NOWAIT polling. */
@@ -366,6 +512,8 @@ IpcIoResult NamedPipeChannel::SendAll(const void*, size_t, uint32_t,
 std::unique_ptr<IIpcChannel> ConnectNamedPipeChannel(
     const std::string&, uint32_t, std::string& err)
 { err = "unsupported platform"; return nullptr; }
+bool VerifyPipeServer(void*, std::string& err)
+{ err = "unsupported platform"; return false; }
 
 } /* namespace ipc */
 } /* namespace openrgb2 */

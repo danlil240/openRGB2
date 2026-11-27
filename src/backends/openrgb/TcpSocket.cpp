@@ -99,7 +99,11 @@ bool TcpSocket::Connect(const std::string& host, uint16_t port,
         ioctlsocket(s, FIONBIO, &nonblocking);
         if(connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0)
         {
-            break;                      /* connected immediately */
+            /* Connected immediately: back to blocking like the
+               select() path — RecvExact/SendAll rely on it. */
+            u_long blocking = 0;
+            ioctlsocket(s, FIONBIO, &blocking);
+            break;
         }
         if(WSAGetLastError() != WSAEWOULDBLOCK)
         {
@@ -216,9 +220,19 @@ RecvResult TcpSocket::RecvExact(void* buf, size_t len, std::string& err)
         if(n < 0)
         {
             const int wsa = WSAGetLastError();
+            if(wsa == WSAETIMEDOUT && left == len)
+            {
+                /* Clean timeout: nothing of this read was
+                   consumed. */
+                return RecvResult::Timeout;
+            }
             if(wsa == WSAETIMEDOUT)
             {
-                return RecvResult::Timeout;
+                /* Part of the record is already consumed — a
+                   "timeout" here would leave the stream
+                   desynchronized, so it is an error. */
+                err = "recv timed out after a partial read";
+                return RecvResult::Error;
             }
             err = WsaError("recv failed");
             return RecvResult::Error;

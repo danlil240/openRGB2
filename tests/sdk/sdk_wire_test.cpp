@@ -511,8 +511,8 @@ static void TestWirelessStatusParse()
     /* The full reply is retained verbatim for diagnostics
        passthrough — backend-side fields surface without a
        client rev. */
-    CHECK(st.raw["available"] == true);
-    CHECK(st.raw["counters"]["set_desired"] == 5);
+    CHECK((*st.raw)["available"] == true);
+    CHECK((*st.raw)["counters"]["set_desired"] == 5);
 
     /* A healthy group parses the same way. */
     const char* ok =
@@ -531,7 +531,7 @@ static void TestWirelessStatusParse()
     CHECK(ParseWirelessStatus(
         (const uint8_t*)empty, strlen(empty) + 1, st3));
     CHECK(st3.groups.empty());
-    CHECK(st3.raw["available"] == false);
+    CHECK((*st3.raw)["available"] == false);
 }
 
 static void TestWirelessStatusParseRejects()

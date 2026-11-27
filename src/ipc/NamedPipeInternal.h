@@ -105,7 +105,9 @@ enum class OvWait { Completed, Timeout, Closed, Error };
    Anything but Completed cancels the op and DRAINS it with a
    blocking GetOverlappedResult — the caller's OVERLAPPED and
    I/O buffer are guaranteed dead before this returns, so
-   stack storage is safe to unwind. */
+   stack storage is safe to unwind. If the drain shows the op
+   completed with data anyway (it raced the cancel), the
+   result is Completed: transferred bytes are never dropped. */
 inline OvWait WaitOverlapped(HANDLE h, OVERLAPPED& ov, HANDLE ev,
                              HANDLE close_ev,
                              uint64_t deadline_abs_ms,
@@ -143,7 +145,17 @@ inline OvWait WaitOverlapped(HANDLE h, OVERLAPPED& ov, HANDLE ev,
         }
         CancelIoEx(h, &ov);
         DWORD n = 0;
-        GetOverlappedResult(h, &ov, &n, TRUE);   /* drain */
+        if(GetOverlappedResult(h, &ov, &n, TRUE) && n > 0)  /* drain */
+        {
+            /* The op completed in the race with the cancel:
+               its bytes were really transferred (read out of
+               the pipe / written into it). Reporting a timeout
+               here would lose received data or invite a
+               duplicate write — the caller re-queries the
+               (now final) result and consumes it. */
+            err.clear();
+            return OvWait::Completed;
+        }
         return result;
     }
 }

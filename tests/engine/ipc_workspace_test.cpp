@@ -537,7 +537,9 @@ int main()
         put((uint16_t)MsgType::WorkspaceCommand, 2);
         put(++seq, 4); put(kMaxBodyBytes + 1, 4);
         c.SendBytes(big);
-        c.SendRaw(std::string(128, '#'));
+        /* The whole declared body: it is discarded by length. */
+        c.SendBytes(std::vector<uint8_t>((size_t)kMaxBodyBytes + 1,
+                                         '#'));
         c.SendMsg(MsgType::Ping, ++seq, json::object());
         CHECK(RecvReply(c, seq - 1, m));
         CHECK(IsErr(m, ErrCode::TooLarge));

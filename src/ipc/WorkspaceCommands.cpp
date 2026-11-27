@@ -964,7 +964,7 @@ IpcReply WorkspaceCommands::Handle(uint64_t session_id,
             "unavailable");
     }
     if(!body.is_object() ||
-       !body.value("verb", nlohmann::json()).is_string())
+       !FieldOrNull(body, "verb").is_string())
     {
         return FailDetail(ErrCode::BadRequest,
             "WORKSPACE_COMMAND requires {verb:<string>}",
@@ -1185,7 +1185,9 @@ IpcReply WorkspaceCommands::PreviewCandidate(
                                           : err,
                               "bad_request");
         }
-        doc = nlohmann::json::parse(bytes, nullptr, false);
+        /* Same nesting cap as wire bodies: the staged document
+           is untrusted and nlohmann copies/dumps recursively. */
+        doc = ParseJsonBounded(bytes);
         if(doc.is_discarded())
         {
             return FailDetail(ErrCode::BadRequest,

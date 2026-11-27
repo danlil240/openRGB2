@@ -79,6 +79,13 @@ struct OpenRgbClientOptions
     std::string      client_name        = "openrgb2-engine";
     uint32_t         connect_timeout_ms = 3000;
     uint32_t         io_timeout_ms      = 4000;
+    /* Packet-4000 (wireless status) probe: one overall reply
+       deadline, far below io_timeout_ms — a stock backend never
+       answers and the probe holds the wire (io_mutex_) while it
+       waits. A backend that missed it is re-probed after
+       wireless_reprobe_ms (and on every enumeration). */
+    uint32_t         wireless_probe_timeout_ms = 300;
+    uint32_t         wireless_reprobe_ms       = 60000;
     ReconnectBackoff backoff;
 };
 
@@ -103,17 +110,21 @@ struct ConnectionSnapshotInfo
    supported — the backend answered (the lianli-wireless
                fork). A stock backend drops unknown packets
                silently under protocol <= 4, so the probe
-               times out: supported latches false for the
-               REST of the connection (never re-probed — a
-               periodic 4 s stall would be worse than no
-               data), and the connection stays healthy.
+               times out (its own short deadline): supported
+               latches false and the connection stays
+               healthy. The latch is re-probed only on the
+               slow wireless_reprobe_ms schedule and on every
+               enumeration, and clears as soon as a late reply
+               arrives (a fork that was merely slow).
    have_data — a reply was received AND parsed (a replying
                server is "supported" even when one reply is
                malformed).
    fetched_at/status — the last parsed reply and when it
                arrived; diagnostics computes staleness from
                fetched_at rather than trusting a cached body
-               to be current. */
+               to be current. status.raw is shared
+               (shared_ptr<const json>), so copying the
+               snapshot never deep-copies the document. */
 struct WirelessStatusSnapshot
 {
     bool              probed    = false;
@@ -263,6 +274,9 @@ public:
     | live. Returns false only when the wire op broke the      |
     | connection — a silently-dropped request on a stock       |
     | backend returns true with supported=false latched.       |
+    | Replies are matched by counting outstanding requests, so |
+    | a late reply to a timed-out probe is never read as the   |
+    | next probe's answer.                                     |
     | WirelessStatus() copies the cache under the state lock   |
     | only — never touches the wire.                           |
     \*---------------------------------------------------------*/
@@ -273,9 +287,11 @@ public:
        the group whose `mac` equals `controller.serial` — the
        playback-clock-sync dep (PlaybackClockSync.h expects a
        per-call provider). False when the extension is
-       unsupported, the group is unknown, or its rgb_clock is
-       invalid — the caller treats a miss like any absent
-       sample (staleness, not breakage). */
+       unsupported, THIS fetch got no parsed reply (a cached
+       status is never re-stamped as a new sample), the group
+       is unknown, or its rgb_clock is invalid — the caller
+       treats a miss like any absent sample (staleness, not
+       breakage). sampled_at = reply arrival - backend age. */
     bool WirelessClockSample(const DeviceKey& controller,
                              PlaybackClockSnapshot& out);
 
@@ -291,7 +307,9 @@ private:
     struct TransportError;
     void SendPacket(uint32_t dev_id, uint32_t pkt_id,
                     const std::vector<uint8_t>& body);
-    bool RecvPacket(Packet& pkt, std::string& err);
+    /* Ok, or a clean Closed/Timeout (no byte consumed); a
+       stall after part of a packet throws TransportError. */
+    RecvResult RecvPacket(Packet& pkt);
     std::vector<uint8_t> Request(uint32_t dev_id, uint32_t pkt_id,
                                  const std::vector<uint8_t>& body,
                                  uint32_t expected_reply_id);
@@ -309,7 +327,10 @@ private:
     \*--------------------------------------------------------*/
     bool EnumerateIo(std::string& err);
     bool ConnectIo(std::string& err);
-    bool FetchWirelessStatusIo();
+    /* force: probe even when latched unsupported. fresh: set
+       true only when THIS call parsed a reply. */
+    bool FetchWirelessStatusIo(bool force, bool* fresh = nullptr);
+    void NoteWirelessReplyIo();
     void MarkBrokenIo(const std::string& reason, TimePoint now);
     void PollIo(TimePoint now);
 
@@ -333,6 +354,16 @@ private:
     /* Last wireless-status fetch — state lock; cleared on
        (re)connect so a swapped backend gets a fresh probe. */
     WirelessStatusSnapshot wireless_status_;
+    TimePoint              wireless_next_probe_{};  /* state lock */
+
+    /* Server-reported controller count at the last enumeration
+       (state lock) — may exceed devices_.size() when
+       duplicate-key controllers collapse. */
+    uint32_t               server_controller_count_ = 0;
+
+    /* Packet-4000 requests sent whose replies have not been
+       read yet. io_mutex_ only (wire-side bookkeeping). */
+    uint32_t               wireless_pending_ = 0;
 };
 
 } /* namespace sdk */
