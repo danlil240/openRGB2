@@ -120,6 +120,19 @@ public:
         std::function<std::shared_ptr<const studio::InputState>()>;
     void     SetInputProvider(InputProvider provider);
 
+    /* Output gate (display-off / suspend): while it reports
+       true, Step still applies submitted scene/input state
+       (AppliedRevision stays truthful) but skips the input pull,
+       the scene evaluation and the frame callback — every
+       frame would only be rejected at the gated pipeline. The
+       clock keeps ticking, so the first ungated tick evaluates
+       the current scene time and the identify overlay's
+       expiry/restore runs then (its restore would be refused
+       while gated anyway). Queried once per tick WITHOUT
+       mutex_ held; must be cheap. */
+    using OutputGate = std::function<bool()>;
+    void     SetOutputGate(OutputGate gate);
+
     /* The scene clock's t = 0 reference. Reactive-input
        providers stamp event times on this base so event ages
        evaluate correctly against the tick's scene_time_s. */
@@ -204,6 +217,7 @@ private:
     FrameCallback         callback_;
     IdleFrameHook         idle_frame_hook_;
     InputProvider         input_provider_;
+    OutputGate            output_gate_;
     EngineLogFn           log_;
     /* Worker-thread-only counter (Step is single-caller) —
        throttles the per-fault log line. */

@@ -1017,6 +1017,12 @@ bool EngineHost::Start(std::string& err)
        submissions to the suppressed wireless group still run
        so the lane's rejection — never a silent drop — is
        exercised on every tick. */
+    /* While the power lifecycle gates output (display off /
+       suspend) every mapped frame would only be rejected at the
+       pipeline: skip evaluation + mapping instead of running
+       them at 60 Hz just to inflate the `rejected` counters. */
+    engine_.Worker().SetOutputGate(
+        [this]() { return pipeline_->OutputPaused(); });
     engine_.Worker().SetFrameCallback(
         [this](const EvaluatedFrame& eval)
         {

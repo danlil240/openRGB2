@@ -177,6 +177,49 @@ static void TestLatestWinsScene()
           Reference(*WaveDoc(), SolidLayers(200, 0, 0), 0.0));
 }
 
+/* Output gate: while gated, no input pull, no evaluation, no
+   callback — but submitted scenes still apply (revision truth),
+   and the first ungated tick samples the CURRENT scene time. */
+static void TestOutputGate()
+{
+    SceneWorker worker;
+    std::vector<EvaluatedFrame> frames;
+    worker.SetFrameCallback([&frames](const EvaluatedFrame& f)
+    {
+        frames.push_back(f);
+    });
+    int pulls = 0;
+    worker.SetInputProvider([&pulls]()
+    {
+        ++pulls;
+        return std::shared_ptr<const studio::InputState>();
+    });
+    bool gated = true;
+    worker.SetOutputGate([&gated] { return gated; });
+
+    const TimePoint epoch = Clock::now();
+    worker.SetEpoch(epoch);
+    worker.SubmitScene(WaveDoc(), WaveLayers(), /*rev*/ 3);
+
+    CHECK(!worker.Step(epoch));
+    CHECK(!worker.Step(epoch + std::chrono::milliseconds(16)));
+    CHECK(frames.empty());
+    CHECK(pulls == 0);
+    CHECK(worker.AppliedRevision() == 3);
+
+    gated = false;
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(500)));
+    CHECK(frames.size() == 1);
+    CHECK(pulls == 1);
+    if(!frames.empty())
+    {
+        CHECK(frames[0].sequence == 1);
+        CHECK(Near(frames[0].scene_time_s, 0.500));
+        CHECK(frames[0].colors ==
+              Reference(*WaveDoc(), WaveLayers(), 0.500));
+    }
+}
+
 static void TestNoScene()
 {
     SceneWorker worker;
@@ -429,6 +472,7 @@ int main()
     TestAbsoluteTimeSampling();
     TestLatestWinsScene();
     TestNoScene();
+    TestOutputGate();
     TestInputSlot();
     TestReentrantInputProvider();
     TestStepFaultIsContained();
