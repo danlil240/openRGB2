@@ -206,6 +206,17 @@ std::vector<Sighting> LianLiWirelessService::RecentSightings(uint64_t max_age_ms
     return sightings.Snapshot(clock.NowMs(), max_age_ms);
 }
 
+bool LianLiWirelessService::AdoptedMaster(Mac& out) const
+{
+    std::lock_guard<std::mutex> status_lock(status_mutex);
+    if(!has_adopted_master)
+    {
+        return false;
+    }
+    out = adopted_master;
+    return true;
+}
+
 uint64_t LianLiWirelessService::BeginMode(const Mac& mac, bool playback)
 {
     uint64_t revision = 0;
@@ -422,6 +433,13 @@ void LianLiWirelessService::StepAll()
                 break;
             }
             kv.second->Tick();
+            Mac adopted{};
+            if(kv.second->TakeAdoptedMaster(adopted))
+            {
+                std::lock_guard<std::mutex> status_lock(status_mutex);
+                adopted_master     = adopted;
+                has_adopted_master = true;
+            }
             PublishStatus(kv.first, *kv.second);
         }
         finished = TraceClock::now();

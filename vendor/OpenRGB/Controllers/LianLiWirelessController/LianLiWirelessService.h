@@ -102,6 +102,15 @@ namespace LianLiWireless
         \*---------------------------------------------------------*/
         std::vector<Sighting> RecentSightings(uint64_t max_age_ms) const;
 
+        /*---------------------------------------------------------*\
+        | The transmitter most recently adopted by a runtime after  |
+        | new intent (an operator mode/effect request) re-armed a   |
+        | transmitter-identity wedge. False if none ever was. The   |
+        | detector's rescan uses it so groups bound to the adopted  |
+        | transmitter are accepted; it is never set automatically.  |
+        \*---------------------------------------------------------*/
+        bool AdoptedMaster(Mac& out) const;
+
         /* newest-frame-wins; unknown MAC is ignored */
         uint64_t BeginMode(const Mac& mac, bool playback);
 
@@ -188,6 +197,8 @@ namespace LianLiWireless
         /* small lock for the published per-group status snapshot */
         mutable std::mutex    status_mutex;
         std::map<Mac, GroupStatus> status_snapshot;
+        Mac                   adopted_master{};         /* status_mutex */
+        bool                  has_adopted_master = false; /* status_mutex */
         struct PendingUpload
         {
             bool queued = false;

@@ -95,6 +95,25 @@ namespace LianLiWireless
         uint64_t reconnect_ms     = 3000;   /* delay between transport retry batches */
         uint64_t rearm_ms         = 30000;  /* first timed re-arm of a terminal wedge */
         uint64_t rearm_max_ms     = 240000; /* timed re-arm backoff ceiling          */
+        uint64_t rearm_stable_ms  = 30000;  /* Holding this long resets the backoff  */
+    };
+
+    /*---------------------------------------------------------*\
+    | Why a runtime is in a terminal wedge. Only the            |
+    | observation-only causes (GroupMaster, Layout) re-arm on a |
+    | timer: a re-armed runtime never writes until discovery    |
+    | shows the group bound to our master with the expected     |
+    | layout again. UploadBudget (another owner keeps           |
+    | overriding the effect) and TransmitterIdentity are        |
+    | report-only and re-arm only on new intent.                |
+    \*---------------------------------------------------------*/
+    enum class WedgeCause
+    {
+        None,
+        GroupMaster,            /* group reports a different master       */
+        Layout,                 /* fan count / motherboard RGB sync       */
+        UploadBudget,           /* upload never confirmed (other owner)   */
+        TransmitterIdentity,    /* local transmitter MAC changed          */
     };
 
     class WirelessRuntime
@@ -103,9 +122,9 @@ namespace LianLiWireless
         WirelessRuntime(IWirelessLink& link, IWirelessClock& clock,
                         WirelessRuntimeConfig cfg = {});
 
-        /* A changed fan count on an existing target is new intent: it
-           re-arms a terminal wedge (e.g. a layout failure caused by a
-           wrong count frozen at detection). */
+        /* A changed fan count on an existing target re-arms a Layout
+           wedge (e.g. a layout failure caused by a wrong count frozen
+           at detection). It never re-arms other wedge causes. */
         void SetTarget(const Mac& mac, uint8_t expected_fans);
         uint8_t ExpectedFans() const { return expected_fans; }
         /* newest-frame-wins: replaces any pending desired upload */
@@ -134,6 +153,16 @@ namespace LianLiWireless
            device — used by the service to count replaced-pending frames */
         bool HasUnconfirmedDesired() const { return desired && !Confirmed(); }
 
+        WedgeCause Wedge() const { return IsTerminalWedge() ? wedge_cause : WedgeCause::None; }
+
+        /*---------------------------------------------------------*\
+        | True once after new intent re-armed a transmitter-        |
+        | identity wedge and Boot adopted the transmitter now       |
+        | present (out = its MAC). The service forwards it so the   |
+        | detector's rescan filter follows the operator's choice.   |
+        \*---------------------------------------------------------*/
+        bool TakeAdoptedMaster(Mac& out);
+
     private:
         bool PollAndMerge(uint64_t now);
         bool SendDesired(uint64_t now);
@@ -143,9 +172,15 @@ namespace LianLiWireless
         void RevalidateTransport(const char* err);
         void RetryTransport();
         /* N01: new intent re-arms a terminal wedge (Failed budget /
-           layout exhaustion, ForeignMaster). See implementation. */
-        void RearmTerminal();
+           layout exhaustion, ForeignMaster). See implementation.
+           from_intent=false is the timed re-arm (observation-only
+           causes only). */
+        void RearmTerminal(bool from_intent = true);
         bool IsTerminalWedge() const;
+        static bool TimedRearmAllowed(WedgeCause c)
+        {
+            return c == WedgeCause::GroupMaster || c == WedgeCause::Layout;
+        }
 
         IWirelessLink&       link;
         IWirelessClock&      clock;
@@ -193,14 +228,18 @@ namespace LianLiWireless
         uint64_t             search_started_ms = 0;
         bool                 search_armed = false;
 
-        /* Timed re-arm of terminal wedges (uploaded playback sends no
-           new intent). Backoff doubles per re-arm up to rearm_max_ms
-           and resets once the group is confirmed again. */
+        /* Timed re-arm of observation-only wedges (uploaded playback
+           sends no new intent). Backoff doubles per re-arm up to
+           rearm_max_ms and resets only after the group has been
+           Holding for rearm_stable_ms. */
         bool                 rearm_scheduled = false;
         uint64_t             next_rearm_ms = 0;
         uint64_t             rearm_delay_ms = 0;
-        /* ForeignMaster entered because the local transmitter's MAC
-           changed: a re-arm adopts the current transmitter. */
-        bool                 identity_changed = false;
+        uint64_t             holding_since_ms = 0;
+        WedgeCause           wedge_cause = WedgeCause::None;
+        /* New intent re-armed a TransmitterIdentity wedge: the next
+           Boot adopts the transmitter present then. */
+        bool                 adopt_on_boot = false;
+        bool                 adopted_pending = false;
     };
 }

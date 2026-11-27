@@ -192,6 +192,25 @@ static std::shared_ptr<WirelessServiceContext> BuildWirelessContext()
 \*---------------------------------------------------------*/
 static void MergeRescanSightings(WirelessServiceContext& ctx)
 {
+    /*-----------------------------------------------------*\
+    | Follow an operator-adopted transmitter: when new      |
+    | intent re-armed a transmitter-identity wedge, the     |
+    | runtime adopted the transmitter present then. Accept  |
+    | groups on that master from now on, so a group bound   |
+    | to it is added instead of driven only by an existing  |
+    | runtime. Never changes without that operator action.  |
+    | Written under the context mutex (CollectStatusJson    |
+    | reads it); rescans are serialized by the detect mutex.|
+    \*-----------------------------------------------------*/
+    Mac adopted{};
+    if(ctx.service->AdoptedMaster(adopted) && adopted != ctx.master)
+    {
+        LOG_INFO("[Lian Li Wireless] rescan follows adopted transmitter %02X:%02X:%02X:%02X:%02X:%02X",
+                 adopted[0], adopted[1], adopted[2], adopted[3], adopted[4], adopted[5]);
+        std::lock_guard<std::mutex> lock(wireless_ctx_mutex);
+        ctx.master = adopted;
+    }
+
     std::vector<Sighting> recent = ctx.service->RecentSightings(LLW_RESCAN_SIGHTING_AGE_MS);
 
     for(const Sighting& s : recent)
