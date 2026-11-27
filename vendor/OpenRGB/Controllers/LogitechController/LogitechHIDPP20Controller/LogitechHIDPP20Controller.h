@@ -116,6 +116,7 @@
 | paginates its readback by the same count.                 |
 \*---------------------------------------------------------*/
 #define HIDPP20_8080_KEYS_PER_FRAME         14
+#define HIDPP20_8080_FRAME_GAP_MS           2   /* gap between SetKeyColors frames */
 
 /*---------------------------------------------------------*\
 | Feature 0x0001 functions (FeatureSet)                     |
