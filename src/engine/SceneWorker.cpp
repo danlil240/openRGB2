@@ -170,7 +170,12 @@ bool SceneWorker::Step(TimePoint now)
             active_scene_      = std::move(pending_scene_);
             pending_scene_     = SceneState{};
             has_pending_scene_ = false;
-            engine_.SetLayers(active_scene_.scene.layers);
+            /* Audit C-2: replace at this tick's scene time so a
+               layer whose speed/wavelength changed keeps its
+               pattern where it is (t below is the same value). */
+            engine_.ReplaceLayers(
+                active_scene_.scene.layers,
+                std::chrono::duration<double>(now - epoch_).count());
             world_dirty_ = true;
         }
         if(has_pending_input_)

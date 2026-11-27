@@ -225,12 +225,17 @@ static Vec3 SamplePos(const EffectLayer& layer, const EvalInput& in)
     return (layer.space == CoordSpace::Local) ? in.local : in.world;
 }
 
-static ColorF EvalWave(const EffectLayer& L, const EvalInput& in)
+/* The time-driven terms below add LayerDrive offsets (audit C-2;
+   see EffectTypes.h). A zero drive adds +0.0, which leaves every
+   value bit-identical to the plain absolute-time evaluation. */
+static ColorF EvalWave(const EffectLayer& L, const EvalInput& in,
+                       const LayerDrive& D)
 {
     const Vec3  p   = SamplePos(L, in);
     const Vec3  dir = Normalize(L.direction);
     const float u   = Dot(p, dir) / L.scale
-                      - (float)Wrap1(in.t * L.speed / L.scale) + L.phase;
+                      - (float)Wrap1(in.t * L.speed / L.scale + D.cycles)
+                      + L.phase;
     /* band shape: density >1 thins the bands, <1 widens, 0 = full sweep */
     const float band = 0.5f - 0.5f * std::cos(TAU * u);
     ColorF out = L.palette.Sample(u);
@@ -238,33 +243,39 @@ static ColorF EvalWave(const EffectLayer& L, const EvalInput& in)
     return out;
 }
 
-static ColorF EvalPulse(const EffectLayer& L, const EvalInput& in)
+static ColorF EvalPulse(const EffectLayer& L, const EvalInput& in,
+                        const LayerDrive& D)
 {
     const Vec3  p = SamplePos(L, in);
     const Vec3  d { p.x - L.origin.x, p.y - L.origin.y, p.z - L.origin.z };
     const float u = Length(d) / L.scale
-                    - (float)Wrap1(in.t * L.speed / L.scale) + L.phase;
+                    - (float)Wrap1(in.t * L.speed / L.scale + D.cycles)
+                    + L.phase;
     const float band = 0.5f - 0.5f * std::cos(TAU * u);
     ColorF out = L.palette.Sample(u);
     out.a = std::pow(band, L.density > 0.0f ? L.density : 1.0f) * L.opacity;
     return out;
 }
 
-static ColorF EvalGradient(const EffectLayer& L, const EvalInput& in)
+static ColorF EvalGradient(const EffectLayer& L, const EvalInput& in,
+                           const LayerDrive& D)
 {
     const Vec3  p   = SamplePos(L, in);
     const Vec3  dir = Normalize(L.direction);
-    const float u   = Dot(p, dir) * L.scale + (float)Wrap1(in.t * L.speed) + L.phase;
+    const float u   = Dot(p, dir) * L.scale
+                      + (float)Wrap1(in.t * L.speed + D.cycles) + L.phase;
     ColorF out = L.palette.Sample(u);
     out.a = L.opacity;
     return out;
 }
 
-static ColorF EvalSpin(const EffectLayer& L, const EvalInput& in)
+static ColorF EvalSpin(const EffectLayer& L, const EvalInput& in,
+                       const LayerDrive& D)
 {
     const Vec3  p = SamplePos(L, in);
     const float a = std::atan2(p.z - L.origin.z, p.x - L.origin.x);
-    const float u = (a / TAU) * L.scale - (float)Wrap1(in.t * L.speed) + L.phase;
+    const float u = (a / TAU) * L.scale
+                    - (float)Wrap1(in.t * L.speed + D.cycles) + L.phase;
     ColorF out = L.palette.Sample(u);
     out.a = L.opacity;
     return out;
@@ -319,7 +330,8 @@ static float PathArc(const std::vector<Vec3>& path, const Vec3& p, float& total_
     return best_s;
 }
 
-static ColorF EvalComet(const EffectLayer& L, const EvalInput& in)
+static ColorF EvalComet(const EffectLayer& L, const EvalInput& in,
+                        const LayerDrive& D)
 {
     const Vec3 p = SamplePos(L, in);
     float total = 0.0f;
@@ -332,7 +344,8 @@ static ColorF EvalComet(const EffectLayer& L, const EvalInput& in)
     }
     /* period is the path length, reduced in double (see Wrap1);
        a negative speed or phase wraps into [0, total) too */
-    double head_d = std::fmod(in.t * L.speed + (double)L.phase * total,
+    double head_d = std::fmod(in.t * L.speed + D.cycles
+                              + (double)L.phase * total,
                               (double)total);
     if(head_d < 0.0)
     {
@@ -356,16 +369,17 @@ static ColorF EvalComet(const EffectLayer& L, const EvalInput& in)
     return out;
 }
 
-static ColorF EvalNoise(const EffectLayer& L, const EvalInput& in)
+static ColorF EvalNoise(const EffectLayer& L, const EvalInput& in,
+                        const LayerDrive& D)
 {
     const Vec3 p = SamplePos(L, in);
     /* Noise is not periodic, so the drift offset cannot be wrapped;
        instead the sample point stays in double and NoiseAt splits it
        into an integer lattice cell + float fraction (see Wrap1). */
     const double off = in.t * L.speed;
-    const float n = NoiseAt((double)p.x * L.scale + L.direction.x * off,
-                            (double)p.y * L.scale + L.direction.y * off,
-                            (double)p.z * L.scale + L.direction.z * off,
+    const float n = NoiseAt((double)p.x * L.scale + L.direction.x * off + D.nx,
+                            (double)p.y * L.scale + L.direction.y * off + D.ny,
+                            (double)p.z * L.scale + L.direction.z * off + D.nz,
                             L.seed);
     /* density gates coverage: 0 = everywhere, ~0.9 = sparse sparks */
     const float lo  = 1.0f - 0.9f * Clamp01(L.density);
@@ -499,12 +513,18 @@ static ColorF EvalLevel(const EffectLayer& L, const EvalInput& in)
 
 ColorF EvalPrimitive(const EffectLayer& L, const EvalInput& in)
 {
-    if(L.primitive == "wave")        return EvalWave(L, in);
-    if(L.primitive == "pulse")       return EvalPulse(L, in);
-    if(L.primitive == "gradient")    return EvalGradient(L, in);
-    if(L.primitive == "spin")        return EvalSpin(L, in);
-    if(L.primitive == "comet")       return EvalComet(L, in);
-    if(L.primitive == "noise")       return EvalNoise(L, in);
+    return EvalPrimitive(L, in, LayerDrive{});
+}
+
+ColorF EvalPrimitive(const EffectLayer& L, const EvalInput& in,
+                     const LayerDrive& D)
+{
+    if(L.primitive == "wave")        return EvalWave(L, in, D);
+    if(L.primitive == "pulse")       return EvalPulse(L, in, D);
+    if(L.primitive == "gradient")    return EvalGradient(L, in, D);
+    if(L.primitive == "spin")        return EvalSpin(L, in, D);
+    if(L.primitive == "comet")       return EvalComet(L, in, D);
+    if(L.primitive == "noise")       return EvalNoise(L, in, D);
     if(L.primitive == "ripple")      return EvalRipple(L, in);
     if(L.primitive == "screenfield") return EvalScreenField(L, in);
     if(L.primitive == "level")       return EvalLevel(L, in);
@@ -512,6 +532,113 @@ ColorF EvalPrimitive(const EffectLayer& L, const EvalInput& in)
     /* "static" and unknown primitives: flat palette[0] */
     ColorF out = L.palette.stops.empty() ? ColorF{} : L.palette.stops[0].color;
     out.a = L.opacity;
+    return out;
+}
+
+/*---------------------------------------------------------*\
+||| Phase continuity across layer replacement (audit C-2)   |
+\*---------------------------------------------------------*/
+static bool SameVec3(const Vec3& a, const Vec3& b)
+{
+    return a.x == b.x && a.y == b.y && a.z == b.z;
+}
+
+static bool SamePath(const std::vector<Vec3>& a, const std::vector<Vec3>& b)
+{
+    if(a.size() != b.size())
+    {
+        return false;
+    }
+    for(size_t i = 0; i < a.size(); i++)
+    {
+        if(!SameVec3(a[i], b[i]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static double CometLoopLength(const std::vector<Vec3>& path)
+{
+    float total = 0.0f;
+    PathArc(path, Vec3{}, total);
+    return total;
+}
+
+LayerDrive ContinueDrive(const EffectLayer& from,
+                         const LayerDrive& from_drive,
+                         const EffectLayer& to, double t)
+{
+    LayerDrive out;
+    if(from.primitive != to.primitive)
+    {
+        return out;     /* a different field: start fresh */
+    }
+    const std::string& prim = to.primitive;
+
+    /* Periodic terms: the drive is in phase cycles. Solve
+       t*rate_to + out = t*rate_from + from_drive (mod 1). The
+       difference is formed in double from the same expressions
+       the primitives evaluate, then wrapped to keep it small. */
+    if(prim == "wave" || prim == "pulse")
+    {
+        if(from.speed == to.speed && from.scale == to.scale)
+        {
+            return from_drive;   /* exact: an unchanged re-apply */
+        }
+        out.cycles = Wrap1(t * from.speed / from.scale + from_drive.cycles
+                           - t * to.speed / to.scale);
+        return out;
+    }
+    if(prim == "gradient" || prim == "spin")
+    {
+        if(from.speed == to.speed)
+        {
+            return from_drive;
+        }
+        out.cycles = Wrap1(t * from.speed + from_drive.cycles
+                           - t * to.speed);
+        return out;
+    }
+    /* Comet: the drive is metres travelled; keep the distance the
+       head has covered and reduce it by the new loop length. A
+       path edit keeps the travelled distance, not the position. */
+    if(prim == "comet")
+    {
+        if(from.speed == to.speed && SamePath(from.path, to.path))
+        {
+            return from_drive;
+        }
+        double d = t * from.speed + from_drive.cycles - t * to.speed;
+        const double total = CometLoopLength(to.path);
+        if(total >= 1e-6)
+        {
+            d = std::fmod(d, total);
+        }
+        out.cycles = d;
+        return out;
+    }
+    /* Noise: not periodic, so the drift offset is a lattice-space
+       vector. A direction edit stays continuous too. */
+    if(prim == "noise")
+    {
+        if(from.speed == to.speed
+           && SameVec3(from.direction, to.direction))
+        {
+            return from_drive;
+        }
+        const double off_from = t * from.speed;
+        const double off_to   = t * to.speed;
+        out.nx = from.direction.x * off_from + from_drive.nx
+               - to.direction.x * off_to;
+        out.ny = from.direction.y * off_from + from_drive.ny
+               - to.direction.y * off_to;
+        out.nz = from.direction.z * off_from + from_drive.nz
+               - to.direction.z * off_to;
+        return out;
+    }
+    /* ripple / screenfield / level / static: no t*speed term. */
     return out;
 }
 

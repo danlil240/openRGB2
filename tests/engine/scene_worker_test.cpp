@@ -258,6 +258,52 @@ static void TestWorldCachePerScene()
     }
 }
 
+/* Audit C-2: a live speed edit (a new scene submission whose wave
+   layer differs only in speed) must not jump the pattern by an
+   amount that grows with uptime. Ten minutes in, the edited frame
+   at the same instant matches the frame before the edit, and the
+   pattern moves on at the new rate. */
+static void TestSpeedEditContinuity()
+{
+    SceneWorker worker;
+    std::vector<EvaluatedFrame> frames;
+    worker.SetFrameCallback([&frames](const EvaluatedFrame& f)
+    {
+        frames.push_back(f);
+    });
+    const TimePoint epoch = Clock::now();
+    worker.SetEpoch(epoch);
+
+    auto doc = WaveDoc();
+    const auto at = [&epoch](int ms)
+    {
+        return epoch + std::chrono::milliseconds(ms);
+    };
+    worker.SubmitScene(doc, WaveLayers(), 1);
+    CHECK(worker.Step(at(600000)));
+
+    std::vector<studio::EffectLayer> faster = WaveLayers();
+    faster[0].speed *= 1.043f;   /* 0.58 cycles off at t = 600 s */
+    worker.SubmitScene(doc, faster, 2);
+    CHECK(worker.Step(at(600000)));
+    CHECK(worker.Step(at(600016)));
+
+    CHECK(frames.size() == 3);
+    if(frames.size() == 3)
+    {
+        const auto red = [](const EvaluatedFrame& f)
+        {
+            return (int)(f.colors.at("mid")[0] & 0xFF);
+        };
+        CHECK(std::abs(red(frames[1]) - red(frames[0])) <= 1);
+        CHECK(std::abs(red(frames[2]) - red(frames[1])) <= 3);
+        /* ...where a fresh start at t = 600 s would have jumped. */
+        const int fresh =
+            (int)(Reference(*doc, faster, 600.0).at("mid")[0] & 0xFF);
+        CHECK(std::abs(fresh - red(frames[0])) > 40);
+    }
+}
+
 static void TestNoScene()
 {
     SceneWorker worker;
@@ -512,6 +558,7 @@ int main()
     TestNoScene();
     TestOutputGate();
     TestWorldCachePerScene();
+    TestSpeedEditContinuity();
     TestInputSlot();
     TestReentrantInputProvider();
     TestStepFaultIsContained();

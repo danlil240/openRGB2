@@ -23,7 +23,23 @@ namespace studio
 class EffectEngine
 {
 public:
-    void SetLayers(const std::vector<EffectLayer>& new_layers) { layers = new_layers; }
+    /* Fresh start: every layer runs on absolute time (t * speed
+       from t = 0). Deterministic per (layers, doc, t) — the
+       golden fixtures and one-shot evaluators use this. */
+    void SetLayers(const std::vector<EffectLayer>& new_layers);
+
+    /* Live replacement at scene time t (audit C-2): layer i of
+       the new stack continues layer i of the old one when the
+       primitive matches — its time-driven motion term (wave and
+       pulse phase, gradient/spin rotation, comet head, noise
+       drift) evaluates the same at t as before the swap, so a
+       speed, wavelength or direction edit changes the RATE from
+       here on instead of jumping the pattern by an amount that
+       grows with uptime. An unchanged layer is bit-exact. Other
+       layers (new index, different primitive) start fresh. */
+    void ReplaceLayers(const std::vector<EffectLayer>& new_layers,
+                       double t);
+
     const std::vector<EffectLayer>& Layers() const             { return layers; }
     bool Empty() const                                         { return layers.empty(); }
 
@@ -47,6 +63,7 @@ public:
 
 private:
     std::vector<EffectLayer> layers;
+    std::vector<LayerDrive>  drives;    /* parallel to layers */
 };
 
 } /* namespace studio */

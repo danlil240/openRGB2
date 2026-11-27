@@ -76,8 +76,44 @@ struct EvalInput
 bool   LayerMatches(const EffectLayer& layer, const SceneObject& obj,
                     const Emitter& emitter);
 
+/*---------------------------------------------------------*\
+|||| LayerDrive — a per-layer offset on the time-driven term |
+|||| (audit C-2). Every moving primitive advances by          |
+|||| t * speed (/ scale), and t is seconds since the worker   |
+|||| started, so swapping in a layer with a new speed or      |
+|||| wavelength moved its pattern by an amount proportional   |
+|||| to uptime. EffectEngine::ReplaceLayers picks an offset   |
+|||| per layer so the motion term is continuous at the        |
+|||| replacement time. Zero (the default) is the plain        |
+|||| absolute-time evaluation, bit-for-bit.                   |
+||||                                                         |
+||||   cycles — wave/pulse/gradient/spin: phase cycles added  |
+||||            to the term before it is wrapped;             |
+||||            comet: metres added to the head distance      |
+||||   nx..nz — noise: lattice-space drift added to the       |
+||||            sample point (noise is not periodic)          |
+\*---------------------------------------------------------*/
+struct LayerDrive
+{
+    double cycles = 0.0;
+    double nx     = 0.0;
+    double ny     = 0.0;
+    double nz     = 0.0;
+};
+
 /* Evaluate one primitive — returns color + coverage (a). */
 ColorF EvalPrimitive(const EffectLayer& layer, const EvalInput& in);
+ColorF EvalPrimitive(const EffectLayer& layer, const EvalInput& in,
+                     const LayerDrive& drive);
+
+/* The drive for `to` that continues `from` (running with
+   `from_drive`) at time t: both evaluate the same motion term at
+   t. Returns `from_drive` unchanged when nothing that feeds the
+   term changed, and a zero drive when the primitive differs or
+   has no time term (ripple/screenfield/level/static). */
+LayerDrive ContinueDrive(const EffectLayer& from,
+                         const LayerDrive& from_drive,
+                         const EffectLayer& to, double t);
 
 /* Composite src over dst with src.a already including opacity. */
 ColorF BlendOver(ColorF dst, ColorF src, BlendMode mode);

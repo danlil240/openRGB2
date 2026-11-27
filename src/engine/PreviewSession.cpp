@@ -183,7 +183,9 @@ bool PreviewSession::Sample(double scene_time_s,
             applied_revision_ = to_apply_rev;
             error_.clear();
         }
-        engine_.SetLayers(prepared_.layers);
+        /* Audit C-2: a draft edit continues each layer's motion
+           at this sample's time instead of jumping it. */
+        engine_.ReplaceLayers(prepared_.layers, scene_time_s);
     }
 
     /* Snapshot the applied state under the lock — a concurrent

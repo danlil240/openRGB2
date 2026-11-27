@@ -8,8 +8,29 @@
 
 #include "../scene/SceneGraph.h"
 
+#include <algorithm>
+
 namespace studio
 {
+
+void EffectEngine::SetLayers(const std::vector<EffectLayer>& new_layers)
+{
+    layers = new_layers;
+    drives.assign(layers.size(), LayerDrive{});
+}
+
+void EffectEngine::ReplaceLayers(const std::vector<EffectLayer>& new_layers,
+                                 double t)
+{
+    std::vector<LayerDrive> next(new_layers.size());
+    const size_t n = std::min(layers.size(), new_layers.size());
+    for(size_t i = 0; i < n; i++)
+    {
+        next[i] = ContinueDrive(layers[i], drives[i], new_layers[i], t);
+    }
+    layers = new_layers;
+    drives = std::move(next);
+}
 
 void EffectEngine::Evaluate(const SceneDocument& doc, double t,
                             FrameColors& frame, const InputState* input) const
@@ -84,8 +105,9 @@ void EffectEngine::Evaluate(const SceneDocument& doc,
                 }
             }
             ColorF acc = ToColorF(painted);
-            for(const EffectLayer& layer : layers)
+            for(size_t k = 0; k < layers.size(); k++)
             {
+                const EffectLayer& layer = layers[k];
                 if(!layer.enabled || !LayerMatches(layer, obj, e))
                 {
                     continue;
@@ -93,7 +115,7 @@ void EffectEngine::Evaluate(const SceneDocument& doc,
                 touched  = true;
                 /* r.a already carries layer.opacity — every
                    primitive applies it (BlendOver's contract). */
-                const ColorF r = EvalPrimitive(layer, in);
+                const ColorF r = EvalPrimitive(layer, in, drives[k]);
                 acc = BlendOver(acc, r, layer.blend);
             }
             colors[i] = ToSceneColor(acc);
