@@ -202,6 +202,24 @@ public:
     };
     ExternalFingerprint ExternalScan(const std::string& id) const;
 
+    /* Metadata-only companion of ExternalScan (audit I-6): the
+       same tracked set described by existence, size and last
+       write time — the marker pair is the only thing READ (a
+       few bytes, to find the pointed generation); nothing is
+       hashed. Equal stamps mean ExternalScan would reproduce
+       its last answer, so the 2 s `get` poll rescans only
+       when this moves. `racy` is set when any stamped entry
+       was written in the last few seconds: a same-size
+       rewrite inside one file-time tick cannot be told apart
+       by metadata (the racy-git rule), so the caller must
+       rescan rather than trust the stamp. */
+    struct ExternalStampResult
+    {
+        std::string stamp;
+        bool        racy = true;
+    };
+    ExternalStampResult ExternalStamp(const std::string& id) const;
+
     /* The marker BACKUP's generation (active.lkg) — the
        last-known-good load Restore Backup commits forward.
        Empty/Failed statuses carry the honest reason; the

@@ -49,10 +49,12 @@
 #include "effects/Presets.h"
 #include "scene/SceneTypes.h"
 
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 namespace openrgb2
 {
@@ -163,7 +165,10 @@ public:
            document with NO objects never reaches the hook:
            applying an empty scene is a deliberate "new scene"
            staging step, not the thing to restore on the next
-           launch. Empty -> no persistence. */
+           launch. Runs on the service's background snapshot
+           writer, coalesced latest-wins (audit I-6) — never on
+           the request thread; FlushPersistedScene() and the
+           destructor drain it. Empty -> no persistence. */
         std::function<void(const studio::SceneDocument&)>
             persist_scene;
 
@@ -263,6 +268,14 @@ public:
     uint64_t SceneRevision() const;
     std::shared_ptr<const studio::SceneDocument> Scene() const;
 
+    /* Blocks until the last-scene snapshot writer has landed
+       every document queued so far (audit I-6: persist_scene
+       runs on a background writer, coalesced latest-wins, so
+       an apply never waits on the durable write). The owner
+       calls it at orderly shutdown; the destructor drains the
+       same way. No-op without a persist_scene hook. */
+    void     FlushPersistedScene();
+
     /* Diff-driven event emission for the push channel: call
        periodically (~500 ms) from the engine's owner loop.
        Emits topology/connection/playback/reactive events on
@@ -353,6 +366,20 @@ private:
        the OWNING session only. */
     std::function<void(uint64_t, const IpcEvent&,
                        const std::string&)> session_sink_;
+
+    /* Last-scene snapshot writer (audit I-6): a depth-1
+       latest-wins slot drained by one background thread —
+       a burst of applies lands only the newest document, and
+       the request thread never runs the durable write. The
+       thread starts with the first queued document. */
+    std::mutex              persist_mutex_;
+    std::condition_variable persist_cv_;
+    std::shared_ptr<const studio::SceneDocument> persist_pending_;
+    bool                    persist_busy_ = false;
+    bool                    persist_stop_ = false;
+    std::thread             persist_thread_;
+    void   QueuePersist(std::shared_ptr<const studio::SceneDocument> doc);
+    void   PersistMain();
 
     /* PollEvents diffing state. */
     std::string         last_connection_sig_;

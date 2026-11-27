@@ -39,6 +39,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <process.h>
@@ -1395,6 +1396,105 @@ static void TestFailedCommitRetry()
     CHECK(lr.candidate->document.meta.name == "second");
 }
 
+/*---------------------------------------------------------*\
+|||| I-6: the `get` poll is metadata-only. The published     ||
+|||| snapshot carries the current document's bytes (built    ||
+|||| by the committing thread, not by the reader), and the   ||
+|||| external-change check re-reads + hashes the tracked     ||
+|||| files only when their size/write-time stamp moved —    ||
+|||| a recently-written ("racy") stamp always rescans.      ||
+\*---------------------------------------------------------*/
+static void BackdateTree(const fs::path& dir, int seconds)
+{
+    std::error_code ec;
+    const auto t = fs::file_time_type::clock::now() -
+                   std::chrono::seconds(seconds);
+    for(fs::recursive_directory_iterator it(dir, ec), end;
+        !ec && it != end; it.increment(ec))
+    {
+        if(it->is_regular_file(ec))
+        {
+            fs::last_write_time(it->path(), t, ec);
+        }
+    }
+}
+
+static void TestPollIsMetadataOnly()
+{
+    const fs::path types = g_tmp / "types-i6";
+    fs::create_directories(types);
+    WriteText((types / "mini-fan.device.json").string(),
+              TypeJson("mini-fan", 8, "base"));
+    WorkspaceStore::Deps deps;
+    deps.devices = RegistryWith(types.string());
+    const fs::path root = g_tmp / "ws-i6";
+    {
+        WorkspaceStore store(root.string(), deps);
+        WorkspaceCandidate cand;
+        CHECK(MakeCandidate(
+            json::parse(WorkspaceJson("poll-a", "mini-fan")),
+            deps.devices, deps.effects, cand));
+        CHECK(store.Commit("desk", cand, std::string(), 0).ok);
+    }
+    const fs::path wsdir = root / "desk";
+    BackdateTree(wsdir, 30);
+
+    WorkspaceService::Deps sdeps;
+    sdeps.devices = deps.devices;
+    WorkspaceService svc(root.string(), sdeps);
+    CHECK(svc.Open("desk").ok);
+    BackdateTree(wsdir, 30);
+
+    /* The adopt published the document bytes — the same bytes
+       DocumentBytes (download / content_sha256) serves. */
+    {
+        const WorkspaceService::PublishedState ps = svc.Snapshot();
+        CHECK(ps.document_bytes != nullptr);
+        std::string direct, derr;
+        CHECK(svc.DocumentBytes("desk", direct, derr));
+        CHECK(ps.document_bytes && *ps.document_bytes == direct);
+        CHECK(!direct.empty() && direct.front() == '{');
+    }
+
+    /* Quiet poll: one full scan, then stamp hits. */
+    const uint64_t scans0 = svc.ExternalFullScans();
+    for(int i = 0; i < 5; ++i)
+    {
+        CHECK(svc.CheckExternal().state == "none");
+    }
+    CHECK(svc.ExternalFullScans() - scans0 == 1);
+
+    /* An outside edit moves the stamp: rescanned once, then
+       the "modified" answer is served from the stamp. */
+    const fs::path doc = wsdir / "generations" / "gen-000001" /
+                         "document.json";
+    const std::string orig = ReadText(doc.string());
+    WriteText(doc.string(), orig + "\n/* outside edit */");
+    BackdateTree(wsdir, 20);
+    CHECK(svc.CheckExternal().state == "modified");
+    CHECK(svc.CheckExternal().state == "modified");
+    CHECK(svc.ExternalFullScans() - scans0 == 2);
+
+    /* Restored bytes: the stamp moved again -> rescan ->
+       same-content suppression reports "none". */
+    WriteText(doc.string(), orig);
+    BackdateTree(wsdir, 10);
+    CHECK(svc.CheckExternal().state == "none");
+    CHECK(svc.ExternalFullScans() - scans0 == 3);
+
+    /* Racy: a same-size rewrite that just happened is never
+       trusted to the stamp — every poll rescans until the
+       write ages out, so it cannot hide. */
+    std::string flipped = orig;
+    flipped[0] = flipped[0] == ' ' ? '\t' : ' ';
+    WriteText(doc.string(), flipped);
+    CHECK(svc.CheckExternal().state == "modified");
+    CHECK(svc.CheckExternal().state == "modified");
+    CHECK(svc.ExternalFullScans() - scans0 == 5);
+    WriteText(doc.string(), orig);
+    CHECK(svc.CheckExternal().state == "none");
+}
+
 int main()
 {
     g_tmp = fs::temp_directory_path() /
@@ -1420,6 +1520,7 @@ int main()
     TestLoadBackup();
     TestFutureSchemaRefusal();
     TestFailedCommitRetry();
+    TestPollIsMetadataOnly();
 
     fs::remove_all(g_tmp, ec);
     std::printf("%d checks, %d failures\n", checks, failures);

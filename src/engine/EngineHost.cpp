@@ -1889,6 +1889,15 @@ const OrderlyShutdown::Result& EngineHost::Stop()
                  std::chrono::milliseconds(2000),
                  [this]
                  { if(workspaces_) workspaces_->Shutdown(); });
+    /* No apply can arrive any more (IPC and workspace jobs are
+       down): land the last queued scene snapshot now, inside
+       a measured step, rather than implicitly in the service
+       destructor (audit I-6 moved the write off the request
+       thread). */
+    shutdown.Add("scene-snapshot",
+                 std::chrono::milliseconds(2000),
+                 [this]
+                 { if(service_) service_->FlushPersistedScene(); });
     shutdown.Add("scene-worker",
                  std::chrono::milliseconds(2000),
                  [this] { engine_.Stop(); });
