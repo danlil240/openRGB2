@@ -22,6 +22,7 @@
 #include "inputs/KeyMap.h"
 
 #include <cmath>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -753,6 +754,13 @@ static void TestEngineMirrorAndJson()
     CHECK(back.effect.preset == "aurora" && back.effect.seed == 4242
           && Near(back.effect.speed, 1.5f) && Near(back.effect.intensity, 0.6f)
           && back.effect.playing, "effect state round-trips");
+
+    /* Audit C-12: a finite double past float range narrowed to an
+       inf global speed. */
+    nlohmann::json big = ToJson(doc);
+    big["effect"]["speed"] = 1e39;
+    SceneDocument bad;
+    CHECK(!FromJson(big, bad), "effect speed that narrows to inf rejected");
 }
 
 static void TestPresetsAndRemix()
@@ -818,6 +826,28 @@ static int MaxCh(studio::SceneColor c)
 {
     const int r = RedOf(c), g = GreenOf(c), b = BlueOf(c);
     return r > g ? (r > b ? r : b) : (g > b ? g : b);
+}
+
+/* Audit C-12: Clamp01 let NaN through (both compares are false)
+   and ToSceneColor then cast NaN*255 to unsigned — undefined
+   behaviour (on x64 MSVC it lands 0x80000000-ish garbage in the
+   packed color). NaN maps to 0, +/-inf clamp to the ends. */
+static void TestColorNaNSafe()
+{
+    using namespace studio;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    CHECK(ToSceneColor(ColorF{ nan, nan, nan, 1.0f }) == 0u,
+          "color: NaN channels pack to 0");
+    CHECK(ToSceneColor(ColorF{ inf, -inf, 0.5f, 1.0f })
+          == MakeSceneColor(255, 0, 128),
+          "color: inf clamps to 255, -inf to 0");
+    /* A NaN coverage composites as transparent, not NaN. */
+    const ColorF dst{ 0.25f, 0.5f, 0.75f, 1.0f };
+    const ColorF out = BlendOver(dst, ColorF{ 1.0f, 1.0f, 1.0f, nan },
+                                 BlendMode::Replace);
+    CHECK(out.r == 0.25f && out.g == 0.5f && out.b == 0.75f,
+          "color: NaN coverage blends as zero");
 }
 
 static void TestInputBus()
@@ -1822,6 +1852,7 @@ int main()
     TestNoiseAndMasks();
     TestEngineMirrorAndJson();
     TestPresetsAndRemix();
+    TestColorNaNSafe();
     TestInputBus();
     TestOnsetDetect();
     TestKeyMap();

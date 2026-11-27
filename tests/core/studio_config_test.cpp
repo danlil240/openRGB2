@@ -744,6 +744,17 @@ static void TestEffectsSection()
         CHECK(!FromJson(j, doc, &errors) && HasError(errors, "speed"),
               "effects: non-positive speed rejected");
     }
+    /* Audit C-12: range checks ran on the double; narrowing to the
+       float field then made 1e39 inf and 1e-50 zero. */
+    for(const double v : { 1e39, 1e-50 })
+    {
+        json j = good;
+        j["effects"]["speed"] = v;
+        StudioDocument doc;
+        errors.clear();
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "speed"),
+              "effects: speed that narrows to inf/0 rejected");
+    }
     {
         json j = good;
         j["effects"]["intensity"] = 2.0;

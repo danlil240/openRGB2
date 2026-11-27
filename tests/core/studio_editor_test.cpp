@@ -1785,6 +1785,31 @@ static void TestFlowEdit()
     neg.speed = -1.0f;
     CHECK(!ctl.SetFlow(neg).has_value(), "flow: negative speed refused");
 
+    /* Audit C-12: the proportional rescale is computed in float —
+       a valid finite request can still overflow a sibling layer
+       to inf (or underflow its scale to 0). Refused, untouched. */
+    {
+        StudioDocument w3 = Fixture();
+        w3.effect.layers = stack();
+        w3.effect.layers[0].speed = 1e-30f;   /* speed0 (first wave) */
+        w3.effect.layers[1].speed = 1e10f;
+        w3.effect.layers[0].scale = 1e30f;    /* scale0 */
+        w3.effect.layers[1].scale = 1e-30f;
+        EditorController ctl3(w3);
+        EditorController::FlowEdit big;
+        big.speed = 1e10f;                    /* x1e40 on layer 1 */
+        CHECK(!ctl3.SetFlow(big).has_value()
+              && std::isfinite(w3.effect.layers[1].speed)
+              && w3.effect.layers[0].speed == 1e-30f,
+              "flow: speed rescale overflow refused");
+        EditorController::FlowEdit tiny;
+        tiny.wavelength = 1e-10f;             /* x1e-40 on layer 1 */
+        CHECK(!ctl3.SetFlow(tiny).has_value()
+              && w3.effect.layers[1].scale > 0.0f
+              && w3.effect.layers[0].scale == 1e30f,
+              "flow: wavelength rescale underflow refused");
+    }
+
     StudioDocument w2 = Fixture();
     EffectLayer st;  st.primitive = "static";
     w2.effect.layers = { st };
@@ -1898,6 +1923,12 @@ static void TestEffectLayers()
         CHECK(!ctl.SetLayerField(0, EditorController::LayerField::Phase,
                                  1e300).has_value(),
               "fx: float-overflow phase refused");
+        /* Audit C-12: a positive double that underflows float
+           narrows to scale 0 (EvalWave divides by it). */
+        CHECK(!ctl.SetLayerField(0, EditorController::LayerField::Scale,
+                                 1e-50).has_value()
+              && w.effect.layers[0].scale > 0.0f,
+              "fx: float-underflow scale refused");
         CHECK(ctl.SetLayerField(0, EditorController::LayerField::Density,
                                 -2.0).has_value()
               && w.effect.layers[0].density == 0.0f,
