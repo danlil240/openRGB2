@@ -753,6 +753,30 @@ int main(int argc, char** argv)
         CHECK(p2.value("speed").toInt() == 150);
         CHECK(p2.value("touched_speed").toBool());
         CHECK(s2.storageLocation() == path);
+        CHECK(s2.hasWindowPosition());
+        CHECK(!s2.windowMaximized());
+
+        /* A monitor left of / above the primary: negative
+           coordinates are a real position, not "unset"; the
+           maximized state is stored apart from the normal rect. */
+        s2.saveGeometry(-1600, -200, 1200, 800);
+        s2.setWindowMaximized(true);
+        {
+            ui::UiSettings s3;
+            s3.setPathForTesting(path);
+            CHECK(s3.hasWindowPosition());
+            CHECK(s3.windowX() == -1600 && s3.windowY() == -200);
+            CHECK(s3.windowWidth() == 1200);
+            CHECK(s3.windowMaximized());
+        }
+        {
+            QTemporaryDir fresh;
+            ui::UiSettings s4;
+            s4.setPathForTesting(
+                fresh.filePath(QStringLiteral("p.ini")));
+            CHECK(!s4.hasWindowPosition());
+            CHECK(!s4.windowMaximized());
+        }
 
         /* Bounded: 80 scene names can't grow the index past
            the bound — the oldest are evicted. */

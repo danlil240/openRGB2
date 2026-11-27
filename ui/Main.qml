@@ -10,6 +10,7 @@
 // engine shutdown lives on Settings → Quit All
 // (a confirmed IPC QUIT, plan section 4 UI independence).
 import QtQuick
+import QtQuick.Window
 import QtQuick.Layouts
 import QtQuick.Controls
 import OpenRGB2.UI.theme
@@ -41,37 +42,104 @@ ApplicationWindow {
 
     property int currentView: 0
 
+    /* The saved rect is accepted only when its title-bar strip
+       lands on a screen that exists NOW (monitors get unplugged
+       or rearranged). Coordinates may be negative — a monitor
+       left of / above the primary is a normal setup. */
+    function screenFor(x, y, w) {
+        const screens = Qt.application.screens;
+        for(let i = 0; i < screens.length; ++i) {
+            const sc = screens[i];
+            const sx = sc.virtualX, sy = sc.virtualY;
+            if(x + w - 80 > sx && x + 80 < sx + sc.width
+               && y >= sy - 8 && y + 40 < sy + sc.height)
+                return sc;
+        }
+        return null;
+    }
+    function restoreGeometry() {
+        let w = uiPrefs.windowWidth, h = uiPrefs.windowHeight;
+        const sized = w >= root.minimumWidth
+                      && h >= root.minimumHeight;
+        const sc = uiPrefs.hasWindowPosition
+                   ? root.screenFor(uiPrefs.windowX, uiPrefs.windowY,
+                                    sized ? w : root.width)
+                   : null;
+        const screens = Qt.application.screens;
+        const fit = sc || (screens.length > 0 ? screens[0] : null);
+        if(sized) {
+            /* Never larger than the screen it opens on. */
+            if(fit) {
+                w = Math.min(w, Math.max(root.minimumWidth, fit.width));
+                h = Math.min(h, Math.max(root.minimumHeight, fit.height));
+            }
+            root.width  = w;
+            root.height = h;
+        }
+        if(sc) {
+            root.x = Math.min(uiPrefs.windowX,
+                              sc.virtualX + sc.width - 80);
+            root.y = Math.max(sc.virtualY,
+                              Math.min(uiPrefs.windowY,
+                                       sc.virtualY + sc.height - 40));
+        }
+        root.normalGeom = Qt.rect(root.x, root.y,
+                                  root.width, root.height);
+    }
+
     Component.onCompleted: {
         if(root.prefsUp) {
             if(uiPrefs.restoreLastView)
                 root.currentView =
                     Math.max(0, Math.min(4, uiPrefs.lastView));
-            if(uiPrefs.windowWidth >= root.minimumWidth
-               && uiPrefs.windowHeight >= root.minimumHeight) {
-                root.width  = uiPrefs.windowWidth;
-                root.height = uiPrefs.windowHeight;
-            }
-            if(uiPrefs.windowX >= 0 && uiPrefs.windowY >= 0) {
-                root.x = uiPrefs.windowX;
-                root.y = uiPrefs.windowY;
-            }
+            root.restoreGeometry();
+            /* The maximized state itself is applied by main.cpp
+               (QWindow::setWindowStates) so a tray-start keeps the
+               window hidden. */
         }
         root.syncViewportVisible();
     }
+
+    /* The last NORMAL (windowed) geometry — what is saved, so a
+       maximized/minimized close never overwrites it with the
+       maximized frame. Sampled after geometry settles: during a
+       maximize the size can change before visibility flips. */
+    property rect normalGeom: Qt.rect(0, 0, 0, 0)
+    Timer {
+        id: geomSettle
+        interval: 400
+        onTriggered: {
+            if(root.visibility === Window.Windowed)
+                root.normalGeom = Qt.rect(root.x, root.y,
+                                          root.width, root.height);
+        }
+    }
+    onXChanged: geomSettle.restart()
+    onYChanged: geomSettle.restart()
+    onWidthChanged: geomSettle.restart()
+    onHeightChanged: geomSettle.restart()
+
+    /* The window can actually be seen: shown AND not minimized
+       (root.visible stays true while minimized). */
+    readonly property bool windowShown:
+        root.visible && root.visibility !== Window.Minimized
 
     /* studio-import Task 7: the draft preview publishes only
        while a surface that can show it is on screen AND the
        window itself is up — tray-hide or minimize pauses the
        feed (engine reports paused/hidden) just like a page
-       switch does. */
+       switch does. The transport-accepted frame_status feed is
+       dropped at the bridge under the same condition. */
     function syncViewportVisible() {
         if(typeof viewport !== "undefined")
             viewport.visible =
-                root.visible
+                root.windowShown
                 && (root.currentView === 1
                     || root.currentView === 2);
+        if(typeof bridge !== "undefined")
+            bridge.frameFeedActive = root.windowShown;
     }
-    onVisibleChanged: syncViewportVisible()
+    onWindowShownChanged: syncViewportVisible()
     /* Geometry + last view are UI-owned — saved on close and
        on view change (write-through; QSettings batches the
        platform write). */
@@ -81,9 +149,24 @@ ApplicationWindow {
             uiPrefs.lastView = root.currentView;
     }
     onClosing: function(close) {
-        if(root.prefsUp)
-            uiPrefs.saveGeometry(root.x, root.y,
-                                 root.width, root.height);
+        if(root.prefsUp) {
+            /* Only a windowed rect is a restorable geometry; a
+               maximized close keeps the last normal one and
+               records the state separately. */
+            if(root.visibility === Window.Windowed)
+                root.normalGeom = Qt.rect(root.x, root.y,
+                                          root.width, root.height);
+            if(root.normalGeom.width > 0 && root.normalGeom.height > 0)
+                uiPrefs.saveGeometry(root.normalGeom.x,
+                                     root.normalGeom.y,
+                                     root.normalGeom.width,
+                                     root.normalGeom.height);
+            if(root.visibility === Window.Maximized)
+                uiPrefs.setWindowMaximized(true);
+            else if(root.visibility === Window.Windowed)
+                uiPrefs.setWindowMaximized(false);
+            /* minimized/hidden: keep the stored flag */
+        }
         if(!root.exitRequested
            && typeof trayAvailable !== "undefined"
            && trayAvailable) {

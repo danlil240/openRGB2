@@ -349,6 +349,10 @@ int main(int argc, char** argv)
     ui_prefs.setPathForTesting(
         prefs_dir.filePath(QStringLiteral("prefs.ini")));
     scene_edit.setUiSettings(&ui_prefs);
+    /* A saved position on a monitor that no longer exists must
+       not be restored (the window would open off-screen). Size 0
+       keeps the declared default size for the layout checks. */
+    ui_prefs.saveGeometry(-50000, -50000, 0, 0);
 
     QQmlEngine engine;
     engine.rootContext()->setContextProperty(
@@ -401,6 +405,7 @@ int main(int argc, char** argv)
         CHECK(win_obj->property("minimumWidth").toInt() == 960);
         CHECK(win_obj->property("minimumHeight").toInt() == 620);
         CHECK(win->width() >= 960 && win->height() >= 620);
+        CHECK(win->x() != -50000 && win->y() != -50000);
         /* critical controls exist + have nonzero size —
            nothing essential collapsed under the scale pass */
         QObject* saveBtn =
@@ -658,6 +663,34 @@ int main(int argc, char** argv)
         win->setVisible(true);
         QCoreApplication::processEvents();
         CHECK(PumpBoth(s, [&] { return diag_ctl.active(); }));
+    }
+
+    /*---- frame_status feed follows the window -----------------
+       Hidden (tray) or minimized: the bridge drops frame_status
+       so no page rebuilds previews nobody can see. */
+    std::printf("-- frameFeedActive follows window shown\n");
+    {
+        CHECK(bridge.frameFeedActive());
+        win->setVisible(false);
+        QCoreApplication::processEvents();
+        CHECK(PumpBoth(s, [&] { return !bridge.frameFeedActive(); }));
+        win->setVisible(true);
+        QCoreApplication::processEvents();
+        CHECK(PumpBoth(s, [&] { return bridge.frameFeedActive(); }));
+        win->setWindowState(Qt::WindowMinimized);
+        QCoreApplication::processEvents();
+        /* offscreen QPA may refuse to minimize — only assert when
+           the state actually took */
+        if(win->visibility() == QWindow::Minimized)
+        {
+            CHECK(PumpBoth(s, [&] {
+                return !bridge.frameFeedActive();
+            }));
+        }
+        win->setWindowState(Qt::WindowNoState);
+        win->setVisible(true);
+        QCoreApplication::processEvents();
+        CHECK(PumpBoth(s, [&] { return bridge.frameFeedActive(); }));
     }
 
     /*---- F09/F02: the shared-draft canvas delegates ----------

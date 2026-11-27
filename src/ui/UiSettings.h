@@ -56,6 +56,15 @@ class UiSettings : public QObject
                    NOTIFY prefsChanged)
     Q_PROPERTY(int windowHeight READ windowHeight
                    NOTIFY prefsChanged)
+    /* true once a position was saved — x/y may legitimately be
+       negative (a monitor left of/above the primary), so -1 is
+       not a usable "unset" marker on its own. */
+    Q_PROPERTY(bool hasWindowPosition READ hasWindowPosition
+                   NOTIFY prefsChanged)
+    /* The window was maximized when last closed. The saved
+       x/y/w/h stay the NORMAL (restored) geometry. */
+    Q_PROPERTY(bool windowMaximized READ windowMaximized
+                   NOTIFY prefsChanged)
 
     /* Palette-picker defaults (0..1 HSV) — the picker's
        remembered position, purely cosmetic. */
@@ -107,7 +116,12 @@ public:
     int      windowY() const;
     int      windowWidth() const;
     int      windowHeight() const;
+    bool     hasWindowPosition() const;
+    bool     windowMaximized() const;
+    /* Saves the NORMAL (windowed) geometry — callers pass the
+       last windowed rect, never a maximized/minimized one. */
     Q_INVOKABLE void saveGeometry(int x, int y, int w, int h);
+    Q_INVOKABLE void setWindowMaximized(bool maximized);
     double   paletteHue() const;
     void     setPaletteHue(double v);
     double   paletteSat() const;
