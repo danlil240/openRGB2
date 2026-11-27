@@ -404,7 +404,13 @@ private:
     bool BeginUpload(const QString& purpose,
                      const QByteArray& bytes,
                      const QString& verb,
-                     const QVariantMap& args);
+                     const QVariantMap& args,
+                     const QString& kind = QStringLiteral("bundle"));
+    /* A save/save-copy whose upload or staged job send failed:
+       release the saving latch honestly. */
+    void FailStagedSave(const QString& why,
+                        const QString& source =
+                            QStringLiteral("engine"));
     /* Document download for the active workspace. */
     bool BeginDownload(const QString& kind, const QString& id,
                        const QString& purpose);
