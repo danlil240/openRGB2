@@ -271,8 +271,16 @@ void StudioViewportModel::Begin()
             "over the IPC bound)"));
         return;
     }
+    /* preview_end erased the engine's PreviewSession, so a
+       re-begin numbers frames from 1 again: forget the old
+       sequence (and its partials) or every new frame would be
+       dropped as stale until it overtook the old count (audit
+       U-13). The begin reply resets it once more, for old
+       frames still queued ahead of it. */
+    ClearFrame();
     begin_sent_   = true;
     pending_req_  = id;
+    begin_req_    = id;
     sent_visible_ = visible_;
 }
 
@@ -343,6 +351,17 @@ void StudioViewportModel::OnReply(int request_id,
         return;
     }
     pending_req_ = 0;
+    const bool begin_reply = request_id == begin_req_;
+    begin_req_ = 0;
+    if(begin_reply && type_name != QLatin1String("ERROR"))
+    {
+        /* Every frame of a previous preview precedes this reply
+           on the wire (the engine ended it before handling the
+           begin): whatever sequence those set is not this
+           preview's. */
+        sequence_ = 0;
+        partials_.clear();
+    }
     if(type_name == QLatin1String("ERROR"))
     {
         const QString detail =
