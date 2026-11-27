@@ -51,3 +51,6 @@ vendor/OpenRGB/OpenRGB-baseline-backup/
 
 # QA session reports and evidence (docs/qa/) stay local, not in git.
 docs/qa/
+
+# graphify knowledge-graph output (generated, regenerate with `graphify update .`).
+graphify-out/
