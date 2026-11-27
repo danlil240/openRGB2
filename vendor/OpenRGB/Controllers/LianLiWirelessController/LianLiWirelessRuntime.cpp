@@ -18,6 +18,7 @@ using namespace LianLiWireless;
 WirelessRuntime::WirelessRuntime(IWirelessLink& l, IWirelessClock& c, WirelessRuntimeConfig cfg_in)
     : link(l), clock(c), cfg(cfg_in)
 {
+    rearm_delay_ms = cfg.rearm_ms;
 }
 
 RgbClockSnapshot WirelessRuntime::ClockSnapshot() const
@@ -50,8 +51,14 @@ uint64_t WirelessRuntime::NextDeadlineMs() const
 
 void WirelessRuntime::SetTarget(const Mac& mac, uint8_t fans)
 {
+    const bool changed = (mac != target_mac || fans != expected_fans);
     target_mac    = mac;
     expected_fans = fans;
+    layout_mismatch = 0;
+    if(changed)
+    {
+        RearmTerminal();
+    }
 }
 
 void WirelessRuntime::SetDesired(std::shared_ptr<const RgbUpload> upload)
@@ -111,6 +118,21 @@ void WirelessRuntime::Enter(WirelessState s, const char* err)
     if(s != state || (err && *err))
         Diagnostics::Get().Trace("state", (long long)state, (long long)s,
                                   err && *err ? 1 : 0);
+    const bool searching_before = (state == WirelessState::Boot
+                                   || state == WirelessState::Searching);
+    const bool searching_after  = (s == WirelessState::Boot
+                                   || s == WirelessState::Searching);
+    if(searching_after && !searching_before)
+    {
+        /* A new search: the never-sighted grace restarts at the
+           first poll of this search. */
+        search_armed = false;
+    }
+    if(s == WirelessState::Holding)
+    {
+        /* Confirmed again: the next wedge starts a fresh backoff. */
+        rearm_delay_ms = cfg.rearm_ms;
+    }
     state = s;
     if(s == WirelessState::ForeignMaster)
     {
@@ -159,7 +181,14 @@ void WirelessRuntime::RetryTransport()
     retry_transport = false;
     rgb_clock.valid = false;
     next_rgb_clock_ms = 0;
+    rearm_scheduled = false;
     Enter(WirelessState::Boot);
+}
+
+bool WirelessRuntime::IsTerminalWedge() const
+{
+    return state == WirelessState::ForeignMaster
+        || (state == WirelessState::Failed && !retry_transport);
 }
 
 void WirelessRuntime::RearmTerminal()
@@ -179,10 +208,23 @@ void WirelessRuntime::RearmTerminal()
     | group simply re-fails through the normal debounce path.   |
     | A Failed runtime already inside a reconnect backoff       |
     | keeps its schedule; Cancelled is never re-armed.          |
+    |                                                           |
+    | Uploaded playback loops send no further intent, so Tick   |
+    | also re-arms a wedge on a slow timer (rearm_ms, doubling  |
+    | to rearm_max_ms). When the wedge was the local            |
+    | transmitter's identity changing, RetryTransport alone     |
+    | would compare against the old MAC and re-wedge forever:   |
+    | forget it and adopt the current transmitter. Writes still |
+    | go only to groups that report that transmitter as their   |
+    | master, so no group bound elsewhere is ever taken over.   |
     \*---------------------------------------------------------*/
-    if(state == WirelessState::ForeignMaster
-       || (state == WirelessState::Failed && !retry_transport))
+    if(IsTerminalWedge())
     {
+        if(identity_changed)
+        {
+            master           = Mac{};
+            identity_changed = false;
+        }
         RetryTransport();
     }
 }
@@ -209,12 +251,34 @@ void WirelessRuntime::RevalidateTransport(const char* err)
 
 void WirelessRuntime::Tick()
 {
-    if(cancelled || state == WirelessState::ForeignMaster)
+    if(cancelled)
     {
         return;
     }
 
     uint64_t now = clock.NowMs();
+    if(IsTerminalWedge())
+    {
+        /*-----------------------------------------------------*\
+        | Timed re-arm (see RearmTerminal): the first Tick in a  |
+        | wedge schedules it; the wedge stays silent until then. |
+        \*-----------------------------------------------------*/
+        if(!rearm_scheduled)
+        {
+            rearm_scheduled = true;
+            next_rearm_ms   = now + rearm_delay_ms;
+            return;
+        }
+        if(now < next_rearm_ms)
+        {
+            return;
+        }
+        Diagnostics::Get().Trace("timed_rearm", (long long)state,
+                                 (long long)rearm_delay_ms, 0);
+        rearm_delay_ms = std::min(rearm_delay_ms * 2, cfg.rearm_max_ms);
+        RearmTerminal();
+        return;
+    }
     if(state == WirelessState::Failed)
     {
         if(!retry_transport || now < next_reconnect_ms)
@@ -375,6 +439,7 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
         }
         if(master != Mac{} && current_master != master)
         {
+            identity_changed = true;
             Enter(WirelessState::ForeignMaster, "transmitter identity changed");
             return false;
         }
@@ -383,6 +448,12 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
         master_read_tries = 0;
         master_known = true;
         Enter(WirelessState::Searching);
+    }
+
+    if(!search_armed)
+    {
+        search_armed      = true;
+        search_started_ms = now;
     }
 
     std::vector<uint8_t> response;
@@ -440,10 +511,7 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
     | sighting until it goes stale, and never let it vote       |
     | toward foreign-master or layout failures.                 |
     \*---------------------------------------------------------*/
-    if(found != nullptr
-       && (found->fan_count == 0
-           || !IsValidUnicastMac(found->master)
-           || found->receiver == 0))
+    if(found != nullptr && !IsCompleteSighting(*found))
     {
         Diagnostics::Get().Trace("layout_incomplete", expected_fans,
                                  found->fan_count, found->mb_rgb_sync ? 1 : 0);
@@ -469,9 +537,13 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
             have_sighting = false;
             Enter(WirelessState::Lost, "target absent past deadline");
         }
-        else if(!have_sighting && now > cfg.lost_ms
+        else if(!have_sighting
+                && now - std::max(search_started_ms, last_seen_ms) > cfg.lost_ms
                 && state != WirelessState::Lost)
         {
+            /* NowMs is a steady clock since boot: measure the grace from
+               the start of this search (or the last good sighting, if
+               later), never from the clock's epoch. */
             Enter(WirelessState::Lost, "target never sighted");
         }
         return true;
