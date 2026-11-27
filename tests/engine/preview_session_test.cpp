@@ -557,6 +557,94 @@ static void TestReducedLabeling()
     CHECK(f.object_total == 4);
 }
 
+/* Audit E-8: the per-draft work (world matrices, owner
+   lookups, painted-color fallback) is done once per APPLIED
+   draft, not once per sample — and the cached path paints
+   exactly the bytes the reference output math gives, for
+   untouched objects (painted fallback, per-emitter
+   overrides), linked copies and reduced frames alike. */
+static void TestSampleCacheIsPerDraft()
+{
+    std::printf("-- unit: sample cache built once per applied draft\n");
+    studio::PresetRegistry dev_reg;
+    std::vector<std::string> errs;
+    dev_reg.LoadDirectory((g_tmp / "types").string(), &errs);
+    studio::EffectRegistry eff_reg;
+    const std::vector<DeviceSnapshot> snaps = { TestSnapshot() };
+
+    /* No layers: every emitter takes the painted fallback,
+       one per-emitter override included; a mirrored copy and
+       an unbound object ride along. */
+    json doc_a = CompactDoc(3, 1, 0.6);
+    doc_a["effects"]["layers"] = json::array();
+    doc_a["device_settings"]["fan2"] =
+        json::object({{ "mirror_of", "fan0" }});
+    doc_a["colors"]["emitters"] = json::object({
+        { "fan0", json::object({{ "2", "#00FF10" }}) } });
+    json doc_b = CompactDoc(3, 0, 0.9);   /* static red layer */
+    auto cand_a = ParseCand(doc_a, dev_reg, eff_reg);
+    auto cand_b = ParseCand(doc_b, dev_reg, eff_reg);
+
+    for(int pass = 0; pass < 2; ++pass)
+    {
+        const bool reduced_pass = pass == 1;
+        PreviewSession::Deps pdeps;
+        pdeps.snapshots = [snaps] { return snaps; };
+        PreviewSession::Options popts;
+        if(reduced_pass)
+        {
+            popts.display_budget_leds = 10;
+        }
+        PreviewSession ps(pdeps, popts);
+        std::string err;
+        CHECK(ps.DraftCacheBuilds() == 0);
+
+        const std::shared_ptr<const WorkspaceCandidate> cands[] =
+            { cand_a, cand_b };
+        uint64_t rev = 0;
+        for(const auto& cand : cands)
+        {
+            CHECK(ps.SetCandidate(cand, ++rev, err));
+            PreparedStudioScene prepared;
+            CHECK(PrepareStudioScene(*cand, snaps, prepared, err));
+            for(int i = 0; i < 6; ++i)
+            {
+                const double t = 0.05 + 0.13 * i;
+                PreviewFrame f;
+                CHECK(ps.Sample(t, nullptr, f));
+                CHECK(f.draft_revision == rev);
+                CHECK(f.reduced == reduced_pass);
+                for(const PreviewObjectColors& o : f.objects)
+                {
+                    /* A linked copy previews its owner. */
+                    const studio::SceneObject* src =
+                        o.kind == "linked"
+                            ? studio::OutputOwner(*prepared.doc,
+                                                  o.object_id)
+                            : nullptr;
+                    const std::vector<RgbColor> want =
+                        RefObjectColors(prepared,
+                                        src ? src->id : o.object_id,
+                                        t, nullptr);
+                    if(o.indices.empty())
+                    {
+                        CHECK(o.colors == want);
+                        continue;
+                    }
+                    CHECK(o.indices.size() == o.colors.size());
+                    for(size_t k = 0; k < o.indices.size(); ++k)
+                    {
+                        CHECK(o.indices[k] < want.size() &&
+                              o.colors[k] == want[o.indices[k]]);
+                    }
+                }
+            }
+            /* Six samples of this draft, ONE cache build. */
+            CHECK(ps.DraftCacheBuilds() == rev);
+        }
+    }
+}
+
 /*---------------------------------------------------------*\
 || IPC: preview verbs over the real session machinery       ||
 \*---------------------------------------------------------*/
@@ -777,6 +865,7 @@ int main()
     TestDisabledInputsStayEmpty();
     TestHiddenPauseAndStaleCandidate();
     TestReducedLabeling();
+    TestSampleCacheIsPerDraft();
 
     uint32_t seq = 0;
 
