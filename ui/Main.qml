@@ -129,7 +129,8 @@ ApplicationWindow {
        window itself is up — tray-hide or minimize pauses the
        feed (engine reports paused/hidden) just like a page
        switch does. The transport-accepted frame_status feed is
-       dropped at the bridge under the same condition. */
+       held back at the bridge under the same condition (only
+       the newest is kept, and repainted when shown again). */
     function syncViewportVisible() {
         if(typeof viewport !== "undefined")
             viewport.visible =

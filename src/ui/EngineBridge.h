@@ -317,6 +317,16 @@ private:
     /* Read on the worker thread (event filter), written on the
        GUI thread. */
     std::atomic<bool> frame_feed_active_{ true };
+    /* The newest frame_status dropped while the feed was
+       inactive. The engine only emits on change, so on
+       re-activation this IS the current state (static,
+       uploaded and power-gated output would otherwise keep
+       showing pre-hide data). frame_mu_ makes the worker's
+       "inactive? then park" and the GUI's "activate + take"
+       atomic w.r.t. each other, so a parked event can never
+       be applied after a newer posted one, nor be lost. */
+    std::mutex                      frame_mu_;
+    std::unique_ptr<nlohmann::json> parked_frame_status_;
     QVariantMap delivery_stats_;
     QVariantList presets_;
     QVariantMap diagnostics_;
