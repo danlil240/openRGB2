@@ -206,6 +206,15 @@ enum
                                                             /* SetDeviceSpecificZoneConfiguration()             */
 
     NET_PACKET_ID_RGBCONTROLLER_SIGNALUPDATE        = 1150, /* RGBController::SignalUpdate()                    */
+
+    /*---------------------------------------------------------*\
+    | lianli-wireless fork extension (openrgb2): read-only      |
+    | Lian Li wireless service status — per-group GroupStatus   |
+    | plus the process diagnostics counters as one JSON body,   |
+    | same encoding convention as the SETTINGS replies. Private |
+    | range; upstream ids stay below 2000.                      |
+    \*---------------------------------------------------------*/
+    NET_PACKET_ID_LIANLI_WIRELESS_STATUS            = 4000, /* LianLiWireless::CollectStatusJson()            */
 };
 
 std::string GetHostname();

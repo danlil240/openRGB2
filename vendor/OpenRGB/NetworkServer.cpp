@@ -13,6 +13,7 @@
 #include <queue>
 #include "i2c_smbus.h"
 #include "JsonUtils.h"
+#include "LianLiWirelessDiagnostics.h"
 #include "LogManager.h"
 #include "NetworkServer.h"
 #include "StringUtils.h"
@@ -1378,6 +1379,14 @@ void NetworkServer::ListenThreadFunction(NetworkClientInfo* client_info)
                 break;
 
         /*-------------------------------------------------*\
+        | lianli-wireless fork extension (openrgb2):        |
+        | read-only group status + diagnostics counters     |
+        \*-------------------------------------------------*/
+            case NET_PACKET_ID_LIANLI_WIRELESS_STATUS:
+                status = ProcessRequest_LianLiWirelessStatus(client_info);
+                break;
+
+        /*-------------------------------------------------*\
         | LogManager functions                              |
         \*-------------------------------------------------*/
             case NET_PACKET_ID_LOGMANAGER_CLEAR_LOG_BUFFER:
@@ -1877,6 +1886,35 @@ NetPacketStatus NetworkServer::ProcessRequest_GetI2CBusInfo(NetworkClientInfo* c
     send_in_progress.lock();
     send(client_info->client_sock, (char *)&reply_hdr, sizeof(NetPacketHeader), MSG_NOSIGNAL);
     send(client_info->client_sock, (char *)data_buf, reply_hdr.pkt_size, MSG_NOSIGNAL);
+    send_in_progress.unlock();
+
+    return(NET_PACKET_STATUS_OK);
+}
+
+/*---------------------------------------------------------*\
+| lianli-wireless fork extension (openrgb2): the wireless   |
+| service's per-group GroupStatus (lifecycle state, resend/ |
+| failure counters, last_error, latest sighting, upload     |
+| stats, RGB-clock sample) plus the process diagnostics     |
+| counters — the read-only surface engine diagnostics       |
+| embeds as backend_counters. A wedged group                |
+| (state "failed"/"foreign_master", wedged:true) is         |
+| visible here instead of staying in-process state. Replies |
+| with the SETTINGS convention: same packet id,             |
+| null-terminated JSON body.                                |
+\*---------------------------------------------------------*/
+NetPacketStatus NetworkServer::ProcessRequest_LianLiWirelessStatus(NetworkClientInfo* client_info)
+{
+    nlohmann::json status_json       = LianLiWireless::CollectStatusJson();
+    std::string    status_json_str   = status_json.dump();
+
+    NetPacketHeader reply_hdr;
+
+    InitNetPacketHeader(&reply_hdr, 0, NET_PACKET_ID_LIANLI_WIRELESS_STATUS, (unsigned int)strlen(status_json_str.c_str()) + 1);
+
+    send_in_progress.lock();
+    send(client_info->client_sock, (char *)&reply_hdr, sizeof(NetPacketHeader), MSG_NOSIGNAL);
+    send(client_info->client_sock, (char *)status_json_str.c_str(), reply_hdr.pkt_size, MSG_NOSIGNAL);
     send_in_progress.unlock();
 
     return(NET_PACKET_STATUS_OK);

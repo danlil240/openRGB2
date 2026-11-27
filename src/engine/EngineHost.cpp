@@ -570,10 +570,31 @@ PlaybackController::Deps EngineHost::BuildPlaybackDeps()
     pdeps.wait_idle =
         [this](const DeviceKey& k, Clock::duration timeout)
         { return pipeline_->WaitIdle(k, timeout); };
-    /* clock_sample intentionally unset: the backend's
-       GroupStatus/RgbClockSnapshot is in-process state not
-       exposed over the SDK wire, and no backend diagnostics
-       pipe exists yet — sync reports honest Unknown/Stale. */
+    /* clock_sample — the N01 observability pipe doubles as the
+       clock channel: LIANLI_WIRELESS_STATUS carries the group's
+       rgb_clock sample, so the playback-clock sync dep is now
+       real. The controller's own FindWireless() picks the first
+       connected "Wireless:" snapshot; this resolves the same
+       predicate so the dep needs no key plumbing. A stock
+       backend (no packet 4000) answers false cleanly — sync
+       reports honest Unknown/Stale. */
+    pdeps.clock_sample =
+        [this](PlaybackClockSnapshot& out)
+        {
+            if(!sdk_)
+            {
+                return false;
+            }
+            for(const DeviceSnapshot& snap : sdk_->Snapshots())
+            {
+                if(IsWirelessGroupController(snap) &&
+                   snap.connection == ConnectionState::Connected)
+                {
+                    return sdk_->WirelessClockSample(snap.key, out);
+                }
+            }
+            return false;
+        };
     return pdeps;
 }
 

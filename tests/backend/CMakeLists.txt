@@ -24,6 +24,7 @@ set(LLW_INCLUDES
     ${CMAKE_SOURCE_DIR}/src/core
     ${CTRL}
     ${DEPS}
+    ${DEPS}/json
     ${DEPS}/tinyuz
     ${DEPS}/HDiffPatch)
 set(LLW_DEFINES NDEBUG _IS_USED_MULTITHREAD=0)

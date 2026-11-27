@@ -36,10 +36,12 @@
 
 #pragma once
 
+#include "LianLiWirelessService.h"
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <nlohmann/json.hpp>
 
 namespace LianLiWireless
 {
@@ -170,4 +172,33 @@ namespace LianLiWireless
         DiagCounters         counters;
         std::unique_ptr<TraceSink> sink;
     };
+
+    /*---------------------------------------------------------*\
+    | SDK diagnostics serialization (N01 observability): the    |
+    | body of the backend's wireless-status reply.              |
+    |                                                           |
+    | GroupStatusToJson carries identity (mac — the same        |
+    | "AA:BB:.." string the RGBController reports as serial),   |
+    | the lifecycle state, convergence counters, last_error,    |
+    | the latest discovery sighting, the desired-upload stats,  |
+    | and the playback-clock sample. `wedged` marks the         |
+    | terminal states a new intent re-arms (Failed,             |
+    | ForeignMaster) so a consumer never re-derives "wedged"    |
+    | from the state string.                                    |
+    \*---------------------------------------------------------*/
+    const char*    WirelessStateName(WirelessState s);
+    std::string    MacToString(const Mac& mac);   /* "AA:BB:.." — the
+                                                     controller serial  */
+    nlohmann::json GroupStatusToJson(const Mac& mac,
+                        const LianLiWirelessService::GroupStatus& st);
+    nlohmann::json CountersToJson(const DiagCounters& c);
+
+    /*---------------------------------------------------------*\
+    | Defined in LianLiWirelessControllerDetect.cpp — snapshots |
+    | every tracked group's GroupStatus plus the process        |
+    | counters from the live service context. Returns           |
+    | {"available":false,"groups":[]} when no dongle pair was   |
+    | ever detected (the context never materialized).           |
+    \*---------------------------------------------------------*/
+    nlohmann::json CollectStatusJson();
 }

@@ -16,6 +16,8 @@
 #include "LianLiWirelessController.h"
 #include "LianLiWirelessFanType.h"
 
+#include <nlohmann/json.hpp>
+
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -457,6 +459,78 @@ static void TestTraceCapAndSummary()
           "counters accumulate without a trace file");
 }
 
+/*-------------------------------------------------------------*\
+|| 11. GroupStatus -> JSON: the SDK diagnostics payload        ||
+||     must surface a wedged group (state + error) instead of   ||
+||     the wedge staying in-process state (N01 follow-up).      ||
+\*-------------------------------------------------------------*/
+static void TestStatusJsonSerializer()
+{
+    DIAG.Reset();
+    FakeClock clk;
+    FakeLink  link;
+    LianLiWirelessService svc(link, clk);
+    CHECK(svc.AddGroup(MAC_TARGET, 3), "service tracks group for status json");
+
+    /* converge: the sighting echoes the upload's effect id once
+       the first upload frame goes out */
+    auto up = std::make_shared<RgbUpload>(MakeUpload(0x30));
+    link.poll_fn = [&] { return MakeDiscovery(MAC_TARGET, MAC_MASTER,
+        link.rgb_sends > 0 ? up->EffectId().data() : nullptr); };
+    svc.SetDesired(MAC_TARGET, up);
+    for(int i = 0; i < 40; i++) { clk.Advance(100); svc.StepAll(); }
+
+    LianLiWirelessService::GroupStatus st;
+    CHECK(svc.GetStatus(MAC_TARGET, st) && st.confirmed,
+          "fixture converged before json check");
+
+    nlohmann::json j = GroupStatusToJson(MAC_TARGET, st);
+    CHECK(j["mac"].get<std::string>() == "9B:10:76:E5:66:E1",
+          "group mac rendered as the DeviceKey serial string");
+    CHECK(j["state"].get<std::string>() == "holding",
+          "converged state serialized");
+    CHECK(j["wedged"].get<bool>() == false,
+          "healthy group is not wedged");
+    CHECK(j["confirmed"].get<bool>() == true,
+          "confirmed flag serialized");
+    CHECK(j["upload"]["frame_count"].get<uint32_t>() == 1,
+          "upload stats present");
+    CHECK(j["sighting"]["fan_count"].get<uint32_t>() == 3,
+          "sighting fields present");
+    CHECK(j.contains("rgb_clock"), "clock sample present");
+    CHECK(j["rgb_clock"]["valid"].get<bool>() == false,
+          "unpolled clock reports invalid, not fabricated ticks");
+
+    /* wedge: exhaust the resend budget on a group that never
+       acks (same recipe as section 8) */
+    FakeClock clk2;
+    FakeLink  link2;
+    LianLiWirelessService svc2(link2, clk2);
+    CHECK(svc2.AddGroup(MAC_FOREIGN, 3), "second service tracks group");
+    link2.poll_fn = [] { return MakeDiscovery(MAC_FOREIGN, MAC_MASTER); };
+    svc2.SetDesired(MAC_FOREIGN,
+                    std::make_shared<RgbUpload>(MakeUpload(0x70)));
+    for(int i = 0; i < 400; i++) { clk2.Advance(100); svc2.StepAll(); }
+
+    LianLiWirelessService::GroupStatus wedged;
+    CHECK(svc2.GetStatus(MAC_FOREIGN, wedged), "wedged status snapshot");
+    nlohmann::json wj = GroupStatusToJson(MAC_FOREIGN, wedged);
+    CHECK(wj["state"].get<std::string>() == "failed",
+          "exhausted group reports failed");
+    CHECK(wj["wedged"].get<bool>() == true,
+          "terminal state flagged as wedged");
+    CHECK(!wj["last_error"].get<std::string>().empty(),
+          "wedge carries its last_error");
+    CHECK(wj["resends"].get<uint64_t>() >= 1,
+          "resend budget visible");
+
+    nlohmann::json cj = CountersToJson(DIAG.Snapshot());
+    CHECK(cj["set_desired"].get<uint64_t>() >= 1,
+          "process counters serialized");
+    CHECK(cj.contains("rgb_clock_queries"),
+          "clock counters serialized");
+}
+
 int main()
 {
     TestCounterBasics();
@@ -469,6 +543,7 @@ int main()
     TestUploadRetryAndFailure();
     TestCompressionViaController();
     TestTraceCapAndSummary();
+    TestStatusJsonSerializer();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

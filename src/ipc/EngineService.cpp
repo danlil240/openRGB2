@@ -1149,9 +1149,7 @@ nlohmann::json EngineService::DiagnosticsJson(TimePoint now) const
         { "clock", nlohmann::json::object({
             { "steady_ms", steady_ms },
         })},
-        /* The backend's own read-only counters pipe is a
-           separate plan item; honest null until it exists. */
-        { "backend_counters", nullptr                        },
+        { "backend_counters", BackendCountersJson()           },
     });
 }
 
@@ -1170,6 +1168,58 @@ nlohmann::json EngineService::OnWelcome()
            unchanged. */
         caps.push_back("studio_workspace_v1");
     }
+/*---------------------------------------------------------*\
+||| backend_counters — the vendor SDK extension's cached   |||
+||| snapshot. WirelessStatus() is a state-lock read; this   |||
+||| never waits behind wire I/O (same discipline as the     |||
+||| F12 fix). The raw backend document is passed through    |||
+||| verbatim so server-side fields surface without a client |||
+||| rev.                                                    |||
+\*---------------------------------------------------------*/
+
+nlohmann::json EngineService::BackendCountersJson() const
+{
+    if(!deps_.sdk)
+    {
+        return nullptr;              /* honest: no backend   */
+    }
+    sdk::WirelessStatusSnapshot snap;
+    deps_.sdk->WirelessStatus(snap);
+    if(!snap.probed)
+    {
+        return nlohmann::json::object({
+            { "available", false },
+            { "probed",    false },
+        });
+    }
+    if(!snap.supported)
+    {
+        /* Stock backend: it dropped packet 4000 — "unsupported"
+           is itself diagnostic. */
+        return nlohmann::json::object({
+            { "available", false },
+            { "probed",    true  },
+            { "supported", false },
+        });
+    }
+    if(!snap.have_data)
+    {
+        /* Answered but never parsed (e.g. malformed body). */
+        return nlohmann::json::object({
+            { "available", false },
+            { "probed",    true  },
+            { "supported", true  },
+        });
+    }
+    nlohmann::json out = snap.status.raw;
+    out["probed"]    = true;
+    out["supported"] = true;
+    out["fetched_age_ms"] =
+        std::chrono::duration<double, std::milli>(
+            Clock::now() - snap.fetched_at).count();
+    return out;
+}
+
     return nlohmann::json::object({
         { "engine",       "openrgb2-engine" },
         { "running",      engine_.Running() },

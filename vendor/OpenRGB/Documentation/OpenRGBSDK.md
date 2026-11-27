@@ -105,8 +105,11 @@ The following IDs represent different SDK commands.  Each ID packet has a certai
 | 1130  | [NET_PACKET_ID_RGBCONTROLLER_SETDEVICESPECIFICCONFIGURATION](#net_packet_id_rgbcontroller_setdevicespecificconfiguration)         | RGBController::SetDeviceSpecificConfiguration                 | 6                |
 | 1131  | [NET_PACKET_ID_RGBCONTROLLER_SETDEVICESPECIFICZONECONFIGURATION](#net_packet_id_rgbcontroller_setdevicespecificzoneconfiguration) | RGBController::SetDeviceSpecificZoneConfiguration             | 6                |
 | 1150  | [NET_PACKET_ID_RGBCONTROLLER_SIGNALUPDATE](#net_packet_id_rgbcontroller_signalupdate)                                             | RGBController::SignalUpdate()                                 | 6                |
+| 4000  | [NET_PACKET_ID_LIANLI_WIRELESS_STATUS](#net_packet_id_lianli_wireless_status)                                                     | Lian Li wireless group status + diagnostics counters (fork extension) | 0†        |
 
 \* The [NET_PACKET_ID_REQUEST_PROTOCOL_VERSION](#net_packet_id_request_protocol_version) packet was not present in protocol version 0, but clients supporting protocol versions 1+ should always send this packet.  If no response is received, it should be assumed that the server is using protocol 0.
+
+† Packet 4000 is a `lianli-wireless` fork extension, not part of upstream OpenRGB.  A server that does not implement it simply never replies — clients must treat a reply timeout as "unsupported" and must NOT treat it as a connection failure.
 
 ### Device IDs
 
@@ -955,3 +958,43 @@ The update reason code determines the format of the description data:
 | ------------------ | -------------------- | ---------- | -------------------------------- |
 | 2                  | unsigned short       | num_colors | Number of color values           |
 | 4 * num_colors     | RGBColor[num_colors] | colors     | Color values for each LED        |
+
+## NET_PACKET_ID_LIANLI_WIRELESS_STATUS
+
+*`lianli-wireless` fork extension (openrgb2) — not part of upstream OpenRGB.*
+
+### Request [Size: 0]
+
+The client uses this ID to request the Lian Li wireless service's per-group status.  The request contains no data; `pkt_dev_id` is ignored.
+
+### Response [Size: Variable]
+
+The server responds with a null-terminated JSON document (same encoding convention as the SETTINGS replies):
+
+```json
+{ "available": true,
+  "master": "AA:BB:CC:DD:EE:FF",
+  "groups": [ {
+      "mac": "9B:10:76:E5:66:E1",
+      "state": "boot|searching|uploading|holding|lost|foreign_master|failed|cancelled",
+      "wedged": false,
+      "confirmed": true,
+      "resends": 0, "send_failures": 0, "last_error": "",
+      "fan_type": "SL V3", "fan_count": 3,
+      "sighting": { "master": "...", "channel": 8, "receiver": 1,
+                    "device_type": 0, "fan_count": 3, "mb_rgb_sync": false,
+                    "device_ticks": 0, "effect_id": "AABBCCDD" },
+      "upload": { "frame_count": 0, "interval_hundredths": 0,
+                  "effective_cycle_ms": 0.0, "nominal_fps": 0.0,
+                  "compressed_bytes": 0, "effect_id": "00000000" },
+      "rgb_clock": { "valid": false, "ticks": 0,
+                     "sampled_at_ms": 0, "age_ms": 0 } } ],
+  "counters": { "set_desired": 0, "uploads_admitted": 0, "..." : 0 } }
+```
+
+- `available` is `false` (with an empty `groups` array and no `master`/`counters`) when no wireless dongle pair was ever detected — the service context does not exist.
+- `mac` matches the corresponding RGBController's `serial` field, so a client can join a group row to its enumerated device.
+- `wedged` marks the terminal states a new intent re-arms (`failed` — resend budget / transport backoff exhaustion — and `foreign_master`); `state` plus `last_error` carry the detail.
+- `sighting` is `null` until the group has been sighted in the RX discovery table; `upload` is `null` when no desired upload is outstanding.
+- `rgb_clock` is the V1 master RGB-clock sample used for playback-clock sync; `age_ms` is the backend-side age of the sample at serialization time.
+- `counters` carries the process-wide `DiagCounters` (submissions, lock wait, compression, admission, USB, discovery, keep-alive, resets, clock queries).

@@ -448,3 +448,161 @@ void Diagnostics::WriteSummaryLocked() const
     summary << "trace_rows," << sink->rows << '\n';
     summary << "trace_capped," << (sink->capped ? 1 : 0) << '\n';
 }
+
+/*---------------------------------------------------------*\
+|| SDK diagnostics serialization                           ||
+\*---------------------------------------------------------*/
+
+namespace
+{
+    std::string BytesToHex(const uint8_t* data, size_t len)
+    {
+        char buf[9];
+        size_t n = len < 4 ? len : 4;
+        for(size_t i = 0; i < n; i++)
+        {
+            snprintf(buf + i * 2, sizeof(buf) - i * 2, "%02X", data[i]);
+        }
+        buf[n * 2] = 0;
+        return buf;
+    }
+}
+
+std::string LianLiWireless::MacToString(const Mac& mac)
+{
+    char buf[18];
+    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return buf;
+}
+
+const char* LianLiWireless::WirelessStateName(WirelessState s)
+{
+    switch(s)
+    {
+        case WirelessState::Boot:          return "boot";
+        case WirelessState::Searching:     return "searching";
+        case WirelessState::Uploading:     return "uploading";
+        case WirelessState::Holding:       return "holding";
+        case WirelessState::Lost:          return "lost";
+        case WirelessState::ForeignMaster: return "foreign_master";
+        case WirelessState::Failed:        return "failed";
+        case WirelessState::Cancelled:     return "cancelled";
+    }
+    return "unknown";
+}
+
+nlohmann::json LianLiWireless::GroupStatusToJson(
+        const Mac& mac, const LianLiWirelessService::GroupStatus& st)
+{
+    nlohmann::json j;
+
+    j["mac"]           = MacToString(mac);
+    j["state"]         = WirelessStateName(st.state);
+    j["wedged"]        = st.state == WirelessState::Failed
+                      || st.state == WirelessState::ForeignMaster;
+    j["confirmed"]     = st.confirmed;
+    j["resends"]       = st.resends;
+    j["send_failures"] = st.send_failures;
+    j["last_error"]    = st.last_error;
+
+    if(st.have_sighting)
+    {
+        const Sighting& s = st.latest;
+        j["sighting"] = nlohmann::json::object({
+            { "master",       MacToString(s.master)                    },
+            { "channel",      s.channel                              },
+            { "receiver",     s.receiver                             },
+            { "device_type",  s.device_type                          },
+            { "fan_count",    s.fan_count                            },
+            { "mb_rgb_sync",  s.mb_rgb_sync                          },
+            { "device_ticks", s.device_ticks                         },
+            { "effect_id",    BytesToHex(s.effect_id.data(),
+                                         s.effect_id.size())          },
+        });
+    }
+    else
+    {
+        j["sighting"] = nullptr;
+    }
+
+    if(st.frame_count > 0)
+    {
+        j["upload"] = nlohmann::json::object({
+            { "frame_count",         st.frame_count                   },
+            { "interval_hundredths", st.interval_hundredths           },
+            { "effective_cycle_ms",  st.effective_cycle_ms            },
+            { "nominal_fps",         st.nominal_fps                   },
+            { "compressed_bytes",    st.compressed_bytes              },
+            { "effect_id",           BytesToHex(st.effect_id.data(),
+                                                st.effect_id.size())  },
+        });
+    }
+    else
+    {
+        j["upload"] = nullptr;
+    }
+
+    j["rgb_clock"] = nlohmann::json::object({
+        { "valid",         st.rgb_clock.valid         },
+        { "ticks",         st.rgb_clock.ticks         },
+        { "sampled_at_ms", st.rgb_clock.sampled_at_ms },
+        { "age_ms",        st.rgb_clock.age_ms        },
+    });
+
+    return j;
+}
+
+nlohmann::json LianLiWireless::CountersToJson(const DiagCounters& c)
+{
+    nlohmann::json j;
+    #define DIAG_FIELD(name) j[#name] = c.name;
+    DIAG_FIELD(set_desired)
+    DIAG_FIELD(set_desired_rejected)
+    DIAG_FIELD(replaced_pending)
+    DIAG_FIELD(set_desired_us)
+    DIAG_FIELD(set_desired_us_max)
+    DIAG_FIELD(lock_wait_us)
+    DIAG_FIELD(lock_wait_us_max)
+    DIAG_FIELD(step_all)
+    DIAG_FIELD(step_all_us)
+    DIAG_FIELD(step_all_us_max)
+    DIAG_FIELD(compress_calls)
+    DIAG_FIELD(compress_us)
+    DIAG_FIELD(compress_us_max)
+    DIAG_FIELD(compress_bytes_in)
+    DIAG_FIELD(compress_bytes_out)
+    DIAG_FIELD(uploads_admitted)
+    DIAG_FIELD(uploads_deferred)
+    DIAG_FIELD(upload_retries)
+    DIAG_FIELD(upload_failures)
+    DIAG_FIELD(rf_packets)
+    DIAG_FIELD(header_repeats)
+    DIAG_FIELD(upload_us)
+    DIAG_FIELD(upload_us_max)
+    DIAG_FIELD(usb_chunk_batches)
+    DIAG_FIELD(usb_chunks)
+    DIAG_FIELD(usb_send_us)
+    DIAG_FIELD(usb_send_us_max)
+    DIAG_FIELD(usb_reads)
+    DIAG_FIELD(usb_read_us)
+    DIAG_FIELD(usb_read_us_max)
+    DIAG_FIELD(discovery_polls)
+    DIAG_FIELD(discovery_misses)
+    DIAG_FIELD(discovery_records)
+    DIAG_FIELD(discovery_deferred)
+    DIAG_FIELD(discovery_us)
+    DIAG_FIELD(discovery_us_max)
+    DIAG_FIELD(discovery_age_ms)
+    DIAG_FIELD(discovery_age_ms_max)
+    DIAG_FIELD(keepalives)
+    DIAG_FIELD(keepalive_failures)
+    DIAG_FIELD(keepalive_gap_ms_max)
+    DIAG_FIELD(transport_revalidations)
+    DIAG_FIELD(foreign_master_events)
+    DIAG_FIELD(rgb_clock_queries)
+    DIAG_FIELD(rgb_clock_valid_samples)
+    DIAG_FIELD(rgb_clock_ticks)
+    #undef DIAG_FIELD
+    return j;
+}
