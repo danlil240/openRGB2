@@ -31,6 +31,8 @@
 
 #include <QCryptographicHash>
 #include <QGuiApplication>
+#include <QKeyEvent>
+#include <QQuickItem>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -452,8 +454,9 @@ int main(int argc, char** argv)
     /*---- a slider drag is ONE undo record ------------------
        Brightness used to commit on every onMoved: one drag =
        dozens of history entries + full-document serializations.
-       Now the press..release gesture commits once; a keyboard
-       step (no press) still commits immediately. */
+       Now the press..release gesture commits once; a bare
+       `moved` with no gesture (accessibility action) still
+       commits immediately. */
     {
         QObject* bright =
             win->findChild<QObject*>(QStringLiteral("sceneBrightness"));
@@ -471,10 +474,59 @@ int main(int argc, char** argv)
             bright->setProperty("pressed", false);
             CHECK(ws_ctl.Session().UndoCount() == before + 1);
             CHECK(std::abs(scene_edit.brightness() - 0.55) < 1e-6);
-            /* keyboard step: moved with no press */
+            /* moved with no gesture (no press) */
             bright->setProperty("value", 60);
             QMetaObject::invokeMethod(bright, "moved");
             CHECK(ws_ctl.Session().UndoCount() == before + 2);
+
+            /* The model changing mid-drag must not yank the
+               handle (Binding is `when: !pressed`); the release
+               commits what the USER dragged to. */
+            bright->setProperty("pressed", true);
+            bright->setProperty("value", 70);
+            scene_edit.setBrightness(0.10);
+            CHECK(ws_ctl.Session().UndoCount() == before + 3);
+            CHECK(std::abs(bright->property("value").toDouble() - 70)
+                  < 1e-6);
+            bright->setProperty("pressed", false);
+            CHECK(ws_ctl.Session().UndoCount() == before + 4);
+            CHECK(std::abs(scene_edit.brightness() - 0.70) < 1e-6);
+
+            /* Disabled mid-drag (Qt drops the grab and clears
+               `pressed` with no release): no commit, and the
+               handle re-syncs to the model. */
+            bright->setProperty("pressed", true);
+            bright->setProperty("value", 25);
+            bright->setProperty("enabled", false);
+            bright->setProperty("pressed", false);
+            CHECK(ws_ctl.Session().UndoCount() == before + 4);
+            CHECK(std::abs(scene_edit.brightness() - 0.70) < 1e-6);
+            /* (brightness is stored as float) */
+            CHECK(std::abs(bright->property("value").toDouble() - 70)
+                  < 1e-3);
+            bright->setProperty("enabled", true);
+
+            /* A step key is a gesture too: Slider holds `pressed`
+               while the key is down -> one commit on key RELEASE. */
+            auto* bright_item = qobject_cast<QQuickItem*>(bright);
+            CHECK(bright_item != nullptr);
+            if(bright_item != nullptr)
+            {
+                QKeyEvent down(QEvent::KeyPress, Qt::Key_Right,
+                               Qt::NoModifier);
+                QCoreApplication::sendEvent(bright_item, &down);
+                CHECK(bright->property("pressed").toBool());
+                CHECK(std::abs(bright->property("value").toDouble()
+                               - 71) < 1e-3);
+                CHECK(ws_ctl.Session().UndoCount() == before + 4);
+                QKeyEvent up(QEvent::KeyRelease, Qt::Key_Right,
+                             Qt::NoModifier);
+                QCoreApplication::sendEvent(bright_item, &up);
+                CHECK(!bright->property("pressed").toBool());
+                CHECK(ws_ctl.Session().UndoCount() == before + 5);
+                CHECK(std::abs(scene_edit.brightness() - 0.71)
+                      < 1e-5);
+            }
         }
     }
 
