@@ -280,6 +280,14 @@ public:
        contract as PollEvents. */
     void PollFrameStatus(TimePoint now = Clock::now());
 
+    /* The draft-preview publish tick (Task 7). PollEvents
+       calls this too; the owner loop calls it on the same
+       fast cadence as PollFrameStatus but unconditionally, so
+       a client subscribed to "preview" and not to
+       "frame_status" still gets the fast feed. Same
+       single-caller contract as PollEvents. */
+    void PollPreviews(TimePoint now = Clock::now());
+
     /* Emits the "reactive" event with the current reactive
        state — the ReactiveInputs manager's changed hook
        calls this (enable/disable, pause transitions). */

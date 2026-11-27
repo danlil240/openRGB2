@@ -1753,9 +1753,18 @@ void EngineHost::Run()
             PollOnce();
             next_maint = now + std::chrono::milliseconds(500);
         }
-        if(service_ && EventInterest("frame_status"))
+        if(service_)
         {
-            service_->PollFrameStatus();
+            const TimePoint tick = Clock::now();
+            /* frame_status body only when someone listens;
+               draft previews always ride the fast tick — a
+               client subscribed to "preview" alone must not
+               fall back to the maintenance cadence. */
+            if(EventInterest("frame_status"))
+            {
+                service_->PollFrameStatus(tick);
+            }
+            service_->PollPreviews(tick);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }

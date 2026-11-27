@@ -2863,6 +2863,7 @@ void EngineService::PollEvents(TimePoint now)
     /* frame_status emits last — the same ordering it had as
        the final entry of the pending batch. */
     PollFrameStatus(now);
+    PollPreviews(now);
 }
 
 void EngineService::PollFrameStatus(TimePoint now)
@@ -2907,9 +2908,14 @@ void EngineService::PollFrameStatus(TimePoint now)
             last_stats_sig_.clear();
         }
     }
+}
 
-    /* Task 7 draft previews ride the same fast tick; the
-       per-session 30 Hz cap lives inside PollPreviews. */
+void EngineService::PollPreviews(TimePoint now)
+{
+    /* Task 7 draft previews: their own fast-tick entry point,
+       independent of frame_status interest — the per-session
+       30 Hz cap and the session-bound targeting live inside
+       WorkspaceCommands::PollPreviews. */
     if(ws_commands_)
     {
         ws_commands_->PollPreviews(now);
