@@ -177,6 +177,11 @@ struct WsEngine
     int           import_commits  = 0;
     int           reload_jobs     = 0;
     std::string   upload_bytes;
+    /* The document bytes a download was staged with — like the
+       real engine (StageDownload copies the cached bytes), a
+       transfer serves ONE consistent snapshot even if the
+       workspace moves mid-transfer. */
+    std::string   dl_bytes;
     std::map<std::string, std::string> staged_uploads;
     std::vector<uint64_t>         terminal_jobs;
     int           set_scene_calls = 0;
@@ -404,12 +409,13 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
             if(dir == "download")
             {
                 ++e.download_begins;
-                const std::string bytes = e.DocBytesFor();
+                e.dl_bytes = e.DocBytesFor();
+                const std::string& bytes = e.dl_bytes;
                 e.srv.SendMsg(MsgType::Ok, m.request_id,
                     nlohmann::json::object({
                         { "transfer_id",     "dl1" },
                         { "length",          (uint64_t)bytes.size() },
-                        { "sha256",          e.DocSha() },
+                        { "sha256",          Sha256(bytes) },
                         { "max_chunk_bytes", (uint64_t)400 },
                     }));
             }
@@ -451,7 +457,7 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
             else
             {
                 /* download chunk */
-                const std::string bytes = e.DocBytesFor();
+                const std::string bytes = e.dl_bytes;
                 const uint64_t mx =
                     body.value("max_bytes", (uint64_t)400);
                 const uint64_t n =
@@ -954,6 +960,43 @@ int main(int argc, char** argv)
                    !rig.ctl.error().isEmpty(); }));
         CHECK(rig.ctl.dirty());
         CHECK(rig.ctl.Session().Working().meta.name == "kept");
+    }
+
+    /* Audit U-9: a download staged at revision N that finishes
+       after the snapshot moved to N+1 holds N's bytes; adopting
+       it labelled N+1 is a lost update (the next save would
+       overwrite N+1 with no conflict). The transfer hash must
+       match the current content hash, or the doc is refetched. */
+    std::printf("-- controller: a download overtaken by a newer "
+                "revision is refetched (U-9)\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        CHECK(rig.ctl.Session().Working().meta.name == "desk");
+
+        /* Foreign commit -> rev 2: the UI starts a download. */
+        const int begins = rig.engine.download_begins;
+        rig.engine.doc = CompactDoc("second");
+        rig.engine.ws_rev = 2;
+        rig.engine.SendEvent(rig.engine.Snapshot());
+        CHECK(rig.PumpUntil([&] {
+            return rig.engine.download_begins == begins + 1; }));
+        /* Mid-transfer, another commit lands as rev 3. */
+        rig.engine.doc = CompactDoc("third");
+        rig.engine.ws_rev = 3;
+        rig.engine.SendEvent(rig.engine.Snapshot());
+        CHECK(rig.PumpUntil([&] {
+            return !rig.ctl.loading() &&
+                   rig.ctl.Session().BaseRevision() == 3 &&
+                   rig.ctl.Session().Baseline().meta.name ==
+                       "third"; }, 4000));
+        CHECK(rig.ctl.Session().Baseline().meta.name == "third");
+        CHECK(!rig.ctl.dirty());
+        CHECK(!rig.ctl.conflict());
     }
 
     std::printf("-- controller: revision_conflict -> conflict\n");
