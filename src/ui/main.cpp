@@ -60,6 +60,44 @@
 #include <cstdlib>
 #include <cstring>
 
+namespace
+{
+
+/* QA port text -> 0..65535 (0 = ephemeral). Anything else —
+   non-numeric, signed, out of range — is rejected instead of
+   silently becoming 0 or wrapping modulo 65536. */
+bool ParseQaPort(const QString& text, int& port)
+{
+    bool ok = false;
+    const uint v = text.trimmed().toUInt(&ok, 10);
+    if(!ok || v > 65535u)
+    {
+        return false;
+    }
+    port = (int)v;
+    return true;
+}
+
+/* Bring the window back from the tray / minimized state
+   without dropping a maximized state (showNormal() would). */
+void ShowRestored(QQuickWindow* window)
+{
+    const Qt::WindowStates st =
+        window->windowStates() & ~Qt::WindowMinimized;
+    if(st & Qt::WindowMaximized)
+    {
+        window->showMaximized();
+    }
+    else
+    {
+        window->showNormal();
+    }
+    window->raise();
+    window->requestActivate();
+}
+
+} /* anonymous namespace */
+
 int main(int argc, char** argv)
 {
     /* --pipe <name> overrides the well-known command pipe —
@@ -75,9 +113,12 @@ int main(int argc, char** argv)
         qEnvironmentVariableIsSet("OPENRGB2_QA") &&
         qEnvironmentVariable("OPENRGB2_QA") != "0";
     int  qa_port = openrgb2::ui::QaServer::kDefaultPort;
+    bool qa_port_ok = true;
+    QString qa_port_text;
     if(qEnvironmentVariableIsSet("OPENRGB2_QA_PORT"))
     {
-        qa_port = qEnvironmentVariable("OPENRGB2_QA_PORT").toInt();
+        qa_port_text = qEnvironmentVariable("OPENRGB2_QA_PORT");
+        qa_port_ok = ParseQaPort(qa_port_text, qa_port);
     }
     for(int i = 1; i < argc; ++i)
     {
@@ -91,13 +132,15 @@ int main(int argc, char** argv)
             if(i + 1 < argc && std::isdigit(
                    (unsigned char)argv[i + 1][0]))
             {
-                qa_port = std::atoi(argv[++i]);
+                qa_port_text = QString::fromUtf8(argv[++i]);
+                qa_port_ok = ParseQaPort(qa_port_text, qa_port);
             }
         }
         else if(std::strncmp(argv[i], "--qa=", 5) == 0)
         {
             qa_enabled = true;
-            qa_port = std::atoi(argv[i] + 5);
+            qa_port_text = QString::fromUtf8(argv[i] + 5);
+            qa_port_ok = ParseQaPort(qa_port_text, qa_port);
         }
         else if(std::strcmp(argv[i], "--managed") == 0)
         {
@@ -400,6 +443,14 @@ int main(int argc, char** argv)
         }
     }
 #endif
+    /* Main.qml restores the NORMAL geometry; the maximized flag
+       is applied here because setWindowStates() does not show a
+       hidden (tray-start) window — the state takes effect when
+       it is first shown. */
+    if(ui_prefs.windowMaximized())
+    {
+        window->setWindowStates(Qt::WindowMaximized);
+    }
     if(startup_task.available())
         startup_task.refresh();
 
@@ -408,11 +459,7 @@ int main(int argc, char** argv)
     QProcess shutdown;
     if(tray_available)
     {
-        auto show_ui = [window] {
-            window->showNormal();
-            window->raise();
-            window->requestActivate();
-        };
+        auto show_ui = [window] { ShowRestored(window); };
         tray.setToolTip(QStringLiteral("OpenRGB2"));
         tray.setContextMenu(&tray_menu);
         tray_menu.addAction(QObject::tr("Open OpenRGB2"), show_ui);
@@ -503,7 +550,7 @@ int main(int argc, char** argv)
         if(background && !QSystemTrayIcon::isSystemTrayAvailable())
             QTimer::singleShot(20000, window, [window] {
                 if(!QSystemTrayIcon::isSystemTrayAvailable())
-                    window->showNormal();
+                    ShowRestored(window);
             });
 #endif
     }
@@ -513,9 +560,7 @@ int main(int argc, char** argv)
                          &app, [&instance_server, window] {
             while(auto* client = instance_server.nextPendingConnection())
             {
-                window->showNormal();
-                window->raise();
-                window->requestActivate();
+                ShowRestored(window);
                 client->deleteLater();
             }
         });
@@ -586,14 +631,39 @@ int main(int argc, char** argv)
     /* QA harness is opt-in and needs the loaded root object —
        it walks the live item tree and synthesizes input. */
     openrgb2::ui::QaServer qa_server(engine);
-    if(qa_enabled)
+    if(qa_enabled && !qa_port_ok)
+    {
+        /* Fail closed: an unparseable/out-of-range port never
+           falls back to some other port. */
+        std::fprintf(stderr,
+            "QA socket disabled: invalid port \"%s\" "
+            "(expected 0..65535)\n",
+            qa_port_text.toUtf8().constData());
+    }
+    else if(qa_enabled)
     {
         QString qa_err;
         if(qa_server.Start((quint16)qa_port, qa_err))
         {
+            /* Every request must carry this per-launch token.
+               tools/qa/qa.py reads the per-user token file. */
+            const QString token_file =
+                openrgb2::ui::QaServer::TokenFilePath(
+                    qa_server.Port());
+            QString tok_err;
+            const bool wrote =
+                qa_server.WriteTokenFile(token_file, tok_err);
             std::fprintf(stderr,
-                "QA socket: 127.0.0.1:%u\n",
-                (unsigned)qa_server.Port());
+                "QA socket: 127.0.0.1:%u\n"
+                "QA token: %s\n"
+                "QA token file: %s%s%s\n",
+                (unsigned)qa_server.Port(),
+                qa_server.Token().toLatin1().constData(),
+                QDir::toNativeSeparators(token_file)
+                    .toUtf8().constData(),
+                wrote ? "" : " (write failed: ",
+                wrote ? "" : (tok_err + QStringLiteral(")"))
+                                 .toUtf8().constData());
         }
         else
         {
