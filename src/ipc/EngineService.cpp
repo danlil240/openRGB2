@@ -168,6 +168,7 @@ nlohmann::json StatsToJson(const DeliveryStats& s)
         { "transport_completed", s.transport_completed },
         { "suppressed",          s.suppressed          },
         { "transport_rejected",  s.transport_rejected  },
+        { "keyframes",           s.keyframes           },
         { "last_interval_s",     s.last_interval_s     },
         { "min_interval_s",      s.min_interval_s      },
         { "max_interval_s",      s.max_interval_s      },

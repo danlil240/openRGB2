@@ -281,10 +281,15 @@ map_stats, controllers:[{key, stats, pending, colors, budget_ms,
 delivered, wireless, suppressed, owned}]}`; per-controller form adds
 `{controller, found, stats}`. `stats` =
 `{submitted,replaced_pending,rejected,transport_completed,suppressed,
-transport_rejected,last_interval_s,min_interval_s,max_interval_s,
-mean_interval_s,interval_count,provenance}`.
+transport_rejected,keyframes,last_interval_s,min_interval_s,
+max_interval_s,mean_interval_s,interval_count,provenance}`.
 `transport_completed` means *accepted by the transport* — never
-"displayed" (plan section 4). Every registered lane produces a
+"displayed" (plan section 4). `keyframes` counts frames identical to
+the lane's last delivered state that were resent anyway because the
+static-scene keyframe interval (3 s by default) had passed since that
+lane's last send — so a device another writer changed converges again
+while the scene stays static. They are included in
+`transport_completed` and never in `suppressed`. Every registered lane produces a
 `controllers` row, including lanes that have never delivered — the row
 says so with `delivered:false`, zeroed counters, and empty `colors`
 (a "bound but never delivered" controller is a visible row, not an

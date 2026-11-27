@@ -765,6 +765,101 @@ static void TestStopBoundedByInFlightSend()
     CHECK(!pipe.Running());
 }
 
+/* Audit E-5: a static scene must be re-asserted. Unchanged-
+   frame suppression used to drop identical frames forever, so
+   a device reset by G Hub / Dynamic Lighting / firmware stayed
+   wrong until the scene itself changed. A per-lane keyframe
+   lets one identical frame through once the interval since
+   the last send has passed — counted in `keyframes`, never in
+   `suppressed` — and still obeys budgets, the suppressed
+   (uploaded-playback) lane, and the power-pause gate. */
+static void TestStaticKeyframe()
+{
+    auto transport = std::make_shared<FakeTransport>();
+    DeliveryPipeline pipe(transport);
+    const DeviceSnapshot w = Wired();
+    pipe.RegisterDevice(w);
+    pipe.SetKeyframeInterval(3s);
+
+    const RgbColor red{ 200, 0, 0 };
+    const RgbColor blue{ 0, 0, 200 };
+    const TimePoint t0 = TimePoint{} + 1h;
+    uint64_t seq = 0;
+    DeliveryStats st;
+
+    pipe.SubmitLatest(MakeFrame(w, ++seq, red));
+    CHECK(pipe.DrainDue(w.key, t0) == 1);
+
+    /* Inside the interval: identical frames stay suppressed. */
+    pipe.SubmitLatest(MakeFrame(w, ++seq, red));
+    CHECK(pipe.DrainDue(w.key, t0 + 1s) == 0);
+    pipe.SubmitLatest(MakeFrame(w, ++seq, red));
+    CHECK(pipe.DrainDue(w.key, t0 + 2999ms) == 0);
+
+    /* Interval reached: the identical frame is re-asserted. */
+    pipe.SubmitLatest(MakeFrame(w, ++seq, red));
+    CHECK(pipe.DrainDue(w.key, t0 + 3s) == 1);
+    CHECK(transport->DeliveredCount(w.key) == 2);
+    CHECK(pipe.Stats(w.key, st));
+    CHECK(st.keyframes == 1);
+    CHECK(st.suppressed == 2);
+    CHECK(st.transport_completed == 2);
+    CHECK(pipe.Stats().keyframes == 1);
+
+    /* The interval restarts from that send. */
+    pipe.SubmitLatest(MakeFrame(w, ++seq, red));
+    CHECK(pipe.DrainDue(w.key, t0 + 5s) == 0);
+
+    /* A changed frame is an ordinary send, not a keyframe —
+       and it restarts the interval too. */
+    pipe.SubmitLatest(MakeFrame(w, ++seq, blue));
+    CHECK(pipe.DrainDue(w.key, t0 + 5500ms) == 1);
+    pipe.SubmitLatest(MakeFrame(w, ++seq, blue));
+    CHECK(pipe.DrainDue(w.key, t0 + 8s) == 0);
+    pipe.SubmitLatest(MakeFrame(w, ++seq, blue));
+    CHECK(pipe.DrainDue(w.key, t0 + 8500ms) == 1);
+    CHECK(pipe.Stats(w.key, st));
+    CHECK(st.keyframes == 2);
+
+    /* Power-pause gate: nothing leaves while paused, however
+       old the last send is. */
+    pipe.SetOutputPaused(true, "display off");
+    CHECK(pipe.SubmitLatest(MakeFrame(w, ++seq, blue)).status ==
+          SubmitStatus::Rejected);
+    CHECK(pipe.DrainDue(w.key, t0 + 60s) == 0);
+    pipe.SetOutputPaused(false);
+
+    /* Uploaded playback owns the lane: no keyframe either. */
+    pipe.SetSuppressed(w.key, true, "owned by uploaded playback");
+    CHECK(pipe.SubmitLatest(MakeFrame(w, ++seq, blue)).status ==
+          SubmitStatus::Rejected);
+    CHECK(pipe.DrainDue(w.key, t0 + 70s) == 0);
+    pipe.SetSuppressed(w.key, false);
+    CHECK(pipe.Stats(w.key, st));
+    CHECK(st.keyframes == 2);
+    CHECK(transport->DeliveredCount(w.key) == 4);
+
+    /* The budget still paces it: a keyframe due before the
+       lane's budget window has elapsed waits for the budget. */
+    pipe.SetBudget(w.key, 5s);
+    pipe.SubmitLatest(MakeFrame(w, ++seq, red));
+    CHECK(pipe.DrainDue(w.key, t0 + 80s) == 1);           /* change */
+    pipe.SubmitLatest(MakeFrame(w, ++seq, red));
+    CHECK(pipe.DrainDue(w.key, t0 + 83s) == 0);           /* budget */
+    CHECK(pipe.PendingCount(w.key) == 1);
+    CHECK(pipe.DrainDue(w.key, t0 + 85s) == 1);           /* keyframe */
+    CHECK(pipe.Stats(w.key, st));
+    CHECK(st.keyframes == 3);
+
+    /* 0 = off: identical frames are suppressed forever. */
+    pipe.SetBudget(w.key, 0s);
+    pipe.SetKeyframeInterval(0s);
+    pipe.SubmitLatest(MakeFrame(w, ++seq, red));
+    CHECK(pipe.DrainDue(w.key, t0 + 1000s) == 0);
+    CHECK(pipe.Stats(w.key, st));
+    CHECK(st.keyframes == 3);
+}
+
 int main()
 {
     TestBurstCollapse();
@@ -782,6 +877,7 @@ int main()
     TestConcurrentCompletionsNeverNegative();
     TestDrainVsDeviceRemoval();
     TestStopBoundedByInFlightSend();
+    TestStaticKeyframe();
     std::printf("delivery pipeline: %d checks, %d failures\n",
                 checks, failures);
     return failures ? 1 : 0;

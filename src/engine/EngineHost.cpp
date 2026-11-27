@@ -833,6 +833,7 @@ bool EngineHost::Start(std::string& err)
        SDK transport below; with no transport configured its
        lanes simply idle. */
     pipeline_ = std::make_shared<DeliveryPipeline>();
+    pipeline_->SetKeyframeInterval(opts_.delivery_keyframe);
     engine_.SetFrameSink(pipeline_);
 
     /* 4. Backend attach: the backend is launched EXTERNALLY

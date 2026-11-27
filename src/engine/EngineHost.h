@@ -127,6 +127,13 @@ struct EngineHostOptions
        frames and resyncs the lanes. */
     std::chrono::milliseconds sdk_topology_poll{ 2000 };
 
+    /* Audit E-5: static-scene keyframe interval for every
+       delivery lane (DeliveryPipeline::SetKeyframeInterval).
+       Unchanged frames are otherwise never resent, so a device
+       reset by G Hub, Dynamic Lighting or its firmware stays
+       wrong until the scene changes. 0 = off. */
+    std::chrono::milliseconds delivery_keyframe{ 3000 };
+
     /* IPC surface (docs/ipc-protocol.md). Pipe names are
        overridable so a test never touches the well-known
        names a real engine may own. */
