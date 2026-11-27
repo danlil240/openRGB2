@@ -53,11 +53,27 @@ try {
     New-Item -ItemType File $exe | Out-Null
     $name = Get-OpenRGB2StartupTaskName $sid
     if($name -ne "OpenRGB2-$sid") { throw "unexpected task name: $name" }
-    if((Invoke-OpenRGB2StartupTask status $root $sid $user).enabled) {
+    $status = Invoke-OpenRGB2StartupTask status $root $sid $user
+    if($status.enabled -or $status.state -ne 'disabled' -or $status.target) {
         throw 'startup was enabled without a task'
     }
+
+    # A temp dir is owned (and writable) by the signed-in user: an
+    # elevated sign-in task over it would be a silent elevation path.
+    $refused = $null
+    try { $null = Invoke-OpenRGB2StartupTask enable $root $sid $user }
+    catch { $refused = $_.Exception.Message }
+    if(-not $refused -or $refused -notmatch 'writable' -or $script:registered) {
+        throw "enable over a user-writable install was not refused: $refused"
+    }
+    Write-Host 'PASS enable refuses a user-writable install'
+
+    # The rest exercises registration as if the install were protected.
+    function Get-OpenRGB2UserWritablePaths { return ,@() }
+
     $enabled = Invoke-OpenRGB2StartupTask enable $root $sid $user
-    if(-not $enabled.enabled) { throw 'enable did not report active task' }
+    if(-not $enabled.enabled -or $enabled.state -ne 'enabled' -or
+       $enabled.target -ne $exe) { throw 'enable did not report active task' }
     if($script:registered.TaskName -ne $name -or
        $script:registered.Actions[0].Execute -ne $exe -or
        $script:registered.Actions[0].Arguments -ne '--managed --background' -or
@@ -76,14 +92,20 @@ try {
         Actions=@([pscustomobject]@{Execute='C:\Other\openrgb2-ui.exe'})
         Principal=[pscustomobject]@{RunLevel='Highest';LogonType='Interactive'}
     }
-    if((Invoke-OpenRGB2StartupTask status $root $sid $user).enabled) {
+    $stale = Invoke-OpenRGB2StartupTask status $root $sid $user
+    if($stale.enabled) {
         throw 'another install was reported as this install'
     }
-    $null = Invoke-OpenRGB2StartupTask disable $root $sid $user
-    if(-not $script:registered) {
-        throw 'disable removed another install task'
+    if($stale.state -ne 'stale' -or $stale.target -ne 'C:\Other\openrgb2-ui.exe') {
+        throw "a task for a moved/other install was not reported stale: $($stale | ConvertTo-Json -Compress)"
     }
-    Write-Host 'PASS per-user elevated sign-in task enable/status/disable'
+    # The user's own OpenRGB2-<SID> task pointing elsewhere (moved or
+    # deleted install) is removed by disable -- never left behind.
+    $cleared = Invoke-OpenRGB2StartupTask disable $root $sid $user
+    if($script:registered -or $cleared.enabled -or $cleared.state -ne 'disabled') {
+        throw 'disable left the stale task of a moved install registered'
+    }
+    Write-Host 'PASS per-user elevated sign-in task enable/status/disable/stale'
 } finally {
     if(Test-Path $root) {
         $temp = (Resolve-Path -LiteralPath $env:TEMP).Path.TrimEnd('\')

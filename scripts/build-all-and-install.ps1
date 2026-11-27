@@ -1,33 +1,46 @@
 <#
 .SYNOPSIS
-    Elevated build-everything + install-in-place for OpenRGB2.
+    Build everything + install in place for OpenRGB2 (elevating only
+    the steps that need it).
 
 .DESCRIPTION
     One command from repo checkout to a working desktop icon:
 
-      1. Elevates via UAC -- the managed stack runs elevated, so only
-         an elevated shell can verify and stop its processes.
-      2. Stops every related process: the installed managed stack via
-         <InstallDir>\scripts\stop-openrgb2.ps1 -Force (engine IPC QUIT
-         -> backend shutdown event -> verified Stop-Process fallback),
-         then a sweep that force-stops any openrgb2/OpenRGB binary still
-         running from this repo (build\ outputs, staged packages, a
-         vendor\OpenRGB backend started in place) or from the install
-         dir. Foreign installs are listed, never touched.
-      3. Builds the pinned vendored backend via
+      1. Frees the repo's build outputs: dev-run openrgb2/OpenRGB
+         processes running from this repo (build\ outputs, staged
+         packages, a vendor\OpenRGB backend started in place) are
+         force-stopped when this shell can see their image path. If a
+         repo executable is still locked afterwards -- an ELEVATED
+         dev-run process, invisible to this shell -- an elevated
+         "Sweep" step (UAC) stops it. Foreign installs are listed,
+         never touched.
+      2. Builds the pinned vendored backend via
          vendor\OpenRGB\scripts\build-windows.bat 6.8.3 2022 64
          (qmake + jom, incremental; -SkipBackend to skip).
-      4. Runs packaging\windows\build-and-deploy.ps1: CMake build of
-         engine + UI + tools -> stage-release.ps1 (windeployqt +
-         manifest) -> update-openrgb2.ps1 into -InstallDir
-         (manifest-verified, preserves profiles\local\ + state\,
-         one-level .previous rollback).
+      3. Runs packaging\windows\build-and-deploy.ps1 WITHOUT
+         -InstallDir: CMake build of engine + UI + tools ->
+         stage-release.ps1 (windeployqt + manifest).
+         Steps 1-3 run as the invoking user, never elevated: compilers,
+         qmake/jom, windeployqt and the staging copy have no need for
+         admin rights.
+      4. Elevated "Deploy" step (UAC): stops the installed managed
+         stack via <InstallDir>\scripts\stop-openrgb2.ps1 -Force (UI ->
+         engine IPC QUIT -> backend shutdown event -> verified
+         Stop-Process fallback), force-stops anything still running
+         from the install dir, then runs update-openrgb2.ps1 --
+         manifest-verified, preserves profiles\local\ + state\,
+         one-level .previous rollback -- which, being elevated, makes
+         the install admin-only (state\ + profiles\local\ stay
+         writable by the invoking user).
       5. Ensures a desktop shortcut targets <InstallDir>\openrgb2-ui.exe
          (creates OpenRGB2.lnk via create-desktop-shortcut.ps1 when
-         none does).
+         none does), as the invoking user.
 
     Default InstallDir = %LOCALAPPDATA%\Programs\OpenRGB2 -- the target
     of the OpenRGB2 desktop icon.
+
+    Started from an already-elevated shell, every step runs in that
+    shell (no UAC prompts; the build then runs elevated too).
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\build-all-and-install.ps1
@@ -61,10 +74,15 @@ param(
     # (passthrough to stage-release.ps1; needs OPENRGB2_TS_* env vars).
     [switch]$Sign,
 
-    # Internal: marks the UAC-relaunched instance.
-    [switch]$ElevatedChild,
+    # Internal: the UAC-relaunched step to run ("Sweep" or "Deploy").
+    [ValidateSet("", "Sweep", "Deploy")]
+    [string]$ElevatedPhase = "",
 
-    # Don't hold the elevated window open at the end.
+    # Internal: SID of the invoking (non-elevated) user, who keeps
+    # write access to state\ + profiles\local\.
+    [string]$UserSid,
+
+    # Don't hold a failed elevated window open at the end.
     [switch]$NoPause
 )
 
@@ -73,9 +91,12 @@ Set-StrictMode -Version 2.0
 
 $RepoRoot  = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $PkgDir    = Join-Path $RepoRoot "packaging\windows"
-# Script-level bound params -- captured here because $PSBoundParameters
-# inside Invoke-Main would be the function's own (empty) table.
-$BoundArgs = $PSBoundParameters
+if(-not $BuildDir) { $BuildDir = Join-Path $RepoRoot "build" }
+# Absolute paths: the UAC child starts in another working directory.
+$BuildDir   = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($BuildDir)
+$InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir)
+$RelatedNames = @("openrgb2-ui","openrgb2-engine","openrgb2-ctl",
+                  "OpenRGB","lianli_bench","skew_bench")
 
 function Info([string]$msg) { Write-Host "  $msg" }
 function Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
@@ -94,72 +115,18 @@ function Test-UnderRoot([string]$path, [string]$root) {
                             [StringComparison]::OrdinalIgnoreCase)
 }
 
-function Invoke-Main {
-    #----------------------------------------------------------------#
-    # 0. elevation                                                   #
-    #----------------------------------------------------------------#
+function Test-IsElevated {
     $principal = New-Object Security.Principal.WindowsPrincipal(
                      [Security.Principal.WindowsIdentity]::GetCurrent())
-    if(-not $principal.IsInRole(
-            [Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        Step "elevation required -- re-launching under UAC"
-        $argList = @("-NoProfile","-ExecutionPolicy","Bypass","-File",
-                     "`"$PSCommandPath`"","-ElevatedChild")
-        foreach($k in $BoundArgs.Keys) {
-            if($k -eq "ElevatedChild") { continue }
-            $v = $BoundArgs[$k]
-            if($v -is [System.Management.Automation.SwitchParameter]) {
-                if($v.IsPresent) { $argList += "-$k" }
-            } else {
-                $argList += @("-$k","`"$v`"")
-            }
-        }
-        try {
-            $proc = Start-Process -FilePath powershell.exe -Verb RunAs `
-                        -Wait -PassThru -ArgumentList ($argList -join " ")
-        } catch {
-            throw "elevation declined or unavailable: $($_.Exception.Message)"
-        }
-        return $proc.ExitCode
-    }
+    return $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
 
-    Step "OpenRGB2 build-all + install"
-    Info "repo:    $RepoRoot"
-    Info "install: $InstallDir"
-    Info "config:  $Configuration"
-
-    #----------------------------------------------------------------#
-    # 1. stop the installed managed stack (graceful -> forced)        #
-    #----------------------------------------------------------------#
-    $stopScript = Join-Path $InstallDir "scripts\stop-openrgb2.ps1"
-    if(Test-Path $stopScript) {
-        Step "Stopping installed stack ($InstallDir)"
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript `
-            -InstallDir $InstallDir -Force
-        if($LASTEXITCODE -ne 0) {
-            Info "stop-openrgb2 returned $LASTEXITCODE -- continuing to the sweep"
-        }
-    } else {
-        Info "no installed stop script -- skipping managed shutdown"
-    }
-
-    #----------------------------------------------------------------#
-    # 2. sweep: force-stop our own processes left anywhere            #
-    #----------------------------------------------------------------#
-    # Covers dev-run build\ outputs, staged packages, and a vendored
-    # backend started in place -- anything whose exe would lock files
-    # the build/stage/update steps write. Only image paths under the
-    # repo or the install dir are touched; foreign installs are listed.
-    Step "Killing leftover related processes"
-    $names = @("openrgb2-ui","openrgb2-engine","openrgb2-ctl",
-             "OpenRGB","lianli_bench","skew_bench")
-    $roots = @($RepoRoot)
-    if((Resolve-Path $InstallDir -ErrorAction SilentlyContinue) -and
-       -not (Test-UnderRoot $InstallDir $RepoRoot)) {
-        $roots += (Resolve-Path $InstallDir).Path
-    }
-    $killed = 0
-    foreach($p in @(Get-Process -Name $names -ErrorAction SilentlyContinue)) {
+# Force-stop related processes whose image lives under one of $roots.
+# Unreadable image paths are listed, never touched.
+function Stop-RelatedUnder([string[]]$roots) {
+    $killed = 0; $hidden = 0
+    foreach($p in @(Get-Process -Name $RelatedNames -ErrorAction SilentlyContinue)) {
         $img = $null
         try { $img = $p.Path } catch { $img = $null }
         $ours = $false
@@ -176,12 +143,136 @@ function Invoke-Main {
             Info "foreign $($p.Name) (pid $($p.Id)) -- $img (not touched)"
         } else {
             Info "unverifiable $($p.Name) (pid $($p.Id)) -- image unreadable (not touched)"
+            $hidden++
         }
     }
-    if($killed -eq 0) { Info "nothing related running" }
+    if($killed -eq 0) { Info "nothing related running there" }
+    return $hidden
+}
+
+# Repo executables that are loaded somewhere (exclusive-open fails):
+# what an elevated dev-run process -- invisible to this shell -- holds.
+function Find-LockedRepoExes {
+    $dirs = @($BuildDir,
+              (Join-Path $RepoRoot "vendor\OpenRGB\release"),
+              (Join-Path $RepoRoot "vendor\OpenRGB\OpenRGB Windows 64-bit"))
+    $locked = @()
+    foreach($d in $dirs) {
+        if(-not (Test-Path -LiteralPath $d)) { continue }
+        foreach($exe in @(Get-ChildItem -LiteralPath $d -Recurse -File -Filter *.exe `
+                              -ErrorAction SilentlyContinue)) {
+            if($RelatedNames -notcontains $exe.BaseName) { continue }
+            try {
+                $fs = [IO.File]::Open($exe.FullName, [IO.FileMode]::Open,
+                    [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                $fs.Dispose()
+            } catch [UnauthorizedAccessException] {
+            } catch { $locked += $exe.FullName }
+        }
+    }
+    return ,$locked
+}
+
+function Get-InstallRoot {
+    $r = Resolve-Path -LiteralPath $InstallDir -ErrorAction SilentlyContinue
+    if($r -and -not (Test-UnderRoot $r.Path $RepoRoot)) { return $r.Path }
+    return $null
+}
+
+#--------------------------------------------------------------------#
+# Elevated steps                                                      #
+#--------------------------------------------------------------------#
+function Invoke-SweepPhase {
+    Step "Stopping elevated processes running from the repo"
+    $roots = @($RepoRoot)
+    if($ir = Get-InstallRoot) { $roots += $ir }
+    $null = Stop-RelatedUnder $roots
+    return 0
+}
+
+function Invoke-DeployPhase {
+    $stopScript = Join-Path $InstallDir "scripts\stop-openrgb2.ps1"
+    if(Test-Path $stopScript) {
+        Step "Stopping installed stack ($InstallDir)"
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript `
+            -InstallDir $InstallDir -Force
+        if($LASTEXITCODE -ne 0) {
+            Info "stop-openrgb2 returned $LASTEXITCODE -- continuing to the sweep"
+        }
+    } else {
+        Info "no installed stop script -- skipping managed shutdown"
+    }
+    if($ir = Get-InstallRoot) {
+        Step "Stopping leftovers running from the install dir"
+        $null = Stop-RelatedUnder @($ir)
+    }
+
+    $cmakeTop = Get-Content (Join-Path $RepoRoot "CMakeLists.txt") -Raw
+    $version  = "0.0.0"
+    if($cmakeTop -match "project\s*\(\s*OpenRGB2\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)") {
+        $version = $Matches[1]
+    }
+    $outDir = Join-Path $BuildDir "package\OpenRGB2-$version-win64"
+    Step "Applying package -> $InstallDir (elevated: install becomes admin-only)"
+    $updArgs = @("-PackageDir", $outDir, "-InstallDir", $InstallDir)
+    if($UserSid) { $updArgs += @("-UserSid", $UserSid) }
+    Invoke-PsScript (Join-Path $PkgDir "update-openrgb2.ps1") $updArgs
+    return 0
+}
+
+# Run an elevated step: in-process when this shell is already
+# elevated, else one UAC-relaunched child (its own window).
+function Invoke-Elevated([string]$phase) {
+    if(Test-IsElevated) {
+        if($phase -eq "Sweep") { return (Invoke-SweepPhase) }
+        return (Invoke-DeployPhase)
+    }
+    Step "elevation required for the $phase step -- UAC prompt"
+    $argList = @("-NoProfile","-ExecutionPolicy","Bypass","-File",
+                 "`"$PSCommandPath`"",
+                 "-ElevatedPhase", $phase,
+                 "-InstallDir", "`"$InstallDir`"",
+                 "-BuildDir", "`"$BuildDir`"",
+                 "-UserSid", [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+    if($NoPause) { $argList += "-NoPause" }
+    try {
+        $proc = Start-Process -FilePath powershell.exe -Verb RunAs `
+                    -Wait -PassThru -ArgumentList ($argList -join " ")
+    } catch {
+        throw "elevation declined or unavailable: $($_.Exception.Message)"
+    }
+    if($proc.ExitCode -ne 0) {
+        throw "elevated $phase step failed (exit $($proc.ExitCode)) -- see its window"
+    }
+    return 0
+}
+
+function Invoke-Main {
+    Step "OpenRGB2 build-all + install"
+    Info "repo:    $RepoRoot"
+    Info "install: $InstallDir"
+    Info "config:  $Configuration"
 
     #----------------------------------------------------------------#
-    # 3. vendored backend (pinned qmake recipe)                       #
+    # 1. free the repo's build outputs                                #
+    #----------------------------------------------------------------#
+    Step "Stopping related processes running from the repo"
+    $hidden = Stop-RelatedUnder @($RepoRoot)
+    $locked = Find-LockedRepoExes
+    if($locked.Count -gt 0) {
+        Info "still in use: $($locked -join ', ')"
+        if($hidden -gt 0 -or -not (Test-IsElevated)) {
+            $null = Invoke-Elevated "Sweep"
+        }
+        Start-Sleep -Milliseconds 500
+        $locked = Find-LockedRepoExes
+        if($locked.Count -gt 0) {
+            throw "repo executables are still in use: $($locked -join ', ') -- close the program holding them and re-run"
+        }
+    }
+
+    #----------------------------------------------------------------#
+    # 2. vendored backend (pinned qmake recipe)                       #
     #----------------------------------------------------------------#
     $vendorDir  = Join-Path $RepoRoot "vendor\OpenRGB"
     $backendExe = Join-Path $vendorDir "OpenRGB Windows 64-bit\OpenRGB.exe"
@@ -203,23 +294,28 @@ function Invoke-Main {
     Info "backend: $backendExe"
 
     #----------------------------------------------------------------#
-    # 4. app build + stage + deploy into the icon's install dir       #
+    # 3. app build + stage (as the invoking user)                     #
     #----------------------------------------------------------------#
-    if(-not (Test-Path $InstallDir)) {
-        New-Item -ItemType Directory -Force $InstallDir | Out-Null
-        Info "created install dir (first install): $InstallDir"
-    }
-    $deployArgs = @("-Configuration",$Configuration,
-                    "-InstallDir",$InstallDir,"-ForceStop")
-    if($BuildDir)    { $deployArgs += @("-BuildDir",$BuildDir) }
+    $deployArgs = @("-Configuration",$Configuration,"-BuildDir",$BuildDir)
     if($Reconfigure) { $deployArgs += "-Reconfigure" }
     if($SkipBuild)   { $deployArgs += "-SkipBuild" }
     if($Sign)        { $deployArgs += "-Sign" }
-    Step "Build + stage + deploy (packaging\windows\build-and-deploy.ps1)"
+    Step "Build + stage (packaging\windows\build-and-deploy.ps1)"
     Invoke-PsScript (Join-Path $PkgDir "build-and-deploy.ps1") $deployArgs
 
     #----------------------------------------------------------------#
-    # 5. desktop shortcut                                             #
+    # 4. elevated: stop the install, deploy, protect it               #
+    #----------------------------------------------------------------#
+    if(-not (Test-Path $InstallDir)) {
+        # Created as the invoking user, so update-openrgb2.ps1 knows
+        # whose state\ + profiles\local\ stay writable.
+        New-Item -ItemType Directory -Force $InstallDir | Out-Null
+        Info "created install dir (first install): $InstallDir"
+    }
+    $null = Invoke-Elevated "Deploy"
+
+    #----------------------------------------------------------------#
+    # 5. desktop shortcut (as the invoking user)                      #
     #----------------------------------------------------------------#
     $uiExe   = Join-Path $InstallDir "openrgb2-ui.exe"
     $desktop = [Environment]::GetFolderPath("Desktop")
@@ -248,12 +344,22 @@ function Invoke-Main {
 }
 
 $exitCode = 1
-try { $exitCode = Invoke-Main }
+try {
+    if($ElevatedPhase) {
+        if(-not (Test-IsElevated)) { throw "-ElevatedPhase must run elevated" }
+        $exitCode = if($ElevatedPhase -eq "Sweep") { Invoke-SweepPhase }
+                    else { Invoke-DeployPhase }
+    } else {
+        $exitCode = Invoke-Main
+    }
+}
 catch {
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
     $exitCode = 1
 }
-if($ElevatedChild -and -not $NoPause) {
+# The UAC child has its own console window: hold it open only when it
+# failed, so the error stays readable.
+if($ElevatedPhase -and $exitCode -ne 0 -and -not $NoPause) {
     Write-Host ""
     Read-Host "Press Enter to close" | Out-Null
 }
