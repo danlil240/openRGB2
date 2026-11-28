@@ -459,10 +459,28 @@ static void TestOwnerKeys()
     CHECK(dl.key == "dynamic_lighting");
 }
 
+/* R-10 review: vendor UPDATERS never write RGB. lghub_updater runs
+   as an Automatic service after G Hub is quit (seen on Daniel's PC),
+   so flagging it would keep the conflict banner up forever after the
+   user followed the steps. */
+static void TestUpdatersAreNotWriters()
+{
+    const std::vector<OwnerFinding> out = ClassifyOwners({
+        { 10, "lghub_updater.exe" },
+        { 11, "logioptionsplus_updater.exe" },
+        { 12, "lghub_agent.exe" },              /* still a writer */
+    }, /*self*/ 1, /*backend*/ 0);
+    CHECK(FindPid(out, 10) == nullptr);
+    CHECK(FindPid(out, 11) == nullptr);
+    CHECK(FindPid(out, 12) != nullptr &&
+          FindPid(out, 12)->key == "logitech");
+}
+
 int main()
 {
     TestClassifier();
     TestOwnerKeys();
+    TestUpdatersAreNotWriters();
     TestDynamicLighting();
     TestOwnerChanges();
     TestManagedConfig();

@@ -35,6 +35,19 @@ Item {
     readonly property var logTail:
         (root.hasCtl ? diagCtl.eventLog : []).slice(-24).reverse()
 
+    /* R-10 review: one guide per writer KEY — G Hub runs several
+       matching processes. A keyless finding gets its own. */
+    function firstOfKey(i) {
+        const c = root.ownership.conflicts || [];
+        const k = (c[i] && c[i].key) || "";
+        if(k === "")
+            return true;
+        for(let j = 0; j < i; ++j)
+            if(((c[j] && c[j].key) || "") === k)
+                return false;
+        return true;
+    }
+
     function fmt(v, suffix) {
         return (v === undefined || v === null) ? "—" : v + (suffix || "");
     }
@@ -614,6 +627,7 @@ Item {
                             /* R-10: concrete steps for this writer,
                                keyed by the engine's finding key. */
                             OwnershipGuide {
+                                visible: root.firstOfKey(index)
                                 width: parent.width - Theme.spaceL
                                 x: Theme.spaceL
                                 key: modelData.key || ""

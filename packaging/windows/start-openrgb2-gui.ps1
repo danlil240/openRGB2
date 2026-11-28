@@ -57,7 +57,7 @@ function Confirm-TakeOver([string[]]$Conflicts) {
     if($TakeOverAnswer -eq 'Yes') { return $true }
     if($TakeOverAnswer -eq 'No' -or $NoDialog) { return $false }
     Add-Type -AssemblyName System.Windows.Forms
-    $list = ($Conflicts | ForEach-Object { '  ' + $_.Trim() }) -join "`n"
+    $list = ($Conflicts | ForEach-Object { '  ' + (Format-ConflictLine $_) }) -join "`n"
     $message = "Other RGB software is running and controls the same devices:`n`n" +
         "$list`n`n" +
         "Take over anyway? OpenRGB2 never closes these programs - they keep " +

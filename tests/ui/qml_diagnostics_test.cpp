@@ -24,6 +24,7 @@
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickItem>
+#include <QSet>
 #include <QQuickStyle>
 
 #include <cstdio>
@@ -31,6 +32,20 @@
 #include <memory>
 
 using namespace openrgb2;
+
+static void CollectVisibleByName(QObject* root, const QString& name,
+                                 QSet<QObject*>& out)
+{
+    if(!root)
+        return;
+    if(root->objectName() == name && root->property("visible").toBool())
+        out.insert(root);
+    for(QObject* c : root->children())
+        CollectVisibleByName(c, name, out);
+    if(auto* item = qobject_cast<QQuickItem*>(root))
+        for(QQuickItem* c : item->childItems())
+            CollectVisibleByName(c, name, out);
+}
 
 /* Repeater delegates are visual children (parentItem), not QObject
    children — findChild never sees them. Walk both trees. */
@@ -170,6 +185,8 @@ int main(int argc, char** argv)
             conflict("LampArray service (Dynamic Lighting)",
                      "lamparray"),
             conflict("Logitech G Hub / Options", "logitech"),
+            /* G Hub runs several matching processes */
+            conflict("Logitech G Hub / Options", "logitech"),
             conflict("Some Future RGB", "future_key") });
         rep.insert(QStringLiteral("notices"), QVariantList{});
         bridge.setOwnershipForTesting(rep);
@@ -191,6 +208,13 @@ int main(int argc, char** argv)
         CHECK(la.contains(
             QStringLiteral("sc config logi_lamparray_service start= demand")));
         CHECK(la.contains(QStringLiteral("Windows Update")));
+        /* R-10 review: one guide per writer key, not per process */
+        {
+            QSet<QObject*> guides;
+            CollectVisibleByName(page.get(),
+                QStringLiteral("ownershipGuide_logitech"), guides);
+            CHECK(guides.size() == 1);
+        }
         const QString lg = steps_text("logitech");
         CHECK(lg.contains(QStringLiteral("G HUB")) &&
               lg.contains(QStringLiteral("startup")));

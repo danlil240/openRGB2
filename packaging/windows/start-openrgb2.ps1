@@ -173,6 +173,9 @@ function Get-OwnerFindings {
         $exe     = Split-Path -Leaf ([string]$p.exe)
         $name    = $exe.ToLowerInvariant()
         $compact = ($exe -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+        # R-10: vendor updaters never write RGB (lghub_updater stays
+        # running as a service after G Hub is quit).
+        if($name.Contains("updater")) { continue }
 
         $f = [ordered]@{ conflict=$false; owner=""; key=""; exe=$exe; pid=$procId; detail="" }
 
@@ -252,6 +255,12 @@ function Find-ListenerPid {
         if($line -and ($line -match '(\d+)\s*$')) { return [int]$Matches[1] }
     }
     return 0
+}
+
+# R-10: a CONFLICT line as shown to a person -- trimmed, without the
+# trailing machine tag " [key: <key>]".
+function Format-ConflictLine([string]$Line) {
+    return ($Line -replace '\s*\[key:[^\]]*\]\s*$', '').Trim()
 }
 
 function Write-Findings([object[]]$Findings) {

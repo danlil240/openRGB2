@@ -200,6 +200,15 @@ std::vector<OwnerFinding> ClassifyOwners(
         const std::string exe     = BaseName(p.exe);
         const std::string name    = Lower(exe);
         const std::string compact = Compact(exe);
+        /* R-10: vendor updaters (lghub_updater runs as an
+           Automatic service after G Hub is quit,
+           logioptionsplus_updater) never write RGB — flagging
+           them would keep the conflict up after the user turned
+           the real writer off. */
+        if(Contains(name, "updater"))
+        {
+            continue;
+        }
 
         OwnerFinding f;
         f.exe = exe;
