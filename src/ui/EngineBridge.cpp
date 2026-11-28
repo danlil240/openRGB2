@@ -1070,7 +1070,7 @@ int EngineBridge::automationCommand(const QString& verb,
 {
     if(!has_automation_)
     {
-        return 0;   /* unadvertised surface — never sent */
+        return 0;   /* unadvertised surface â€” never sent */
     }
     nlohmann::json b = VariantToJson(args);
     if(!b.is_object())

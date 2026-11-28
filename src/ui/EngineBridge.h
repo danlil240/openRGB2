@@ -147,7 +147,7 @@ class EngineBridge : public QObject
                    NOTIFY hasOutputControlChanged)
     /* R-2: engine-side automation (AUTOMATION body: {hotkeys:
        [{action, chord, state, detail?}], actions, proposed,
-       cycle, brightness_step, registrar}) — WELCOME state,
+       cycle, brightness_step, registrar}) â€” WELCOME state,
        STATE replies, AUTOMATION replies and the "automation"
        event. Empty = not published / no capability. */
     Q_PROPERTY(QVariantMap automation READ automation
@@ -210,7 +210,7 @@ public:
        output_control_v1. */
     Q_INVOKABLE int outputCommand(const QString& verb,
                                   const QVariantMap& args);
-    /* R-2 AUTOMATION_COMMAND {verb,...args} — "get",
+    /* R-2 AUTOMATION_COMMAND {verb,...args} â€” "get",
        "set_hotkeys" {bindings:[{action, chord}], cycle?,
        brightness_step?}. The AUTOMATION reply lands in the
        automation store. Returns 0 (nothing sent) when the
