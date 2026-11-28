@@ -1,6 +1,6 @@
 # R-4: Schedule / lock / idle dimming
 
-Status: proposed · Size: M · Source: audit 2026-11-28 R-4 · Depends on: R-1 (`OutputControl` contributors), R-2 (`AUTOMATION_COMMAND`)
+Status: implemented on `feat/r-2-r-4-hotkeys-dimming` (not merged) · Size: M · Source: audit 2026-11-28 R-4 · Depends on: R-1 (`OutputControl` contributors), R-2 (`AUTOMATION_COMMAND`)
 
 ## Goal
 
@@ -152,3 +152,35 @@ The tray tooltip (R-1) shows the active reason.
 - DST: windows are local wall times. A window whose start falls in the
   skipped hour on a spring-forward day starts at the next valid
   minute.
+
+## Implementation decisions (on the branch)
+
+- Level 0 ("off") stops an uploaded wireless loop with stop-black, as
+  R-1 blackout does (the plan's manual-test line); any other level
+  leaves the loop running and reported unscaled. The decision is
+  `OutputControl::AnyContributorOff` in `EngineHost::OnOutputChanged`.
+- Lock does not imply off: every rule is disabled by default and a
+  newly enabled lock or idle rule starts at 30 %.
+- `set_dimming` replaces the whole rule set (absent sections reset to
+  off), like E-12b's `set_policy`. Persisted as
+  `EngineState.automation.dimming`; a malformed persisted section is
+  dropped with a warning and the hotkeys beside it survive.
+- Window days are 0 = Sunday .. 6 = Saturday; no days = every day; a
+  window past midnight belongs to its start day; `start == end` is
+  refused; at most 8 windows; idle 30 s .. 24 h; ramps 0 .. 10 s
+  (defaults: dim 600 ms, restore 0 = immediate).
+- `OUTPUT.contributors` reports each slot's target level; `effective`
+  is the live ramped scale. Ramps advance on the owner fast tick and
+  notify only on a target change or completion.
+- Session lock/unlock never enter PowerLifecycle's bounded queue
+  (accepted and ignored at `PostEvent`), so a lock storm cannot evict
+  a pending Suspend or DisplayOff. The engine assumes "unlocked" at
+  start.
+- The rules re-evaluate every 100 ms and at once on a lock post or a
+  config change. GetLastInputInfo is polled only while the idle rule is
+  on; SHQueryUserNotificationState (QUNS_BUSY, D3D fullscreen,
+  presentation mode) only once the idle threshold is reached. R-3's
+  watcher has not landed, so the fullscreen probe is called directly.
+- User-idle dimming is unrelated to E-12b's "no scene" idle
+  (`output_idle_after`, `OutputIdle()`); the names stay apart
+  (`dimming.idle`, contributor `idle`).

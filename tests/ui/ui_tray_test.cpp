@@ -363,6 +363,25 @@ int main(int argc, char** argv)
         const QVariantMap note = Find(tray.menu(), "brightness:note");
         CHECK(!note.isEmpty() && !note.value("enabled").toBool());
 
+        /* R-4: an active dimming rule (an OUTPUT contributor)
+           names itself in the tooltip — the strongest one. */
+        bridge.setOutputForTesting(QVariantMap({
+            { "master", 1.0 }, { "blackout", false },
+            { "hold", false }, { "effective", 0.3 },
+            { "contributors", QVariantMap({ { "schedule", 0.3 },
+                                            { "idle", 0.5 } }) } }));
+        CHECK(tray.toolTip().contains("Dimmed by schedule (30%)"));
+        bridge.setOutputForTesting(QVariantMap({
+            { "master", 1.0 }, { "blackout", false },
+            { "hold", false }, { "effective", 0.0 },
+            { "contributors", QVariantMap({ { "lock", 0.0 } }) } }));
+        CHECK(tray.toolTip().contains("Off while locked"));
+        bridge.setOutputForTesting(QVariantMap({
+            { "master", 1.0 }, { "blackout", false },
+            { "hold", false }, { "effective", 1.0 },
+            { "contributors", QVariantMap() } }));
+        CHECK(!tray.toolTip().contains("Dimmed"));
+
         /* Workspace pick, clean draft: opens, no window. */
         tray.trigger(QStringLiteral("workspace:shelf"));
         CHECK(ws.opened == QStringList({ "shelf" }));

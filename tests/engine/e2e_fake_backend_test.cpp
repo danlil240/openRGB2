@@ -516,6 +516,141 @@ static void TestIdlePolicy(const std::filesystem::path& tmp)
     host.Stop();
 }
 
+/* Max channel of the last UpdateLEDs frame for `dev` (-1 when
+   no frame was seen). */
+static int LastFrameMax(const sdk_test::FakeSdkServer& server,
+                        uint32_t dev)
+{
+    int best = -1;
+    for(const sdk_test::ServerEvent& e : server.SnapshotEvents())
+    {
+        if(e.pkt_id != sdk::kPktUpdateLEDs || e.dev_id != dev ||
+           e.body.size() < 6)
+        {
+            continue;
+        }
+        uint16_t count = 0;
+        memcpy(&count, e.body.data() + 4, 2);
+        if(count == 0 || e.body.size() < 6u + 4u * count)
+        {
+            continue;
+        }
+        best = 0;
+        for(uint16_t i = 0; i < count; ++i)
+        {
+            uint32_t c = 0;
+            memcpy(&c, e.body.data() + 6 + 4 * i, 4);
+            best = std::max({ best, int(c & 0xFF),
+                              int((c >> 8) & 0xFF),
+                              int((c >> 16) & 0xFF) });
+        }
+    }
+    return best;
+}
+
+/* R-4: user-idle dimming through the real host wiring —
+   injected idle seconds dim the mapped colors to the rule's
+   level, input restores them at once, a fullscreen app never
+   counts as idle, and a session lock dims through the lock
+   rule. No desktop, no GetLastInputInfo: every source is a
+   lambda. */
+static void TestIdleDimming(const std::filesystem::path& tmp)
+{
+    sdk_test::FakeSdkServer server;
+    server.controllers = { RainbowWired() };
+    std::atomic<double> idle_s{ 0.0 };
+    std::atomic<bool>   fullscreen{ false };
+    EngineHostOptions o = E12bOptions(server, tmp, "dim");
+    o.idle_seconds = [&idle_s] { return idle_s.load(); };
+    o.fullscreen   = [&fullscreen] { return fullscreen.load(); };
+    EngineHost host(std::move(o));
+    std::string err;
+    CHECK(host.Start(err));
+    CHECK(host.GetAutomation() != nullptr);
+    if(!host.GetAutomation())
+    {
+        return;
+    }
+    CHECK(ApplyDoc(host, RainbowSceneDoc()));
+
+    /* Poll the owner loop (past the rule-evaluation interval)
+       until `pred` holds on the frames the backend received. */
+    auto settle = [&](auto pred)
+    {
+        for(int i = 0; i < 300; ++i)
+        {
+            host.PollOnce();
+            if(pred())
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return pred();
+    };
+    CHECK(settle([&] { return LastFrameMax(server, 0) > 150; }));
+
+    DimmingConfig d;
+    d.idle.enabled = true;
+    d.idle.after_s = 60;
+    d.idle.level   = 0.25f;
+    d.lock.enabled = true;
+    d.lock.level   = 0.5f;
+    d.ramp_ms      = 0;          /* the ramp is output_control_test's */
+    CHECK(host.GetAutomation()->SetDimming(d, err));
+
+    /* Not idle yet: nothing dims. */
+    idle_s = 59.0;
+    for(int i = 0; i < 30; ++i)
+    {
+        host.PollOnce();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(host.GetOutput().EffectiveScale() == 1.0f);
+
+    /* Idle: the "idle" contributor dims the mapped colors. */
+    idle_s = 120.0;
+    CHECK(settle([&] {
+        return host.GetOutput().EffectiveScale() == 0.25f; }));
+    CHECK(host.GetOutput().State().contributors.count("idle") == 1);
+    CHECK(settle([&] {
+        const int m = LastFrameMax(server, 0);
+        return m >= 0 && m <= 66; }));
+    CHECK(host.GetAutomation()->ToJson()["dimming"]["active"]["idle"]
+              .get<double>() == 0.25);
+
+    /* Input restores at once (restore ramp 0). */
+    idle_s = 0.4;
+    CHECK(settle([&] {
+        return host.GetOutput().EffectiveScale() == 1.0f; }));
+    CHECK(host.GetOutput().State().contributors.empty());
+    CHECK(settle([&] { return LastFrameMax(server, 0) > 150; }));
+
+    /* A fullscreen app never counts as idle. */
+    fullscreen = true;
+    idle_s     = 4000.0;
+    for(int i = 0; i < 30; ++i)
+    {
+        host.PollOnce();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(host.GetOutput().EffectiveScale() == 1.0f);
+    fullscreen = false;
+    idle_s     = 0.0;
+
+    /* Session lock (what WinPowerMonitor posts) dims through the
+       lock rule; unlock lifts it. */
+    host.GetAutomation()->PostSessionLock(true);
+    CHECK(settle([&] {
+        return host.GetOutput().EffectiveScale() == 0.5f; }));
+    host.GetAutomation()->PostSessionLock(false);
+    CHECK(settle([&] {
+        return host.GetOutput().EffectiveScale() == 1.0f; }));
+
+    host.RequestStop();
+    host.Stop();
+}
+
 int main()
 {
     std::error_code ec;
@@ -999,6 +1134,7 @@ int main()
     TestPartialStartTeardown(tmp);
     TestPriorModeRecording(tmp);
     TestIdlePolicy(tmp);
+    TestIdleDimming(tmp);
 
     std::printf("%d checks, %d failures\n", checks, failures);
     {

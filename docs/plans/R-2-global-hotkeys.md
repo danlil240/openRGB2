@@ -1,6 +1,6 @@
 # R-2: Global hotkeys (next profile, brightness, lights off)
 
-Status: proposed · Size: M · Source: audit 2026-11-28 R-2 · Depends on: R-1 (`OutputControl`, `OUTPUT_COMMAND`)
+Status: implemented on `feat/r-2-r-4-hotkeys-dimming` (not merged) · Size: M · Source: audit 2026-11-28 R-2 · Depends on: R-1 (`OutputControl`, `OUTPUT_COMMAND`)
 
 ## Goal
 
@@ -155,3 +155,41 @@ capability `automation_v1`. R-3 and R-4 add sections to this same body.
   still fires. That is acceptable for modifier chords.
 - `WM_HOTKEY` delivery to a message-only window is expected to work
   but must be checked on the target machine (guess, not verified).
+
+## Implementation decisions (on the branch)
+
+- Nothing is bound by default. The plan's chords are offered as
+  `proposed` in the AUTOMATION body and by a "Use suggested keys"
+  button: Ctrl+Alt+Shift + PgDn (next) / PgUp (previous), Up / Down
+  (brightness), End (lights), Pause (hold). Unverified: Ctrl+Pause
+  usually arrives as VK_CANCEL, so the suggested pause chord may never
+  fire — check it on the target machine and pick another key if so.
+- "Next profile" cycles every managed workspace in `list` order; the
+  optional `cycle` list (set through `set_hotkeys`) is the curated
+  favourites list. Ids that no longer exist are skipped.
+- Burst debounce: the first press reloads at once (no 1 s latency);
+  presses within 1 s of the previous one only move the target, and the
+  burst ends with one reload of the latest target — none if that is
+  the workspace already loading. A burst of five presses costs at most
+  two reloads.
+- The VK name table lives in `Automation.cpp` as literal VK codes
+  (the same values as `src/core/inputs/VkDefs.h`) so the Qt-free engine
+  never includes `<windows.h>`.
+- Validation failures (unknown action, unparsable chord, no
+  Ctrl/Alt/Win, duplicate chord, more than 16) refuse the whole
+  `set_hotkeys` (`bad_request`); an OS refusal is a per-binding state
+  (`in_use` on ERROR_HOTKEY_ALREADY_REGISTERED, else `invalid`), never
+  a verb failure. A persisted binding that no longer validates is kept
+  and reports `invalid`.
+- The hotkey thread starts lazily on the first non-empty set (an engine
+  with nothing bound never creates a window) and stops inside the
+  existing `power-monitor` shutdown step, so the step list is
+  unchanged. Presses run on the 17 ms owner fast tick.
+- Reply type AUTOMATION is `0x8108`. The body also carries `actions`,
+  `proposed`, `registrar` and `max_hotkeys`.
+- Step 7: an engine-initiated switch over a dirty draft flushes the
+  draft record at once (it sat in the draft store's debounce before),
+  releases it as a recovery candidate, raises a notice and sets
+  `WorkspaceController.switchedAwayDraft`; a poll reply that raced the
+  event and still names the old id is the same switch (no second
+  notice).

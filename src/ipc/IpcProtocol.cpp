@@ -94,6 +94,7 @@ const std::vector<std::string>& EventKinds()
         event_kind::kCalibration,
         event_kind::kOwnership,
         event_kind::kOutput,
+        event_kind::kAutomation,
     };
     return kinds;
 }
@@ -119,6 +120,7 @@ const char* MsgTypeName(MsgType t)
     case MsgType::ReactiveCommand: return "REACTIVE_COMMAND";
     case MsgType::WorkspaceCommand:return "WORKSPACE_COMMAND";
     case MsgType::OutputCommand:   return "OUTPUT_COMMAND";
+    case MsgType::AutomationCommand: return "AUTOMATION_COMMAND";
     case MsgType::DiagGet:         return "DIAG_GET";
     case MsgType::Welcome:         return "WELCOME";
     case MsgType::Ok:              return "OK";
@@ -131,6 +133,7 @@ const char* MsgTypeName(MsgType t)
     case MsgType::Pong:            return "PONG";
     case MsgType::Presets:         return "PRESETS";
     case MsgType::Output:          return "OUTPUT";
+    case MsgType::Automation:      return "AUTOMATION";
     case MsgType::Event:           return "EVENT";
     case MsgType::Diagnostics:     return "DIAGNOSTICS";
     }

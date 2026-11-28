@@ -47,6 +47,7 @@
 
 #pragma once
 
+#include "Automation.h"
 #include "CalibrationSession.h"
 #include "DeliveryPipeline.h"
 #include "DeviceMapper.h"
@@ -69,6 +70,7 @@
 #include "OpenRgbClient.h"
 #include "Transport.h"
 
+#include "WinHotkeys.h"
 #include "WinPowerMonitor.h"
 #include "WinTimerResolution.h"
 
@@ -214,6 +216,24 @@ struct EngineHostOptions
     std::chrono::milliseconds   output_idle_after{ 5000 };
     std::function<TimePoint()>  output_clock;
 
+    /* R-2 system-wide hotkeys (Automation + WinHotkeys). True
+       wires the RegisterHotKey thread — it only starts once a
+       binding exists (nothing is bound by default). An
+       injected hotkey_registrar wins over the platform one
+       (the offline suites pass a fake, or hotkeys=false for
+       none: bindings then report "unavailable"). */
+    bool                              hotkeys = true;
+    std::shared_ptr<IHotkeyRegistrar> hotkey_registrar;
+
+    /* R-4 dimming sources (Automation::Deps). Empty = the
+       platform: GetLastInputInfo, SHQueryUserNotificationState,
+       the local wall clock. Each is only consulted while a rule
+       needs it, so a test that sets no dimming never reaches
+       the desktop. */
+    std::function<double()>    idle_seconds;
+    std::function<bool()>      fullscreen;
+    std::function<LocalTime()> wall_clock;
+
     /* Log sink (default: stderr with the engine prefix). */
     std::function<void(const std::string&)> log;
 };
@@ -298,6 +318,8 @@ public:
     sdk::OpenRgbClient*      GetSdk()        { return sdk_.get(); }
     PowerLifecycle*          GetLifecycle()  { return lifecycle_.get(); }
     ReactiveInputs*          GetReactive()   { return reactive_.get(); }
+    /* R-2/R-4: hotkeys + dimming rules (null before Start). */
+    Automation*              GetAutomation() { return automation_.get(); }
     /* A copy: the maintenance tick re-scans while IPC threads
        read the report (B-1). */
     OwnershipReport          Ownership() const;
@@ -439,6 +461,14 @@ private:
        capturing `this` in ~EngineService) dies before it — the
        hook clear can never touch freed state. */
     std::unique_ptr<WorkspaceService>        workspaces_;
+    /* R-2: the RegisterHotKey thread (null when opts_.hotkeys
+       is off or a registrar was injected) and the automation
+       owner. Declared after workspaces_/output_ (its deps) and
+       BEFORE service_, which holds a raw Automation*. */
+    std::shared_ptr<platform::WinHotkeys>    win_hotkeys_;
+    std::unique_ptr<Automation>              automation_;
+    /* Owner loop: queued hotkeys + debounce (fast tick). */
+    void PollAutomation(TimePoint now);
     std::unique_ptr<ipc::EngineService>      service_;
     std::unique_ptr<ipc::IpcServer>          ipc_server_;
     std::unique_ptr<ipc::NamedPipeListener>  cmd_listener_;

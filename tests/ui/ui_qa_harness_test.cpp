@@ -411,6 +411,85 @@ int main(int argc, char** argv)
               == false);
     }
 
+    /* R-2: the Hotkeys card's chord capture field — focus it,
+       press a chord, and the field reads the key event into the
+       engine's chord text (a UI-local read; only the string is
+       sent). The offline bridge cannot send, which the card
+       reports honestly. */
+    {
+        QVariantMap body;
+        body.insert(QStringLiteral("hotkeys"), QVariantList());
+        body.insert(QStringLiteral("registrar"), true);
+        bridge.setAutomationCapabilityForTesting(true);
+        bridge.setAutomationForTesting(body);
+        QCoreApplication::processEvents();
+        const QString cap = QStringLiteral("hotkeyCapture_lights_toggle");
+        /* The card sits below the fold: focus the field (the
+           page's focus-follow scrolls it into view), the way a
+           Tab would — a click at an off-screen centre misses. */
+        CHECK(OkField(Req(sock, {{ QStringLiteral("op"),
+                                  QStringLiteral("set") },
+                                { QStringLiteral("sel"), cap },
+                                { QStringLiteral("prop"),
+                                  QStringLiteral("focus") },
+                                { QStringLiteral("value"), true }})));
+        {
+            const QJsonObject r =
+                Req(sock, {{ QStringLiteral("op"),
+                             QStringLiteral("get") },
+                           { QStringLiteral("sel"), cap },
+                           { QStringLiteral("prop"),
+                             QStringLiteral("capturing") }});
+            CHECK(r.value(QStringLiteral("result")).toObject()
+                      .value(QStringLiteral("value")).toBool(false));
+        }
+        /* A bare key is refused in place (needs Ctrl/Alt/Win). */
+        CHECK(OkField(Req(sock, {{ QStringLiteral("op"),
+                                  QStringLiteral("key") },
+                                { QStringLiteral("key"),
+                                  QStringLiteral("End") }})));
+        {
+            const QJsonObject r =
+                Req(sock, {{ QStringLiteral("op"),
+                             QStringLiteral("get") },
+                           { QStringLiteral("sel"), cap },
+                           { QStringLiteral("prop"),
+                             QStringLiteral("lastCaptured") }});
+            CHECK(r.value(QStringLiteral("result")).toObject()
+                      .value(QStringLiteral("value")).toString()
+                      .isEmpty());
+        }
+        CHECK(OkField(Req(sock, {{ QStringLiteral("op"),
+                                  QStringLiteral("key") },
+                                { QStringLiteral("key"),
+                                  QStringLiteral("Ctrl+Alt+Shift+End") }})));
+        {
+            const QJsonObject r =
+                Req(sock, {{ QStringLiteral("op"),
+                             QStringLiteral("get") },
+                           { QStringLiteral("sel"), cap },
+                           { QStringLiteral("prop"),
+                             QStringLiteral("lastCaptured") }});
+            CHECK(r.value(QStringLiteral("result")).toObject()
+                      .value(QStringLiteral("value")).toString()
+                  == QLatin1String("Ctrl+Alt+Shift+End"));
+        }
+        {
+            const QJsonObject r =
+                Req(sock, {{ QStringLiteral("op"),
+                             QStringLiteral("get") },
+                           { QStringLiteral("sel"),
+                             QStringLiteral("hotkeysCard") },
+                           { QStringLiteral("prop"),
+                             QStringLiteral("status") }});
+            CHECK(r.value(QStringLiteral("result")).toObject()
+                      .value(QStringLiteral("value")).toString()
+                      .contains(QLatin1String("not sent")));
+        }
+        bridge.setAutomationCapabilityForTesting(false);
+        QCoreApplication::processEvents();
+    }
+
     /* geom — detailed geometry for layout debugging */
     {
         const QJsonObject r =

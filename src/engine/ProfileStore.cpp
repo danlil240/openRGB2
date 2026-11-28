@@ -364,6 +364,12 @@ nlohmann::json EngineStateToJson(const EngineState& state)
 
     /* E-12b exit/idle output policy (OutputPolicy.h shape). */
     j["output_policy"] = OutputPolicyToJson(state.output_policy);
+
+    /* R-2/R-4 automation — only once something set it. */
+    if(state.automation)
+    {
+        j["automation"] = AutomationConfigToJson(*state.automation);
+    }
     return j;
 }
 
@@ -880,6 +886,22 @@ bool EngineStateFromJson(const nlohmann::json& j,
         }
     }
 
+    /*---- R-2/R-4 automation (lenient, like `output`) --------*/
+    const auto ait = j.find("automation");
+    if(ait != j.end() && !ait->is_null())
+    {
+        if(ait->is_object())
+        {
+            candidate.automation =
+                AutomationConfigFromJson(*ait, &warn);
+        }
+        else
+        {
+            warn.push_back("automation: expected an object — "
+                           "ignored");
+        }
+    }
+
     /* Unknown top-level members are retained verbatim — a
        migrated document never silently drops fields that
        still apply. */
@@ -890,7 +912,8 @@ bool EngineStateFromJson(const nlohmann::json& j,
            it.key() != "reactive" &&
            it.key() != "active_workspace" &&
            it.key() != "output" &&
-           it.key() != "output_policy")
+           it.key() != "output_policy" &&
+           it.key() != "automation")
         {
             candidate.extensions[it.key()] = it.value();
         }

@@ -25,6 +25,11 @@ engine_suite(device_mapping_test)
 # blackout, hold, contributor arbitration, persistence types).
 engine_suite(output_control_test)
 
+# R-2 / R-4 — automation: chord parser, hotkey validation, the
+# EngineState.automation round-trip, the action dispatcher (fake
+# clock, workspace list and registrar) and the dimming rules.
+engine_suite(automation_test)
+
 # Task 3.6 — playback mode integration + cross-device sync.
 engine_suite(playback_mode_test)
 set_tests_properties(playback_mode_test PROPERTIES

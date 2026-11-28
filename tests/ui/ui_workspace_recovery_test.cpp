@@ -212,6 +212,7 @@ struct ClientRig
     WorkspaceController   ctl{ &bridge };
     int                   notices = 0;
     QString               last_notice;
+    QStringList           all_notices;
 
     explicit ClientRig(IpcServer& srv) : server(&srv)
     {
@@ -234,6 +235,7 @@ struct ClientRig
                          &ctl, [this](const QString& t) {
                              ++notices;
                              last_notice = t;
+                             all_notices.append(t);
                          });
     }
 
@@ -607,6 +609,73 @@ int main(int argc, char** argv)
                rig.ctl.Session().HasWorking() &&
                rig.ctl.Session().Working().meta.name == "shelf-doc";
     }));
+
+    /*========================================================*\
+    || G3. R-2: an ENGINE-initiated switch (a hotkey enqueues  ||
+    ||     `reload {id}` under internal session 0) over a      ||
+    ||     dirty draft — no confirm is possible, so the draft  ||
+    ||     is made durable at once and the UI flags it         ||
+    \*========================================================*/
+    std::printf("-- engine-initiated switch keeps the dirty draft\n");
+    {
+        /* A long debounce: the record reaches disk only if the
+           switch itself flushes it. */
+        rig.ctl.setDebounceForTesting(60000);
+        CHECK(rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "hotkey-draft"; return true; }));
+        rig.ctl.NoteDraftEdited();
+        CHECK(rig.ctl.dirty());
+        CHECK(!rig.ctl.Drafts().Read(QStringLiteral("shelf")).exists);
+        const int notices0 = rig.notices;
+
+        /* Exactly what Automation's enqueue_reload does. */
+        const WorkspaceService::JobResult jr = eng.ws->Enqueue(
+            0, "reload", nlohmann::json::object({{ "id", "desk" }}));
+        CHECK(jr.accepted);
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.workspaceId() == QLatin1String("desk") &&
+                   rig.ctl.Session().HasWorking() &&
+                   rig.ctl.Session().Working().meta.name !=
+                       "hotkey-draft"; }));
+        /* No confirm latch (the switch already happened). */
+        CHECK(!rig.ctl.replaceOffered());
+        CHECK(!rig.ctl.dirty());
+        /* The draft is durable under its own id... */
+        CHECK(DraftName(rig.ctl.Drafts(), QStringLiteral("shelf")) ==
+              "hotkey-draft");
+        /* ...and the UI says so — exactly once, naming the
+           draft's own workspace. (A poll reply that raced the
+           event may still name 'shelf' once; that flap is the
+           same switch and must not re-notify or re-point the
+           flag at 'desk'.) */
+        int switch_notices = 0;
+        for(int i = notices0; i < rig.all_notices.size(); ++i)
+        {
+            const QString& t = rig.all_notices[i];
+            if(t.contains(QLatin1String("draft store")))
+            {
+                ++switch_notices;
+                CHECK(t.contains(QLatin1String("edits to 'shelf'")));
+            }
+        }
+        CHECK(switch_notices == 1);
+        CHECK(rig.ctl.switchedAwayDraft() == QLatin1String("shelf"));
+
+        /* Going back offers it; discarding clears the flag. */
+        rig.ctl.setDebounceForTesting(10);
+        rig.ctl.openWorkspace(QStringLiteral("shelf"));
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.workspaceId() == QLatin1String("shelf") &&
+                   rig.ctl.recoveryOffered(); }));
+        rig.ctl.discardDraft();
+        CHECK(rig.ctl.switchedAwayDraft().isEmpty());
+        CHECK(!rig.ctl.Drafts().Read(QStringLiteral("shelf")).exists);
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.Session().HasWorking() &&
+                   rig.ctl.Session().Working().meta.name ==
+                       "shelf-doc"; }));
+    }
 
     /*========================================================*\
     || H. crash recovery — staged record survives the session  ||

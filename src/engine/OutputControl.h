@@ -32,6 +32,8 @@
 
 #pragma once
 
+#include "EngineTypes.h"   /* Clock, TimePoint (R-4 ramps) */
+
 #include <atomic>
 #include <functional>
 #include <map>
@@ -64,7 +66,12 @@ struct OutputState
     bool                         blackout  = false;
     bool                         hold      = false;
     float                        effective = 1.0f;
+    /* Contributor TARGETS (R-4: a slot ramping toward a level
+       already reports that level; a slot ramping back up to
+       release is gone). `effective` is the live, ramped scale. */
     std::map<std::string, float> contributors;
+    /* R-4: a contributor ramp is still running. */
+    bool                         ramping = false;
 };
 
 class OutputControl
@@ -90,6 +97,25 @@ public:
     bool SetContributor(const std::string& name, float scale);
     bool ClearContributor(const std::string& name);
 
+    /* R-4 ramped contributors. A lower target ramps down over
+       `down`, a higher one up over `up` (<= 0 = immediate),
+       starting from the slot's current value — a new target
+       mid-ramp never jumps. Same target as the running ramp ->
+       false, nothing restarts. Release ramps the slot up to 1
+       over `up`, then removes it. Notifies when a target is set
+       or released and when a ramp completes — never per tick. */
+    bool SetContributorTarget(const std::string& name, float scale,
+                              TimePoint now,
+                              std::chrono::milliseconds down,
+                              std::chrono::milliseconds up);
+    bool ReleaseContributor(const std::string& name, TimePoint now,
+                            std::chrono::milliseconds up);
+    /* Advance every ramp to `now` and publish the scale; true
+       when the effective scale moved. Owner loop, ~60 Hz. */
+    bool Tick(TimePoint now);
+    /* True when any reported contributor target is 0 ("off"). */
+    static bool AnyContributorOff(const OutputState& s);
+
     /* Restart path: master + blackout come back, hold stays
        off. Fires the changed callback when the state moved. */
     void Restore(const PersistedOutput& p);
@@ -114,13 +140,25 @@ public:
 private:
     /* Under mutex_: recompute + publish effective_, snapshot. */
     OutputState CommitLocked();
+    OutputState SnapshotLocked() const;
+
+    struct Ramp
+    {
+        float                     from    = 1.0f;
+        float                     to      = 1.0f;
+        TimePoint                 start{};
+        std::chrono::milliseconds dur{ 0 };
+        bool                      release = false;
+    };
     void        Notify(const OutputState& s);
 
     mutable std::mutex           mutex_;
     float                        master_   = 1.0f;
     bool                         blackout_ = false;
     bool                         hold_     = false;
+    /* LIVE (ramped) contributor values — what Arbitrate sees. */
     std::map<std::string, float> contributors_;
+    std::map<std::string, Ramp>  ramps_;     /* R-4 */
     std::atomic<float>           effective_{ 1.0f };
     /* Guarded by its own mutex so a callback swap never races a
        notify (copied out, then invoked unlocked). */

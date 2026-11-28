@@ -35,6 +35,7 @@
 #include "WorkspaceCommands.h"
 #include "WorkspaceTransfer.h"
 
+#include "Automation.h"
 #include "CalibrationSession.h"
 #include "DeliveryPipeline.h"
 #include "DeviceMapper.h"
@@ -161,6 +162,13 @@ public:
            Unavailable and no capability (clients hide the
            controls). */
         OutputControl*      output = nullptr;
+
+        /* R-2: engine-side automation — the AUTOMATION_COMMAND
+           verb space (get / set_hotkeys; R-4 set_dimming), the
+           "automation" event, STATE "automation" and the
+           "automation_v1" WELCOME capability. Nullptr ->
+           Unavailable, STATE null, no capability. */
+        Automation*         automation = nullptr;
 
         /* IPC-side queue/counter source (IpcServer::Stats) —
            diagnostics exposes queue depths, not guesses. */
@@ -357,6 +365,9 @@ public:
        body — the engine's OutputControl changed hook calls
        this after applying a change. */
     void EmitOutput();
+    /* R-2: emits the "automation" event with the current
+       AUTOMATION body — Automation's changed hook calls it. */
+    void EmitAutomation();
 
     /*---- IIpcService ---------------------------------------*/
     nlohmann::json OnWelcome() override;
@@ -513,6 +524,24 @@ private:
        client's OUTPUT store is never overwritten by a policy. */
     IpcReply       OutputGetPolicy(const nlohmann::json& body);
     IpcReply       OutputSetPolicy(const nlohmann::json& body);
+
+    /* R-2 AUTOMATION_COMMAND surface — same table shape as
+       OutputVerbs; every reply is the full AUTOMATION body. */
+    using AutomationVerbFn =
+        IpcReply (EngineService::*)(const nlohmann::json&);
+    struct AutomationVerb
+    {
+        const char*      name;
+        AutomationVerbFn fn;
+    };
+    static const std::vector<AutomationVerb>& AutomationVerbs();
+    IpcReply       HandleAutomationCommand(const std::string& verb,
+                                           const nlohmann::json& body);
+    IpcReply       AutomationGet(const nlohmann::json& body);
+    IpcReply       AutomationSetHotkeys(const nlohmann::json& body);
+    IpcReply       AutomationSetDimming(const nlohmann::json& body);  /* R-4 */
+    /* Null when no Automation is wired. */
+    nlohmann::json AutomationJson() const;
     IpcReply       HandleIdentify(const nlohmann::json& body);
     /* studio-import Task 3 gate: HandleLayoutMutate refuses
        lossy legacy edits while a managed workspace is active

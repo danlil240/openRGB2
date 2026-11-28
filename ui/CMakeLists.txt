@@ -70,10 +70,13 @@ qt_add_qml_module(openrgb2_ui
         components/AppSlider.qml
         components/AppTextField.qml
         components/Card.qml
+        components/ChordCaptureField.qml
         components/ColorWell.qml
+        components/DimmingCard.qml
         components/EmptyState.qml
         components/FrameStrip.qml
         components/GroupChip.qml
+        components/HotkeysCard.qml
         components/NavButton.qml
         components/OwnershipBanner.qml
         components/OwnershipGuide.qml

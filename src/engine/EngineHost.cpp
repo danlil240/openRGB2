@@ -13,6 +13,7 @@
 #include "SceneLoader.h"
 
 #include "WinReactiveInputs.h"
+#include "WinUserActivity.h"
 
 #include "TcpSocket.h"
 
@@ -1080,7 +1081,18 @@ bool EngineHost::Start(std::string& err)
         std::string perr;
         if(!power_monitor_.Start(
             [this](PowerLifecycle::Event e)
-            { lifecycle_->PostEvent(e); }, perr))
+            {
+                lifecycle_->PostEvent(e);
+                /* R-4: the lock rule reads lock/unlock (the
+                   lifecycle accepts and ignores them). */
+                if(automation_ &&
+                   (e == PowerLifecycle::Event::SessionLock ||
+                    e == PowerLifecycle::Event::SessionUnlock))
+                {
+                    automation_->PostSessionLock(
+                        e == PowerLifecycle::Event::SessionLock);
+                }
+            }, perr))
         {
             Log("power monitoring unavailable: " + perr +
                 " (continuing)");
@@ -1207,6 +1219,108 @@ bool EngineHost::Start(std::string& err)
             std::move(wdeps));
     }
 
+    /*---- R-2 engine-side automation (hotkeys) ----------------*\
+    || Built before the IPC service (AUTOMATION_COMMAND binds   ||
+    || to it); the persisted bindings register at the end of    ||
+    || Start(). Every action runs on the owner loop            ||
+    || (PollAutomation) — the hotkey thread only queues.        ||
+    \*---------------------------------------------------------*/
+    {
+        Automation::Deps adeps;
+        adeps.output = &output_;
+        if(opts_.hotkey_registrar)
+        {
+            adeps.registrar = opts_.hotkey_registrar;
+        }
+        else if(opts_.hotkeys)
+        {
+            win_hotkeys_ = std::make_shared<platform::WinHotkeys>(
+                [this](int id)
+                {
+                    if(automation_)
+                    {
+                        automation_->PostHotkey(id);
+                    }
+                });
+            adeps.registrar = win_hotkeys_;
+        }
+        adeps.list_workspaces =
+            [this]() -> std::vector<std::string>
+            {
+                return workspaces_ ? workspaces_->Store().List()
+                                   : std::vector<std::string>{};
+            };
+        adeps.active_workspace =
+            [this]() -> std::string
+            {
+                return workspaces_ ? workspaces_->Snapshot().id
+                                   : std::string();
+            };
+        /* Internal session 0 (IPC sessions start at 1): the job
+           event and the published snapshot still reach every
+           subscribed UI. */
+        adeps.enqueue_reload =
+            [this](const std::string& id, std::string& rerr) -> bool
+            {
+                if(!workspaces_)
+                {
+                    rerr = "no workspace service";
+                    return false;
+                }
+                const WorkspaceService::JobResult jr =
+                    workspaces_->Enqueue(0, "reload",
+                        nlohmann::json::object({{ "id", id }}));
+                if(!jr.accepted)
+                {
+                    rerr = jr.error;
+                    return false;
+                }
+                Log("hotkey: switching to workspace '" + id + "'");
+                return true;
+            };
+        adeps.persist =
+            [this](const AutomationConfig& c, std::string& perr)
+            {
+                if(!profile_)
+                {
+                    return true;
+                }
+                std::lock_guard<std::mutex> g(state_mutex_);
+                const std::optional<AutomationConfig> prev =
+                    engine_state_.automation;
+                engine_state_.automation = c;
+                if(!profile_->Save(engine_state_, perr))
+                {
+                    engine_state_.automation = prev;
+                    return false;
+                }
+                return true;
+            };
+        /* The AUTOMATION body moved (bindings, states). */
+        adeps.changed =
+            [this]
+            {
+                if(service_)
+                {
+                    service_->EmitAutomation();
+                }
+            };
+        adeps.log = [this](const std::string& l) { Log(l); };
+        /* R-4: the dimming sources (injectable for the suites). */
+        adeps.idle_seconds =
+            opts_.idle_seconds
+                ? opts_.idle_seconds
+                : std::function<double()>(
+                      [] { return platform::UserIdleSeconds(); });
+        adeps.fullscreen =
+            opts_.fullscreen
+                ? opts_.fullscreen
+                : std::function<bool()>(
+                      [] { return platform::FullscreenAppActive(); });
+        adeps.wall_now = opts_.wall_clock;   /* empty = local time */
+        automation_ = std::make_unique<Automation>(std::move(adeps));
+    }
+
     /* The IPC service owns the scene-apply path (Task 3.5): the
        --scene CLI and SET_SCENE both go through
        ApplySceneDocument, so a UI-applied scene and a
@@ -1230,6 +1344,9 @@ bool EngineHost::Start(std::string& err)
         /* R-1: OUTPUT_COMMAND + the "output" event + the
            output_control_v1 capability. */
         ipc_deps.output = &output_;
+        /* R-2: AUTOMATION_COMMAND + the "automation" event +
+           the automation_v1 capability. */
+        ipc_deps.automation = automation_.get();
         /* Task 4.4 layout verbs: identify and the set_binding
            create path resolve against live topology — the
            same source the mapper syncs from. */
@@ -1393,6 +1510,28 @@ bool EngineHost::Start(std::string& err)
             Log("managed workspace '" + wsid +
                 "' could not be re-adopted (" + wr.error +
                 ") — starting unmanaged");
+        }
+    }
+
+    /* R-2: register the persisted hotkeys (a failed chord is
+       logged and reported in the AUTOMATION body, never fatal;
+       nothing bound -> no hotkey thread at all). */
+    if(automation_)
+    {
+        std::optional<AutomationConfig> persisted;
+        {
+            std::lock_guard<std::mutex> g(state_mutex_);
+            persisted = engine_state_.automation;
+        }
+        if(persisted)
+        {
+            automation_->Restore(*persisted);
+            if(!persisted->hotkeys.empty())
+            {
+                Log("restored " +
+                    std::to_string(persisted->hotkeys.size()) +
+                    " hotkey binding(s) from " + opts_.state_path);
+            }
         }
     }
 
@@ -1583,11 +1722,16 @@ void EngineHost::OnOutputChanged()
         reactive_->Bus()->ClearEvents();
     }
     /* Uploaded loops: hold -> Paused, Off -> Stopped (they are
-       never scaled by the master). */
+       never scaled by the master). R-4: a level-0 dimming rule
+       (schedule / lock / idle at "off") stops them the same way
+       — a dimmed level leaves the loop running, reported
+       unscaled. */
     if(playback_)
     {
         const PlaybackController::Result r =
-            playback_->SetUserOverride(s.hold, s.blackout);
+            playback_->SetUserOverride(
+                s.hold,
+                s.blackout || OutputControl::AnyContributorOff(s));
         if(!r.accepted)
         {
             Log("output control: uploaded playback did not take "
@@ -1849,6 +1993,18 @@ void EngineHost::PollOnce()
 
     /* Audit E-12b: idle entry/exit (on_idle). */
     PollIdle();
+
+    /* R-2: also on the fast tick (Run); here so a test that
+       drives PollOnce alone still runs queued hotkeys. */
+    PollAutomation(Clock::now());
+}
+
+void EngineHost::PollAutomation(TimePoint now)
+{
+    if(automation_)
+    {
+        automation_->Poll(now);
+    }
 }
 
 /*---------------------------------------------------------*\
@@ -2268,6 +2424,9 @@ void EngineHost::Run()
             PollOnce();
             next_maint = now + std::chrono::milliseconds(500);
         }
+        /* R-2: a hotkey press lands within one fast tick
+           (~17 ms), not on the 500 ms maintenance cadence. */
+        PollAutomation(Clock::now());
         if(service_)
         {
             const TimePoint tick = Clock::now();
@@ -2327,9 +2486,19 @@ const OrderlyShutdown::Result& EngineHost::Stop()
        measured against its declared bound — an overrun is
        reported honestly, never silently. */
     OrderlyShutdown shutdown;
+    /* The platform event sources: the power monitor and (R-2)
+       the hotkey thread, which unregisters every chord before
+       it exits. One step, so the step list stays stable. */
     shutdown.Add("power-monitor",
                  std::chrono::milliseconds(2000),
-                 [this] { power_monitor_.Stop(); });
+                 [this]
+                 {
+                     power_monitor_.Stop();
+                     if(win_hotkeys_)
+                     {
+                         win_hotkeys_->Stop();
+                     }
+                 });
     shutdown.Add("ipc-listeners",
                  std::chrono::milliseconds(2000),
                  [this]
