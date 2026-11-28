@@ -456,11 +456,24 @@ static int TestBody()
             server.CountEvents(sdk::kPktUpdateLEDs, 0);
         const uint64_t w1 =
             server.CountEvents(sdk::kPktUpdateLEDs, 1);
+        /* E-6: the scene clock keeps ticking (Tick bakes the
+           wired frames on it) but the scene is no longer
+           evaluated and mapped for nothing. One tick that read
+           the gate just before ownership may still land. */
+        SceneWorker& worker = host.GetEngine().Worker();
+        const uint64_t ev0  = worker.Evaluations();
+        const uint64_t sq0  = worker.Sequence();
         PumpFor(host, 600);
         CHECKV(server.CountEvents(sdk::kPktUpdateLEDs, 0) == w0,
                "live UPDATELEDS reached the owned group");
         CHECKV(server.CountEvents(sdk::kPktUpdateLEDs, 1) > w1,
                "wired baked frames stopped during playback");
+        CHECKV(worker.Evaluations() <= ev0 + 1,
+               "scene evaluated while playback owns the output "
+               "(%llu -> %llu)", (unsigned long long)ev0,
+               (unsigned long long)worker.Evaluations());
+        CHECKV(worker.Sequence() > sq0 + 10,
+               "scene clock stopped during playback");
     }
 
     /*------------------------------------------------*/
@@ -589,6 +602,14 @@ static int TestBody()
                s.upload == UploadState::None;
     }, 10000));
     CHECK(!pipeline->IsSuppressed(wireless_key));
+    {
+        /* Back on live: evaluation resumes (E-6 gate lifted). */
+        SceneWorker& worker = host.GetEngine().Worker();
+        const uint64_t ev = worker.Evaluations();
+        CHECKV(WaitFor(host, [&]{
+            return worker.Evaluations() > ev + 5;
+        }, 3000), "scene evaluation did not resume on live");
+    }
 
     params.speed = 120;
     {

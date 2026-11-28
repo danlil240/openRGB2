@@ -523,24 +523,7 @@ PlaybackController::Deps EngineHost::BuildPlaybackDeps()
     pdeps.wired_targets =
         [this]() -> std::vector<DeviceSnapshot>
         {
-            std::vector<DeviceSnapshot> out;
-            if(!sdk_)
-            {
-                return out;
-            }
-            const std::vector<DeviceKey> bound =
-                mapper_.BoundControllers();
-            for(const DeviceSnapshot& s : sdk_->Snapshots())
-            {
-                if(!IsWirelessGroupController(s) &&
-                   s.connection == ConnectionState::Connected &&
-                   std::find(bound.begin(), bound.end(), s.key) !=
-                       bound.end())
-                {
-                    out.push_back(s);
-                }
-            }
-            return out;
+            return WiredTargets();
         };
     pdeps.select_mode =
         [this](const DeviceKey& k, const std::string& name,
@@ -1076,29 +1059,45 @@ bool EngineHost::Start(std::string& err)
     /* Every evaluated scene frame is split into per-controller
        complete-controller frames and handed to the pipeline via
        the engine's submitLatest sink. While an uploaded loop
-       owns the output, live submissions to OTHER controllers
-       are skipped (Tick produces the matching baked frames);
-       submissions to the suppressed wireless group still run
-       so the lane's rejection — never a silent drop — is
-       exercised on every tick. */
+       owns the output the evaluate gate below skips evaluation
+       and mapping (Tick produces the wired baked frames; the
+       owned group's suppressed lane would refuse a live frame).
+       A tick that read the gate just before ownership began is
+       still mapped: submissions to OTHER controllers are then
+       skipped, and one to the suppressed wireless group is
+       refused by its lane with a reason — never a silent
+       drop. */
     /* While the power lifecycle gates output (display off /
        suspend) every mapped frame would only be rejected at the
        pipeline: skip evaluation + mapping instead of running
        them at 60 Hz just to inflate the `rejected` counters. */
     engine_.Worker().SetOutputGate(
         [this]() { return pipeline_->OutputPaused(); });
+    /* E-6: while the uploaded loop owns the output every mapped
+       frame would be skipped (wired) or refused by the
+       suppressed lane (the owned group) — so skip evaluation
+       and mapping entirely. The clock still ticks: Tick bakes
+       the wired frames on it. A frame the gate skipped is never
+       mapped even if ownership ended mid-tick (its colors are
+       empty); the next tick evaluates normally. */
+    engine_.Worker().SetEvaluateGate(
+        [this]() { return playback_->PlaybackOwnsWired(); });
     engine_.Worker().SetFrameCallback(
         [this](const EvaluatedFrame& eval)
         {
             ++frames_;
-            const bool owns = playback_->PlaybackOwnsWired();
-            for(RgbFrame& frame : mapper_.MapFrame(eval))
+            if(!eval.evaluate_gated)
             {
-                if(owns && !playback_->OwnsGroup(frame.controller))
+                const bool owns = playback_->PlaybackOwnsWired();
+                for(RgbFrame& frame : mapper_.MapFrame(eval))
                 {
-                    continue;
+                    if(owns &&
+                       !playback_->OwnsGroup(frame.controller))
+                    {
+                        continue;
+                    }
+                    engine_.SubmitLatest(std::move(frame));
                 }
-                engine_.SubmitLatest(std::move(frame));
             }
             playback_->Tick(eval.sample_time);
         });
@@ -1526,6 +1525,57 @@ void EngineHost::OnReactiveChanged()
     {
         Log("profile save failed: " + serr);
     }
+}
+
+std::vector<DeviceSnapshot> EngineHost::WiredTargets()
+{
+    if(!sdk_)
+    {
+        return {};
+    }
+    /* Generation FIRST, then the snapshots: a re-enumeration
+       between the two leaves newer snapshots under an older
+       key, which simply rebuilds next call — the reverse order
+       could cache old snapshots under the new generation. */
+    const uint64_t        generation = sdk_->TopologyGeneration();
+    const ConnectionState state      = sdk_->State();
+    std::vector<DeviceKey> bound     = mapper_.BoundControllers();
+    std::lock_guard<std::mutex> lock(wired_cache_mutex_);
+    if(wired_cache_.valid &&
+       wired_cache_.generation == generation &&
+       wired_cache_.state == state &&
+       wired_cache_.bound == bound)
+    {
+        return wired_cache_.targets;
+    }
+    std::vector<DeviceSnapshot> out;
+    for(DeviceSnapshot& s : sdk_->Snapshots())
+    {
+        if(!IsWirelessGroupController(s) &&
+           s.connection == ConnectionState::Connected &&
+           std::find(bound.begin(), bound.end(), s.key) !=
+               bound.end())
+        {
+            s.colors.clear();
+            s.colors.shrink_to_fit();
+            s.led_names.clear();
+            s.led_names.shrink_to_fit();
+            s.modes.clear();
+            s.modes.shrink_to_fit();
+            for(ZoneSnapshot& z : s.zones)
+            {
+                z.matrix_map.clear();
+                z.matrix_map.shrink_to_fit();
+            }
+            out.push_back(std::move(s));
+        }
+    }
+    wired_cache_.valid      = true;
+    wired_cache_.generation = generation;
+    wired_cache_.state      = state;
+    wired_cache_.bound      = std::move(bound);
+    wired_cache_.targets    = out;
+    return out;
 }
 
 void EngineHost::PollOnce()

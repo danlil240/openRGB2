@@ -53,6 +53,11 @@ struct EvaluatedFrame
                                                colors belong to
                                                (0 = no scene)       */
     studio::FrameColors colors;             /* object id -> LEDs    */
+    /* True when the evaluate gate skipped evaluation (E-6):
+       `colors` is empty on purpose and the frame must not be
+       mapped to devices — only the clock-driven consumers
+       (uploaded-playback Tick) use it. */
+    bool                evaluate_gated = false;
 };
 
 class SceneWorker
@@ -137,6 +142,21 @@ public:
        mutex_ held; must be cheap. */
     using OutputGate = std::function<bool()>;
     void     SetOutputGate(OutputGate gate);
+
+    /* Evaluate gate (E-6): while it reports true, Step applies
+       submitted state and still runs the frame callback on the
+       scene clock, but skips the input pull and the scene
+       evaluation — the frame carries evaluate_gated = true and
+       an empty color map. For output owned by another producer
+       (uploaded playback) that still needs the clock tick.
+       Queried once per tick WITHOUT mutex_ held; must be cheap.
+       The output gate takes precedence (no callback at all). */
+    using EvaluateGate = std::function<bool()>;
+    void     SetEvaluateGate(EvaluateGate gate);
+
+    /* Ticks that actually ran the scene evaluation (gated and
+       idle-hook frames excluded) — diagnostics/tests. */
+    uint64_t Evaluations() const;
 
     /* The scene clock's t = 0 reference. Reactive-input
        providers stamp event times on this base so event ages
@@ -233,6 +253,8 @@ private:
     IdleFrameHook         idle_frame_hook_;
     InputProvider         input_provider_;
     OutputGate            output_gate_;
+    EvaluateGate          evaluate_gate_;
+    uint64_t              evaluations_ = 0;     /* mutex_ */
     EngineLogFn           log_;
     /* Worker-thread-only counter (Step is single-caller) —
        throttles the per-fault log line. */

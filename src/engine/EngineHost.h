@@ -395,6 +395,26 @@ private:
 
     std::atomic<uint64_t>                    frames_{ 0 };
     std::atomic<bool>                        capture_paused_{ false };
+
+    /* E-6: playback's wired-target list (bound, connected,
+       non-wireless controllers), cached per SDK topology
+       generation + connection state + bound-controller set.
+       Tick asks for it ~30x/s while uploaded playback runs;
+       rebuilding meant deep-copying every snapshot each time.
+       Cached entries carry identity/topology fields only (key,
+       generation, zones, connection) — no colors, LED names or
+       modes, which no wired-target consumer reads. */
+    std::vector<DeviceSnapshot> WiredTargets();
+    struct WiredTargetCache
+    {
+        bool                        valid      = false;
+        uint64_t                    generation = 0;
+        ConnectionState             state = ConnectionState::Disconnected;
+        std::vector<DeviceKey>      bound;
+        std::vector<DeviceSnapshot> targets;
+    };
+    std::mutex                               wired_cache_mutex_;
+    WiredTargetCache                         wired_cache_;
     /* The managed-backend pid a QUIT stop_backend request
        resolved at ask time (0 = none pending). Stop() re-
        verifies before signaling — the pid is a handle to
