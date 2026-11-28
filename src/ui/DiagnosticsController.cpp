@@ -9,6 +9,12 @@
 #include "EngineBridge.h"
 #include "IpcProtocol.h"
 #include "JsonVariant.h"
+#include "LaunchHardening.h"
+
+#include <QClipboard>
+#include <QFileInfo>
+#include <QGuiApplication>
+#include <QProcess>
 
 #include <QDateTime>
 #include <QDir>
@@ -686,6 +692,63 @@ void DiagnosticsController::RecomputeControllers()
     controllers_ = rows;
     unresolved_  = unresolved;
     emit controllersChanged();
+}
+
+bool DiagnosticsController::openOwnershipTarget(const QString& target)
+{
+    /* The whole surface is two constants — no caller-supplied
+       string ever reaches the shell. */
+    const QString explorer = launch::SystemExplorerPath();
+    QString arg;
+    if(target == QLatin1String("dynamic_lighting_settings"))
+    {
+        /* The Dynamic Lighting page id in the Settings catalog
+           (present on Windows 11 build 26300). */
+        arg = QStringLiteral("ms-settings:personalization-lighting");
+    }
+    else if(target == QLatin1String("services"))
+    {
+        const QString win = QFileInfo(explorer).absolutePath();
+        arg = QDir::toNativeSeparators(
+            win + QStringLiteral("/System32/services.msc"));
+    }
+    else
+    {
+        return false;
+    }
+    if(explorer.isEmpty())
+    {
+        return false;
+    }
+    if(shell_launcher_)
+    {
+        return shell_launcher_(explorer, QStringList{ arg });
+    }
+    QProcess p;
+    p.setProgram(explorer);
+    p.setArguments(QStringList{ arg });
+    p.setProcessEnvironment(launch::SanitizedChildEnvironment());
+    const bool started = p.startDetached();
+    if(!started)
+    {
+        AppendEvent(QStringLiteral("error"),
+                    QStringLiteral("could not open %1").arg(arg));
+    }
+    return started;
+}
+
+bool DiagnosticsController::copyText(const QString& text)
+{
+    QClipboard* cb = qobject_cast<QGuiApplication*>(
+                         QCoreApplication::instance())
+                         ? QGuiApplication::clipboard()
+                         : nullptr;
+    if(!cb || text.isEmpty())
+    {
+        return false;
+    }
+    cb->setText(text);
+    return true;
 }
 
 void DiagnosticsController::RecomputeOwnership()

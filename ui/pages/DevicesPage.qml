@@ -611,12 +611,21 @@ Item {
                                 font.pixelSize: Theme.fontSizeSmall
                                 wrapMode: Text.WordWrap
                             }
+                            /* R-10: concrete steps for this writer,
+                               keyed by the engine's finding key. */
+                            OwnershipGuide {
+                                width: parent.width - Theme.spaceL
+                                x: Theme.spaceL
+                                key: modelData.key || ""
+                                owner: modelData.owner || ""
+                            }
                         }
                     }
                     Text {
+                        objectName: "ownershipReportOnlyNote"
                         visible: (root.ownership.conflictCount || 0) > 0
                         width: parent.width
-                        text: qsTr("Report-only — OpenRGB2 never kills or takes over a competing owner. Close the conflicting application (or move its RGB control off this hardware), then restart the engine.")
+                        text: qsTr("Report-only — OpenRGB2 never stops or changes another app. Turn the other app off with the steps above; OpenRGB2 re-applies your lights once it stops.")
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSizeSmall
                         wrapMode: Text.WordWrap

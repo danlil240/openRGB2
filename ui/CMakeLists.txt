@@ -76,6 +76,7 @@ qt_add_qml_module(openrgb2_ui
         components/GroupChip.qml
         components/NavButton.qml
         components/OwnershipBanner.qml
+        components/OwnershipGuide.qml
         components/PageFlickable.qml
         components/PageHeader.qml
         components/PaletteSwatch.qml

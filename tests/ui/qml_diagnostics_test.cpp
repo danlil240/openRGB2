@@ -23,6 +23,7 @@
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QQuickItem>
 #include <QQuickStyle>
 
 #include <cstdio>
@@ -30,6 +31,25 @@
 #include <memory>
 
 using namespace openrgb2;
+
+/* Repeater delegates are visual children (parentItem), not QObject
+   children — findChild never sees them. Walk both trees. */
+static QObject* FindByName(QObject* root, const QString& name)
+{
+    if(!root)
+        return nullptr;
+    if(root->objectName() == name)
+        return root;
+    for(QObject* c : root->children())
+        if(QObject* f = FindByName(c, name))
+            return f;
+    if(auto* item = qobject_cast<QQuickItem*>(root))
+        for(QQuickItem* c : item->childItems())
+            if(c->parent() != root)
+                if(QObject* f = FindByName(c, name))
+                    return f;
+    return nullptr;
+}
 
 static int checks   = 0;
 static int failures = 0;
@@ -120,6 +140,107 @@ int main(int argc, char** argv)
     if(exportBtn)
     {
         CHECK(!exportBtn->property("enabled").toBool());
+    }
+
+    /*---- R-10: guided steps per writer key --------------------*/
+    {
+        QString     launched_program;
+        QStringList launched_args;
+        diag.setShellLauncherForTesting(
+            [&](const QString& program, const QStringList& args)
+            {
+                launched_program = program;
+                launched_args    = args;
+                return true;
+            });
+        auto conflict = [](const char* owner, const char* key)
+        {
+            QVariantMap c;
+            c.insert(QStringLiteral("owner"), QString::fromUtf8(owner));
+            c.insert(QStringLiteral("key"), QString::fromUtf8(key));
+            c.insert(QStringLiteral("exe"), QString());
+            c.insert(QStringLiteral("pid"), 0);
+            c.insert(QStringLiteral("detail"), QStringLiteral("d"));
+            return QVariant(c);
+        };
+        QVariantMap rep;
+        rep.insert(QStringLiteral("scanned"), true);
+        rep.insert(QStringLiteral("conflicts"), QVariantList{
+            conflict("Windows Dynamic Lighting", "dynamic_lighting"),
+            conflict("LampArray service (Dynamic Lighting)",
+                     "lamparray"),
+            conflict("Logitech G Hub / Options", "logitech"),
+            conflict("Some Future RGB", "future_key") });
+        rep.insert(QStringLiteral("notices"), QVariantList{});
+        bridge.setOwnershipForTesting(rep);
+        QCoreApplication::processEvents();
+
+        auto steps_text = [&page](const char* key)
+        {
+            QObject* g = FindByName(page.get(),
+                QStringLiteral("ownershipGuide_") +
+                QString::fromUtf8(key));
+            return g ? g->property("stepsText").toString()
+                     : QStringLiteral("<no guide>");
+        };
+        const QString dl = steps_text("dynamic_lighting");
+        CHECK(dl.contains(QStringLiteral("Dynamic Lighting")) &&
+              dl.contains(QStringLiteral("Use Dynamic Lighting on my devices")));
+        const QString la = steps_text("lamparray");
+        CHECK(la.contains(QStringLiteral("sc stop logi_lamparray_service")));
+        CHECK(la.contains(
+            QStringLiteral("sc config logi_lamparray_service start= demand")));
+        CHECK(la.contains(QStringLiteral("Windows Update")));
+        const QString lg = steps_text("logitech");
+        CHECK(lg.contains(QStringLiteral("G HUB")) &&
+              lg.contains(QStringLiteral("startup")));
+        /* an unknown key still gets steps, never a blank */
+        const QString fu = steps_text("future_key");
+        CHECK(fu.contains(QStringLiteral("Some Future RGB")));
+
+        /* "Open Settings" exists for Dynamic Lighting and goes
+           through the whitelisted launcher */
+        QObject* settingsBtn = FindByName(page.get(),
+            QStringLiteral("openLightingSettingsButton"));
+        CHECK(settingsBtn != nullptr);
+        if(settingsBtn)
+        {
+            QMetaObject::invokeMethod(settingsBtn, "clicked");
+            CHECK(launched_program.endsWith(
+                      QStringLiteral("explorer.exe"),
+                      Qt::CaseInsensitive));
+            CHECK(launched_args ==
+                  QStringList{ QStringLiteral(
+                      "ms-settings:personalization-lighting") });
+        }
+        QObject* servicesBtn = FindByName(page.get(),
+            QStringLiteral("openServicesButton"));
+        CHECK(servicesBtn != nullptr);
+        if(servicesBtn)
+        {
+            launched_args.clear();
+            QMetaObject::invokeMethod(servicesBtn, "clicked");
+            CHECK(launched_args.size() == 1 &&
+                  launched_args[0].endsWith(
+                      QStringLiteral("services.msc"),
+                      Qt::CaseInsensitive));
+        }
+        /* only the whitelisted targets ever launch */
+        launched_args.clear();
+        CHECK(!diag.openOwnershipTarget(QStringLiteral("cmd.exe")));
+        CHECK(launched_args.isEmpty());
+
+        /* the copy buttons put the exact command on the clipboard */
+        CHECK(diag.copyText(
+            QStringLiteral("sc stop logi_lamparray_service")));
+
+        /* E-5 is merged: no "restart the engine" advice */
+        QObject* note = page->findChild<QObject*>("ownershipReportOnlyNote");
+        CHECK(note != nullptr &&
+              !note->property("text").toString().contains(
+                  QStringLiteral("restart the engine")) &&
+              note->property("text").toString().contains(
+                  QStringLiteral("re-applies")));
     }
 
     /*---- R-10: the Ownership card is a jump target -----------*/

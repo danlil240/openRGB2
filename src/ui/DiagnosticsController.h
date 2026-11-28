@@ -40,11 +40,13 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
 
 #include <deque>
+#include <functional>
 
 namespace openrgb2
 {
@@ -148,6 +150,26 @@ public:
     Q_INVOKABLE QString defaultExportPath() const;
     Q_INVOKABLE void   clearEventLog();
 
+    /*---- R-10 guided fix steps ------------------------------*/
+    /* Opens one WHITELISTED system surface for the ownership
+       guide — never an engine-supplied or arbitrary string:
+         "dynamic_lighting_settings" -> Settings > Personalization
+                                        > Dynamic Lighting
+         "services"                  -> the Services console
+       Launched by absolute explorer.exe with a sanitised
+       environment (the UI usually runs elevated — audit U-6).
+       Returns false for any other target. The user takes the
+       action there; OpenRGB2 changes nothing itself. */
+    Q_INVOKABLE bool openOwnershipTarget(const QString& target);
+    /* Puts a guide command (e.g. `sc stop ...`) on the
+       clipboard for the user to run themselves. */
+    Q_INVOKABLE bool copyText(const QString& text);
+    /* Replaces the explorer.exe launch: (absolute program,
+       args) -> started. */
+    void setShellLauncherForTesting(
+        std::function<bool(const QString&, const QStringList&)>
+            launcher) { shell_launcher_ = std::move(launcher); }
+
     /*---- state ----------------------------------------------*/
     bool         active() const            { return active_; }
     int          refreshIntervalMs() const { return interval_ms_; }
@@ -212,6 +234,8 @@ private:
     bool           log_signal_pending_ = false;
     QString        last_export_;
     QString        export_error_;
+    std::function<bool(const QString&, const QStringList&)>
+                   shell_launcher_;   /* test seam (R-10) */
 
     /* UI-side preview cadence basis: arrival stamps of the
        frame_status pushes the preview repaints on. */
