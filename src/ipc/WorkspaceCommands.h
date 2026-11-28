@@ -169,6 +169,17 @@ public:
     };
     void           SetCalibrationDeps(CalibrationDeps deps);
 
+    /* Audit I-4: the applied scene document, serialized — the
+       source a `scene` download transfer stages. Set once by
+       the owning service before any dispatch. */
+    struct SceneSource
+    {
+        uint64_t                           revision = 0;
+        std::shared_ptr<const std::string> bytes;   /* null: none */
+        std::string                        sha256;
+    };
+    void           SetSceneSource(std::function<SceneSource()> fn);
+
     /* The "calibration" event's session-bound snapshot —
        the OWNER sees token + full status; another session
        sees the shared fields plus owner:true while a lease
@@ -252,6 +263,7 @@ private:
 
     WorkspaceService*        service_;
     WorkspaceTransfer        transfers_;
+    std::function<SceneSource()> scene_source_;
 
     mutable std::mutex       cache_mutex_;
     mutable uint64_t         lib_dev_mtime_ = 0;

@@ -276,6 +276,22 @@ private:
                          const std::string& detail);
     void RecomputeDegraded();
 
+    /* Audit I-4: a SCENE body (WELCOME state, scene EVENT,
+       GET_SCENE reply) may announce a large document by
+       document_sha256 instead of inlining it
+       (document_omitted). The bridge completes it through a
+       `scene` download transfer before publishing, so scene()
+       keeps its shape for every consumer: a loaded scene
+       carries its document. A body whose hash matches the
+       held document reuses it without a fetch. */
+    void AdoptScene(const nlohmann::json& body);
+    void StartSceneFetch();
+    bool HandleSceneFetchReply(uint32_t request_id, ipc::MsgType type,
+                               const nlohmann::json& body);
+    void FinishSceneFetch(const nlohmann::json* doc,
+                          const std::string& sha,
+                          const std::string& error);
+
     void setConnectionState(const QString& s);
     void setLastError(const QString& s);
     void setDegraded(bool d);
@@ -309,6 +325,22 @@ private:
     QVariantList snapshots_;
     QVariantMap connection_;
     QVariantMap scene_;
+    /* Audit I-4 fetch state (GUI thread). */
+    QString        scene_doc_sha_;     /* sha of scene_'s document  */
+    nlohmann::json scene_pending_;     /* newest body awaiting its
+                                          document (null: none)      */
+    struct SceneFetch
+    {
+        int         stage    = 0;      /* 0 idle, 1 begin, 2 chunk  */
+        uint32_t    req      = 0;
+        std::string transfer_id;
+        uint64_t    length   = 0;
+        uint64_t    max_chunk = 0;
+        std::string sha256;
+        std::string bytes;
+        int         attempts = 0;
+    } scene_fetch_;
+    uint32_t       scene_finish_req_ = 0;  /* unawaited finish */
     QVariantMap playback_;
     QVariantMap frame_status_;
     QVariantMap frame_aggregate_;

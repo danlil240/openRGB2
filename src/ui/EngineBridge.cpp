@@ -8,6 +8,8 @@
 
 #include "JsonVariant.h"
 
+#include <QByteArray>
+#include <QCryptographicHash>
 #include <QMetaObject>
 
 namespace openrgb2
@@ -285,8 +287,7 @@ void EngineBridge::ApplyWelcome(const nlohmann::json& welcome)
     {
         if(state.contains("scene") && state["scene"].is_object())
         {
-            scene_ = JsonToVariant(state["scene"]).toMap();
-            emit sceneChanged();
+            AdoptScene(state["scene"]);
         }
         if(state.contains("sdk") && state["sdk"].is_object())
         {
@@ -361,8 +362,10 @@ void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
     }
     else if(kind == ipc::event_kind::kScene)
     {
-        scene_ = data_map;
-        emit sceneChanged();
+        if(data.is_object())
+        {
+            AdoptScene(data);
+        }
     }
     else if(kind == ipc::event_kind::kPlayback)
     {
@@ -423,6 +426,12 @@ void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
 void EngineBridge::ApplyReply(uint32_t request_id, ipc::MsgType type,
                               const nlohmann::json& body)
 {
+    /* The bridge's own scene-document fetch (audit I-4) —
+       consumed here, never surfaced as a generic reply. */
+    if(HandleSceneFetchReply(request_id, type, body))
+    {
+        return;
+    }
     /* Reply bodies are objects by contract; anything else skips
        the store update (still emitted to replyReceived below —
        the correlator is what callers pair on). The try/catch
@@ -447,8 +456,7 @@ void EngineBridge::ApplyReply(uint32_t request_id, ipc::MsgType type,
         }
         break;
     case ipc::MsgType::Scene:
-        scene_ = JsonToVariant(body).toMap();
-        emit sceneChanged();
+        AdoptScene(body);
         break;
     case ipc::MsgType::Playback:
         playback_ = JsonToVariant(body).toMap();
@@ -532,6 +540,11 @@ void EngineBridge::ApplySessionEnd(EngineWireClient::EndReason reason,
         why += ": " + QString::fromStdString(detail);
     }
     setLastError(why);
+    /* A fetch dies with its session; the reconnect's WELCOME
+       re-announces the scene (and refetches if needed). */
+    scene_fetch_      = SceneFetch{};
+    scene_pending_    = nlohmann::json();
+    scene_finish_req_ = 0;
     /* The wire cleared its capability set — the flag follows so
        a reconnecting UI never briefly believes an old engine. */
     setHasWorkspace(false);
@@ -539,6 +552,238 @@ void EngineBridge::ApplySessionEnd(EngineWireClient::EndReason reason,
     /* While running_ the worker retries with backoff; the
        stores stay populated (stale-but-labelled, never erased
        into a fake "all good"). */
+}
+
+/*---------------------------------------------------------*\
+||| Scene document out of band (audit I-4)                   ||
+\*---------------------------------------------------------*/
+
+void EngineBridge::AdoptScene(const nlohmann::json& body)
+{
+    const bool omitted =
+        body.value("document_omitted", false) &&
+        !(body.contains("document") && body["document"].is_object());
+    const std::string sha =
+        body.value("document_sha256", std::string());
+    if(!omitted)
+    {
+        /* Inline (or no scene): adopt verbatim — the previous
+           behaviour; any fetch in flight is now stale. */
+        scene_pending_ = nlohmann::json();
+        scene_         = JsonToVariant(body).toMap();
+        scene_doc_sha_ = QString::fromStdString(sha);
+        emit sceneChanged();
+        return;
+    }
+    const QVariant held = scene_.value(QStringLiteral("document"));
+    if(!sha.empty() && scene_doc_sha_ == QString::fromStdString(sha) &&
+       !held.toMap().isEmpty())
+    {
+        /* Same document, newer metadata (reconnect WELCOME,
+           a STATE-driven refresh): no transfer needed. */
+        scene_pending_ = nlohmann::json();
+        QVariantMap m = JsonToVariant(body).toMap();
+        m.insert(QStringLiteral("document"), held);
+        scene_ = std::move(m);
+        emit sceneChanged();
+        return;
+    }
+    /* Held back until its document arrives — a consumer never
+       sees a loaded scene without one. The newest body wins;
+       an in-flight fetch re-checks it when it lands. */
+    scene_pending_ = body;
+    if(scene_fetch_.stage == 0)
+    {
+        scene_fetch_.attempts = 0;
+        StartSceneFetch();
+    }
+}
+
+void EngineBridge::StartSceneFetch()
+{
+    const int attempts = scene_fetch_.attempts + 1;
+    scene_fetch_          = SceneFetch{};
+    scene_fetch_.attempts = attempts;
+    const int id = workspaceCommandJson(
+        QStringLiteral("transfer_begin"),
+        nlohmann::json::object({
+            { "direction", "download" },
+            { "kind",      "scene"    },
+        }));
+    if(id <= 0)
+    {
+        FinishSceneFetch(nullptr, std::string(),
+                         "scene document request could not be sent");
+        return;
+    }
+    scene_fetch_.stage = 1;
+    scene_fetch_.req   = (uint32_t)id;
+}
+
+bool EngineBridge::HandleSceneFetchReply(uint32_t request_id,
+                                         ipc::MsgType type,
+                                         const nlohmann::json& body)
+{
+    if(request_id != 0 && request_id == scene_finish_req_)
+    {
+        scene_finish_req_ = 0;      /* our transfer_finish echo */
+        return true;
+    }
+    if(scene_fetch_.stage == 0 || request_id != scene_fetch_.req)
+    {
+        return false;
+    }
+    if(type != ipc::MsgType::Ok || !body.is_object())
+    {
+        std::string msg = "scene document fetch failed";
+        if(body.is_object() && body.contains("message") &&
+           body["message"].is_string())
+        {
+            msg += ": " + body["message"].get<std::string>();
+        }
+        FinishSceneFetch(nullptr, std::string(), msg);
+        return true;
+    }
+    try
+    {
+        if(scene_fetch_.stage == 1)
+        {
+            scene_fetch_.transfer_id =
+                body.value("transfer_id", std::string());
+            scene_fetch_.length    = body.value("length", (uint64_t)0);
+            scene_fetch_.sha256    = body.value("sha256", std::string());
+            scene_fetch_.max_chunk =
+                body.value("max_chunk_bytes", (uint64_t)0);
+            if(scene_fetch_.transfer_id.empty() ||
+               scene_fetch_.sha256.empty())
+            {
+                FinishSceneFetch(nullptr, std::string(),
+                                 "scene download begin carried no "
+                                 "transfer");
+                return true;
+            }
+            scene_fetch_.bytes.reserve((size_t)scene_fetch_.length);
+            scene_fetch_.stage = 2;
+        }
+        else
+        {
+            const std::string b64 = body.value("data", std::string());
+            const QByteArray chunk = QByteArray::fromBase64(
+                QByteArray::fromRawData(b64.data(), (int)b64.size()));
+            scene_fetch_.bytes.append(chunk.constData(),
+                                      (size_t)chunk.size());
+            const bool eof = body.value("eof", false);
+            if(scene_fetch_.bytes.size() > scene_fetch_.length ||
+               (chunk.isEmpty() && !eof))
+            {
+                FinishSceneFetch(nullptr, std::string(),
+                                 "scene download stream is malformed");
+                return true;
+            }
+            if(eof || scene_fetch_.bytes.size() == scene_fetch_.length)
+            {
+                /* Release the staged transfer; its reply is
+                   swallowed, not awaited. */
+                const int fin = workspaceCommandJson(
+                    QStringLiteral("transfer_finish"),
+                    nlohmann::json::object({
+                        { "transfer_id", scene_fetch_.transfer_id } }));
+                scene_finish_req_ = fin > 0 ? (uint32_t)fin : 0;
+                const QByteArray raw = QByteArray::fromRawData(
+                    scene_fetch_.bytes.data(),
+                    (int)scene_fetch_.bytes.size());
+                const std::string got = QCryptographicHash::hash(
+                    raw, QCryptographicHash::Sha256).toHex()
+                        .toStdString();
+                if(scene_fetch_.bytes.size() != scene_fetch_.length ||
+                   got != scene_fetch_.sha256)
+                {
+                    FinishSceneFetch(nullptr, std::string(),
+                                     "scene download failed its "
+                                     "length/sha256 check");
+                    return true;
+                }
+                const nlohmann::json doc = nlohmann::json::parse(
+                    scene_fetch_.bytes, nullptr, false);
+                if(!doc.is_object())
+                {
+                    FinishSceneFetch(nullptr, std::string(),
+                                     "scene document is not a JSON "
+                                     "object");
+                    return true;
+                }
+                FinishSceneFetch(&doc, got, std::string());
+                return true;
+            }
+        }
+        nlohmann::json args = nlohmann::json::object({
+            { "transfer_id", scene_fetch_.transfer_id         },
+            { "offset",      (uint64_t)scene_fetch_.bytes.size() },
+        });
+        if(scene_fetch_.max_chunk > 0)
+        {
+            args["max_bytes"] = scene_fetch_.max_chunk;
+        }
+        const int id = workspaceCommandJson(
+            QStringLiteral("transfer_chunk"), std::move(args));
+        if(id <= 0)
+        {
+            FinishSceneFetch(nullptr, std::string(),
+                             "scene chunk request could not be sent");
+            return true;
+        }
+        scene_fetch_.req = (uint32_t)id;
+    }
+    catch(const std::exception& e)
+    {
+        FinishSceneFetch(nullptr, std::string(),
+                         std::string("malformed scene download reply: ")
+                             + e.what());
+    }
+    return true;
+}
+
+void EngineBridge::FinishSceneFetch(const nlohmann::json* doc,
+                                    const std::string& sha,
+                                    const std::string& error)
+{
+    const int attempts = scene_fetch_.attempts;
+    scene_fetch_ = SceneFetch{};
+    if(!scene_pending_.is_object())
+    {
+        return;      /* an inline body superseded the fetch */
+    }
+    const std::string want =
+        scene_pending_.value("document_sha256", std::string());
+    if(doc != nullptr && sha != want && attempts < 3)
+    {
+        /* The scene moved on while we fetched — fetch the
+           newest one (bounded: the scene EVENT that moved it
+           already updated scene_pending_). */
+        scene_fetch_.attempts = attempts;
+        StartSceneFetch();
+        return;
+    }
+    QVariantMap m = JsonToVariant(scene_pending_).toMap();
+    if(doc != nullptr && sha == want)
+    {
+        m.insert(QStringLiteral("document"), JsonToVariant(*doc));
+        scene_doc_sha_ = QString::fromStdString(sha);
+    }
+    else
+    {
+        /* Honest failure: metadata without a document, and
+           why — never a stale document under a new revision. */
+        m.insert(QStringLiteral("document_error"),
+                 QString::fromStdString(
+                     error.empty() ? "scene changed during the "
+                                     "document fetch"
+                                   : error));
+        scene_doc_sha_.clear();
+    }
+    scene_pending_ = nlohmann::json();
+    scene_         = std::move(m);
+    emit sceneChanged();
 }
 
 void EngineBridge::RecomputeDegraded()

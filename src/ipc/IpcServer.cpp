@@ -316,6 +316,11 @@ void IpcServer::Emit(const IpcEvent& ev)
             }));
     if(encoded.empty())
     {
+        /* Over the body cap: never sent — counted, not silent
+           (audit I-4). */
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++stats_.events_dropped;
+        ++stats_.events_oversize;
         return;
     }
     const Session::Bytes bytes =
@@ -415,6 +420,11 @@ void IpcServer::EmitTo(uint64_t session_id, const IpcEvent& ev,
             }));
     if(encoded.empty())
     {
+        /* Over the body cap: never sent — counted, not silent
+           (audit I-4). */
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++stats_.events_dropped;
+        ++stats_.events_oversize;
         return;
     }
     const Session::Bytes bytes =
@@ -1100,7 +1110,13 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
                         EncodeMessage(MsgType::Event, 0,
                             nlohmann::json::object(
                                 {{ "kind", k }, { "data", snap }}));
-                    if(!ev.empty())
+                    if(ev.empty())
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        ++stats_.events_dropped;
+                        ++stats_.events_oversize;
+                    }
+                    else
                     {
                         std::lock_guard<std::mutex> lock(s->out_mutex);
                         const auto now_it = s->enq_count.find(k);

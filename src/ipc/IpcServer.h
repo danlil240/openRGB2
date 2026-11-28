@@ -64,6 +64,8 @@ struct IpcServerStats
     uint64_t responses_out     = 0;
     uint64_t events_sent       = 0;
     uint64_t events_dropped    = 0;   /* queue overflow/coalesce   */
+    uint64_t events_oversize   = 0;   /* over the body cap, never
+                                         sent (also in dropped)    */
     uint64_t resync_bytes      = 0;   /* skipped garbage           */
     uint64_t rejected_hellos   = 0;
     uint64_t rate_limited      = 0;
