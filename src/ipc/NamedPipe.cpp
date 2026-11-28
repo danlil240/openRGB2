@@ -144,8 +144,22 @@ bool BuildRestrictedSddl(std::string& sddl_out, std::string& err)
        Network (NU, S-1-5-2 — present in every network-logon
        token) keeps the creating user's OWN account from
        reaching the pipe over SMB; PIPE_REJECT_REMOTE_CLIENTS
-       on every instance enforces the same at the pipe layer. */
-    sddl_out = "D:P(D;;GA;;;NU)(A;;GA;;;" + sid + ")(A;;GA;;;SY)";
+       on every instance enforces the same at the pipe layer.
+
+       S:(ML;;NW;;;ME) = an EXPLICIT Medium no-write-up label
+       (audit I-9). An elevated engine's objects are otherwise
+       unlabeled (implicitly Medium), so this changes no access
+       today — it pins the decided policy instead of leaning on
+       the default: medium clients of this user may drive an
+       elevated engine (the shipped topology: elevated stack,
+       possibly non-elevated UI / openrgb2-ctl), low-integrity
+       and sandboxed callers never can. A High label would lock
+       the medium UI out; the engine verbs take no client paths,
+       so a medium client cannot borrow the engine's rights for
+       file writes. The listener re-checks the floor per client
+       (ClientIntegrityAllowed). */
+    sddl_out = "D:P(D;;GA;;;NU)(A;;GA;;;" + sid + ")(A;;GA;;;SY)"
+               "S:(ML;;NW;;;ME)";
     return true;
 }
 
@@ -226,6 +240,25 @@ static HANDLE CreatePipeInstance(const std::string& name, bool first,
         (LPSECURITY_ATTRIBUTES)security.Raw());
 }
 
+/* Engine-side integrity floor (audit I-9): a connected client
+   must run at Medium or above. The Medium no-write-up label
+   already keeps low-integrity callers from opening the pipe for
+   write; this per-connection check makes the floor independent
+   of the descriptor and fails closed when the client's token
+   cannot be read. Medium is deliberate (see BuildRestrictedSddl):
+   an elevated engine still serves a non-elevated UI. */
+static bool ClientIntegrityAllowed(HANDLE pipe)
+{
+    ULONG pid = 0;
+    if(!GetNamedPipeClientProcessId(pipe, &pid) || pid == 0)
+    {
+        return false;
+    }
+    uint32_t rid = 0;
+    return QueryIntegrity(IntegritySubject::PipeClient, pid, rid) &&
+           rid >= kIntegrityMedium;
+}
+
 struct NamedPipeListener::Impl
 {
     IpcServer&           server;
@@ -279,7 +312,7 @@ struct NamedPipeListener::Impl
                top retries — the window only reopens in that
                failure case. */
             HANDLE next = CreatePipeInstance(name, false, security);
-            if(connected)
+            if(connected && ClientIntegrityAllowed(cur))
             {
                 server.Serve(std::unique_ptr<IIpcChannel>(
                                  new NamedPipeChannel((void*)cur)),

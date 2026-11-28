@@ -36,6 +36,26 @@ implementer needs nothing else.
   ELEVATED engine of the same user creates — the managed engine runs
   elevated while the UI may not); failing that, the server process's
   token user must equal the client's. Otherwise the connect fails closed.
+- Integrity (audit I-9/U-6): the SDDL also carries an explicit
+  `S:(ML;;NW;;;ME)` label, and the listener drops any client whose token
+  is below Medium (or unreadable). The client additionally requires the
+  server to run at no lower integrity than itself — the server token's
+  level when readable, else a lower bound (an Administrators/LocalSystem
+  owner implies an elevated creator; otherwise the object's label) — and
+  an ELEVATED client requires an Administrators/LocalSystem owner (or a
+  this-user owner whose server token it read at its own level, for
+  machines whose policy makes the creator the owner). Allowed
+  combinations:
+
+  | client \ server | medium | elevated | SYSTEM |
+  | --- | --- | --- | --- |
+  | medium | allow | allow (shipped: elevated stack, non-elevated UI/ctl) | allow |
+  | elevated | **refuse** | allow | allow |
+  | low / sandboxed | refuse (label + listener floor) | refuse | refuse |
+
+  Any client refuses a low-integrity server. A medium client driving an
+  elevated engine is by design: no verb accepts a client path, so it
+  cannot borrow the engine's rights for file writes.
 
 ## 1. Framing
 
