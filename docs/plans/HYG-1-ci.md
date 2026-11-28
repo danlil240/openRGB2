@@ -1,6 +1,6 @@
 # HYG-1: Continuous integration
 
-Status: proposed · Size: M · Source: audit 2026-11-28 Hygiene ("No CI")
+Status: implemented on `ci/hyg-1-github-actions` (not merged; not yet run on GitHub) · Size: M · Source: audit 2026-11-28 Hygiene ("No CI")
 
 ## Goal
 
@@ -97,3 +97,34 @@ tolerance knob. Do not drop it.
   week.
 - **The audit notes `main` was not pushed when it was written.** CI only helps
   once the branches are pushed.
+
+## Implementation notes (2026-11-28)
+
+Steps 1–5 are in `.github/workflows/ci.yml` and `AGENTS.md`. None of it has
+run on GitHub yet.
+
+**Open questions, settled by the plan's recommendation:**
+- **Gating:** report-only. No branch protection; revisit after a green week.
+- **Qt source:** open-source Qt 6.8.3 through aqtinstall
+  (`jurplel/install-qt-action@v4`), installed at `C:\Qt\6.8.3\msvc2022_64`, the
+  same path as the local toolchain.
+- **Minutes:** Daniel still has to check the quota. To save minutes, pushes
+  that touch only `docs/**` or `*.md` are skipped, superseded push/PR runs are
+  cancelled, and the backend build, packaging and timing repeats run only
+  nightly or on manual dispatch.
+
+**Found while implementing:**
+- **No CTest needs the qmake `OpenRGB.exe`.** The packaging suites use
+  `cmd.exe` stand-ins and `fake_windeployqt`; locally all 8 pass in about 47 s.
+  Only `stage-release.ps1` needs the backend. Packaging stays nightly as
+  designed, but moving the label into `build-test` would be cheap.
+- **Hosted runners run elevated.** `ipc_server_test` assumed a medium test
+  process. It now reads the live pipe owner and expects the matching outcome.
+- **`build-windows.bat` hard-codes the BuildTools `vcvarsall` path and
+  `C:\Qt\jom`.** The packaging job links a junction from the runner's VS
+  install to that path and downloads jom on a cache miss, so the vendored
+  recipe and `stage-release.ps1` run unmodified.
+- **Local proof (2026-11-28):** with the workflow's configure, build and CTest
+  commands (`-m:4` locally because the machine was shared), 91 of 91 tests
+  passed: 49 Qt-free, 34 ui (Quick3D viewport included) and 8 packaging. The
+  timing suites passed 3 of 3.
