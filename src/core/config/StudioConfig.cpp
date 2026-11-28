@@ -979,7 +979,7 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
         }
     }
     if(!out.effect.preset.empty()
-       && FindPreset(out.effect.preset) == nullptr)
+       && !FindPreset(out.effect.preset))
     {
         warns.push_back("effects.preset: unknown preset '"
                         + out.effect.preset + "'");

@@ -147,7 +147,7 @@ int main(int argc, char** argv)
     CHECK(effect_dir != nullptr && effect_dir[0] != '\0');
     /* Force the registry probe now — EffectLooks() caches the
        defaults layer on first access. */
-    CHECK(studio::FindPreset("aurora") != nullptr);
+    CHECK(studio::FindPreset("aurora").has_value());
 
     /*======================================================*\
     || A. EffectEditorController over the shared session    ||

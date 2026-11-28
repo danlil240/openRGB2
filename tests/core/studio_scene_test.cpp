@@ -1608,16 +1608,16 @@ static void TestReactivePresets()
 
     /* The three reactive presets exist, declare their input need,
        and build layers; the original six declare none. */
-    CHECK(FindPreset("shockwave") != nullptr
+    CHECK(FindPreset("shockwave").has_value()
           && FindPreset("shockwave")->needs == "audio", "shockwave needs audio");
-    CHECK(FindPreset("keyripple") != nullptr
+    CHECK(FindPreset("keyripple").has_value()
           && FindPreset("keyripple")->needs == "key", "keyripple needs key");
-    CHECK(FindPreset("ambient") != nullptr
+    CHECK(FindPreset("ambient").has_value()
           && FindPreset("ambient")->needs == "screen", "ambient needs screen");
     for(const char* pid : { "aurora", "reactor", "comet",
                             "chrome", "portal", "embers" })
     {
-        CHECK(FindPreset(pid) != nullptr && FindPreset(pid)->needs.empty(),
+        CHECK(FindPreset(pid) && FindPreset(pid)->needs.empty(),
               "non-reactive preset has no input need");
     }
 
