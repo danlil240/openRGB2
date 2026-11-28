@@ -804,12 +804,33 @@ PlaybackController::Result PlaybackController::OnSceneApplied(
        re-apply (persisted preset no longer qualifies, the
        backend refuses the mode, a transition is in flight)
        reaches the caller and LastApplyResult(). */
-    const Result r = RequestImpl(choice.mode,
-                                 PlaybackControl::Playing,
+    /* R-1: an engaged tray hold/Off survives the re-apply (a
+       tray workspace switch must not silently resume a loop the
+       user turned off) — the selection lands with the
+       override's control, and its release resumes Playing. */
+    PlaybackControl control = PlaybackControl::Playing;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(ovr_engaged_ &&
+           choice.mode == PlaybackMode::AnimationPlayback)
+        {
+            control = ovr_blackout_ ? PlaybackControl::Stopped
+                                    : PlaybackControl::Paused;
+        }
+    }
+    const Result r = RequestImpl(choice.mode, control,
                                  choice.params, doc);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         last_apply_result_ = r;
+        if(ovr_engaged_)
+        {
+            ovr_prior_         = PlaybackControl::Playing;
+            ovr_applied_       = control;
+            ovr_applied_valid_ =
+                r.accepted &&
+                choice.mode == PlaybackMode::AnimationPlayback;
+        }
     }
     return r;
 }
@@ -818,6 +839,117 @@ PlaybackController::Result PlaybackController::LastApplyResult() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return last_apply_result_;
+}
+
+/*---------------------------------------------------------*\
+|| R-1 user override (tray hold / Off)                      ||
+\*---------------------------------------------------------*/
+
+PlaybackController::Result PlaybackController::SetUserOverride(
+    bool hold, bool blackout)
+{
+    Result          r;
+    PlaybackMode    mode    = PlaybackMode::LiveEffects;
+    PlaybackParams  params;
+    PlaybackControl want    = PlaybackControl::Playing;
+    const bool      engaged = hold || blackout;
+    /* Restored when the request is refused as busy, so the
+       Poll retry re-runs the same transition. */
+    bool            was_engaged       = false;
+    PlaybackControl was_prior         = PlaybackControl::Playing;
+    bool            was_applied_valid = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        was_engaged       = ovr_engaged_;
+        was_prior         = ovr_prior_;
+        was_applied_valid = ovr_applied_valid_;
+        const bool animation =
+            requested_mode_ == PlaybackMode::AnimationPlayback;
+        ovr_hold_     = hold;
+        ovr_blackout_ = blackout;
+        ovr_retry_    = false;
+        if(engaged && !ovr_engaged_)
+        {
+            ovr_prior_         = animation ? requested_control_
+                                           : PlaybackControl::Playing;
+            ovr_applied_valid_ = false;
+        }
+        const bool releasing = !engaged && ovr_engaged_;
+        ovr_engaged_ = engaged;
+        mode   = requested_mode_;
+        params = params_;
+        r.accepted = true;
+        if(!animation)
+        {
+            /* Live output: the worker hold + mapper scale own it. */
+            if(!engaged)
+            {
+                ovr_applied_valid_ = false;
+            }
+            return r;
+        }
+        if(engaged)
+        {
+            want = blackout ? PlaybackControl::Stopped
+                            : PlaybackControl::Paused;
+        }
+        else
+        {
+            if(!releasing)
+            {
+                return r;              /* nothing was engaged */
+            }
+            const bool user_took_over =
+                ovr_applied_valid_ && requested_control_ != ovr_applied_;
+            ovr_applied_valid_ = false;
+            if(user_took_over)
+            {
+                return r;              /* keep the user's choice */
+            }
+            want = ovr_prior_;
+        }
+        if(requested_control_ == want)
+        {
+            if(engaged)
+            {
+                ovr_applied_       = want;
+                ovr_applied_valid_ = true;
+            }
+            return r;
+        }
+    }
+
+    r = Request(mode, want, params);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(r.accepted)
+    {
+        if(engaged)
+        {
+            ovr_applied_       = want;
+            ovr_applied_valid_ = true;
+        }
+    }
+    else if(r.reason == "a playback transition is already in progress")
+    {
+        ovr_engaged_       = was_engaged;
+        ovr_prior_         = was_prior;
+        ovr_applied_valid_ = was_applied_valid;
+        ovr_retry_         = true;
+    }
+    return r;
+}
+
+bool PlaybackController::UserOverrideActive() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return ovr_engaged_;
+}
+
+void PlaybackController::SetTransitionBusyForTesting(bool busy)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    transition_ = busy;
 }
 
 /*---------------------------------------------------------*\
@@ -1090,6 +1222,32 @@ void PlaybackController::Poll(TimePoint now)
                     "playback request parked across the power "
                     "gate failed on replay: " + r.reason;
             }
+            Changed();
+            return;   /* maintenance continues next tick */
+        }
+    }
+
+    /*---- R-1 user-override retry ---------------------------*\
+    || A tray hold/Off refused because another transition was  ||
+    || in flight re-runs here once the controller is free.     ||
+    \*---------------------------------------------------------*/
+    {
+        bool retry    = false;
+        bool hold     = false;
+        bool blackout = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if(ovr_retry_ && !transition_)
+            {
+                ovr_retry_ = false;
+                retry      = true;
+                hold       = ovr_hold_;
+                blackout   = ovr_blackout_;
+            }
+        }
+        if(retry)
+        {
+            SetUserOverride(hold, blackout);
             Changed();
             return;   /* maintenance continues next tick */
         }

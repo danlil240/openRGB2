@@ -2271,6 +2271,144 @@ int main()
         }
     }
 
+    /*---- R-1 OUTPUT_COMMAND / "output" event ------------------*/
+    {
+        /* Not wired: honest Unavailable, no capability. */
+        IpcReply r = svc.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "get" }}));
+        CHECK(r.code == ErrCode::Unavailable);
+        {
+            const nlohmann::json w = svc.OnWelcome();
+            bool has = false;
+            for(const auto& c : w["capabilities"])
+            {
+                has = has || c == "output_control_v1";
+            }
+            CHECK(!has);
+        }
+
+        Engine        engine9;
+        OutputControl oc;
+        EngineService::Deps d9;
+        d9.output = &oc;
+        EngineService svc9(engine9, d9);
+        std::vector<IpcEvent> ev9;
+        svc9.SetEventSink([&ev9](const IpcEvent& e)
+                          { ev9.push_back(e); });
+
+        const nlohmann::json w = svc9.OnWelcome();
+        bool has = false;
+        for(const auto& c : w["capabilities"])
+        {
+            has = has || c == "output_control_v1";
+        }
+        CHECK(has);
+        /* WELCOME state paints the control immediately. */
+        CHECK(w["state"]["output"].is_object());
+
+        r = svc9.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "get" }}));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.reply_type == MsgType::Output);
+        CHECK(r.body["master"].get<double>() == 1.0);
+        CHECK(r.body["blackout"].get<bool>() == false);
+        CHECK(r.body["hold"].get<bool>() == false);
+        CHECK(r.body["effective"].get<double>() == 1.0);
+        CHECK(r.body["contributors"].is_object() &&
+              r.body["contributors"].empty());
+        CHECK(r.body["uploaded_unscaled"].get<bool>() == false);
+
+        r = svc9.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "set_master" },
+                                    { "value", 0.5 }}));
+        CHECK(r.code == ErrCode::Ok && r.reply_type == MsgType::Output);
+        CHECK(r.body["master"].get<double>() == 0.5);
+        CHECK(r.body["effective"].get<double>() == 0.5);
+        CHECK(oc.EffectiveScale() == 0.5f);
+
+        /* Range/type validation is bad_request, state unchanged. */
+        for(const nlohmann::json& bad : {
+                nlohmann::json::object({{ "verb", "set_master" },
+                                        { "value", 1.5 }}),
+                nlohmann::json::object({{ "verb", "set_master" },
+                                        { "value", -0.1 }}),
+                nlohmann::json::object({{ "verb", "set_master" },
+                                        { "value", "half" }}),
+                nlohmann::json::object({{ "verb", "set_master" }}),
+                nlohmann::json::object({{ "verb", "set_blackout" },
+                                        { "on", 1 }}),
+                nlohmann::json::object({{ "verb", "set_hold" }}),
+                nlohmann::json::object({{ "verb", "dim" }}),
+                nlohmann::json::object({{ "verb", 7 }}),
+                nlohmann::json::object() })
+        {
+            r = svc9.Dispatch(MsgType::OutputCommand, bad);
+            CHECK(r.code == ErrCode::BadRequest);
+        }
+        CHECK(oc.State().master == 0.5f);
+
+        r = svc9.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "set_blackout" },
+                                    { "on", true }}));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["blackout"].get<bool>() == true);
+        CHECK(r.body["effective"].get<double>() == 0.0);
+        CHECK(r.body["master"].get<double>() == 0.5);
+
+        r = svc9.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "set_hold" },
+                                    { "on", true }}));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["hold"].get<bool>() == true);
+        CHECK(oc.State().hold);
+
+        oc.SetContributor("idle", 0.5f);
+        r = svc9.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "get" }}));
+        CHECK(r.body["contributors"]["idle"].get<double>() == 0.5);
+
+        /* STATE carries the same body. */
+        r = svc9.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r.body["output"]["hold"].get<bool>() == true);
+
+        /* Push: EmitOutput (the host's changed hook) sends the
+           body; the SUBSCRIBE snapshot serves it; PollEvents
+           only re-sends when the body moved since. */
+        ev9.clear();
+        svc9.EmitOutput();
+        CHECK(ev9.size() == 1 && ev9[0].kind == event_kind::kOutput &&
+              ev9[0].data["blackout"].get<bool>() == true);
+        svc9.PollEvents();
+        size_t outs = 0;
+        for(const IpcEvent& e : ev9)
+        {
+            outs += e.kind == event_kind::kOutput ? 1 : 0;
+        }
+        CHECK(outs == 1);                       /* no duplicate */
+        oc.SetBlackout(false);                  /* no hook wired */
+        svc9.PollEvents();
+        outs = 0;
+        for(const IpcEvent& e : ev9)
+        {
+            outs += e.kind == event_kind::kOutput ? 1 : 0;
+        }
+        CHECK(outs == 2);                       /* diff caught it */
+        nlohmann::json osnap;
+        CHECK(svc9.SnapshotEvent(event_kind::kOutput, osnap));
+        CHECK(osnap["blackout"].get<bool>() == false);
+
+        bool known = false;
+        for(const std::string& k : EventKinds())
+        {
+            known = known || k == event_kind::kOutput;
+        }
+        CHECK(known);
+        CHECK(std::string(MsgTypeName(MsgType::OutputCommand)) ==
+              "OUTPUT_COMMAND");
+        CHECK(std::string(MsgTypeName(MsgType::Output)) == "OUTPUT");
+        CHECK(uint16_t(MsgType::OutputCommand) == 0x010f);
+    }
+
     std::printf("ipc_engine_service_test: %d checks, %d failures\n",
                 checks, failures);
     return failures ? 1 : 0;

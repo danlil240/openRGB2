@@ -49,6 +49,7 @@
 #include "scene/BindingResolver.h"
 #include "scene/SceneTypes.h"
 
+#include <atomic>
 #include <deque>
 #include <map>
 #include <memory>
@@ -189,6 +190,16 @@ public:
        emit; a `verified` object whose binding does NOT
        resolve stays unwritable. */
     std::vector<RgbFrame> MapFrame(const EvaluatedFrame& eval);
+
+    /* R-1 runtime master scale: MapFrame multiplies the value
+       read from `scale` (OutputControl's effective-scale
+       atomic) into the document brightness, so a tray change
+       reaches the LEDs on the next tick without touching the
+       document. Blackout (0) still emits a black frame per
+       tick. nullptr (the default) = identity. The pointee
+       must outlive the mapper or be detached first. Preserved
+       baseline colors (unmapped LEDs) are never scaled. */
+    void SetOutputScaleSource(const std::atomic<float>* scale);
 
     /*---- LED identification (Task 4.4, LAYOUT_COMMAND      --*\
     |  "identify"): a bounded per-controller overlay. While   |
@@ -342,6 +353,8 @@ private:
     uint64_t            logged_writable_  = 0;
     MapStats            stats_;
     EngineLogFn         log_;
+    /* R-1: the master-scale source (see SetOutputScaleSource). */
+    std::atomic<const std::atomic<float>*> output_scale_{ nullptr };
 };
 
 } /* namespace openrgb2 */

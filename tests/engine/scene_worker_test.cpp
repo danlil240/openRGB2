@@ -223,6 +223,98 @@ static void TestOutputGate()
     }
 }
 
+/* R-1 user hold (tray Pause): while held, Step keeps producing
+   frames — the master scale still has to reach the LEDs — but
+   at the FROZEN scene time, without pulling input. Release
+   shifts the epoch by the time spent held, so the animation
+   resumes from the paused frame, and drops input queued
+   across the hold (its event ages were stamped on the old
+   epoch). */
+static void TestHold()
+{
+    using std::chrono::milliseconds;
+    SceneWorker worker;
+    auto doc = WaveDoc();
+    worker.SubmitScene(doc, WaveLayers(), 1);
+    std::vector<EvaluatedFrame> frames;
+    worker.SetFrameCallback([&frames](const EvaluatedFrame& f)
+    {
+        frames.push_back(f);
+    });
+    int pulls = 0;
+    worker.SetInputProvider([&pulls]()
+    {
+        ++pulls;
+        return std::shared_ptr<const studio::InputState>();
+    });
+    const TimePoint epoch = Clock::now();
+    worker.SetEpoch(epoch);
+
+    CHECK(!worker.Held());
+    CHECK(worker.Step(epoch + milliseconds(100)));
+    CHECK(pulls == 1);
+
+    /* Engage at t = 0.2 s. */
+    CHECK(worker.SetHold(true, epoch + milliseconds(200)));
+    CHECK(!worker.SetHold(true, epoch + milliseconds(250)));
+    CHECK(worker.Held());
+    CHECK(worker.Step(epoch + milliseconds(500)));
+    CHECK(worker.Step(epoch + milliseconds(900)));
+    CHECK(pulls == 1);                 /* no input pull while held */
+    CHECK(frames.size() == 3);
+    if(frames.size() == 3)
+    {
+        CHECK(Near(frames[1].scene_time_s, 0.200));
+        CHECK(Near(frames[2].scene_time_s, 0.200));
+        CHECK(frames[1].colors == Reference(*doc, WaveLayers(), 0.200));
+        CHECK(frames[2].colors == frames[1].colors);
+        /* sample_time stays the real tick time (delivery
+           cadence is wall-clock). */
+        CHECK(frames[2].sample_time == epoch + milliseconds(900));
+        CHECK(frames[2].sequence == 3);
+    }
+
+    /* A scene applied while held evaluates at the held time. */
+    worker.SubmitScene(doc, SolidLayers(10, 20, 30), 2);
+    CHECK(worker.Step(epoch + milliseconds(950)));
+    CHECK(frames.size() == 4 && Near(frames[3].scene_time_s, 0.200));
+    worker.SubmitScene(doc, WaveLayers(), 3);
+
+    /* Queued input across the hold is dropped on release. */
+    auto stale = std::make_shared<studio::InputState>();
+    stale->audio_level = 0.9f;
+    worker.SubmitInput(stale);
+
+    /* Release at wall t = 1.0 s: held 0.8 s -> epoch + 0.8. */
+    CHECK(worker.SetHold(false, epoch + milliseconds(1000)));
+    CHECK(!worker.SetHold(false, epoch + milliseconds(1000)));
+    CHECK(!worker.Held());
+    CHECK(worker.Epoch() == epoch + milliseconds(800));
+    CHECK(worker.Step(epoch + milliseconds(1100)));
+    CHECK(pulls == 2);                 /* pulling again */
+    CHECK(frames.size() == 5);
+    if(frames.size() == 5)
+    {
+        /* Resumes from the paused frame: 0.2 + 0.1. */
+        CHECK(Near(frames[4].scene_time_s, 0.300));
+        CHECK(frames[4].colors == Reference(*doc, WaveLayers(), 0.300));
+    }
+    CHECK(worker.PendingInputForTesting() == nullptr);
+
+    /* A worker with no provider: the pushed slot is cleared
+       too, so a stale InputState never evaluates after a
+       release. */
+    SceneWorker plain;
+    plain.SubmitScene(doc, WaveLayers(), 1);
+    plain.SetEpoch(epoch);
+    plain.SetHold(true, epoch);
+    plain.SubmitInput(stale);
+    plain.SetHold(false, epoch + milliseconds(10));
+    CHECK(plain.PendingInputForTesting() == nullptr);
+    CHECK(plain.Step(epoch + milliseconds(20)));
+    CHECK(plain.ActiveInputForTesting() == nullptr);
+}
+
 /* World matrices are cached per applied document: a newly
    applied document with a moved object must evaluate at the NEW
    position (cache invalidated on apply), matching a fresh
@@ -659,6 +751,7 @@ int main()
     TestNoScene();
     TestOutputGate();
     TestEvaluateGate();
+    TestHold();
     TestWorldCachePerScene();
     TestSpeedEditContinuity();
     TestFrameBufferReuse();

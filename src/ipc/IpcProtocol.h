@@ -83,6 +83,9 @@ constexpr const char* kCalibration = "calibration";   /* physical calibration �
 constexpr const char* kOwnership   = "ownership";     /* R-10: competing-writer
                                                          report changed — data =
                                                          the OWNERSHIP body */
+constexpr const char* kOutput      = "output";        /* R-1: runtime output
+                                                         control changed — data =
+                                                         the OUTPUT body */
 }
 
 /* The set SnapshotEvent/SUBSCRIBE validation knows. */
@@ -122,6 +125,10 @@ enum class MsgType : uint16_t
                                        revisions, and bounded transfers
                                        (plan section 3.3; capability
                                        "studio_workspace_v1")           */
+    OutputCommand    = 0x010f,   /* {verb,...args} -> Output; R-1
+                                       runtime output control (master,
+                                       blackout, hold — capability
+                                       "output_control_v1")             */
 
     /*---- diagnostics channel (the only post-HELLO verb) ---*/
     DiagGet          = 0x0300,   /* -> Diagnostics                      */
@@ -137,6 +144,7 @@ enum class MsgType : uint16_t
     State            = 0x8104,
     Pong             = 0x8105,
     Presets          = 0x8106,
+    Output           = 0x8107,   /* R-1: the OUTPUT body                */
     Event            = 0x8200,   /* push: {kind,data}; request_id = 0   */
     Diagnostics      = 0x8300,
 };

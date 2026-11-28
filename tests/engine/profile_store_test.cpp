@@ -239,6 +239,83 @@ static void TestMigration()
 }
 
 /*---------------------------------------------------------*\
+||| R-1: EngineState.output — the tray's master + blackout  ||
+|||     survive a restart; an older file (no member) loads; ||
+|||     unknown members inside `output` survive a save      ||
+\*---------------------------------------------------------*/
+
+static void TestOutputState()
+{
+    /* An older file: no `output` member -> nothing restored,
+       and a save does not invent one. */
+    const std::string p = Path("no-output.json");
+    WriteText(p, "{ \"schema_version\": 1, \"scenes\": [], "
+                 "\"bindings\": {} }");
+    ProfileStore            store(p);
+    ProfileStore::LoadResult lr = store.Load();
+    CHECK(lr.status == ProfileStore::LoadStatus::Loaded);
+    CHECK(!lr.state.output.has_value());
+    CHECK(EngineStateToJson(lr.state).count("output") == 0);
+
+    /* Round trip. */
+    PersistedOutput po;
+    po.master   = 0.25f;
+    po.blackout = true;
+    lr.state.output = po;
+    std::string err;
+    CHECK(store.Save(lr.state, err));
+    lr = store.Load();
+    CHECK(lr.status == ProfileStore::LoadStatus::Loaded);
+    CHECK(lr.state.output.has_value());
+    if(lr.state.output)
+    {
+        CHECK(lr.state.output->master == 0.25f);
+        CHECK(lr.state.output->blackout);
+    }
+    /* `output` is a known member — never an extension copy. */
+    CHECK(lr.state.extensions.count("output") == 0);
+
+    /* Unknown members inside `output` (a newer build's
+       additions) survive a save beside the known fields. */
+    WriteText(Path("output-extra.json"),
+              "{ \"schema_version\": 1, \"scenes\": [], "
+              "\"bindings\": {}, \"output\": { \"master\": 0.5, "
+              "\"blackout\": false, \"policy\": { \"idle\": 0.3 } } }");
+    ProfileStore            ext(Path("output-extra.json"));
+    ProfileStore::LoadResult el = ext.Load();
+    CHECK(el.status == ProfileStore::LoadStatus::Loaded);
+    CHECK(el.state.output.has_value() &&
+          el.state.output->master == 0.5f);
+    CHECK(ext.Save(el.state, err));
+    el = ext.Load();
+    const nlohmann::json saved = EngineStateToJson(el.state);
+    CHECK(saved["output"]["policy"]["idle"].get<double>() == 0.3);
+    CHECK(saved["output"]["master"].get<double>() == 0.5);
+
+    /* A malformed member never fails the whole document (it
+       would cost the bindings to LKG recovery): it is dropped
+       with a warning and the restart simply has no override. */
+    WriteText(Path("output-bad.json"),
+              "{ \"schema_version\": 1, \"scenes\": [], "
+              "\"bindings\": {}, \"output\": { \"master\": \"loud\" } }");
+    ProfileStore            bad(Path("output-bad.json"));
+    ProfileStore::LoadResult bl = bad.Load();
+    CHECK(bl.status == ProfileStore::LoadStatus::Loaded);
+    CHECK(!bl.state.output.has_value());
+    CHECK(!bl.warnings.empty());
+
+    /* Out-of-range masters clamp into [0, 1]. */
+    WriteText(Path("output-range.json"),
+              "{ \"schema_version\": 1, \"scenes\": [], "
+              "\"bindings\": {}, \"output\": { \"master\": 7 } }");
+    ProfileStore            rng(Path("output-range.json"));
+    ProfileStore::LoadResult rl = rng.Load();
+    CHECK(rl.state.output.has_value() &&
+          rl.state.output->master == 1.0f &&
+          !rl.state.output->blackout);
+}
+
+/*---------------------------------------------------------*\
 ||| T3: offline bindings — a missing device keeps its       ||
 |||     identity; a same-named different device never       ||
 |||     inherits the binding                                ||
@@ -888,6 +965,7 @@ int main()
 
     TestAtomicity();
     TestMigration();
+    TestOutputState();
     TestOfflineBindings();
     TestRecovery();
     TestBoundaryValidation();

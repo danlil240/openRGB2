@@ -976,6 +976,28 @@ bool EngineHost::Start(std::string& err)
         }
     }
 
+    /*---- R-1 runtime output control ----------------------------*\
+    || master + blackout come back from the profile (hold never   ||
+    || does — a restart resumes). Restored BEFORE the startup     ||
+    || scene applies, so the first frame is already scaled and a  ||
+    || restored Off reaches an uploaded loop's re-apply           ||
+    || (PlaybackController::OnSceneApplied keeps the override).   ||
+    || Every later change runs OnOutputChanged: worker hold,      ||
+    || playback routing, persistence, the "output" event.         ||
+    \*---------------------------------------------------------*/
+    if(engine_state_.output)
+    {
+        output_.Restore(*engine_state_.output);
+        const OutputState os = output_.State();
+        Log("restored output control: master " +
+            std::to_string(int(os.master * 100.0f + 0.5f)) + "%" +
+            (os.blackout ? ", off" : "") + " from " +
+            opts_.state_path);
+    }
+    playback_->SetUserOverride(false, output_.State().blackout);
+    output_.SetChanged(
+        [this](const OutputState&) { OnOutputChanged(); });
+
     /*---- Task 4.6 reactive inputs ----------------------------*\
     || Audio / screen / key capture, Qt-free ports of the        ||
     || preserved plugin's inputs. The manager itself is cheap:   ||
@@ -1091,6 +1113,11 @@ bool EngineHost::Start(std::string& err)
        empty); the next tick evaluates normally. */
     engine_.Worker().SetEvaluateGate(
         [this]() { return playback_->PlaybackOwnsWired(); });
+    /* R-1: the runtime master scale — the mapper multiplies the
+       arbitrated OutputControl scale into every live write, so a
+       tray brightness/Off change lands on the next tick without
+       a document edit (uploaded loops are not scaled). */
+    mapper_.SetOutputScaleSource(&output_.EffectiveScaleSource());
     engine_.Worker().SetFrameCallback(
         [this](const EvaluatedFrame& eval)
         {
@@ -1200,6 +1227,9 @@ bool EngineHost::Start(std::string& err)
            legal; the service then reports available=false
            honestly rather than fabricating toggles. */
         ipc_deps.reactive = reactive_.get();
+        /* R-1: OUTPUT_COMMAND + the "output" event + the
+           output_control_v1 capability. */
+        ipc_deps.output = &output_;
         /* Task 4.4 layout verbs: identify and the set_binding
            create path resolve against live topology — the
            same source the mapper syncs from. */
@@ -1527,6 +1557,67 @@ bool EngineHost::ApplyStartupScene(std::string& err)
 /*---------------------------------------------------------*\
 || Owner loop                                               ||
 \*---------------------------------------------------------*/
+/* R-1 OutputControl change hook. Runs on the writing thread
+   (an IPC session for OUTPUT_COMMAND); serialized and always
+   applying the CURRENT state, so concurrent writers converge on
+   the latest value whatever order their hooks run in. The
+   mapper reads the scale atomic directly — nothing to do here
+   for brightness/Off on live lanes. */
+void EngineHost::OnOutputChanged()
+{
+    std::lock_guard<std::mutex> g(output_apply_mutex_);
+    const OutputState s = output_.State();
+
+    /* Live: freeze/resume the scene clock. A release drops the
+       reactive events queued across the hold — they were
+       stamped on the pre-shift epoch. */
+    if(engine_.Worker().SetHold(s.hold) && !s.hold && reactive_)
+    {
+        reactive_->Bus()->ClearEvents();
+    }
+    /* Uploaded loops: hold -> Paused, Off -> Stopped (they are
+       never scaled by the master). */
+    if(playback_)
+    {
+        const PlaybackController::Result r =
+            playback_->SetUserOverride(s.hold, s.blackout);
+        if(!r.accepted)
+        {
+            Log("output control: uploaded playback did not take "
+                "the override (" + r.reason + ")" +
+                (r.reason.find("in progress") != std::string::npos
+                     ? " — retrying on the next maintenance tick"
+                     : ""));
+        }
+    }
+
+    /* Persist master + blackout only when they moved (a hold
+       toggle never rewrites the profile, and a fresh profile
+       gets no member until something non-default is set). */
+    if(profile_)
+    {
+        const PersistedOutput p = output_.Persisted();
+        std::lock_guard<std::mutex> sg(state_mutex_);
+        const bool changed = engine_state_.output
+                                 ? *engine_state_.output != p
+                                 : p != PersistedOutput{};
+        if(changed)
+        {
+            engine_state_.output = p;
+            std::string serr;
+            if(!profile_->Save(engine_state_, serr))
+            {
+                Log("profile save failed: " + serr);
+            }
+        }
+    }
+
+    if(service_)
+    {
+        service_->EmitOutput();
+    }
+}
+
 /* Task 4.6 reactive-input change hook: the manager's
    `changed` dep — emits the IPC event and persists the
    selection. Runs on whichever thread applied the change

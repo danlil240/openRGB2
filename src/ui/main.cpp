@@ -20,6 +20,7 @@
 #include "SceneEditController.h"
 #include "StartupTaskController.h"
 #include "StudioViewportModel.h"
+#include "TrayController.h"
 #include "UiSettings.h"
 #include "WorkspaceController.h"
 #include "studio/EffectEditorController.h"
@@ -62,6 +63,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 
 namespace
 {
@@ -97,6 +99,45 @@ void ShowRestored(QQuickWindow* window)
     }
     window->raise();
     window->requestActivate();
+}
+
+/* R-1: render the TrayController's menu model (data) into a
+   QMenu. Submenus are created here and recorded in `owned` so
+   the next rebuild deletes them (QMenu::clear() only removes
+   actions). Every action routes back through trigger(id). */
+void RenderTrayEntries(QMenu* menu, const QVariantList& entries,
+                       openrgb2::ui::TrayController* ctl,
+                       QList<QMenu*>& owned)
+{
+    for(const QVariant& v : entries)
+    {
+        const QVariantMap e    = v.toMap();
+        const QString     kind = e.value(QStringLiteral("kind")).toString();
+        const QString     text = e.value(QStringLiteral("text")).toString();
+        if(kind == QLatin1String("separator"))
+        {
+            menu->addSeparator();
+            continue;
+        }
+        if(kind == QLatin1String("submenu"))
+        {
+            QMenu* sub = new QMenu(text, menu);
+            owned << sub;
+            sub->setEnabled(e.value(QStringLiteral("enabled")).toBool());
+            RenderTrayEntries(sub,
+                              e.value(QStringLiteral("children")).toList(),
+                              ctl, owned);
+            menu->addMenu(sub);
+            continue;
+        }
+        QAction* a = menu->addAction(text);
+        a->setEnabled(e.value(QStringLiteral("enabled")).toBool());
+        a->setCheckable(e.value(QStringLiteral("checkable")).toBool());
+        a->setChecked(e.value(QStringLiteral("checked")).toBool());
+        const QString id = e.value(QStringLiteral("id")).toString();
+        QObject::connect(a, &QAction::triggered, ctl,
+                         [ctl, id] { ctl->trigger(id); });
+    }
 }
 
 } /* anonymous namespace */
@@ -494,28 +535,30 @@ int main(int argc, char** argv)
        nested event loop — from ~QProcess). */
     openrgb2::ui::ConflictNoticeTracker conflict_notices;
     bool ownership_msg_pending = false;
+    /* R-1: the tray's quick controls (workspace, brightness,
+       pause) as a data model — declared before the menu whose
+       actions call back into it. */
+    openrgb2::ui::TrayController tray_ctl(&bridge, &workspace_ctl);
+    QList<QMenu*> tray_submenus;
+    std::function<void()> quit_action;
     QMenu tray_menu;
     QSystemTrayIcon tray(app_icon);
     QProcess shutdown;
     if(tray_available)
     {
         auto show_ui = [window] { ShowRestored(window); };
-        tray.setToolTip(QStringLiteral("OpenRGB2"));
+        tray.setToolTip(tray_ctl.toolTip());
         tray.setContextMenu(&tray_menu);
-        tray_menu.addAction(QObject::tr("Open OpenRGB2"), show_ui);
-        tray_menu.addSeparator();
         auto exit_ui = [window] {
             window->setProperty("exitRequested", true);
             window->close();
         };
-        tray_menu.addAction(QObject::tr("Exit UI (keep lighting on)"),
-                            exit_ui);
         const QString install_dir = QCoreApplication::applicationDirPath();
         const QString stop_script = QDir(install_dir).filePath(
             QStringLiteral("scripts/stop-openrgb2.ps1"));
         if(QFileInfo::exists(stop_script))
         {
-            tray_menu.addAction(QObject::tr("Quit OpenRGB2"),
+            quit_action =
                 [&shutdown, install_dir, stop_script, exit_ui] {
                 if(shutdown.state() != QProcess::NotRunning)
                     return;
@@ -541,7 +584,7 @@ int main(int argc, char** argv)
                 shutdown.setStandardOutputFile(QDir(state_dir).filePath(
                     QStringLiteral("shutdown.log")), QIODevice::Append);
                 shutdown.start();
-            });
+            };
             QObject::connect(&shutdown,
                 qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
                 &app, [exit_ui, install_dir](int code,
@@ -564,6 +607,47 @@ int main(int argc, char** argv)
                             .arg(install_dir));
             });
         }
+        /* The menu: Open, the TrayController's quick controls
+           (rendered from its data model), then the existing Exit
+           UI / Quit actions. Rebuilt just before it shows, and on
+           a model change while it is closed — never under the
+           user's cursor. */
+        auto rebuild_tray_menu =
+            [&tray_menu, &tray_submenus, &tray_ctl, &quit_action,
+             show_ui, exit_ui] {
+            tray_menu.clear();
+            qDeleteAll(tray_submenus);
+            tray_submenus.clear();
+            tray_menu.addAction(QObject::tr("Open OpenRGB2"), show_ui);
+            tray_menu.addSeparator();
+            RenderTrayEntries(&tray_menu, tray_ctl.menu(), &tray_ctl,
+                              tray_submenus);
+            tray_menu.addSeparator();
+            tray_menu.addAction(QObject::tr("Exit UI (keep lighting on)"),
+                                exit_ui);
+            if(quit_action)
+                tray_menu.addAction(QObject::tr("Quit OpenRGB2"),
+                                    quit_action);
+        };
+        rebuild_tray_menu();
+        QObject::connect(&tray_menu, &QMenu::aboutToShow,
+                         &app, rebuild_tray_menu);
+        /* Queued: a model change raised from inside an action's
+           triggered() (a workspace pick latching the replace
+           confirmation) must not delete that action mid-emit. */
+        QObject::connect(&tray_ctl,
+                         &openrgb2::ui::TrayController::menuChanged,
+                         &app, [&tray, &tray_ctl, &tray_menu,
+                                rebuild_tray_menu] {
+            tray.setToolTip(tray_ctl.toolTip());
+            if(!tray_menu.isVisible())
+                rebuild_tray_menu();
+        }, Qt::QueuedConnection);
+        /* A tray workspace pick over a dirty draft latched the
+           replace confirmation — it lives in the window. */
+        QObject::connect(&tray_ctl,
+                         &openrgb2::ui::TrayController::showWindowRequested,
+                         &app, show_ui);
         QObject::connect(&tray, &QSystemTrayIcon::activated,
                          &app, [show_ui](QSystemTrayIcon::ActivationReason reason) {
             if(reason == QSystemTrayIcon::Trigger

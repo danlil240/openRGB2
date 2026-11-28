@@ -128,6 +128,8 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/LaunchHardening.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/OwnershipNotice.h
         ${CMAKE_SOURCE_DIR}/src/ui/OwnershipNotice.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/TrayController.h
+        ${CMAKE_SOURCE_DIR}/src/ui/TrayController.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceEditSession.h
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceEditSession.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceDraftStore.h

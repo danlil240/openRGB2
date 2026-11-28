@@ -49,6 +49,7 @@ bool IsRequestType(MsgType t)
     case MsgType::Quit:
     case MsgType::WorkspaceCommand:
     case MsgType::ReactiveCommand:
+    case MsgType::OutputCommand:
     case MsgType::DiagGet:
         return true;
     default:
