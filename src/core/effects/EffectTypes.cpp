@@ -348,6 +348,31 @@ LayerFrame LayerFrameTerms(const EffectLayer& L, const PreparedLayer& P,
     return F;
 }
 
+/* Field conventions (audit C-15). `scale`, `speed` and the sign
+   of the travel along `direction` are NOT uniform across the
+   primitives; saved looks and the shipped effect files are tuned
+   to these exact meanings, so they are documented here rather
+   than unified (unifying would change every saved look).
+
+     wave     u = dot(p, dir) / scale - speed * t / scale
+              scale = wavelength (m), speed = m/s; the bands
+              travel TOWARD +direction for speed > 0.
+     pulse    u = |p - origin| / scale - speed * t / scale
+              scale = ring spacing (m), speed = m/s outward.
+     gradient u = dot(p, dir) * scale + speed * t
+              scale = palette cycles PER METRE (a spatial
+              frequency: bigger = tighter, the inverse of wave),
+              speed = palette cycles/s; the colors travel toward
+              -direction for speed > 0 (opposite to wave).
+     spin     u = (angle / 2pi) * scale - speed * t
+              scale = palette repeats per turn, speed = palette
+              cycles/s (the pattern turns at speed/scale turns/s).
+     comet    scale = tail length (m), speed = m/s along path.
+     noise    scale = lattice cells per metre, speed = drift
+              (cells/s) along direction (not normalised).
+
+   So an editor control that maps "wavelength" or "flow
+   direction" onto layers must branch on the primitive. */
 static ColorF EvalWave(const EffectLayer& L, const PreparedLayer& P,
                        const LayerFrame& F, const EvalInput& in)
 {
