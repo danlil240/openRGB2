@@ -153,6 +153,11 @@ struct WsEngine
     nlohmann::json doc      = CompactDoc();
     uint64_t      next_job  = 1;
     bool          auto_complete_jobs = true;
+    /* The real engine publishes the fresh `get` snapshot BEFORE
+       a commit's terminal job event (WorkspaceService flushes
+       the snapshot hook first). Off by default: most cases
+       script the event-only ordering. */
+    bool          snapshot_before_terminal = false;
     bool          fail_next_commit   = false;
     std::string   commit_fail_detail = "invalid_document";
     /* Count of import_commit jobs to fail before succeeding
@@ -257,6 +262,21 @@ struct WsEngine
             held_verb == "import_commit"))
         {
             ++ws_rev;
+            if(snapshot_before_terminal)
+            {
+                if(held_verb == "commit")
+                {
+                    /* adopt the submitted document the way the
+                       auto-complete path does */
+                    studio::StudioDocument d;
+                    std::vector<std::string> errs;
+                    if(studio::FromJson(last_commit_doc, d, &errs))
+                    {
+                        doc = studio::ToJson(d);
+                    }
+                }
+                SendEvent(Snapshot());
+            }
         }
         SendEvent(JobRecord(held_job, held_verb, state, detail));
         terminal_jobs.push_back(held_job);
@@ -564,6 +584,10 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
                             e.doc = studio::ToJson(d);
                         }
                         ++e.ws_rev;
+                        if(e.snapshot_before_terminal)
+                        {
+                            e.SendEvent(e.Snapshot());
+                        }
                     }
                     else if(verb == "save_copy")
                     {
@@ -1361,6 +1385,101 @@ int main(int argc, char** argv)
                        "shelf-doc"; }));
         CHECK(rig.ctl.Drafts().Read(
             QStringLiteral("ws0")).exists);
+    }
+
+    /* Audit U-3: the UI's own commit is not a foreign change.
+       The real engine publishes the post-commit snapshot before
+       the terminal job event; that snapshot names OUR committed
+       bytes, so it must neither re-download the document nor,
+       with edits made meanwhile, raise "changed on the engine". */
+    std::printf("-- controller: own commit echo is not "
+                "refetched (U-3)\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.engine.snapshot_before_terminal = true;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "mine"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        const int begins = rig.engine.download_begins;
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] { return rig.ctl.saving(); }));
+        CHECK(rig.PumpUntil([&] { return !rig.ctl.saving(); }));
+        rig.PumpUntil([&] { return false; }, 300);   /* drain */
+        CHECK(rig.engine.download_begins == begins);
+        CHECK(!rig.ctl.dirty());
+        CHECK(!rig.ctl.conflict());
+        CHECK(!rig.ctl.loading());
+        CHECK(rig.ctl.workspaceRevision() == 2);
+        CHECK(rig.ctl.Session().BaseRevision() == 2);
+    }
+    std::printf("-- controller: editing while the own commit "
+                "lands raises no conflict (U-3)\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.engine.snapshot_before_terminal = true;
+        rig.engine.auto_complete_jobs = false;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("first",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "v1"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        const int begins = rig.engine.download_begins;
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] { return rig.engine.held_job != 0; }));
+        rig.engine.CompleteHeld("succeeded");
+        /* Keep editing while the snapshot + terminal land. */
+        rig.ctl.Session().CommitDocEdit("second",
+            [](studio::StudioDocument& d) {
+                d.brightness = 0.25f; return true; });
+        rig.ctl.NoteDraftEdited();
+        CHECK(rig.PumpUntil([&] { return !rig.ctl.saving(); }));
+        rig.PumpUntil([&] { return false; }, 300);   /* drain */
+        CHECK(rig.engine.download_begins == begins);
+        CHECK(!rig.ctl.conflict());
+        CHECK(rig.ctl.dirty());
+        CHECK(rig.ctl.Session().Working().brightness == 0.25f);
+        CHECK(rig.ctl.Session().Baseline().meta.name == "v1");
+        CHECK(rig.ctl.workspaceRevision() == 2);
+    }
+    std::printf("-- controller: terminal-first revision move "
+                "notifies (U-3)\n");
+    {
+        /* Event-only ordering: the terminal record moves the
+           revision; QML binds workspaceRevision to
+           workspaceChanged, so the move must notify. */
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "notify"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        int ws_signals = 0;
+        quint64 seen_rev = 0;
+        QObject::connect(&rig.ctl,
+            &WorkspaceController::workspaceChanged, [&] {
+                ++ws_signals;
+                seen_rev = rig.ctl.workspaceRevision();
+            });
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] { return rig.ctl.saving(); }));
+        CHECK(rig.PumpUntil([&] { return !rig.ctl.saving(); }));
+        CHECK(rig.ctl.workspaceRevision() == 2);
+        CHECK(ws_signals >= 1);
+        CHECK(seen_rev == 2);
     }
 
     std::printf("-- controller: edits during save stay dirty\n");
