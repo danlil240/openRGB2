@@ -224,6 +224,10 @@ public:
     void setWireOptionsForTesting(const EngineWireClient::Options& o);
     void setBackoffForTesting(const std::vector<int>& delays_ms);
     int  connectAttemptsForTesting() const;
+    /* Feed a reactive-state body the way a "reactive" event
+       does (offline tests can't drive the engine's inputs). */
+    void setReactiveForTesting(const QVariantMap& m)
+        { reactive_ = m; emit reactiveChanged(); }
 
     void setPipeName(const QString& name);
 

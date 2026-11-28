@@ -96,6 +96,11 @@ EffectEditorController::EffectEditorController(EngineBridge* bridge,
                 this, &EffectEditorController::OnEventReceived);
         connect(bridge_, &EngineBridge::presetsChanged,
                 this, [this] { emit stackChanged(); });
+        connect(bridge_, &EngineBridge::reactiveChanged,
+                this, [this] {
+                    ++input_state_rev_;
+                    emit inputStateChanged();
+                });
         connect(bridge_, &EngineBridge::connectionStateChanged,
                 this, [this] {
                     emit readyChanged();

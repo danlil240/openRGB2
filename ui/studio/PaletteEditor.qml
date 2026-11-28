@@ -242,10 +242,19 @@ Rectangle {
                 placeholderText: "#RRGGBB"
                 text: pal.selStop >= 0 && pal.selStop < pal.stops.length
                       ? String(pal.stops[pal.selStop].color) : ""
-                onAccepted:
-                    effectEdit.setLayerStopColor(pal.layerIndex,
-                                                 pal.selStop,
-                                                 text)
+                /* Commits when the edit ends — Enter or focus loss
+                   (audit Q-10); unchanged text adds no record, and
+                   a refused color does not stay in the field. */
+                onEditingFinished: {
+                    if(pal.selStop < 0 || pal.selStop >= pal.stops.length)
+                        return;
+                    if(String(text).toUpperCase() !== String(
+                           pal.stops[pal.selStop].color).toUpperCase())
+                        effectEdit.setLayerStopColor(pal.layerIndex,
+                                                     pal.selStop,
+                                                     text);
+                    pal.reload();
+                }
             }
             AppButton {
                 objectName: "stopRemove"

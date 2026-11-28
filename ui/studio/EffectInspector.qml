@@ -35,6 +35,14 @@ Rectangle {
     }
     Component.onCompleted: reload()
     onLayerIndexChanged: reload()
+    /* Text fields commit when the edit ends — Enter OR focus loss
+       (editingFinished; audit Q-10) — and skip unchanged text so
+       Enter plus the focus loss after it make one record. Every
+       end re-reads the layer: typed text is not a binding write,
+       so the bound field text only snaps back to the model when
+       layerData is replaced, which a refused or no-op commit
+       never did. */
+    function resync() { reload() }
     Connections {
         target: typeof effectEdit !== "undefined" ? effectEdit : null
         function onStackChanged() { insp.reload() }
@@ -142,9 +150,15 @@ Rectangle {
                 StatusPill {
                     objectName: "inspSourceState"
                     visible: (insp.layerData.source || "") !== ""
+                    /* inputStateRevision makes the binding
+                       re-run when the engine's input state
+                       changes — a bare function call has no
+                       notifier, so the badge never refreshed
+                       (audit Q-10). */
                     readonly property var st:
                         (insp.layerData.source || "") !== ""
                         && typeof effectEdit !== "undefined"
+                        && effectEdit.inputStateRevision >= 0
                         ? effectEdit.inputSourceState(
                               insp.layerData.source) : ({})
                     text: !st.ready ? qsTr("not running") : qsTr("live")
@@ -160,12 +174,16 @@ Rectangle {
                 Layout.fillWidth: true
                 placeholderText: qsTr("object ids / tags — empty = all")
                 text: (insp.layerData.targets || []).join(", ")
-                onAccepted:
-                    effectEdit.setLayerTargets(
-                        insp.layerIndex,
-                        text.split(",").map(function(t) {
-                            return t.trim();
-                        }).filter(function(t) { return t !== ""; }))
+                onEditingFinished: {
+                    const next = text.split(",").map(function(t) {
+                        return t.trim();
+                    }).filter(function(t) { return t !== ""; });
+                    if(next.join(", ")
+                       !== (insp.layerData.targets || []).join(", "))
+                        effectEdit.setLayerTargets(insp.layerIndex,
+                                                   next);
+                    insp.resync();
+                }
             }
         }
 
@@ -249,14 +267,18 @@ Rectangle {
                     inputMethodHints: Qt.ImhFormattedNumbersOnly
                     text: insp.layerData.origin
                           ? String(insp.layerData.origin[modelData]) : "0"
-                    onAccepted: {
+                    onEditingFinished: {
                         const o = insp.layerData.origin || {};
                         const v = { "x": o.x || 0,
                                     "y": o.y || 0,
                                     "z": o.z || 0 };
-                        v[modelData] = parseFloat(text) || 0;
-                        effectEdit.setLayerOrigin(insp.layerIndex,
-                                                  v.x, v.y, v.z);
+                        const n = parseFloat(text);
+                        if(isFinite(n) && n !== v[modelData]) {
+                            v[modelData] = n;
+                            effectEdit.setLayerOrigin(insp.layerIndex,
+                                                      v.x, v.y, v.z);
+                        }
+                        insp.resync();
                     }
                 }
             }
@@ -271,14 +293,18 @@ Rectangle {
                     inputMethodHints: Qt.ImhFormattedNumbersOnly
                     text: insp.layerData.direction
                           ? String(insp.layerData.direction[modelData]) : "0"
-                    onAccepted: {
+                    onEditingFinished: {
                         const d = insp.layerData.direction || {};
                         const v = { "x": d.x || 0,
                                     "y": d.y || 0,
                                     "z": d.z || 0 };
-                        v[modelData] = parseFloat(text) || 0;
-                        effectEdit.setLayerDirection(insp.layerIndex,
-                                                     v.x, v.y, v.z);
+                        const n = parseFloat(text);
+                        if(isFinite(n) && n !== v[modelData]) {
+                            v[modelData] = n;
+                            effectEdit.setLayerDirection(insp.layerIndex,
+                                                         v.x, v.y, v.z);
+                        }
+                        insp.resync();
                     }
                 }
             }
