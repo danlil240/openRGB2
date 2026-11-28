@@ -152,7 +152,10 @@ Two more robustness guarantees worth knowing:
   runs inline on the session's reader thread and there is no
   handler deadline — a thread cannot be safely cancelled
   mid-call. Handlers are required to be non-blocking
-  (in-memory engine state only; `src/ipc/IpcService.h`). If a
+  (in-memory engine state only; `src/ipc/IpcService.h`) — e.g. the
+  last-scene snapshot a `SET_SCENE` triggers is written by a
+  background writer (latest-wins, drained at shutdown), never on
+  the reader thread. If a
   future handler ever blocks, the blast radius is its own
   session (one of ≤8 slots): other sessions, the event writer,
   and the engine are unaffected.
@@ -716,7 +719,13 @@ Task-10 verb details — file actions + external-change recovery:
   scan reproduces the baseline. The UI polls it; detection never
   auto-loads, never saves, and never touches `apply_scene` — the
   notice is the whole mechanism and the user picks reload vs.
-  keep-draft explicitly.
+  keep-draft explicitly. The poll is metadata-first: the tracked
+  files' existence/size/write-time stamp is compared with the last
+  full scan's, and the bytes are re-read and hashed only when the
+  stamp moved or a tracked file was written in the last few
+  seconds. `content_sha256` hashes bytes the committing thread
+  published with the snapshot (once per revision), so `get` never
+  re-serializes or re-reads the document.
 
 The preview verbs drive the bounded draft-preview feed (Task 7,
 plan §3.4): ONE `PreviewSession` per IPC session, at most two

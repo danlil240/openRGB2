@@ -232,6 +232,14 @@ public:
         uint64_t    workspace_revision = 0;
         uint64_t    resource_revision  = 0;
         uint64_t    generation         = 0;
+        /* The current candidate's deterministic document bytes
+           (what a document download streams and what
+           get.content_sha256 hashes) — serialized ONCE per
+           adopted candidate by the publishing thread (the job
+           worker / the adopting owner), so a metadata read
+           never re-serializes under the commit mutex (audit
+           I-6). Null for an unresolved candidate. */
+        std::shared_ptr<const std::string> document_bytes;
     };
     PublishedState Snapshot() const;
     /* Worker/owner paths only — takes the commit mutex. IPC
@@ -271,6 +279,10 @@ public:
         std::string detail;
     };
     ExternalCheck CheckExternal();
+    /* How many full (read + hash) external scans CheckExternal
+       has run — the poll is stamp-gated (audit I-6); the
+       regression observes it. */
+    uint64_t      ExternalFullScans() const;
 
     /* Restore Backup (job verb "restore_backup"): loads the
        generation the marker BACKUP (active.lkg) names and
@@ -485,6 +497,23 @@ private:
     void                FlushSnapshotNotify();
     mutable std::mutex  snap_mutex_;
     PublishedState      snap_;
+    /* The candidate whose bytes snap_.document_bytes holds —
+       under mutex_; a re-publish of the same candidate reuses
+       them instead of serializing again. */
+    std::shared_ptr<const WorkspaceCandidate> published_cand_;
+    /* CheckExternal's stamp gate (audit I-6) — the last full
+       scan's answer, valid while the tracked files' metadata
+       stamp and the baseline are unchanged. */
+    mutable std::mutex  ext_mutex_;
+    struct ExternalCache
+    {
+        bool          valid = false;
+        std::string   id;
+        std::string   baseline;
+        std::string   stamp;
+        ExternalCheck result;
+    }                   ext_cache_;
+    std::atomic<uint64_t> ext_full_scans_{ 0 };
     /* Set under mutex_ whenever current_.id adopts a different
        id; drained by FlushActiveNotify() post-lock. */
     bool                active_notify_ = false;

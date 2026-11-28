@@ -258,7 +258,8 @@ std::shared_ptr<const std::string>
 WorkspaceCommands::CachedDocumentBytes(const std::string& id,
                                        uint64_t workspace_revision,
                                        uint64_t resource_revision,
-                                       std::string& err) const
+                                       std::string& err,
+                                       std::string* sha256) const
 {
     std::lock_guard<std::mutex> g(cache_mutex_);
     const auto it = doc_cache_.find(id);
@@ -266,21 +267,40 @@ WorkspaceCommands::CachedDocumentBytes(const std::string& id,
        it->second.workspace_revision == workspace_revision &&
        it->second.resource_revision == resource_revision)
     {
+        if(sha256)
+        {
+            *sha256 = it->second.sha256;
+        }
         return it->second.bytes;
-    }
-    std::string bytes;
-    /* One bounded load per (id,revisions) — repeat download
-       begins and content_sha256 reads hit the cache. */
-    if(!service_->DocumentBytes(id, bytes, err))
-    {
-        return nullptr;
     }
     DocCacheEntry e;
     e.workspace_revision = workspace_revision;
     e.resource_revision  = resource_revision;
     e.seq    = doc_cache_seq_++;
-    e.bytes  = std::make_shared<const std::string>(
-                   std::move(bytes));
+    /* The current workspace's bytes were serialized by the
+       committing thread into the published snapshot (audit
+       I-6) — shared, not re-serialized or copied. Others: one
+       bounded load per (id,revisions) — repeat download
+       begins and content_sha256 reads hit the cache. */
+    const WorkspaceService::PublishedState snap = service_->Snapshot();
+    if(snap.managed && snap.id == id && snap.document_bytes &&
+       snap.workspace_revision == workspace_revision &&
+       snap.resource_revision == resource_revision)
+    {
+        e.bytes = snap.document_bytes;
+    }
+    else
+    {
+        std::string bytes;
+        if(!service_->DocumentBytes(id, bytes, err))
+        {
+            return nullptr;
+        }
+        e.bytes = std::make_shared<const std::string>(
+                      std::move(bytes));
+    }
+    /* Hashed once per cached revision, never per poll. */
+    e.sha256 = Sha256Hex(*e.bytes);
     doc_cache_[id] = std::move(e);
     while(doc_cache_.size() > kMaxDocCacheEntries)
     {
@@ -293,6 +313,10 @@ WorkspaceCommands::CachedDocumentBytes(const std::string& id,
             }
         }
         doc_cache_.erase(oldest);
+    }
+    if(sha256)
+    {
+        *sha256 = doc_cache_[id].sha256;
     }
     return doc_cache_[id].bytes;
 }
@@ -335,11 +359,11 @@ nlohmann::json WorkspaceCommands::SnapshotJson() const
        Cached per revision: at most one bounded store read per
        commit, amortized across every get/download. */
     std::string err;
-    if(const std::shared_ptr<const std::string> bytes =
-           CachedDocumentBytes(snap.id, snap.workspace_revision,
-                               snap.resource_revision, err))
+    std::string sha;
+    if(CachedDocumentBytes(snap.id, snap.workspace_revision,
+                           snap.resource_revision, err, &sha))
     {
-        out["content_sha256"] = Sha256Hex(*bytes);
+        out["content_sha256"] = sha;
     }
     return out;
 }
@@ -898,8 +922,22 @@ IpcReply WorkspaceCommands::HandleTransferBegin(
                 "download requires {id} naming a managed "
                 "workspace", "bad_request");
         }
-        const WorkspaceStore::Revisions rev =
-            service_->Store().LoadRevisions(id);
+        /* The current workspace's revisions come from the
+           published snapshot — no marker read on the reader
+           thread (audit I-6); others read the durable marker. */
+        WorkspaceStore::Revisions rev;
+        const WorkspaceService::PublishedState snap =
+            service_->Snapshot();
+        if(snap.managed && snap.id == id)
+        {
+            rev.exists             = true;
+            rev.workspace_revision = snap.workspace_revision;
+            rev.resource_revision  = snap.resource_revision;
+        }
+        else
+        {
+            rev = service_->Store().LoadRevisions(id);
+        }
         if(!rev.exists || !rev.error.empty())
         {
             return FailDetail(ErrCode::BadRequest,

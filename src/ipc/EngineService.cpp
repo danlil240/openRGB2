@@ -448,6 +448,83 @@ EngineService::~EngineService()
         deps_.workspace->SetJobEventHook(nullptr);
         deps_.workspace->SetSnapshotEventHook(nullptr);
     }
+    /* Durability: a queued last-scene snapshot is written
+       before the writer exits — the restore-after-restart
+       contract never depends on the owner remembering to
+       flush. */
+    {
+        std::lock_guard<std::mutex> lock(persist_mutex_);
+        persist_stop_ = true;
+    }
+    persist_cv_.notify_all();
+    if(persist_thread_.joinable())
+    {
+        persist_thread_.join();
+    }
+}
+
+void EngineService::QueuePersist(
+    std::shared_ptr<const studio::SceneDocument> doc)
+{
+    {
+        std::lock_guard<std::mutex> lock(persist_mutex_);
+        if(persist_stop_)
+        {
+            return;
+        }
+        /* Latest-wins: an unwritten older document is simply
+           replaced — only the newest apply is the scene to
+           restore. */
+        persist_pending_ = std::move(doc);
+        if(!persist_thread_.joinable())
+        {
+            persist_thread_ = std::thread([this] { PersistMain(); });
+        }
+    }
+    persist_cv_.notify_all();
+}
+
+void EngineService::PersistMain()
+{
+    std::unique_lock<std::mutex> lock(persist_mutex_);
+    for(;;)
+    {
+        persist_cv_.wait(lock, [this]
+        {
+            return persist_pending_ != nullptr || persist_stop_;
+        });
+        if(!persist_pending_)
+        {
+            return;            /* stop requested, nothing queued */
+        }
+        std::shared_ptr<const studio::SceneDocument> doc =
+            std::move(persist_pending_);
+        persist_pending_.reset();
+        persist_busy_ = true;
+        lock.unlock();
+        /* The hook owns its own failure reporting (the host
+           logs it); persistence never breaks the apply. */
+        try
+        {
+            deps_.persist_scene(*doc);
+        }
+        catch(...)
+        {
+        }
+        lock.lock();
+        persist_busy_ = false;
+        persist_cv_.notify_all();
+    }
+}
+
+void EngineService::FlushPersistedScene()
+{
+    std::unique_lock<std::mutex> lock(persist_mutex_);
+    persist_cv_.wait(lock, [this]
+    {
+        return (persist_pending_ == nullptr && !persist_busy_) ||
+               !persist_thread_.joinable();
+    });
 }
 
 void EngineService::SetEventSink(
@@ -701,10 +778,11 @@ bool EngineService::ApplyPreparedScene(const PreparedStudioScene& prepared,
        all funnel through here. An object-less document is a
        deliberate "new scene" staging step, not the scene to
        restore on next launch — it never overwrites the
-       snapshot. */
+       snapshot. The durable write runs on the background
+       writer (audit I-6), never on the request thread. */
     if(deps_.persist_scene && !doc->objects.empty())
     {
-        deps_.persist_scene(*doc);
+        QueuePersist(doc);
     }
     return true;
 }

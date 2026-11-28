@@ -264,7 +264,8 @@ private:
                              const std::string& id,
                              uint64_t workspace_revision,
                              uint64_t resource_revision,
-                             std::string& err) const;
+                             std::string& err,
+                             std::string* sha256 = nullptr) const;
 
     WorkspaceService*        service_;
     WorkspaceTransfer        transfers_;
@@ -294,6 +295,7 @@ private:
         uint64_t    resource_revision  = 0;
         uint64_t    seq                = 0;
         std::shared_ptr<const std::string> bytes;
+        std::string sha256;     /* of bytes — hashed once (I-6) */
     };
     mutable std::map<std::string, DocCacheEntry> doc_cache_;
     mutable uint64_t         doc_cache_seq_ = 1;

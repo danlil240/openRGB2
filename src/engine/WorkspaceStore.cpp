@@ -1806,6 +1806,110 @@ WorkspaceStore::ExternalFingerprint WorkspaceStore::ExternalScan(
     return fp;
 }
 
+WorkspaceStore::ExternalStampResult WorkspaceStore::ExternalStamp(
+    const std::string& id) const
+{
+    ExternalStampResult out;
+    if(!IsWorkspaceId(id))
+    {
+        return out;            /* racy: the caller just scans */
+    }
+    const fs::path wsdir = WorkspaceDir(id);
+    /* Anything written within this window is "racy" — far
+       wider than any file-time granularity. */
+    const auto now     = fs::file_time_type::clock::now();
+    const auto horizon = now - std::chrono::seconds(3);
+    bool racy = false;
+    std::string st;
+    auto stamp_file = [&](const char* tag, const fs::path& p)
+    {
+        std::error_code ec;
+        const fs::file_status fs_st = fs::status(p, ec);
+        st += tag;
+        st += '=';
+        if(ec || !fs::exists(fs_st))
+        {
+            st += "absent;";
+            return;
+        }
+        const uintmax_t   sz = fs::is_regular_file(fs_st)
+                                   ? fs::file_size(p, ec) : 0;
+        const fs::file_time_type t = fs::last_write_time(p, ec);
+        if(ec || t > horizon)
+        {
+            racy = true;
+        }
+        st += std::to_string((uint64_t)sz);
+        st += '@';
+        st += std::to_string(
+            (long long)t.time_since_epoch().count());
+        st += ';';
+    };
+
+    std::error_code ec;
+    if(!fs::is_directory(wsdir, ec))
+    {
+        out.stamp = "unwatched";
+        out.racy  = false;
+        return out;
+    }
+    stamp_file("m", wsdir / "active");
+    stamp_file("b", wsdir / "active.lkg");
+    /* The pointed generation comes from the marker itself —
+       a tiny read; a corrupt/absent marker leaves the
+       generation part out (the marker's own stamp moved). */
+    const Marker primary = ReadMarker(wsdir / "active");
+    if(primary.exists && primary.valid)
+    {
+        const fs::path gendir =
+            wsdir / "generations" / primary.generation;
+        st += "g=" + primary.generation + ";";
+        stamp_file("doc",  gendir / "document.json");
+        stamp_file("man",  gendir / "manifest.json");
+        stamp_file("orig", gendir / "original.json");
+        const fs::path rdir = gendir / "resources";
+        if(fs::is_directory(rdir, ec))
+        {
+            std::vector<std::string> entries;
+            for(fs::recursive_directory_iterator it(rdir, ec), end;
+                !ec && it != end; it.increment(ec))
+            {
+                /* Regular files only — the set ExternalScan
+                   stamps (a directory's own write time moves
+                   with its entries, which are listed here). */
+                std::error_code fec;
+                if(!it->is_regular_file(fec))
+                {
+                    continue;
+                }
+                const fs::file_time_type t =
+                    fs::last_write_time(it->path(), fec);
+                if(fec || t > horizon)
+                {
+                    racy = true;
+                }
+                entries.push_back(
+                    fs::relative(it->path(), rdir, fec)
+                        .generic_string() + ":" +
+                    std::to_string(it->file_size(fec)) + "@" +
+                    std::to_string((long long)
+                        t.time_since_epoch().count()));
+            }
+            std::sort(entries.begin(), entries.end());
+            st += "res=";
+            for(const std::string& e : entries)
+            {
+                st += e;
+                st += ',';
+            }
+            st += ';';
+        }
+    }
+    out.stamp = std::move(st);
+    out.racy  = racy;
+    return out;
+}
+
 WorkspaceStore::CommitResult WorkspaceStore::Commit(
     const std::string& id,
     const WorkspaceCandidate& candidate,
