@@ -505,4 +505,377 @@ const char* HotkeyStateName(HotkeyState s)
     return "?";
 }
 
+/*---------------------------------------------------------*\
+||| Automation                                              ||
+\*---------------------------------------------------------*/
+
+Automation::Automation(Deps deps)
+    : deps_(std::move(deps))
+{
+}
+
+void Automation::Log(const std::string& line) const
+{
+    if(deps_.log)
+    {
+        deps_.log("automation: " + line);
+    }
+}
+
+void Automation::Notify()
+{
+    if(deps_.changed)
+    {
+        deps_.changed();
+    }
+}
+
+void Automation::RegisterLocked()
+{
+    /* Build the request set from the stored bindings. Ids are
+       unique per generation so a WM_HOTKEY queued against the
+       previous set can never run the new set's action. Win32
+       accepts 0x0000..0xBFFF; 1000 generations x 16 slots
+       stays far below. */
+    std::vector<Live>          live;
+    std::vector<HotkeyRequest> requests;
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        generation_ = (generation_ + 1) % 1000;
+        for(size_t i = 0; i < config_.hotkeys.size(); ++i)
+        {
+            Live l;
+            l.binding = config_.hotkeys[i];
+            std::vector<HotkeyBinding> one;
+            std::string verr;
+            Chord c;
+            if(!ValidateHotkeys({ l.binding }, one, verr) ||
+               !ParseChord(one[0].chord, c, verr))
+            {
+                l.state  = HotkeyState::Invalid;
+                l.detail = verr;
+            }
+            else
+            {
+                l.id = int(generation_ * kMaxHotkeys + i + 1);
+                requests.push_back({ l.id, c.mods, c.vk });
+                l.state = HotkeyState::Unavailable;
+                if(!deps_.registrar)
+                {
+                    l.detail = "no hotkey registrar on this engine";
+                }
+            }
+            live.push_back(std::move(l));
+        }
+    }
+
+    /* The platform round trip runs without mutex_ (PostHotkey
+       from the registrar thread must never wait on it). */
+    std::vector<HotkeyResult> results;
+    if(deps_.registrar)
+    {
+        results = deps_.registrar->Apply(requests);
+    }
+    for(Live& l : live)
+    {
+        if(l.id == 0)
+        {
+            continue;
+        }
+        for(const HotkeyResult& r : results)
+        {
+            if(r.id == l.id)
+            {
+                l.state  = r.state;
+                l.detail = r.detail;
+            }
+        }
+        if(l.state != HotkeyState::Ok)
+        {
+            Log("hotkey " + l.binding.chord + " (" + l.binding.action +
+                ") not active: " + HotkeyStateName(l.state) +
+                (l.detail.empty() ? "" : " — " + l.detail));
+            /* Never fires: only "ok" bindings map presses. */
+        }
+    }
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        live_ = std::move(live);
+        pressed_.clear();
+    }
+}
+
+void Automation::Restore(const AutomationConfig& config)
+{
+    {
+        std::lock_guard<std::mutex> apply(apply_mutex_);
+        {
+            std::lock_guard<std::mutex> g(mutex_);
+            config_ = config;
+        }
+        RegisterLocked();
+    }
+    Notify();
+}
+
+bool Automation::SetHotkeys(
+    const std::vector<HotkeyBinding>& bindings,
+    const std::optional<std::vector<std::string>>& cycle,
+    const std::optional<double>& step,
+    std::string& err)
+{
+    std::vector<HotkeyBinding> canonical;
+    if(!ValidateHotkeys(bindings, canonical, err))
+    {
+        return false;
+    }
+    if(step && !(*step >= kMinStep && *step <= kMaxStep))
+    {
+        err = "brightness_step must be within [0.01, 0.5]";
+        return false;
+    }
+    if(cycle && cycle->size() > 64)
+    {
+        err = "cycle holds at most 64 workspace ids";
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> apply(apply_mutex_);
+        AutomationConfig next;
+        {
+            std::lock_guard<std::mutex> g(mutex_);
+            next = config_;
+        }
+        next.hotkeys = std::move(canonical);
+        if(cycle)
+        {
+            next.cycle = *cycle;
+        }
+        if(step)
+        {
+            next.brightness_step = *step;
+        }
+        if(deps_.persist)
+        {
+            std::string serr;
+            if(!deps_.persist(next, serr))
+            {
+                err = "could not save the hotkeys: " + serr;
+                return false;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> g(mutex_);
+            config_ = std::move(next);
+        }
+        RegisterLocked();
+    }
+    Notify();
+    return true;
+}
+
+AutomationConfig Automation::Config() const
+{
+    std::lock_guard<std::mutex> g(mutex_);
+    return config_;
+}
+
+void Automation::PostHotkey(int id)
+{
+    std::lock_guard<std::mutex> g(mutex_);
+    /* Bounded: a stuck owner loop never grows this. */
+    if(pressed_.size() < 64)
+    {
+        pressed_.push_back(id);
+    }
+}
+
+void Automation::Poll(TimePoint now)
+{
+    std::vector<HotkeyAction> run;
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        for(int id : pressed_)
+        {
+            for(const Live& l : live_)
+            {
+                HotkeyAction a;
+                if(l.id == id && l.state == HotkeyState::Ok &&
+                   HotkeyActionFromName(l.binding.action, a))
+                {
+                    run.push_back(a);
+                }
+            }
+        }
+        pressed_.clear();
+    }
+    for(HotkeyAction a : run)
+    {
+        RunAction(a, now);
+    }
+
+    /* Trailing edge of a workspace burst: the latest target,
+       once, if it differs from what is already loading. */
+    if(in_burst_ && now >= burst_until_)
+    {
+        in_burst_ = false;
+        if(pending_ && !cursor_.empty())
+        {
+            pending_ = false;
+            std::string err;
+            if(deps_.enqueue_reload &&
+               !deps_.enqueue_reload(cursor_, err))
+            {
+                Log("workspace switch to '" + cursor_ +
+                    "' refused: " + err);
+            }
+            fired_ = cursor_;
+        }
+        pending_ = false;
+    }
+}
+
+void Automation::StepWorkspace(int dir, TimePoint now)
+{
+    std::vector<std::string> ids =
+        deps_.list_workspaces ? deps_.list_workspaces()
+                              : std::vector<std::string>{};
+    std::vector<std::string> cycle;
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        cycle = config_.cycle;
+    }
+    if(!cycle.empty())
+    {
+        std::vector<std::string> order;
+        for(const std::string& c : cycle)
+        {
+            if(std::find(ids.begin(), ids.end(), c) != ids.end() &&
+               std::find(order.begin(), order.end(), c) == order.end())
+            {
+                order.push_back(c);
+            }
+        }
+        ids = std::move(order);
+    }
+    if(ids.empty())
+    {
+        Log("workspace hotkey: no workspace to switch to");
+        return;
+    }
+
+    const bool burst = in_burst_ && now < burst_until_;
+    const std::string base =
+        burst ? cursor_
+              : (deps_.active_workspace ? deps_.active_workspace()
+                                        : std::string());
+    const auto it = std::find(ids.begin(), ids.end(), base);
+    std::string target;
+    if(it == ids.end())
+    {
+        target = dir > 0 ? ids.front() : ids.back();
+    }
+    else
+    {
+        const long n = long(ids.size());
+        const long i = long(it - ids.begin());
+        target = ids[size_t(((i + dir) % n + n) % n)];
+    }
+    cursor_      = target;
+    burst_until_ = now + kWorkspaceDebounce;
+    if(!burst)
+    {
+        /* Leading edge: reload at once. */
+        in_burst_ = true;
+        pending_  = false;
+        fired_    = target;
+        std::string err;
+        if(deps_.enqueue_reload && !deps_.enqueue_reload(target, err))
+        {
+            Log("workspace switch to '" + target + "' refused: " + err);
+        }
+        return;
+    }
+    pending_ = target != fired_;
+}
+
+void Automation::RunAction(HotkeyAction a, TimePoint now)
+{
+    OutputControl* oc = deps_.output;
+    double step = 0.10;
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        step = config_.brightness_step;
+    }
+    switch(a)
+    {
+    case HotkeyAction::NextWorkspace:
+        StepWorkspace(+1, now);
+        return;
+    case HotkeyAction::PrevWorkspace:
+        StepWorkspace(-1, now);
+        return;
+    case HotkeyAction::BrightnessUp:
+    case HotkeyAction::BrightnessDown:
+        if(oc)
+        {
+            const double m = oc->State().master;
+            double v = a == HotkeyAction::BrightnessUp ? m + step
+                                                       : m - step;
+            /* Snap to the step grid's float noise. */
+            v = std::round(v * 10000.0) / 10000.0;
+            oc->SetMaster(float(std::clamp(v, 0.0, 1.0)));
+        }
+        return;
+    case HotkeyAction::LightsToggle:
+        if(oc)
+        {
+            oc->SetBlackout(!oc->State().blackout);
+        }
+        return;
+    case HotkeyAction::PauseToggle:
+        if(oc)
+        {
+            oc->SetHold(!oc->State().hold);
+        }
+        return;
+    }
+}
+
+nlohmann::json Automation::ToJson() const
+{
+    std::lock_guard<std::mutex> g(mutex_);
+    nlohmann::json hk = nlohmann::json::array();
+    for(const Live& l : live_)
+    {
+        nlohmann::json e = {
+            { "action", l.binding.action },
+            { "chord",  l.binding.chord },
+            { "state",  HotkeyStateName(l.state) },
+        };
+        if(!l.detail.empty())
+        {
+            e["detail"] = l.detail;
+        }
+        hk.push_back(std::move(e));
+    }
+    nlohmann::json actions  = nlohmann::json::array();
+    nlohmann::json proposed = nlohmann::json::object();
+    for(HotkeyAction a : AllHotkeyActions())
+    {
+        actions.push_back(HotkeyActionName(a));
+        proposed[HotkeyActionName(a)] = ProposedChord(a);
+    }
+    return nlohmann::json::object({
+        { "hotkeys",         std::move(hk) },
+        { "actions",         std::move(actions) },
+        { "proposed",        std::move(proposed) },
+        { "cycle",           config_.cycle },
+        { "brightness_step",
+          std::round(config_.brightness_step * 10000.0) / 10000.0 },
+        { "registrar",       deps_.registrar != nullptr },
+        { "max_hotkeys",     kMaxHotkeys },
+    });
+}
+
 } /* namespace openrgb2 */
