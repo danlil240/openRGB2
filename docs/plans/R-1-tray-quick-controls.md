@@ -1,6 +1,6 @@
 # R-1: Tray quick controls (profile, brightness, pause)
 
-Status: proposed · Size: M · Source: audit 2026-11-28 R-1
+Status: implemented on `feat/r-1-tray-quick-controls` (not merged) · Size: M · Source: audit 2026-11-28 R-1
 
 ## Goal
 
@@ -165,3 +165,26 @@ that do not see it hide the controls.
 - An engine-initiated workspace switch while the UI draft is dirty
   relies on the existing foreign-adopt path in
   `WorkspaceController` (`:573`). R-2 and R-3 add the test for it.
+
+## Implementation decisions (on the branch)
+
+- Tray "profile" = workspace, and master brightness is not shown in the
+  draft preview — the plan's recommendations.
+- Replies use a new reply type OUTPUT (`0x8107`); verbs take flat args
+  (`{verb, value}` / `{verb, on}`) like REACTIVE_COMMAND. The verb space
+  is a table in `EngineService::OutputVerbs()` — one row per verb.
+- `set_master` outside [0, 1] is `bad_request` on the wire; the class
+  itself clamps. A malformed `output` member in `engine-state.json` is
+  ignored with a warning instead of failing the document; unknown
+  members inside `output` survive a save.
+- Hold/Off on an uploaded loop: release restores the prior control
+  unless the user changed it while engaged; an engaged hold/Off
+  survives a scene re-apply; a request refused as busy is retried on
+  the next playback Poll.
+- "Off" in the tray is a toggle; a brightness preset while Off turns
+  the lights back on at that level. Output controls stay visible but
+  disabled while disconnected, and are hidden only when a connected
+  engine lacks `output_control_v1`.
+- `TrayController` reaches `WorkspaceController` through its Qt
+  meta-object (the properties QML binds), so `ui_tray_test` uses a
+  small fake instead of the full scripted workspace engine.
