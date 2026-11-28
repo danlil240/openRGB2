@@ -1,6 +1,6 @@
 # P-13: Test and build gaps
 
-Status: proposed · Size: M · Source: audit 2026-11-28 P-13
+Status: implemented on `test/p-13-test-and-build-gaps` (not merged) · Size: M · Source: audit 2026-11-28 P-13
 
 ## Goal
 
