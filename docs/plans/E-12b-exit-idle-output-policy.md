@@ -1,6 +1,6 @@
 # E-12b: Exit/idle output policy
 
-Status: proposed · Size: M · Source: audit 2026-11-28 E-12 (part b) · Related: E-10, P-11, R-1
+Status: implemented on `feat/e-12b-exit-idle-policy` (not merged; OUTPUT_COMMAND verbs pending R-1) · Size: M · Source: audit 2026-11-28 E-12 (part b) · Related: E-10, P-11, R-1
 
 ## Goal
 

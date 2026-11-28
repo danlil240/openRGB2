@@ -214,6 +214,14 @@ public:
            fabricated "no conflicts". */
         std::function<nlohmann::json()> ownership;
 
+        /* Audit E-12b: the exit/idle output policy, read-only
+           in STATE ("output_policy": {on_exit, on_idle,
+           per_controller, idle}) and summarized in the QUIT
+           reply ("exit_policy": the global on_exit) so a client
+           can say "lights will turn off". Empty -> STATE null,
+           QUIT omits the field. */
+        std::function<nlohmann::json()> output_policy;
+
         /* studio-import Task 3: the managed-workspace commit
            surface (engine side). When set, the WORKSPACE_COMMAND
            verb space is live, WELCOME advertises
@@ -543,6 +551,7 @@ private:
        the whole StateJson for one field (QA F12). */
     nlohmann::json IpcStatsJson() const;
     nlohmann::json OwnershipJson() const;
+    nlohmann::json OutputPolicyJson() const;     /* E-12b */
     /* The backend's own read-only diagnostics pipe: the
        SDK client's cached LIANLI_WIRELESS_STATUS snapshot
        (state-lock read only — this never queues behind

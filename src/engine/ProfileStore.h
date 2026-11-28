@@ -51,6 +51,7 @@
 #pragma once
 
 #include "EngineTypes.h"
+#include "OutputPolicy.h"     /* E-12b exit/idle output policy     */
 #include "PlaybackPresets.h"   /* PersistedSceneMode, PlaybackParams */
 #include "ReactiveInputs.h"    /* ReactiveInputs::PersistedInput     */
 #include "OutputControl.h"     /* PersistedOutput (R-1)              */
@@ -108,6 +109,10 @@ struct EngineState
        beside the known fields. */
     std::optional<PersistedOutput>           output;
     nlohmann::json                           output_extensions;
+    /* Audit E-12b: what the LEDs show at engine exit and while
+       idle (hold/black/restore + per-controller overrides).
+       Absent in older profiles -> hold/hold (no change). */
+    OutputPolicy                             output_policy;
     nlohmann::json                           extensions;
 };
 

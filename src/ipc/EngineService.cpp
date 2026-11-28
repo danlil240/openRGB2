@@ -1452,6 +1452,18 @@ nlohmann::json EngineService::OwnershipJson() const
     return j.is_object() ? j : nullptr;
 }
 
+/* Audit E-12b: no provider -> honest null; a non-object
+   provider result is an owner bug, still null. */
+nlohmann::json EngineService::OutputPolicyJson() const
+{
+    if(!deps_.output_policy)
+    {
+        return nullptr;
+    }
+    const nlohmann::json j = deps_.output_policy();
+    return j.is_object() ? j : nullptr;
+}
+
 /* QA F12: the IPC counters body on its own — STATE and
    DIAGNOSTICS both embed it; building it here keeps DIAG_GET
    from re-serializing an entire StateJson for one field. */
@@ -1494,6 +1506,7 @@ nlohmann::json EngineService::StateJson() const
         { "ownership",  OwnershipJson()                      },
         { "output",     OutputJson()                         },
         { "ipc",        IpcStatsJson()                       },
+        { "output_policy", OutputPolicyJson()                },
     });
 }
 
@@ -2142,6 +2155,16 @@ IpcReply EngineService::Dispatch(MsgType type,
             { "ordered",       true          },
             { "stop_backend",  stop_backend  },
         });
+        /* E-12b: what the exit step will do (global on_exit;
+           per-controller overrides are in STATE). */
+        {
+            const nlohmann::json op = OutputPolicyJson();
+            if(op.is_object() && op.contains("on_exit") &&
+               op["on_exit"].is_string())
+            {
+                reply_body["exit_policy"] = op["on_exit"];
+            }
+        }
         const nlohmann::json extra =
             deps_.request_shutdown(stop_backend);
         if(extra.is_object())

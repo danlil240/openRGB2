@@ -955,6 +955,92 @@ static void TestWriteCache()
     CHECK(store.LoadSceneSnapshot().present);
 }
 
+/*---------------------------------------------------------*\
+||| E-12b: the exit/idle output policy is a real persisted  |||
+|||     field — round-trips, defaults to hold/hold when     |||
+|||     absent, and a malformed value fails validation      |||
+|||     (never retained as an extension passthrough)        |||
+\*---------------------------------------------------------*/
+
+static void TestOutputPolicyPersistence()
+{
+    const std::string p = Path("output-policy.json");
+    ProfileStore      store(p);
+    std::string       err;
+
+    EngineState st = SampleState("name:policy",
+                                 PlaybackMode::LiveEffects);
+    CHECK(st.output_policy.IsDefault());
+    st.output_policy.on_exit = OutputAction::Black;
+    st.output_policy.on_idle = OutputAction::Restore;
+    OutputPolicyRule r;
+    r.match.location_prefix = "Wireless:";
+    r.on_exit               = OutputAction::Hold;
+    st.output_policy.per_controller.push_back(r);
+    CHECK(store.Save(st, err));
+
+    ProfileStore::LoadResult lr = store.Load();
+    CHECK(lr.status == ProfileStore::LoadStatus::Loaded);
+    CHECK(lr.state.output_policy == st.output_policy);
+    CHECK(!lr.state.extensions.contains("output_policy"));
+
+    /* On disk it is the documented wire shape. */
+    {
+        std::ifstream in(p);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        const nlohmann::json j = nlohmann::json::parse(ss.str());
+        CHECK(j["output_policy"]["on_exit"] == "black");
+        CHECK(j["output_policy"]["on_idle"] == "restore");
+        CHECK(j["output_policy"]["per_controller"][0]["match"]
+               ["location_prefix"] == "Wireless:");
+    }
+
+    /* A profile written before E-12b has no member: hold/hold. */
+    {
+        nlohmann::json j = EngineStateToJson(
+            SampleState("name:old", PlaybackMode::LiveEffects));
+        j.erase("output_policy");
+        EngineState out;
+        std::vector<std::string> errs;
+        CHECK(EngineStateFromJson(j, out, &errs));
+        CHECK(out.output_policy.IsDefault());
+        CHECK(!out.extensions.contains("output_policy"));
+    }
+
+    /* Malformed in a current-schema document: strict failure
+       naming the field (the store then recovers LKG). */
+    {
+        nlohmann::json j = EngineStateToJson(st);
+        j["output_policy"]["on_exit"] = "off";
+        EngineState out;
+        out.output_policy.on_idle = OutputAction::Black;
+        std::vector<std::string> errs;
+        CHECK(!EngineStateFromJson(j, out, &errs));
+        CHECK(out.output_policy.on_idle == OutputAction::Black);
+        bool named = false;
+        for(const std::string& e : errs)
+        {
+            named = named ||
+                    e.find("output_policy") != std::string::npos;
+        }
+        CHECK(named);
+    }
+
+    /* A legacy (schema-less) document reads leniently: a bad
+       policy is a warning and the default stands. */
+    {
+        nlohmann::json j = EngineStateToJson(st);
+        j.erase("schema_version");
+        j["output_policy"] = "black";
+        EngineState out;
+        std::vector<std::string> errs, warns;
+        CHECK(EngineStateFromJson(j, out, &errs, &warns));
+        CHECK(out.output_policy.IsDefault());
+        CHECK(!warns.empty());
+    }
+}
+
 int main()
 {
     g_tmp = fs::temp_directory_path() /
@@ -973,6 +1059,7 @@ int main()
     TestSceneSnapshot();
     TestWriteCache();
     TestSceneLoader();
+    TestOutputPolicyPersistence();
 
     /* Opt-in manual check: point OPENRGB2_SCENE_FILE at a real
        scene/workspace file (e.g. a studio.v2.backup.json) to
