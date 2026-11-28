@@ -322,6 +322,13 @@ public:
        CalibrationSession::Deps::changed hook calls this. */
     void EmitCalibrationStatus();
 
+    /* R-10: emits the "ownership" event with the current
+       OWNERSHIP body — the engine's competitor re-scan calls
+       this when a writer appeared or cleared, so the UI sees
+       a conflict on any page (and in the tray), not only
+       while Diagnostics polls. */
+    void EmitOwnership();
+
     /*---- IIpcService ---------------------------------------*/
     nlohmann::json OnWelcome() override;
     IpcReply       Dispatch(MsgType type,

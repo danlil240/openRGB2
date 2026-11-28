@@ -283,6 +283,13 @@ ApplicationWindow {
 
     /* Workspace notices (foreign commits, import/export
        results) surface as a transient line in the strip. */
+    /* R-10: the banner's "How to fix" and the tray notice land
+       on the Ownership card. */
+    function showOwnershipFix() {
+        root.currentView = 3;
+        Qt.callLater(devicesPage.showOwnership);
+    }
+
     property string wsNotice: ""
     Connections {
         target: typeof workspace !== "undefined" ? workspace : null
@@ -461,6 +468,18 @@ ApplicationWindow {
                 }
             }
 
+            /* R-10: another program is writing the same lights —
+               shown on every page from the engine's pushed
+               ownership report; only while connected, when the
+               report is current. */
+            OwnershipBanner {
+                Layout.fillWidth: true
+                ownership: typeof bridge !== "undefined"
+                           ? bridge.ownership : ({})
+                active: root.connState === "connected"
+                onFixRequested: root.showOwnershipFix()
+            }
+
             /* Shared-workspace strip (Task 4): one banner for
                the states the shared draft can surface —
                a recovered unsaved draft (offered, NEVER
@@ -625,7 +644,7 @@ ApplicationWindow {
                 DashboardPage {}
                 LightingPage { id: lightingPage }
                 LayoutPage {}
-                DevicesPage {}
+                DevicesPage { id: devicesPage }
                 SettingsPage {}
             }
         }

@@ -9,6 +9,12 @@
 #include "EngineBridge.h"
 #include "IpcProtocol.h"
 #include "JsonVariant.h"
+#include "LaunchHardening.h"
+
+#include <QClipboard>
+#include <QFileInfo>
+#include <QGuiApplication>
+#include <QProcess>
 
 #include <QDateTime>
 #include <QDir>
@@ -245,6 +251,23 @@ QString EventDetail(const QString& kind, const QVariantMap& data)
         }
         return parts.join(QStringLiteral(", "));
     }
+    if(kind == QLatin1String(ipc::event_kind::kOwnership))
+    {
+        /* R-10: name the writers, not a JSON dump. */
+        QStringList owners;
+        for(const QVariant& v :
+            data.value(QStringLiteral("conflicts")).toList())
+        {
+            owners << v.toMap()
+                          .value(QStringLiteral("owner"))
+                          .toString();
+        }
+        return owners.isEmpty()
+            ? QStringLiteral("no competing writers")
+            : QStringLiteral("%1 competing: %2")
+                  .arg(owners.size())
+                  .arg(owners.join(QStringLiteral(", ")));
+    }
     /* Unknown/future kinds: a bounded compact dump beats a
        blank row. */
     QString s = QString::fromUtf8(
@@ -293,6 +316,8 @@ DiagnosticsController::DiagnosticsController(EngineBridge* bridge,
                 this, [this]
                 { RecomputeOwnership(); RecomputeRates(); });
         connect(bridge_, &EngineBridge::stateReportChanged,
+                this, [this] { RecomputeOwnership(); });
+        connect(bridge_, &EngineBridge::ownershipChanged,
                 this, [this] { RecomputeOwnership(); });
         connect(bridge_, &EngineBridge::frameStatusChanged,
                 this, [this] { OnFrameStatus(); });
@@ -669,16 +694,88 @@ void DiagnosticsController::RecomputeControllers()
     emit controllersChanged();
 }
 
+bool DiagnosticsController::openOwnershipTarget(const QString& target)
+{
+    /* The whole surface is two constants — no caller-supplied
+       string ever reaches the shell. */
+    const QString explorer = launch::SystemExplorerPath();
+    if(explorer.isEmpty())
+    {
+        return false;
+    }
+    const QString win = QFileInfo(explorer).absolutePath();
+    QString program;
+    QString arg;
+    if(target == QLatin1String("dynamic_lighting_settings"))
+    {
+        /* The Dynamic Lighting page id in the Settings catalog
+           (present on Windows 11 build 26300). A URI needs the
+           shell, so explorer.exe. */
+        program = explorer;
+        arg     = QStringLiteral("ms-settings:personalization-lighting");
+    }
+    else if(target == QLatin1String("services"))
+    {
+        /* mmc.exe by absolute path, started directly (no shell):
+           the console keeps the UI's elevation and can stop the
+           service — through explorer it would open de-elevated. */
+        program = QDir::toNativeSeparators(
+            win + QStringLiteral("/System32/mmc.exe"));
+        arg     = QDir::toNativeSeparators(
+            win + QStringLiteral("/System32/services.msc"));
+    }
+    else
+    {
+        return false;
+    }
+    if(shell_launcher_)
+    {
+        return shell_launcher_(program, QStringList{ arg });
+    }
+    QProcess p;
+    p.setProgram(program);
+    p.setArguments(QStringList{ arg });
+    p.setProcessEnvironment(launch::SanitizedChildEnvironment());
+    const bool started = p.startDetached();
+    if(!started)
+    {
+        AppendEvent(QStringLiteral("error"),
+                    QStringLiteral("could not open %1").arg(arg));
+    }
+    return started;
+}
+
+bool DiagnosticsController::copyText(const QString& text)
+{
+    QClipboard* cb = qobject_cast<QGuiApplication*>(
+                         QCoreApplication::instance())
+                         ? QGuiApplication::clipboard()
+                         : nullptr;
+    if(!cb || text.isEmpty())
+    {
+        return false;
+    }
+    cb->setText(text);
+    return true;
+}
+
 void DiagnosticsController::RecomputeOwnership()
 {
-    /* DIAGNOSTICS carries the freshest pull; STATE (welcome +
-       refresh) is the fallback. Null/absent -> reported:false,
-       the honest "nothing published" surface. */
+    /* R-10: the bridge's ownership store is freshest-wins
+       across the pushed "ownership" event and the STATE/
+       DIAGNOSTICS pulls, so a change shows up while this page
+       is hidden. The pulled bodies stay the fallback.
+       Null/absent -> reported:false, the honest "nothing
+       published" surface. */
     QVariantMap own;
     if(bridge_)
     {
-        own = bridge_->diagnostics()
-                  .value(QStringLiteral("ownership")).toMap();
+        own = bridge_->ownership();
+        if(own.isEmpty())
+        {
+            own = bridge_->diagnostics()
+                      .value(QStringLiteral("ownership")).toMap();
+        }
         if(own.isEmpty())
         {
             own = bridge_->stateReport()

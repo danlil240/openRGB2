@@ -8,6 +8,7 @@
      output (exit 3 banner + "ownership CONFLICT:" lines). */
 
 #include "LaunchHardening.h"
+#include "OwnershipNotice.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -128,6 +129,97 @@ static void TestOwnershipParse()
 /* Audit U-6: engine-reported folders reach the shell only as an
    existing absolute local directory, opened by an absolute
    explorer.exe. */
+/* R-10: the tray notice fires once per writer key per session —
+   a writer that stays, or comes back, never re-notifies. */
+static void TestConflictNotice()
+{
+    using openrgb2::ui::ConflictNoticeTracker;
+    auto conflict = [](const char* owner, const char* key)
+    {
+        QVariantMap c;
+        c.insert(QStringLiteral("owner"), QString::fromUtf8(owner));
+        c.insert(QStringLiteral("key"), QString::fromUtf8(key));
+        return QVariant(c);
+    };
+    auto report = [](const QVariantList& conflicts)
+    {
+        QVariantMap m;
+        m.insert(QStringLiteral("conflicts"), conflicts);
+        return m;
+    };
+    ConflictNoticeTracker t;
+    CHECK(t.NewConflicts(QVariantMap()).isEmpty(),
+          "notice: no report -> nothing");
+    QStringList n = t.NewConflicts(report({
+        conflict("Windows Dynamic Lighting", "dynamic_lighting") }));
+    CHECK(n == QStringList{QStringLiteral("Windows Dynamic Lighting")},
+          "notice: first sighting of a key -> one notice");
+    CHECK(t.NewConflicts(report({
+              conflict("Windows Dynamic Lighting",
+                       "dynamic_lighting") })).isEmpty(),
+          "notice: same key again -> nothing");
+    n = t.NewConflicts(report({
+        conflict("Windows Dynamic Lighting", "dynamic_lighting"),
+        conflict("Logitech G Hub / Options", "logitech"),
+        conflict("Logitech G Hub / Options", "logitech") }));
+    CHECK(n == QStringList{QStringLiteral("Logitech G Hub / Options")},
+          "notice: only the new key, once even with two processes");
+    t.NewConflicts(report({}));
+    CHECK(t.NewConflicts(report({
+              conflict("Logitech G Hub / Options", "logitech") }))
+              .isEmpty(),
+          "notice: a key that cleared and came back -> nothing");
+    n = t.NewConflicts(report({ conflict("Mystery RGB", "") }));
+    CHECK(n == QStringList{QStringLiteral("Mystery RGB")},
+          "notice: a keyless finding is keyed by its label");
+
+    /* R-10 review: peeking does not consume a key — the tray may
+       not be ready at sign-in, and a notice that could not be
+       shown must still be shown later. */
+    ConflictNoticeTracker p;
+    const QVariantMap razer = report({ conflict("Razer Synapse", "razer") });
+    CHECK(p.Pending(razer) == QStringList{QStringLiteral("Razer Synapse")},
+          "notice: pending lists a new key");
+    CHECK(p.Pending(razer) == QStringList{QStringLiteral("Razer Synapse")},
+          "notice: pending again -> still pending (not consumed)");
+    p.MarkSeen(razer);
+    CHECK(p.Pending(razer).isEmpty(),
+          "notice: after MarkSeen -> nothing pending");
+}
+
+/* R-10: the startup takeover dialog lists each writer once and
+   adds one short "how to turn it off" line per key — the engine is
+   not running yet, so the Devices page cannot show the steps. */
+static void TestTakeoverText()
+{
+    using openrgb2::ui::TakeoverConflictText;
+    const QStringList lines = {
+        QStringLiteral("ownership CONFLICT: LampArray service (Dynamic "
+                       "Lighting) (pid 55, logi_lamparray_service.AMD64"
+                       ".exe) -- bridge [key: lamparray]"),
+        QStringLiteral("ownership CONFLICT: Logitech G Hub / Options "
+                       "(pid 70, lghub_agent.exe) -- owner [key: logitech]"),
+        QStringLiteral("ownership CONFLICT: Logitech G Hub / Options "
+                       "(pid 71, lghub_system_tray.exe) -- owner "
+                       "[key: logitech]"),
+        /* an older script: no key */
+        QStringLiteral("ownership CONFLICT: iCUE (pid 7, service) -- close it"),
+    };
+    const QString t = TakeoverConflictText(lines);
+    CHECK(!t.contains(QStringLiteral("[key:")),
+          "takeover: the key tag is not shown to the user");
+    CHECK(t.contains(QStringLiteral("lghub_agent.exe")) &&
+              t.contains(QStringLiteral("lghub_system_tray.exe")) &&
+              t.contains(QStringLiteral("iCUE (pid 7")),
+          "takeover: every conflict line is still listed");
+    CHECK(t.count(QStringLiteral("sc stop logi_lamparray_service")) == 1,
+          "takeover: the LampArray hint names the service command once");
+    CHECK(t.count(QStringLiteral("Start G HUB on system startup")) == 1,
+          "takeover: one G HUB hint for two G HUB processes");
+    CHECK(t.contains(QStringLiteral("Devices")),
+          "takeover: points at the Devices page for the full steps");
+}
+
 static void TestShellFolder()
 {
 #ifdef Q_OS_WIN
@@ -193,6 +285,8 @@ int main(int argc, char** argv)
     TestRealChild();
 #endif
     TestOwnershipParse();
+    TestConflictNotice();
+    TestTakeoverText();
     TestShellFolder();
     if(g_fail)
     {

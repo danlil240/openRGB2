@@ -14,6 +14,7 @@
 #include "DiagnosticsController.h"
 #include "EngineBridge.h"
 #include "LaunchHardening.h"
+#include "OwnershipNotice.h"
 #include "LayoutController.h"
 #include "QaServer.h"
 #include "SceneEditController.h"
@@ -485,6 +486,14 @@ int main(int argc, char** argv)
     if(startup_task.available())
         startup_task.refresh();
 
+    /* R-10: a competing writer that appears while the window is
+       hidden gets one tray message per writer key per session.
+       Declared before the tray and the Quit-script QProcess so
+       they outlive every handler that captures them (a still-
+       running `shutdown` can run its finished handler — and a
+       nested event loop — from ~QProcess). */
+    openrgb2::ui::ConflictNoticeTracker conflict_notices;
+    bool ownership_msg_pending = false;
     QMenu tray_menu;
     QSystemTrayIcon tray(app_icon);
     QProcess shutdown;
@@ -562,9 +571,50 @@ int main(int argc, char** argv)
                 show_ui();
         });
         /* The background takeover notification opens the window,
-           where the confirmation dialog is waiting. */
+           where the confirmation dialog is waiting; the R-10
+           ownership notice opens it at the fix steps. */
         QObject::connect(&tray, &QSystemTrayIcon::messageClicked,
-                         &app, show_ui);
+                         &app, [show_ui, window,
+                                &ownership_msg_pending] {
+            show_ui();
+            if(ownership_msg_pending)
+            {
+                ownership_msg_pending = false;
+                QMetaObject::invokeMethod(window, "showOwnershipFix");
+            }
+        });
+        QObject::connect(&bridge,
+                         &openrgb2::ui::EngineBridge::ownershipChanged,
+                         &app, [&bridge, &tray, window,
+                                &conflict_notices,
+                                &ownership_msg_pending] {
+            const QVariantMap own = bridge.ownership();
+            const QStringList fresh = conflict_notices.Pending(own);
+            if(fresh.isEmpty())
+                return;
+            const bool hidden = !window->isVisible()
+                || window->visibility() == QWindow::Minimized;
+            if(!hidden)
+            {
+                /* The banner already told the user. */
+                conflict_notices.MarkSeen(own);
+                return;
+            }
+            /* At sign-in the tray may not exist yet: keep the keys
+               pending rather than spend them on a message nobody
+               can see. */
+            if(!QSystemTrayIcon::isSystemTrayAvailable()
+               || !tray.isVisible())
+                return;
+            conflict_notices.MarkSeen(own);
+            ownership_msg_pending = true;
+            tray.showMessage(
+                QObject::tr("Another app is controlling your lights"),
+                QObject::tr("%1. Open OpenRGB2 for the steps to turn "
+                            "it off - OpenRGB2 never closes it for you.")
+                    .arg(fresh.join(QStringLiteral(", "))),
+                QSystemTrayIcon::Warning, 10000);
+        });
         QObject::connect(&instance_server, &QLocalServer::newConnection,
                          &app, [&instance_server, show_ui] {
             while(auto* client = instance_server.nextPendingConnection())
@@ -680,10 +730,10 @@ int main(int argc, char** argv)
             /* Shown once the window can host it (now, or on the first
                show after a background start). */
             auto ask_takeover = [&takeover_conflicts, run_start, window] {
-                QString list;
-                for(const QString& c : takeover_conflicts)
-                    list += QStringLiteral("  ") + c.trimmed()
-                            + QLatin1Char('\n');
+                /* R-10: each writer once, plus a short hint per
+                   finding key. */
+                const QString list =
+                    openrgb2::ui::TakeoverConflictText(takeover_conflicts);
                 QMessageBox box(QMessageBox::Warning,
                     QObject::tr("OpenRGB2 - competing RGB software"),
                     QObject::tr("Other RGB software is running and controls "

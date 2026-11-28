@@ -382,10 +382,18 @@ void EngineHost::ScanCompetitors(bool initial)
 
     if(!initial)
     {
-        for(const std::string& line :
-            DescribeOwnerChanges(before, findings))
+        const std::vector<std::string> changes =
+            DescribeOwnerChanges(before, findings);
+        for(const std::string& line : changes)
         {
             Log("ownership re-scan: " + line);
+        }
+        /* R-10: push the change — one event per scan that
+           changed anything. The initial scan runs before the
+           IPC surface exists; SUBSCRIBE's snapshot covers it. */
+        if(!changes.empty() && service_)
+        {
+            service_->EmitOwnership();
         }
         return;
     }
@@ -469,6 +477,7 @@ nlohmann::json EngineHost::OwnershipJson() const
     {
         nlohmann::json e = nlohmann::json::object({
             { "owner",  f.owner  },
+            { "key",    f.key    },   /* R-10: stable guidance key */
             { "exe",    f.exe    },
             { "pid",    f.pid    },
             { "detail", f.detail },

@@ -409,9 +409,78 @@ static void TestOwnerChanges()
     CHECK(cleared == 1);
 }
 
+/*---------------------------------------------------------*\
+|| R-10: every finding carries a stable machine key, set in  ||
+|| the engine — the UI picks guidance by key, never by       ||
+|| string-matching the owner label.                          ||
+\*---------------------------------------------------------*/
+static void TestOwnerKeys()
+{
+    const std::vector<OwnerFinding> out = ClassifyOwners({
+        { 200, "OpenRGB.exe" },                       /* managed */
+        { 300, "OpenRGB.exe" },                       /* other   */
+        { 400, "LConnectService.exe" },
+        { 500, "GigabyteControlCenter.exe" },
+        { 600, "Razer Synapse 3.exe" },
+        { 700, "logi_lamparray_service.AMD64.exe" },
+        { 701, "lghub_agent.exe" },
+        { 702, "LogiOptionsPlus.exe" },
+        { 800, "iCUE.exe" },
+        { 801, "Corsair.Service.exe" },
+        { 900, "SignalRGB.exe" },
+        { 950, "FanControl.exe" },
+    }, /*self*/ 1, /*backend*/ 200);
+
+    auto key_of = [&out](uint32_t pid)
+    {
+        const OwnerFinding* f = FindPid(out, pid);
+        return f ? f->key : std::string("<missing>");
+    };
+    CHECK(key_of(200) == "openrgb");
+    CHECK(key_of(300) == "openrgb");
+    CHECK(key_of(400) == "lianli");
+    CHECK(key_of(500) == "gigabyte");
+    CHECK(key_of(600) == "razer");
+    CHECK(key_of(700) == "lamparray");
+    CHECK(key_of(701) == "logitech");
+    CHECK(key_of(702) == "logitech");
+    CHECK(key_of(800) == "corsair");
+    CHECK(key_of(801) == "corsair");
+    CHECK(key_of(900) == "signalrgb");
+    CHECK(key_of(950) == "fancontrol");
+    /* No finding is ever keyless. */
+    for(const OwnerFinding& f : out)
+    {
+        CHECK(!f.key.empty());
+    }
+
+    OwnerFinding dl;
+    CHECK(ClassifyDynamicLighting(1, dl));
+    CHECK(dl.key == "dynamic_lighting");
+}
+
+/* R-10 review: vendor UPDATERS never write RGB. lghub_updater runs
+   as an Automatic service after G Hub is quit (seen on Daniel's PC),
+   so flagging it would keep the conflict banner up forever after the
+   user followed the steps. */
+static void TestUpdatersAreNotWriters()
+{
+    const std::vector<OwnerFinding> out = ClassifyOwners({
+        { 10, "lghub_updater.exe" },
+        { 11, "logioptionsplus_updater.exe" },
+        { 12, "lghub_agent.exe" },              /* still a writer */
+    }, /*self*/ 1, /*backend*/ 0);
+    CHECK(FindPid(out, 10) == nullptr);
+    CHECK(FindPid(out, 11) == nullptr);
+    CHECK(FindPid(out, 12) != nullptr &&
+          FindPid(out, 12)->key == "logitech");
+}
+
 int main()
 {
     TestClassifier();
+    TestOwnerKeys();
+    TestUpdatersAreNotWriters();
     TestDynamicLighting();
     TestOwnerChanges();
     TestManagedConfig();

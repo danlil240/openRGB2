@@ -345,6 +345,18 @@ int main()
         CHECK(msg.request_id == 11);
     }
 
+    /*---- R-10: "ownership" is a subscribable kind ----------*/
+    {
+        const std::vector<std::string>& kinds = EventKinds();
+        bool found = false;
+        for(const std::string& k : kinds)
+        {
+            found = found || k == event_kind::kOwnership;
+        }
+        CHECK(found);
+        CHECK(std::string(event_kind::kOwnership) == "ownership");
+    }
+
     std::printf("ipc_protocol_test: %d checks, %d failures\n",
                 checks, failures);
     return failures ? 1 : 0;

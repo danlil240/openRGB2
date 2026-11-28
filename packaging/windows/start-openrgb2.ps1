@@ -173,61 +173,64 @@ function Get-OwnerFindings {
         $exe     = Split-Path -Leaf ([string]$p.exe)
         $name    = $exe.ToLowerInvariant()
         $compact = ($exe -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+        # R-10: vendor updaters never write RGB (lghub_updater stays
+        # running as a service after G Hub is quit).
+        if($name.Contains("updater")) { continue }
 
-        $f = [ordered]@{ conflict=$false; owner=""; exe=$exe; pid=$procId; detail="" }
+        $f = [ordered]@{ conflict=$false; owner=""; key=""; exe=$exe; pid=$procId; detail="" }
 
         if($name -eq "openrgb.exe") {
             if($procId -eq $BackendPid -and $BackendPid -ne 0) {
-                $f.owner  = "OpenRGB (managed backend)"
+                $f.owner  = "OpenRGB (managed backend)"; $f.key = "openrgb"
                 $f.detail = "owns the SDK listener -- the expected sole hardware owner"
             } else {
                 $f.conflict = $true
-                $f.owner    = "OpenRGB (other instance)"
+                $f.owner    = "OpenRGB (other instance)"; $f.key = "openrgb"
                 $f.detail   = "a second OpenRGB may own RGB hardware or host the legacy Studio/Effects producers -- report only, never killed"
             }
             $out += [pscustomobject]$f
         }
         elseif($compact.Contains("lconnect") -or $compact.Contains("lianli")) {
-            $f.conflict = $true; $f.owner = "L-Connect"
+            $f.conflict = $true; $f.owner = "L-Connect"; $f.key = "lianli"
             $f.detail   = "competing RGB owner (Lian Li)"
             $out += [pscustomobject]$f
         }
         elseif($name -eq "gcc.exe" -or $compact.Contains("gigabytecontrolcenter") -or
                $compact.Contains("rgbfusion") -or $compact.Contains("aorusengine")) {
-            $f.conflict = $true; $f.owner = "Gigabyte Control Center / RGB Fusion"
+            $f.conflict = $true; $f.owner = "Gigabyte Control Center / RGB Fusion"; $f.key = "gigabyte"
             $f.detail   = "competing RGB owner (motherboard/GPU)"
             $out += [pscustomobject]$f
         }
         elseif($name.Contains("synapse") -or
                ($name.Contains("razer") -and
                 ($name.Contains("central") -or $name.Contains("cortex")))) {
-            $f.conflict = $true; $f.owner = "Razer Synapse"
+            $f.conflict = $true; $f.owner = "Razer Synapse"; $f.key = "razer"
             $f.detail   = "competing RGB owner (Razer peripherals)"
             $out += [pscustomobject]$f
         }
         elseif($compact.Contains("lamparray")) {
-            $f.conflict = $true; $f.owner = "LampArray service (Dynamic Lighting)"
+            $f.conflict = $true; $f.owner = "LampArray service (Dynamic Lighting)"; $f.key = "lamparray"
             $f.detail   = "Windows Dynamic Lighting bridge -- repaints its devices (e.g. Logitech keyboards) over the backend"
             $out += [pscustomobject]$f
         }
         elseif($name.Contains("lghub") -or $name -eq "lcore.exe" -or
                $compact.Contains("logioptions")) {
-            $f.conflict = $true; $f.owner = "Logitech G Hub / Options"
+            $f.conflict = $true; $f.owner = "Logitech G Hub / Options"; $f.key = "logitech"
             $f.detail   = "competing RGB owner (Logitech peripherals)"
             $out += [pscustomobject]$f
         }
         elseif($name.Contains("icue") -or $name -eq "corsair.service.exe") {
-            $f.conflict = $true; $f.owner = "Corsair iCUE"
+            $f.conflict = $true; $f.owner = "Corsair iCUE"; $f.key = "corsair"
             $f.detail   = "competing RGB owner (Corsair)"
             $out += [pscustomobject]$f
         }
         elseif($name.Contains("signalrgb")) {
-            $f.conflict = $true; $f.owner = "SignalRGB"
+            $f.conflict = $true; $f.owner = "SignalRGB"; $f.key = "signalrgb"
             $f.detail   = "competing RGB owner"
             $out += [pscustomobject]$f
         }
         elseif($name -eq "fancontrol.exe") {
-            $f.owner  = "FanControl"
+            $f.owner  = "FanControl"; $f.key = "fancontrol"
             $f.detail = "cooling owner -- expected; must keep running untouched"
             $out += [pscustomobject]$f
         }
@@ -254,11 +257,22 @@ function Find-ListenerPid {
     return 0
 }
 
+# R-10: a CONFLICT line as shown to a person -- trimmed, without the
+# trailing machine tag " [key: <key>]".
+function Format-ConflictLine([string]$Line) {
+    return ($Line -replace '\s*\[key:[^\]]*\]\s*$', '').Trim()
+}
+
 function Write-Findings([object[]]$Findings) {
     foreach($f in $Findings) {
         $tag = if($f.conflict) { "CONFLICT" } else { "notice  " }
-        Write-Host ("  ownership {0}: {1} (pid {2}, {3}) -- {4}" -f `
-            $tag, $f.owner, $f.pid, $f.exe, $f.detail)
+        # R-10: the trailing key lets the UI's takeover dialog add the
+        # matching hint without re-classifying the label. A finding
+        # built elsewhere without a key prints no tag.
+        $key = if($f.PSObject.Properties['key']) { [string]$f.key } else { "" }
+        $tagKey = if($key) { " [key: $key]" } else { "" }
+        Write-Host ("  ownership {0}: {1} (pid {2}, {3}) -- {4}{5}" -f `
+            $tag, $f.owner, $f.pid, $f.exe, $f.detail, $tagKey)
     }
 }
 
@@ -472,6 +486,7 @@ function Invoke-ManagedStart {
             $findings += [pscustomobject][ordered]@{
                 conflict = $true
                 owner    = "foreign listener on :$ManagedPort"
+                key      = "foreign_listener"
                 exe      = $imgDesc
                 pid      = $backendPid
                 detail   = "the managed SDK port is held by a process that is not the pinned backend -- report only, never killed"

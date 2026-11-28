@@ -179,6 +179,7 @@ $procs = @(
     [pscustomobject]@{ pid=53;  exe="RazerSynapse.exe" },
     [pscustomobject]@{ pid=55;  exe="logi_lamparray_service.AMD64.exe" },
     [pscustomobject]@{ pid=54;  exe="Steam.exe" },          # unrelated -- invisible
+    [pscustomobject]@{ pid=56;  exe="lghub_updater.exe" },  # updater -- invisible (R-10)
     [pscustomobject]@{ pid=999; exe="LConnect.exe" }        # self pid -- skipped
 )
 $f = Get-OwnerFindings -Processes $procs -SelfPid 999 -BackendPid 7
@@ -227,6 +228,38 @@ Check ($cppTokens.Count -gt 0 -and $tokDiff.Count -eq 0) `
 foreach($d in $tokDiff) {
     Write-Host "    drift: $($d.SideIndicator) $($d.InputObject)"
 }
+# R-10: the stable machine key rides with every finding on both
+# sides -- the UI picks guidance by key, so a drift would show the
+# wrong steps.
+$cppKeys = @([regex]::Matches($cppBody, 'key\s*=\s*"([^"]+)"') |
+    ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+$psKeys  = @([regex]::Matches($psBody, 'key\s*=\s*"([^"]+)"') |
+    ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+$keyDiff = @(Compare-Object $cppKeys $psKeys)
+Check ($cppKeys.Count -gt 0 -and $keyDiff.Count -eq 0) `
+      "owner-key parity with OwnershipScan.cpp ($($cppKeys.Count) keys)"
+foreach($d in $keyDiff) {
+    Write-Host "    drift: $($d.SideIndicator) $($d.InputObject)"
+}
+Check (@($f | Where-Object { [string]::IsNullOrEmpty($_.key) }).Count -eq 0) `
+      "every script finding carries a key"
+Check (@($f | Where-Object { $_.exe -ieq "logi_lamparray_service.AMD64.exe" -and $_.key -eq "lamparray" }).Count -eq 1) `
+      "LampArray finding keyed lamparray"
+# R-10: the refusal output carries each finding's key, so the UI's
+# takeover dialog can add the matching hint without re-classifying.
+Check (@($f | Where-Object { $_.exe -ieq "lghub_updater.exe" }).Count -eq 0) `
+      "vendor updaters are not RGB writers"
+# R-10 review: the legacy GUI launcher shows these lines to the user;
+# the machine tag is stripped for display.
+Check ((Format-ConflictLine "  ownership CONFLICT: G (pid 1, g.exe) -- d [key: logitech]") -eq `
+       "ownership CONFLICT: G (pid 1, g.exe) -- d") "display line drops the key tag"
+Check ((Format-ConflictLine "  ownership CONFLICT: G (pid 1, g.exe) -- d") -eq `
+       "ownership CONFLICT: G (pid 1, g.exe) -- d") "an untagged line is only trimmed"
+$guiSrc = Get-Content (Join-Path $ScriptsDir "start-openrgb2-gui.ps1") -Raw
+Check ($guiSrc -match 'Format-ConflictLine') "GUI launcher formats conflict lines for display"
+$findingText = Write-Findings -Findings $f 6>&1 | Out-String -Width 4096
+Check ($findingText -match 'ownership CONFLICT: LampArray service .*\[key: lamparray\]') `
+      "CONFLICT lines end with the finding key"
 $ownDiff = @(Compare-Object $cppOwners $psOwners)
 Check ($ownDiff.Count -eq 0) "owner-label parity with OwnershipScan.cpp"
 foreach($d in $ownDiff) {

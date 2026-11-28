@@ -14,6 +14,8 @@
 // delivered wire events, not fixed tick counts).
 
 #include "EngineHost.h"
+#include "EngineService.h"
+#include "IpcProtocol.h"
 #include "OwnershipScan.h"
 #include "SdkWire.h"
 
@@ -21,6 +23,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -346,6 +349,29 @@ int main()
             }
             return false;
         };
+        /* R-10: the re-scan pushes an "ownership" event per
+           change — exactly one per scan that changed, none for
+           a scan that did not. */
+        std::mutex                   ev_mutex;
+        std::vector<nlohmann::json>  own_events;
+        CHECK(host.GetService() != nullptr);
+        host.GetService()->SetEventSink(
+            [&ev_mutex, &own_events](const ipc::IpcEvent& ev)
+            {
+                if(ev.kind == ipc::event_kind::kOwnership)
+                {
+                    std::lock_guard<std::mutex> g(ev_mutex);
+                    own_events.push_back(ev.data);
+                }
+            });
+        auto own_count = [&ev_mutex, &own_events]
+        {
+            std::lock_guard<std::mutex> g(ev_mutex);
+            return own_events.size();
+        };
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        host.PollOnce();                  /* unchanged scan */
+        CHECK(own_count() == 0);
         {
             std::lock_guard<std::mutex> g(scan_mutex);
             scan_procs.push_back(
@@ -360,6 +386,29 @@ int main()
                   .get<std::string>() == "on");
         CHECK(log_has("new CONFLICT: LampArray service"));
         CHECK(log_has("new CONFLICT: Windows Dynamic Lighting"));
+        /* R-10: the wire carries the engine's stable key — the
+           UI picks guidance by it, never by the label. */
+        {
+            const nlohmann::json oj = host.OwnershipJson();
+            std::vector<std::string> keys;
+            for(const nlohmann::json& c : oj["conflicts"])
+            {
+                keys.push_back(c.value("key", std::string()));
+            }
+            CHECK(std::find(keys.begin(), keys.end(), "lamparray")
+                  != keys.end());
+            CHECK(std::find(keys.begin(), keys.end(),
+                            "dynamic_lighting") != keys.end());
+        }
+        CHECK(own_count() == 1);   /* two writers, ONE scan */
+        {
+            std::lock_guard<std::mutex> g(ev_mutex);
+            CHECK(!own_events.empty() &&
+                  own_events.back()["conflicts"].size() == 2);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        host.PollOnce();                  /* same writers again */
+        CHECK(own_count() == 1);
 
         {
             std::lock_guard<std::mutex> g(scan_mutex);
@@ -371,6 +420,13 @@ int main()
         CHECK(!has_conflict("LampArray service (Dynamic Lighting)"));
         CHECK(!has_conflict("Windows Dynamic Lighting"));
         CHECK(log_has("cleared: LampArray service"));
+        CHECK(own_count() == 2);   /* the clear is one more */
+        {
+            std::lock_guard<std::mutex> g(ev_mutex);
+            CHECK(own_events.size() == 2 &&
+                  own_events.back()["conflicts"].empty());
+        }
+        host.GetService()->SetEventSink(nullptr);
     }
     sdk::OpenRgbClient* client = host.GetSdk();
     CHECK(client != nullptr);

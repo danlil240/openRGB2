@@ -92,6 +92,7 @@ const std::vector<std::string>& EventKinds()
         event_kind::kWorkspace,
         event_kind::kPreview,
         event_kind::kCalibration,
+        event_kind::kOwnership,
     };
     return kinds;
 }

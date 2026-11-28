@@ -35,6 +35,19 @@ Item {
     readonly property var logTail:
         (root.hasCtl ? diagCtl.eventLog : []).slice(-24).reverse()
 
+    /* R-10 review: one guide per writer KEY — G Hub runs several
+       matching processes. A keyless finding gets its own. */
+    function firstOfKey(i) {
+        const c = root.ownership.conflicts || [];
+        const k = (c[i] && c[i].key) || "";
+        if(k === "")
+            return true;
+        for(let j = 0; j < i; ++j)
+            if(((c[j] && c[j].key) || "") === k)
+                return false;
+        return true;
+    }
+
     function fmt(v, suffix) {
         return (v === undefined || v === null) ? "—" : v + (suffix || "");
     }
@@ -58,6 +71,12 @@ Item {
     }
     Component.onCompleted: syncDiagActive()
     onVisibleChanged: syncDiagActive()
+
+    /* R-10: the shell banner's "How to fix" — bring the
+       Ownership card (and its steps) into view. */
+    function showOwnership() {
+        flick.ensureVisible(ownershipCard);
+    }
     /* The target resolves through the page item — a bare
        `Window.window` here looks the attached property up
        on this (non-Item) Connections object, binds null,
@@ -70,6 +89,7 @@ Item {
     }
 
     PageFlickable {     /* scroll bar + focus-follow (audit Q-12) */
+        id: flick
         anchors.fill: parent
         contentHeight: col.implicitHeight
         clip: true
@@ -551,6 +571,8 @@ Item {
                contract (plan section 4): conflicts are
                surfaced with guidance, never kill buttons. */
             Card {
+                id: ownershipCard
+                objectName: "ownershipCard"
                 title: qsTr("OWNERSHIP SCAN")
                 width: parent.width - 2 * col.padding
                 Column {
@@ -602,12 +624,22 @@ Item {
                                 font.pixelSize: Theme.fontSizeSmall
                                 wrapMode: Text.WordWrap
                             }
+                            /* R-10: concrete steps for this writer,
+                               keyed by the engine's finding key. */
+                            OwnershipGuide {
+                                visible: root.firstOfKey(index)
+                                width: parent.width - Theme.spaceL
+                                x: Theme.spaceL
+                                key: modelData.key || ""
+                                owner: modelData.owner || ""
+                            }
                         }
                     }
                     Text {
+                        objectName: "ownershipReportOnlyNote"
                         visible: (root.ownership.conflictCount || 0) > 0
                         width: parent.width
-                        text: qsTr("Report-only — OpenRGB2 never kills or takes over a competing owner. Close the conflicting application (or move its RGB control off this hardware), then restart the engine.")
+                        text: qsTr("Report-only — OpenRGB2 never stops or changes another app. Turn the other app off with the steps above; OpenRGB2 re-applies your lights once it stops.")
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSizeSmall
                         wrapMode: Text.WordWrap

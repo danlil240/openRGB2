@@ -84,6 +84,12 @@ struct OwnerFinding
        backend itself, FanControl, the engine). */
     bool        conflict = false;
     std::string owner;      /* product label                */
+    /* R-10: stable machine key (dynamic_lighting, lamparray,
+       logitech, lianli, gigabyte, razer, corsair, signalrgb,
+       openrgb, fancontrol). The UI chooses guidance by key —
+       never by string-matching `owner`. Mirrored by
+       start-openrgb2.ps1 (T1 parity). */
+    std::string key;
     std::string exe;
     uint32_t    pid = 0;
     std::string detail;
