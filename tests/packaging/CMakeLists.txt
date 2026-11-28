@@ -56,4 +56,14 @@ if(WIN32)
     set_tests_properties(package_lifecycle_test PROPERTIES
         LABELS packaging
         TIMEOUT 300)
+
+    # Audit P-14: stage-release.ps1 -VerifyOnly hashes the staged
+    # tree against its manifest.json (changed / missing / unlisted).
+    add_test(NAME package_stage_verify_test
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/stage_release_verify_tests.ps1
+            -StageScript ${CMAKE_SOURCE_DIR}/packaging/windows/stage-release.ps1)
+    set_tests_properties(package_stage_verify_test PROPERTIES
+        LABELS packaging
+        TIMEOUT 120)
 endif()

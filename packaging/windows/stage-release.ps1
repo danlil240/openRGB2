@@ -720,6 +720,60 @@ if($forbidden.Count -gt 0) {
     Fail "package contains excluded components (effect plugins / WinRing0 / yuz.dll / debug DLLs / user state)"
 }
 
+# -VerifyOnly re-checks the tree against the manifest.json written when
+# it was staged (audit P-14: it used to check presence and exclusions
+# only, so a changed, missing or planted file still passed). Every
+# listed file must exist with its recorded SHA-256 and size, and every
+# file present must be listed -- except manifest.json itself and the
+# user state a run-in-place package writes (state\, profiles\local\;
+# executables and DLLs there are still reported).
+if($VerifyOnly) {
+    $vm = $null
+    try { $vm = Get-Content -Raw -LiteralPath (Join-Path $OutDir "manifest.json") | ConvertFrom-Json }
+    catch { $vm = $null }
+    if(-not $vm -or -not $vm.PSObject.Properties['files']) {
+        Fail "manifest.json is unreadable or lists no files"
+    }
+    $mismatch = @()
+    $listed   = @{}
+    $hashed   = 0
+    foreach($e in @($vm.files)) {
+        $rel = [string]$e.path
+        if(-not $rel -or [IO.Path]::IsPathRooted($rel) -or $rel.Contains(':') -or
+           $rel -match '(^|[\\/])\.{1,2}([\\/]|$)') {
+            $mismatch += "unsafe path: $rel"; continue
+        }
+        $rel = $rel -replace '\\','/'
+        $listed[$rel.ToLowerInvariant()] = $true
+        $full = Join-Path $OutDir ($rel -replace '/','\')
+        if(-not (Test-Path -LiteralPath $full -PathType Leaf)) {
+            $mismatch += "missing: $rel"; continue
+        }
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $full).Hash.ToLower()
+        $size = (Get-Item -LiteralPath $full).Length
+        $hashed++
+        if($hash -ne ([string]$e.sha256).ToLower() -or
+           ($e.PSObject.Properties['bytes'] -and [int64]$e.bytes -ne $size)) {
+            $mismatch += "changed: $rel"
+        }
+    }
+    foreach($f in @(Get-ChildItem -LiteralPath $OutDir -Recurse -File -Force)) {
+        $rel = ($f.FullName.Substring($OutDir.Length).TrimStart('\','/') -replace '\\','/')
+        if($rel -eq "manifest.json") { continue }
+        if(($rel -like "state/*" -or $rel -like "profiles/local/*") -and
+           $rel -notmatch '\.(dll|exe)$') { continue }
+        if(-not $listed.ContainsKey($rel.ToLowerInvariant())) {
+            $mismatch += "not in manifest: $rel"
+        }
+    }
+    if($mismatch.Count -gt 0) {
+        Write-Host "MANIFEST MISMATCH:" -ForegroundColor Red
+        $mismatch | Select-Object -First 25 | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+        Fail "$($mismatch.Count) file(s) do not match manifest.json"
+    }
+    Info "manifest check passed ($hashed files hashed)"
+}
+
 # Signature assert -- runs for both staging and -VerifyOnly: with -Sign
 # every staged executable must carry a Valid Authenticode signature.
 if($Sign) {
