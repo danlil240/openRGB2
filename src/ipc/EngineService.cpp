@@ -1265,6 +1265,11 @@ void EngineService::EmitCalibrationStatus()
     }
 }
 
+void EngineService::EmitOwnership()
+{
+    Emit(event_kind::kOwnership, OwnershipJson());
+}
+
 nlohmann::json EngineService::OwnershipJson() const
 {
     /* Task 4.7: no provider wired -> honest null (the IPC
@@ -1476,6 +1481,13 @@ bool EngineService::SnapshotEvent(const std::string& kind,
     if(kind == event_kind::kReactive)
     {
         out = ReactiveJson();
+        return true;
+    }
+    if(kind == event_kind::kOwnership)
+    {
+        /* R-10: a (re)subscribing UI gets the current report —
+           null when none is wired, never an empty "clean" one. */
+        out = OwnershipJson();
         return true;
     }
     if(kind == event_kind::kWorkspace)

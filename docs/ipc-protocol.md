@@ -364,9 +364,9 @@ surfaced, never killed or taken over from this surface):
 ```json
 { "scanned": true,
   "backend":  {"listening": true, "attached": true},
-  "conflicts": [ {"owner":"L-Connect","exe":"LConnect.exe",
+  "conflicts": [ {"owner":"L-Connect","key":"lianli","exe":"LConnect.exe",
                   "pid":1234,"detail":"competing RGB owner (Lian Li)"} ],
-  "notices":   [ {"owner":"FanControl","exe":"FanControl.exe",
+  "notices":   [ {"owner":"FanControl","key":"fancontrol","exe":"FanControl.exe",
                   "pid":4321,"detail":"cooling owner — expected"} ],
   "config":   {"checked": true, "findings": ["..."],
                "enabled_plugins": ["..."],
@@ -384,7 +384,14 @@ running). `config` is the managed-config sole-writer check:
 `findings`/`legacy_producers` carry the human-readable report
 including legacy Studio/Effects producer warnings on BOTH
 plugin-load paths (`<config>/plugins` and the backend exe
-dir's system `plugins` folder). There is deliberately no
+dir's system `plugins` folder). `key` (R-10) is the engine's
+stable machine key for the writer — `dynamic_lighting`,
+`lamparray`, `logitech`, `lianli`, `gigabyte`, `razer`,
+`corsair`, `signalrgb`, `openrgb`, `fancontrol` — so a client
+picks guidance by key and never re-classifies by `owner`; an
+unknown key gets generic guidance. Windows Dynamic Lighting is
+reported as a conflict with `key:"dynamic_lighting"`, `pid:0`
+and an empty `exe`. There is deliberately no
 verb to act on a finding — takeover is the operator's
 decision (plan section 4).
 
@@ -867,6 +874,7 @@ matches the corresponding pull body:
 | `playback` | PLAYBACK body | requested-mode or applied-status change |
 | `connection` | `sdk` object | SDK link state change |
 | `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |
+| `ownership` | OWNERSHIP body (§ STATE) | R-10: the periodic competitor re-scan (~5 s) found a writer appear or clear; SUBSCRIBE initial push carries the current report (`null` when none is wired) |
 | `frame_status` | `{aggregate, wireless, controllers:[{key,delivered,lane,wireless,suppressed,owned,pending,sequence,colors,stats}]}` | ≤ ~30 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses. `wireless` is the wireless lane's own `{key,stats,suppressed,pending,owned}` summary (`null` when no wireless lane exists — the `aggregate` mixes wired lanes and is never a wireless measure). Every enumerated controller produces a `controllers` row: a lane that never delivered reports `delivered:false` + zeroed `stats` + empty `colors` (`lane:false` when the pipeline has no lane for it) — a "bound but never delivered" controller is a visible row, not an absent one |
 | `workspace` | `get` body (initial snapshot AND published-state change) / job status record (terminal job event) | SUBSCRIBE initial push; every published-state change (adopt, commit, restore, resource install/remove) — so a session whose snapshot raced boot re-adoption re-converges; a workspace job reaching a terminal state |
 | `preview` | `{type:"status"\|"frame", ...}` (below) | ≤ 30 Hz, **session-targeted** — delivered only to the session that owns the preview, never broadcast |

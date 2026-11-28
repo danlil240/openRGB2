@@ -80,6 +80,9 @@ constexpr const char* kPreview     = "preview";       /* draft preview — TARGE
 constexpr const char* kCalibration = "calibration";   /* physical calibration —
                                                          TARGETED to the owning
                                                          session (Task 11) */
+constexpr const char* kOwnership   = "ownership";     /* R-10: competing-writer
+                                                         report changed — data =
+                                                         the OWNERSHIP body */
 }
 
 /* The set SnapshotEvent/SUBSCRIBE validation knows. */

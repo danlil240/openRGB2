@@ -487,6 +487,20 @@ int main()
                           nlohmann::json::object());
         CHECK(r.code == ErrCode::Ok);
         CHECK(r.body["ownership"].is_null());
+
+        /* R-10: the push path — EmitOwnership sends the same
+           body as the pull, and SUBSCRIBE's snapshot serves it */
+        std::vector<IpcEvent> ev6;
+        svc6.SetEventSink([&ev6](const IpcEvent& e)
+                          { ev6.push_back(e); });
+        svc6.EmitOwnership();
+        CHECK(ev6.size() == 1 &&
+              ev6[0].kind == event_kind::kOwnership &&
+              ev6[0].data.is_object() &&
+              ev6[0].data["conflicts"].is_array());
+        nlohmann::json osnap;
+        CHECK(svc6.SnapshotEvent(event_kind::kOwnership, osnap));
+        CHECK(osnap.is_object() && osnap.contains("scanned"));
     }
 
     /*---- layout verbs (Task 4.4) -------------------------------*/
@@ -1259,6 +1273,11 @@ int main()
         CHECK(svc.SnapshotEvent(event_kind::kConnection, snap));
         CHECK(snap.contains("state"));
         CHECK(!svc.SnapshotEvent("no-such-kind", snap));
+        /* R-10: "ownership" snapshots the wired report; this
+           service has no provider -> the honest null, still a
+           served kind (a reconnecting UI must get an answer). */
+        CHECK(svc.SnapshotEvent(event_kind::kOwnership, snap));
+        CHECK(snap.is_null());
     }
 
     /*---- Welcome carries current state ------------------------*/
