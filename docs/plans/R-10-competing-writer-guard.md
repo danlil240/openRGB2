@@ -1,6 +1,8 @@
 # R-10: Competing-writer guard — surface conflicts and guide the fix
 
-Status: proposed · Size: S · Source: audit 2026-11-28 R-10 (remaining part after B-1 and E-5)
+Status: implemented on `feat/r-10-competing-writer-guard` (2026-11-28; not merged) · Size: S · Source: audit 2026-11-28 R-10 (remaining part after B-1 and E-5)
+
+Implementation notes: vendor updaters (`*updater*`) are no longer reported as writers (found in review: `lghub_updater` runs as a service after G Hub is quit); "Open Services" starts `mmc.exe services.msc` directly so it keeps the UI's elevation; the startup dialog adds a short hint per key instead of only pointing at Devices, because the engine is not running when that dialog shows.
 
 ## Goal
 
