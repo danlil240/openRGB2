@@ -52,6 +52,8 @@
 #include "DeviceMapper.h"
 #include "Engine.h"
 #include "OrderlyShutdown.h"
+#include "OutputControl.h"
+#include "OutputPolicy.h"
 #include "OwnershipScan.h"
 #include "PlaybackController.h"
 #include "PowerLifecycle.h"
@@ -205,6 +207,13 @@ struct EngineHostOptions
        timer. */
     platform::ScopedTimerResolution::Api timer_api;
 
+    /* Audit E-12b idle rule: with no (or an empty) scene
+       applied for output_idle_after, the output policy's
+       on_idle runs once per idle entry. output_clock is the
+       idle rule's clock (empty = Clock::now; tests inject). */
+    std::chrono::milliseconds   output_idle_after{ 5000 };
+    std::function<TimePoint()>  output_clock;
+
     /* Log sink (default: stderr with the engine prefix). */
     std::function<void(const std::string&)> log;
 };
@@ -280,6 +289,7 @@ public:
     Engine&                  GetEngine()     { return engine_; }
     PlaybackController*      GetPlayback()   { return playback_.get(); }
     DeviceMapper&            GetMapper()     { return mapper_; }
+    OutputControl&           GetOutput()     { return output_; }
     DeliveryPipeline*        GetPipeline()   { return pipeline_.get(); }
     ipc::EngineService*      GetService()    { return service_.get(); }
     /* Task 2 (studio-import): the workspace commit surface —
@@ -303,6 +313,39 @@ public:
        before StopRequested() turns true. */
     uint32_t                 PendingBackendPid() const
     { return pending_backend_pid_.load(); }
+
+    /*---- Audit E-12b: exit/idle output policy ----------------*\
+    | Each bound controller's hardware mode as it was BEFORE the |
+    | upkeep's first SetCustomMode this run (first observation   |
+    | per key; memory only — a restart loses it).                |
+    \*---------------------------------------------------------*/
+    std::map<DeviceKey, PriorMode> PriorModes() const;
+
+    /* The engine API behind OUTPUT_COMMAND get_policy /
+       set_policy (verbs pending R-1): the caller validates a
+       wire body with OutputPolicyFromJson, then SetOutputPolicy
+       persists it in EngineState (profile save; false + err on
+       a failed save, state unchanged). Takes effect at the next
+       exit / idle entry. Thread-safe. */
+    OutputPolicy   GetOutputPolicy();
+    bool           SetOutputPolicy(const OutputPolicy& policy,
+                                   std::string& err);
+
+    /* What the "output-policy" shutdown step did, one entry
+       per controller ({key, policy, outcome, detail}); empty
+       before Stop() or when no controller was a target. */
+    std::vector<OutputPolicyOutcome> ExitPolicyReport() const;
+
+    /* The STATE "output_policy" body: OutputPolicyToJson plus
+       "idle" (OutputIdle()). */
+    nlohmann::json                   OutputPolicyJson();
+
+    /* Idle rule state: true from the idle entry (on_idle ran)
+       until the next applied scene; the report is that entry's
+       outcomes. */
+    bool                             OutputIdle() const
+    { return output_idle_.load(); }
+    std::vector<OutputPolicyOutcome> IdleReport() const;
 
     void Log(const std::string& line) const;
 
@@ -329,6 +372,10 @@ private:
     /* ReactiveInputs changed hook: emit the IPC event +
        persist the selection through the profile store. */
     void OnReactiveChanged();
+    /* R-1 OutputControl changed hook: worker hold, uploaded-
+       playback routing, persistence, the "output" event. */
+    void OnOutputChanged();
+    std::mutex output_apply_mutex_;
 
     /* Task 5.3: re-arms the SDK reconnect schedule after the
        client's bounded backoff latches to Disconnected. */
@@ -363,6 +410,10 @@ private:
 
     Engine                                   engine_;
     std::shared_ptr<DeliveryPipeline>        pipeline_;
+    /* R-1: runtime output overrides. Declared BEFORE mapper_ —
+       the mapper holds a pointer to its effective-scale atomic,
+       so it must outlive the mapper. */
+    OutputControl                            output_;
     DeviceMapper                             mapper_;
     std::shared_ptr<sdk::OpenRgbClient>      sdk_;
     std::unique_ptr<PlaybackController>      playback_;
@@ -443,6 +494,25 @@ private:
     bool                                     start_attempted_ = false;
     OrderlyShutdown::Result                  shutdown_result_;
     bool                                     stopped_ = false;
+
+    /* Audit E-12b: exit/idle output policy state. */
+    void RecordPriorMode(const DeviceKey& key);
+    OutputPolicyDeps                 BuildOutputPolicyDeps();
+    /* Connected controllers the policy applies to: bound by
+       the scene, or switched to Direct by us this run. */
+    std::vector<DeviceSnapshot>      OutputPolicyTargets();
+    void                             RunExitPolicy();
+    /* Owner loop: idle entry/exit (see output_idle_after). */
+    void                             PollIdle();
+    bool                                     idle_tracking_ = false;
+    TimePoint                                idle_since_{};
+    std::atomic<bool>                        output_idle_{ false };
+    std::vector<OutputPolicyOutcome>         idle_outcomes_;
+    void LogOutcomes(const char* phase,
+                     const std::vector<OutputPolicyOutcome>& out);
+    mutable std::mutex                       output_mutex_;
+    std::map<DeviceKey, PriorMode>           prior_modes_;
+    std::vector<OutputPolicyOutcome>         exit_outcomes_;
 };
 
 } /* namespace openrgb2 */

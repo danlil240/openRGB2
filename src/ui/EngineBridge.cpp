@@ -273,6 +273,9 @@ void EngineBridge::ApplyWelcome(const nlohmann::json& welcome)
        to hasWorkspace falls back to the legacy scene verbs when
        "studio_workspace_v1" is absent. */
     setHasWorkspace(wire_.HasCapability("studio_workspace_v1"));
+    /* R-1: no capability -> no output surface (the store is
+       cleared so a downgraded engine never shows stale state). */
+    setHasOutputControl(wire_.HasCapability("output_control_v1"));
     setConnectionState("connected");
     setRetryInMs(0);
     setLastError(QString());
@@ -313,6 +316,11 @@ void EngineBridge::ApplyWelcome(const nlohmann::json& welcome)
         {
             AdoptOwnership(
                 JsonToVariant(state["ownership"]).toMap());
+        }
+        if(has_output_control_ && state.contains("output") &&
+           state["output"].is_object())
+        {
+            AdoptOutput(JsonToVariant(state["output"]).toMap());
         }
         state_report_ = JsonToVariant(state).toMap();
         emit stateReportChanged();
@@ -420,6 +428,15 @@ void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
             AdoptOwnership(data_map);
         }
     }
+    else if(kind == ipc::event_kind::kOutput)
+    {
+        /* R-1: any session's change (and the SUBSCRIBE
+           snapshot); null = not wired, keep what we have. */
+        if(data.is_object() && has_output_control_)
+        {
+            AdoptOutput(data_map);
+        }
+    }
     else if(kind == ipc::event_kind::kWorkspace)
     {
         /* Initial snapshot = `get` metadata; terminal job
@@ -525,6 +542,15 @@ void EngineBridge::ApplyReply(uint32_t request_id, ipc::MsgType type,
             AdoptOwnership(
                 body_map.value(QStringLiteral("ownership")).toMap());
         }
+        if(has_output_control_ && body.contains("output") &&
+           body["output"].is_object())
+        {
+            AdoptOutput(
+                body_map.value(QStringLiteral("output")).toMap());
+        }
+        break;
+    case ipc::MsgType::Output:
+        AdoptOutput(body_map);
         break;
     case ipc::MsgType::Presets:
         SetIfChanged(this, presets_,
@@ -997,6 +1023,22 @@ int EngineBridge::reactiveCommand(const QString& verb,
     return Issue(ipc::MsgType::ReactiveCommand, b);
 }
 
+int EngineBridge::outputCommand(const QString& verb,
+                                const QVariantMap& args)
+{
+    if(!has_output_control_)
+    {
+        return 0;   /* unadvertised surface — never sent */
+    }
+    nlohmann::json b = VariantToJson(args);
+    if(!b.is_object())
+    {
+        b = nlohmann::json::object();
+    }
+    b["verb"] = verb.toStdString();
+    return Issue(ipc::MsgType::OutputCommand, b);
+}
+
 int EngineBridge::workspaceCommand(const QString& verb,
                                    const QVariantMap& args)
 {
@@ -1231,6 +1273,33 @@ QVariantMap EngineBridge::diagnostics() const     { return diagnostics_; }
 QVariantMap EngineBridge::stateReport() const     { return state_report_; }
 QVariantMap EngineBridge::reactive() const        { return reactive_; }
 QVariantMap EngineBridge::ownership() const       { return ownership_; }
+QVariantMap EngineBridge::output() const          { return output_; }
+bool        EngineBridge::hasOutputControl() const { return has_output_control_; }
+
+void EngineBridge::AdoptOutput(const QVariantMap& m)
+{
+    if(m.isEmpty() || m == output_)
+    {
+        return;
+    }
+    output_ = m;
+    emit outputChanged();
+}
+
+void EngineBridge::setHasOutputControl(bool h)
+{
+    if(has_output_control_ == h)
+    {
+        return;
+    }
+    has_output_control_ = h;
+    if(!h && !output_.isEmpty())
+    {
+        output_.clear();
+        emit outputChanged();
+    }
+    emit hasOutputControlChanged();
+}
 
 void EngineBridge::AdoptOwnership(const QVariantMap& m)
 {

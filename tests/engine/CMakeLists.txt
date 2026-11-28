@@ -17,6 +17,10 @@ engine_suite(scene_worker_test)
 engine_suite(delivery_pipeline_test)
 engine_suite(device_mapping_test)
 
+# R-1 — tray quick controls: the runtime output overrides (master,
+# blackout, hold, contributor arbitration, persistence types).
+engine_suite(output_control_test)
+
 # Task 3.6 — playback mode integration + cross-device sync.
 engine_suite(playback_mode_test)
 set_tests_properties(playback_mode_test PROPERTIES
@@ -29,6 +33,10 @@ engine_suite(shutdown_test)
 # Task 3.8 — profile store: atomicity, migration, offline
 # bindings, last-known-good, durable PlaybackMode, scene loader.
 engine_suite(profile_store_test)
+
+# Audit E-12b — exit/idle output policy: model, matching, the
+# JSON validator, and the per-key executor's decision table.
+engine_suite(output_policy_test)
 
 # Studio-import Task 2 — managed workspace store: immutable
 # generations, atomic active-generation marker, last-valid

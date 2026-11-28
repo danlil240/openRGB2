@@ -19,6 +19,8 @@
 #include "OwnershipScan.h"
 #include "SdkWire.h"
 
+#include "scene/SceneJson.h"
+
 #include "../sdk/fake_sdk_server.h"
 
 #include <nlohmann/json.hpp>
@@ -31,6 +33,7 @@
 #include <filesystem>
 #include <process.h>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -225,6 +228,292 @@ static void TestPartialStartTeardown(const std::filesystem::path& tmp)
     CHECK(saw_ipc);
     CHECK(saw_cal);
     CHECK(sd.all_within_bound);
+}
+
+/*---------------------------------------------------------*\
+|| E-12b fixture: one wired controller sitting in a hardware |
+|| effect ("Rainbow") before the engine switches it to       |
+|| Direct, and a scene bound to its one 8-LED zone.          |
+\*---------------------------------------------------------*/
+static sdk_test::FakeController RainbowWired()
+{
+    sdk_test::FakeController c;
+    c.type     = 2;
+    c.name     = "E12B RAINBOW BOARD";
+    c.vendor   = "GIGABYTE";
+    c.serial   = "MB-E12B-1";
+    c.location = "smbus:0-e12b";
+    sdk_test::FakeMode direct;
+    direct.name = "Direct";
+    sdk_test::FakeMode rainbow;
+    rainbow.name       = "Rainbow";
+    rainbow.speed      = 77;
+    rainbow.direction  = 1;
+    rainbow.colors_max = 1;
+    rainbow.colors     = { 0x00FF0000u };
+    c.modes       = { direct, rainbow };
+    c.active_mode = 1;                    /* hardware effect on */
+    c.zones       = { { "ARGB", 0, 8, 8, 8 } };
+    c.colors.assign(8, 0x00010101u);
+    return c;
+}
+
+static nlohmann::json RainbowSceneDoc()
+{
+    nlohmann::json doc = SceneDoc();
+    doc["name"]     = "e12b-scene";
+    doc["bindings"] = nlohmann::json::array({ {
+        { "id",              "b-rb"       },
+        { "controller_name", "E12B RAINBOW" },
+        { "zone_name",       "ARGB"       },
+        { "zone_leds",       8            },
+    } });
+    doc["objects"] = nlohmann::json::array({ {
+        { "id", "o-rb" }, { "kind", "device" },
+        { "binding", "b-rb" }, { "verified", true },
+        { "visible", true },
+        { "emitters", EmitterArray(0, 8) },
+    } });
+    return doc;
+}
+
+static EngineHostOptions E12bOptions(sdk_test::FakeSdkServer& server,
+                                     const std::filesystem::path& dir,
+                                     const char* tag)
+{
+    EngineHostOptions o;
+    o.sdk_enabled       = true;
+    o.transport_factory =
+        [&server]() -> std::unique_ptr<sdk::IStreamTransport>
+        { return std::make_unique<sdk_test::FakeStream>(server); };
+    o.ipc_enabled     = false;
+    o.power_monitor   = false;
+    o.scan_owners     = false;
+    o.reactive_inputs = false;
+    o.single_instance = true;
+    o.instance_name   = std::string("Local\\openrgb2-engine-e12b-") +
+                        tag + "-" + std::to_string(_getpid());
+    o.scene_restore   = false;
+    o.state_path      = (dir / (std::string(tag) + "-state.json"))
+                            .string();
+    o.log             = [](const std::string&) {};
+    return o;
+}
+
+static bool ApplyDoc(EngineHost& host, const nlohmann::json& j)
+{
+    auto doc = std::make_shared<studio::SceneDocument>();
+    std::vector<std::string> errs;
+    if(!studio::FromJson(j, *doc, &errs))
+    {
+        return false;
+    }
+    std::string err;
+    return host.GetService()->ApplySceneDocument(doc, err);
+}
+
+/* E-12b step 2: the upkeep records each controller's active
+   hardware mode BEFORE its first SetCustomMode — and only the
+   first observation per run counts. */
+static void TestPriorModeRecording(const std::filesystem::path& tmp)
+{
+    sdk_test::FakeSdkServer server;
+    server.controllers = { RainbowWired() };
+    EngineHost host(E12bOptions(server, tmp, "prior"));
+    std::string err;
+    CHECK(host.Start(err));
+    CHECK(host.PriorModes().empty());       /* nothing bound yet */
+    CHECK(ApplyDoc(host, RainbowSceneDoc()));
+    for(int i = 0; i < 20 &&
+        server.CountEvents(sdk::kPktSetCustomMode) == 0; ++i)
+    {
+        host.PollOnce();
+    }
+    CHECK(server.CountEvents(sdk::kPktSetCustomMode) >= 1);
+    std::map<DeviceKey, PriorMode> pm = host.PriorModes();
+    CHECK(pm.size() == 1);
+    if(pm.size() == 1)
+    {
+        const PriorMode& p = pm.begin()->second;
+        CHECK(pm.begin()->first.serial == "MB-E12B-1");
+        CHECK(p.name == "Rainbow");
+        CHECK(p.speed == 77);
+        CHECK(p.direction == 1);
+        CHECK(p.colors.size() == 1 && p.colors[0] == 0x00FF0000u);
+    }
+    /* A re-enumeration bumps the generation, so the upkeep
+       re-asserts Direct — the controller now REPORTS Direct,
+       but the first observation stands. */
+    const size_t custom_before =
+        server.CountEvents(sdk::kPktSetCustomMode);
+    CHECK(host.GetSdk()->Enumerate());
+    host.PollOnce();
+    CHECK(server.CountEvents(sdk::kPktSetCustomMode) > custom_before);
+    pm = host.PriorModes();
+    CHECK(pm.size() == 1 && pm.begin()->second.name == "Rainbow");
+    host.RequestStop();
+    host.Stop();
+}
+
+/* E-12b step 4: idle = no scene (or an empty one) applied for
+   output_idle_after; on_idle runs ONCE per idle entry through
+   the exit executor, the next applied scene clears it, and the
+   power gate defers it. Clock injected — no 5 s sleeps. */
+static bool LastFrameBlack(const sdk_test::FakeSdkServer& server,
+                           uint32_t dev)
+{
+    bool black = false, seen = false;
+    for(const sdk_test::ServerEvent& e : server.SnapshotEvents())
+    {
+        if(e.pkt_id != sdk::kPktUpdateLEDs || e.dev_id != dev ||
+           e.body.size() < 6)
+        {
+            continue;
+        }
+        uint16_t count = 0;
+        memcpy(&count, e.body.data() + 4, 2);
+        if(e.body.size() < 6u + 4u * count)
+        {
+            continue;
+        }
+        seen  = true;
+        black = count > 0;
+        for(uint16_t i = 0; i < count; ++i)
+        {
+            uint32_t c = 0;
+            memcpy(&c, e.body.data() + 6 + 4 * i, 4);
+            black = black && (c & 0x00FFFFFFu) == 0;
+        }
+    }
+    return seen && black;
+}
+
+static size_t CountRestores(const sdk_test::FakeSdkServer& server)
+{
+    size_t n = 0;
+    for(const sdk_test::ServerEvent& e : server.SnapshotEvents())
+    {
+        if(e.pkt_id == sdk::kPktUpdateMode && e.dev_id == 0 &&
+           e.body.size() >= 8)
+        {
+            int32_t idx = -1;
+            memcpy(&idx, e.body.data() + 4, 4);
+            n += idx == 1 ? 1 : 0;              /* "Rainbow" */
+        }
+    }
+    return n;
+}
+
+static void TestIdlePolicy(const std::filesystem::path& tmp)
+{
+    sdk_test::FakeSdkServer server;
+    server.controllers = { RainbowWired() };
+    std::atomic<int64_t> now_ms{ 1000000 };
+    EngineHostOptions o = E12bOptions(server, tmp, "idle");
+    const TimePoint base = Clock::now();
+    o.output_clock = [&now_ms, base]
+    { return base + std::chrono::milliseconds(now_ms.load()); };
+    EngineHost host(std::move(o));
+    std::string err;
+    CHECK(host.Start(err));
+
+    OutputPolicy p;
+    p.on_idle = OutputAction::Restore;
+    CHECK(host.SetOutputPolicy(p, err));
+
+    const nlohmann::json empty_doc = {
+        { "version", 2 }, { "name", "empty" },
+        { "objects", nlohmann::json::array() },
+    };
+    auto advance = [&](int64_t ms)
+    {
+        now_ms += ms;
+        host.PollOnce();
+    };
+
+    /* Boot with nothing applied, but nothing was switched to
+       Direct by us either: idle is entered with no target. */
+    advance(0);
+    advance(6000);
+    CHECK(host.OutputIdle());
+    CHECK(host.IdleReport().empty());
+    CHECK(server.CountEvents(sdk::kPktUpdateMode) == 0);
+
+    /* A scene clears idle; the upkeep records Rainbow. */
+    CHECK(ApplyDoc(host, RainbowSceneDoc()));
+    advance(0);
+    CHECK(!host.OutputIdle());
+    for(int i = 0; i < 20 &&
+        server.CountEvents(sdk::kPktSetCustomMode) == 0; ++i)
+    {
+        advance(10);
+    }
+    CHECK(server.CountEvents(sdk::kPktSetCustomMode) >= 1);
+    advance(60000);                      /* a scene is never idle */
+    CHECK(!host.OutputIdle());
+
+    /* Empty scene: idle only after the full 5 s. */
+    CHECK(ApplyDoc(host, empty_doc));
+    advance(0);
+    advance(4900);
+    CHECK(!host.OutputIdle());
+    CHECK(CountRestores(server) == 0);
+    advance(200);
+    CHECK(host.OutputIdle());
+    CHECK(CountRestores(server) == 1);
+    {
+        const std::vector<OutputPolicyOutcome> rep = host.IdleReport();
+        CHECK(rep.size() == 1);
+        CHECK(rep.size() == 1 && rep[0].outcome == "restored" &&
+              rep[0].detail == "Rainbow");
+    }
+    advance(10000);                       /* once per idle entry */
+    CHECK(CountRestores(server) == 1);
+
+    /* The next scene clears idle and re-asserts Direct (the
+       restore handed the device back to its hardware mode). */
+    const size_t custom_before =
+        server.CountEvents(sdk::kPktSetCustomMode);
+    CHECK(ApplyDoc(host, RainbowSceneDoc()));
+    advance(0);
+    advance(10);
+    CHECK(!host.OutputIdle());
+    CHECK(server.CountEvents(sdk::kPktSetCustomMode) > custom_before);
+    /* Wait for a live frame so the black below is provably the
+       idle write, not an initial state. */
+    for(int i = 0; i < 200 && LastFrameBlack(server, 0); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    /* Second idle entry, now black — deferred while the power
+       gate (display off) holds: display-off is not idle. */
+    p.on_idle = OutputAction::Black;
+    CHECK(host.SetOutputPolicy(p, err));
+    CHECK(ApplyDoc(host, empty_doc));
+    advance(0);
+    host.GetLifecycle()->PostEvent(PowerLifecycle::Event::DisplayOff);
+    advance(0);
+    CHECK(host.GetLifecycle()->OutputPaused());
+    advance(6000);
+    CHECK(!host.OutputIdle());
+    host.GetLifecycle()->PostEvent(PowerLifecycle::Event::DisplayOn);
+    for(int i = 0; i < 200 && !host.OutputIdle(); ++i)
+    {
+        /* the lifecycle's wake path runs on the real clock */
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        advance(100);
+    }
+    CHECK(host.OutputIdle());
+    {
+        const std::vector<OutputPolicyOutcome> rep = host.IdleReport();
+        CHECK(rep.size() == 1 && rep[0].outcome == "black");
+    }
+    CHECK(LastFrameBlack(server, 0));
+    CHECK(CountRestores(server) == 1);
+
+    host.RequestStop();
+    host.Stop();
 }
 
 int main()
@@ -554,12 +843,15 @@ int main()
            no apply can arrive any more. */
         "scene-snapshot",
         "scene-worker", "reactive-inputs",
+        /* E-12b: the exit output policy writes while the
+           lanes and the transport are still up. */
+        "output-policy",
         "delivery-pipeline", "sdk-transport",
     };
-    CHECK(sd.steps.size() == 10);
-    if(sd.steps.size() == 10)
+    CHECK(sd.steps.size() == 11);
+    if(sd.steps.size() == 11)
     {
-        for(size_t i = 0; i < 10; ++i)
+        for(size_t i = 0; i < 11; ++i)
         {
             CHECK(sd.steps[i].name == want_order[i]);
             CHECK(sd.steps[i].within);
@@ -633,9 +925,80 @@ int main()
         CHECK(host3.GetService()->Scene() == nullptr);
         host3.RequestStop();
         host3.Stop();
+
+        /* R-1: the tray's output control through the real host
+           wiring — master + blackout persist across a restart,
+           hold does not (a restart resumes). */
+        {
+            EngineHost host4(make_opts(
+                ("Local\\openrgb2-engine-e2e-test-4-" +
+                 std::to_string(_getpid())).c_str(), true));
+            CHECK(host4.Start(err));
+            ipc::EngineService* svc = host4.GetService();
+            CHECK(svc != nullptr);
+            if(svc)
+            {
+                using ipc::MsgType;
+                ipc::IpcReply r = svc->Dispatch(MsgType::OutputCommand,
+                    nlohmann::json::object({{ "verb", "set_master" },
+                                            { "value", 0.4 }}));
+                CHECK(r.code == ipc::ErrCode::Ok);
+                r = svc->Dispatch(MsgType::OutputCommand,
+                    nlohmann::json::object({{ "verb", "set_blackout" },
+                                            { "on", true }}));
+                CHECK(r.code == ipc::ErrCode::Ok);
+                r = svc->Dispatch(MsgType::OutputCommand,
+                    nlohmann::json::object({{ "verb", "set_hold" },
+                                            { "on", true }}));
+                CHECK(r.code == ipc::ErrCode::Ok);
+                CHECK(host4.GetEngine().Worker().Held());
+                CHECK(host4.GetOutput().EffectiveScale() == 0.0f);
+                /* E-12b x R-1: the production wiring of set_policy
+                   reaches EngineHost::SetOutputPolicy */
+                r = svc->Dispatch(MsgType::OutputCommand,
+                    nlohmann::json::object({{ "verb", "set_policy" },
+                                            { "on_idle", "black" }}));
+                CHECK(r.code == ipc::ErrCode::Ok);
+                CHECK(host4.GetOutputPolicy().on_idle ==
+                      OutputAction::Black);
+                CHECK(host4.GetOutputPolicy().on_exit ==
+                      OutputAction::Hold);
+                /* back to the default so later restarts in this
+                   suite see hold/hold */
+                r = svc->Dispatch(MsgType::OutputCommand,
+                    nlohmann::json::object({{ "verb", "set_policy" }}));
+                CHECK(r.code == ipc::ErrCode::Ok);
+            }
+            host4.RequestStop();
+            host4.Stop();
+        }
+        {
+            EngineHost host5(make_opts(
+                ("Local\\openrgb2-engine-e2e-test-5-" +
+                 std::to_string(_getpid())).c_str(), true));
+            CHECK(host5.Start(err));
+            const OutputState os = host5.GetOutput().State();
+            CHECK(os.master == 0.4f);
+            CHECK(os.blackout);
+            CHECK(!os.hold);
+            CHECK(!host5.GetEngine().Worker().Held());
+            /* Releasing Off restores the persisted master. */
+            ipc::EngineService* svc = host5.GetService();
+            if(svc)
+            {
+                svc->Dispatch(ipc::MsgType::OutputCommand,
+                    nlohmann::json::object({{ "verb", "set_blackout" },
+                                            { "on", false }}));
+            }
+            CHECK(host5.GetOutput().EffectiveScale() == 0.4f);
+            host5.RequestStop();
+            host5.Stop();
+        }
     }
 
     TestPartialStartTeardown(tmp);
+    TestPriorModeRecording(tmp);
+    TestIdlePolicy(tmp);
 
     std::printf("%d checks, %d failures\n", checks, failures);
     {

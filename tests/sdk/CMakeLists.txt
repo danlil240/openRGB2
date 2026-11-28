@@ -23,3 +23,11 @@ endfunction()
 sdk_suite(sdk_wire_test)
 sdk_suite(sdk_client_test)
 sdk_suite(sdk_reconnect_test)
+
+# Audit P-13: the REAL TcpSocket over a 127.0.0.1:0 listener (still
+# offline -- loopback only). Exits 77 when the host refuses the
+# loopback bind/listen, which CTest reports as skipped.
+sdk_suite(sdk_tcp_socket_test)
+set_tests_properties(sdk_tcp_socket_test PROPERTIES
+    SKIP_RETURN_CODE 77
+    TIMEOUT 60)

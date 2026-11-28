@@ -17,9 +17,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # longer puts MSVC's default /W3 into CMAKE_<LANG>_FLAGS, so without this the
 # whole tree builds at the compiler default /W1. Warnings stay warnings (no
 # /WX). C/C++ only -- the RC compiler does not take /W3.
-if(MSVC)
-    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/W3>)
-endif()
+# cmake/OpenRGB2BuildFlags.cmake adds that /W3 plus the opt-in /W4
+# (OPENRGB2_WARNINGS_W4) and AddressSanitizer (OPENRGB2_ASAN)
+# configurations; CMakePresets.json names them `default`, `w4`, `asan`.
+include(${CMAKE_SOURCE_DIR}/cmake/OpenRGB2BuildFlags.cmake)
 
 # Qt 6.8.3 / MSVC 2022 is the pinned toolkit for the UI process
 # (openrgb2-ui + the OpenRGB2.UI QML module + the `ui` CTest suites). The
@@ -98,3 +99,9 @@ add_subdirectory(tools/bench)
 
 # Task 3.9 verification driver (IPC client + SDK save/restore)
 add_subdirectory(tools/engine_ctl)
+
+# Every directory above is first-party: opt its compiled targets into
+# the /W4 configuration (no-op unless OPENRGB2_WARNINGS_W4), and give
+# every test the ASan runtime on PATH (no-op unless OPENRGB2_ASAN).
+openrgb2_warnings_for_dirs(${CMAKE_SOURCE_DIR})
+openrgb2_asan_test_env(${CMAKE_SOURCE_DIR})

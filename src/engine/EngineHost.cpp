@@ -976,6 +976,28 @@ bool EngineHost::Start(std::string& err)
         }
     }
 
+    /*---- R-1 runtime output control ----------------------------*\
+    || master + blackout come back from the profile (hold never   ||
+    || does — a restart resumes). Restored BEFORE the startup     ||
+    || scene applies, so the first frame is already scaled and a  ||
+    || restored Off reaches an uploaded loop's re-apply           ||
+    || (PlaybackController::OnSceneApplied keeps the override).   ||
+    || Every later change runs OnOutputChanged: worker hold,      ||
+    || playback routing, persistence, the "output" event.         ||
+    \*---------------------------------------------------------*/
+    if(engine_state_.output)
+    {
+        output_.Restore(*engine_state_.output);
+        const OutputState os = output_.State();
+        Log("restored output control: master " +
+            std::to_string(int(os.master * 100.0f + 0.5f)) + "%" +
+            (os.blackout ? ", off" : "") + " from " +
+            opts_.state_path);
+    }
+    playback_->SetUserOverride(false, output_.State().blackout);
+    output_.SetChanged(
+        [this](const OutputState&) { OnOutputChanged(); });
+
     /*---- Task 4.6 reactive inputs ----------------------------*\
     || Audio / screen / key capture, Qt-free ports of the        ||
     || preserved plugin's inputs. The manager itself is cheap:   ||
@@ -1091,6 +1113,11 @@ bool EngineHost::Start(std::string& err)
        empty); the next tick evaluates normally. */
     engine_.Worker().SetEvaluateGate(
         [this]() { return playback_->PlaybackOwnsWired(); });
+    /* R-1: the runtime master scale — the mapper multiplies the
+       arbitrated OutputControl scale into every live write, so a
+       tray brightness/Off change lands on the next tick without
+       a document edit (uploaded loops are not scaled). */
+    mapper_.SetOutputScaleSource(&output_.EffectiveScaleSource());
     engine_.Worker().SetFrameCallback(
         [this](const EvaluatedFrame& eval)
         {
@@ -1200,6 +1227,9 @@ bool EngineHost::Start(std::string& err)
            legal; the service then reports available=false
            honestly rather than fabricating toggles. */
         ipc_deps.reactive = reactive_.get();
+        /* R-1: OUTPUT_COMMAND + the "output" event + the
+           output_control_v1 capability. */
+        ipc_deps.output = &output_;
         /* Task 4.4 layout verbs: identify and the set_binding
            create path resolve against live topology — the
            same source the mapper syncs from. */
@@ -1237,6 +1267,13 @@ bool EngineHost::Start(std::string& err)
            listeners) makes the provider race-free. */
         ipc_deps.ownership =
             [this] { return OwnershipJson(); };
+        /* Audit E-12b: the exit/idle output policy in STATE and
+           the QUIT reply's exit_policy. */
+        ipc_deps.output_policy =
+            [this] { return OutputPolicyJson(); };
+        ipc_deps.set_output_policy =
+            [this](const OutputPolicy& p, std::string& e)
+            { return SetOutputPolicy(p, e); };
         /* Task 3.8 offline bindings: a persisted resolved
            identity completes name-only scene bindings before
            apply — the same binding id keeps pointing at the
@@ -1527,6 +1564,67 @@ bool EngineHost::ApplyStartupScene(std::string& err)
 /*---------------------------------------------------------*\
 || Owner loop                                               ||
 \*---------------------------------------------------------*/
+/* R-1 OutputControl change hook. Runs on the writing thread
+   (an IPC session for OUTPUT_COMMAND); serialized and always
+   applying the CURRENT state, so concurrent writers converge on
+   the latest value whatever order their hooks run in. The
+   mapper reads the scale atomic directly — nothing to do here
+   for brightness/Off on live lanes. */
+void EngineHost::OnOutputChanged()
+{
+    std::lock_guard<std::mutex> g(output_apply_mutex_);
+    const OutputState s = output_.State();
+
+    /* Live: freeze/resume the scene clock. A release drops the
+       reactive events queued across the hold — they were
+       stamped on the pre-shift epoch. */
+    if(engine_.Worker().SetHold(s.hold) && !s.hold && reactive_)
+    {
+        reactive_->Bus()->ClearEvents();
+    }
+    /* Uploaded loops: hold -> Paused, Off -> Stopped (they are
+       never scaled by the master). */
+    if(playback_)
+    {
+        const PlaybackController::Result r =
+            playback_->SetUserOverride(s.hold, s.blackout);
+        if(!r.accepted)
+        {
+            Log("output control: uploaded playback did not take "
+                "the override (" + r.reason + ")" +
+                (r.reason.find("in progress") != std::string::npos
+                     ? " — retrying on the next maintenance tick"
+                     : ""));
+        }
+    }
+
+    /* Persist master + blackout only when they moved (a hold
+       toggle never rewrites the profile, and a fresh profile
+       gets no member until something non-default is set). */
+    if(profile_)
+    {
+        const PersistedOutput p = output_.Persisted();
+        std::lock_guard<std::mutex> sg(state_mutex_);
+        const bool changed = engine_state_.output
+                                 ? *engine_state_.output != p
+                                 : p != PersistedOutput{};
+        if(changed)
+        {
+            engine_state_.output = p;
+            std::string serr;
+            if(!profile_->Save(engine_state_, serr))
+            {
+                Log("profile save failed: " + serr);
+            }
+        }
+    }
+
+    if(service_)
+    {
+        service_->EmitOutput();
+    }
+}
+
 /* Task 4.6 reactive-input change hook: the manager's
    `changed` dep — emits the IPC event and persists the
    selection. Runs on whichever thread applied the change
@@ -1737,6 +1835,10 @@ void EngineHost::PollOnce()
             uint64_t& done = custom_mode_done_[key];
             if(done != snap_it->topology_generation)
             {
+                /* E-12b: remember the hardware mode we are
+                   about to replace (first observation only) —
+                   the exit/idle "restore" policy returns to it. */
+                RecordPriorMode(key);
                 if(sdk_->SetCustomMode(key))
                 {
                     done = snap_it->topology_generation;
@@ -1744,6 +1846,283 @@ void EngineHost::PollOnce()
             }
         }
     }
+
+    /* Audit E-12b: idle entry/exit (on_idle). */
+    PollIdle();
+}
+
+/*---------------------------------------------------------*\
+|| Audit E-12b: exit/idle output policy                      ||
+\*---------------------------------------------------------*/
+void EngineHost::RecordPriorMode(const DeviceKey& key)
+{
+    {
+        std::lock_guard<std::mutex> g(output_mutex_);
+        if(prior_modes_.count(key) != 0)
+        {
+            return;                  /* first observation wins */
+        }
+    }
+    int32_t      index = -1;
+    sdk::SdkMode mode;
+    if(!sdk_ || !sdk_->ActiveMode(key, index, &mode) ||
+       mode.name.empty())
+    {
+        return;                      /* try again next upkeep  */
+    }
+    PriorMode pm;
+    pm.name      = mode.name;
+    pm.speed     = mode.speed;
+    pm.direction = mode.direction;
+    pm.colors    = mode.colors;
+    {
+        std::lock_guard<std::mutex> g(output_mutex_);
+        prior_modes_.emplace(key, std::move(pm));
+    }
+    Log("output policy: " + key.device + " was in mode '" +
+        mode.name + "' before Direct");
+}
+
+std::map<DeviceKey, PriorMode> EngineHost::PriorModes() const
+{
+    std::lock_guard<std::mutex> g(output_mutex_);
+    return prior_modes_;
+}
+
+OutputPolicy EngineHost::GetOutputPolicy()
+{
+    std::lock_guard<std::mutex> g(state_mutex_);
+    return engine_state_.output_policy;
+}
+
+bool EngineHost::SetOutputPolicy(const OutputPolicy& policy,
+                                 std::string& err)
+{
+    std::lock_guard<std::mutex> g(state_mutex_);
+    if(engine_state_.output_policy == policy)
+    {
+        return true;
+    }
+    EngineState next   = engine_state_;
+    next.output_policy = policy;
+    if(profile_ && !profile_->Save(next, err))
+    {
+        return false;                  /* state stays as it was */
+    }
+    engine_state_ = std::move(next);
+    Log(std::string("output policy set: on_exit=") +
+        OutputActionName(policy.on_exit) + " on_idle=" +
+        OutputActionName(policy.on_idle) + " overrides=" +
+        std::to_string(policy.per_controller.size()));
+    return true;
+}
+
+std::vector<OutputPolicyOutcome> EngineHost::ExitPolicyReport() const
+{
+    std::lock_guard<std::mutex> g(output_mutex_);
+    return exit_outcomes_;
+}
+
+std::vector<DeviceSnapshot> EngineHost::OutputPolicyTargets()
+{
+    std::vector<DeviceSnapshot> out;
+    if(!sdk_)
+    {
+        return out;
+    }
+    const std::vector<DeviceKey> bound = mapper_.BoundControllers();
+    const std::map<DeviceKey, PriorMode> touched = PriorModes();
+    for(DeviceSnapshot& s : sdk_->Snapshots())
+    {
+        if(s.connection != ConnectionState::Connected)
+        {
+            continue;
+        }
+        if(std::find(bound.begin(), bound.end(), s.key) != bound.end() ||
+           touched.count(s.key) != 0)
+        {
+            out.push_back(std::move(s));
+        }
+    }
+    return out;
+}
+
+OutputPolicyDeps EngineHost::BuildOutputPolicyDeps()
+{
+    OutputPolicyDeps d;
+    d.output_paused = [this]
+    { return lifecycle_ && lifecycle_->OutputPaused(); };
+    d.calibration_owns = [this](const DeviceKey& k)
+    { return calibration_ && calibration_->OwnsGroup(k); };
+    d.playback_owns = [this](const DeviceKey& k)
+    { return playback_ && playback_->OwnsGroup(k); };
+    /* The existing owner write: playback's stop-black. The
+       power-control entry point is used so the per-scene
+       persisted selection is NOT rewritten to "stopped" — the
+       next start replays the user's choice. */
+    d.playback_stop_black = [this](std::string& err)
+    {
+        if(!playback_)
+        {
+            err = "no playback controller";
+            return false;
+        }
+        const PlaybackController::Result r =
+            playback_->RequestPowerControl(PlaybackControl::Stopped);
+        if(!r.accepted)
+        {
+            err = r.reason;
+        }
+        return r.accepted;
+    };
+    d.submit_black = [this](const DeviceSnapshot& s, std::string& err)
+    {
+        RgbFrame f;
+        f.controller          = s.key;
+        f.topology_generation = s.topology_generation;
+        f.sample_time         = Clock::now();
+        f.synthetic           = true;
+        f.colors.assign(s.LedCount(), RgbColor{ 0, 0, 0 });
+        const SubmitResult r = pipeline_->SubmitReliable(f);
+        if(r.status == SubmitStatus::Rejected)
+        {
+            err = r.reason;
+            return false;
+        }
+        return true;
+    };
+    d.wait_idle = [this](const DeviceKey& k, Clock::duration t)
+    { return pipeline_->WaitIdle(k, t); };
+    d.select_mode = [this](const DeviceKey& k, const PriorMode& m,
+                           std::string& err)
+    {
+        sdk::ModePatch patch;
+        patch.has_speed     = true;
+        patch.speed         = m.speed;
+        patch.has_direction = true;
+        patch.direction     = m.direction;
+        patch.has_colors    = !m.colors.empty();
+        patch.colors        = m.colors;
+        if(!sdk_->SelectMode(k, m.name, patch))
+        {
+            err = sdk_->LastError();
+            return false;
+        }
+        return true;
+    };
+    d.drop_pending = [this](const DeviceKey& k)
+    { pipeline_->DropPending(k); };
+    return d;
+}
+
+void EngineHost::LogOutcomes(const char* phase,
+                             const std::vector<OutputPolicyOutcome>& out)
+{
+    for(const OutputPolicyOutcome& o : out)
+    {
+        Log(std::string("output policy (") + phase + "): " +
+            o.key.device + " " + OutputActionName(o.policy) + " -> " +
+            o.outcome + (o.detail.empty() ? "" : " (" + o.detail + ")"));
+    }
+}
+
+/* The "output-policy" shutdown step: frame production is
+   stopped (scene worker + reactive inputs), the lanes and the
+   transport are still up. */
+void EngineHost::RunExitPolicy()
+{
+    if(!sdk_ || !pipeline_)
+    {
+        return;
+    }
+    const OutputPolicy policy = GetOutputPolicy();
+    const std::vector<DeviceSnapshot> targets = OutputPolicyTargets();
+    std::vector<OutputPolicyOutcome> out;
+    {
+        std::map<DeviceKey, PriorMode> priors = PriorModes();
+        out = RunOutputPolicy(targets, OutputPhase::Exit, policy,
+                              priors, BuildOutputPolicyDeps());
+    }
+    LogOutcomes("exit", out);
+    std::lock_guard<std::mutex> g(output_mutex_);
+    exit_outcomes_ = std::move(out);
+}
+
+nlohmann::json EngineHost::OutputPolicyJson()
+{
+    nlohmann::json j = OutputPolicyToJson(GetOutputPolicy());
+    j["idle"] = OutputIdle();
+    return j;
+}
+
+std::vector<OutputPolicyOutcome> EngineHost::IdleReport() const
+{
+    std::lock_guard<std::mutex> g(output_mutex_);
+    return idle_outcomes_;
+}
+
+/* Idle = no scene, or one with no objects, applied for
+   output_idle_after (boot with nothing to adopt, or a scene
+   replaced by an empty one — there is no workspace close
+   path). on_idle runs once per idle entry; the next applied
+   scene ends it. Display-off / suspend is not idle: under the
+   power gate the entry waits (PowerLifecycle owns that). */
+void EngineHost::PollIdle()
+{
+    if(!service_)
+    {
+        return;
+    }
+    const TimePoint now = opts_.output_clock ? opts_.output_clock()
+                                             : Clock::now();
+    const std::shared_ptr<const studio::SceneDocument> doc =
+        service_->Scene();
+    if(doc && !doc->objects.empty())
+    {
+        idle_tracking_ = false;
+        if(output_idle_.exchange(false))
+        {
+            Log("output policy: idle ended (scene applied)");
+        }
+        return;
+    }
+    if(!idle_tracking_)
+    {
+        idle_tracking_ = true;
+        idle_since_    = now;
+        return;
+    }
+    if(output_idle_.load() || now - idle_since_ < opts_.output_idle_after)
+    {
+        return;
+    }
+    if(lifecycle_ && lifecycle_->OutputPaused())
+    {
+        return;                        /* deferred, not consumed */
+    }
+    output_idle_.store(true);
+    std::vector<OutputPolicyOutcome> out;
+    if(sdk_ && pipeline_)
+    {
+        const OutputPolicy policy = GetOutputPolicy();
+        out = RunOutputPolicy(OutputPolicyTargets(), OutputPhase::Idle,
+                              policy, PriorModes(),
+                              BuildOutputPolicyDeps());
+    }
+    for(const OutputPolicyOutcome& o : out)
+    {
+        /* A restored device left Direct: the upkeep must
+           re-assert it when the next scene binds it. */
+        if(o.outcome == "restored")
+        {
+            custom_mode_done_.erase(o.key);
+        }
+    }
+    Log("output policy: idle entered (" + std::to_string(out.size()) +
+        " controller(s))");
+    LogOutcomes("idle", out);
+    std::lock_guard<std::mutex> g(output_mutex_);
+    idle_outcomes_ = std::move(out);
 }
 
 /* Zone-size reconciliation. The scene document's declared
@@ -2001,6 +2380,16 @@ const OrderlyShutdown::Result& EngineHost::Stop()
     shutdown.Add("reactive-inputs",
                  std::chrono::milliseconds(3000),
                  [this] { if(reactive_) reactive_->Shutdown(); });
+    /* Audit E-12b: the exit output policy (hold / black /
+       restore per controller). Frame production is stopped;
+       the lanes and the transport are still up, so a black
+       frame rides the reliable lane slot and a restore goes
+       to the transport once its lane is idle. Skipped under
+       the power gate. 500 ms per lane wait, lanes draining in
+       parallel. */
+    shutdown.Add("output-policy",
+                 std::chrono::milliseconds(2000),
+                 [this] { RunExitPolicy(); });
     /* One in-flight transport send per lane plus join time —
        bounded by the transport's own send timeout (4 s
        default); lanes join sequentially. */

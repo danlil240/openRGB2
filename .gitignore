@@ -5,6 +5,7 @@ out/
 __pycache__/
 
 # IDE / tooling
+CMakeUserPresets.json
 .vs/
 .vscode/
 .idea/

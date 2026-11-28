@@ -593,6 +593,44 @@ static void TestRuntimeContinuousStreamDefersDiscovery()
           "continuous stream: discovery resumes after stream goes quiet");
 }
 
+/* P-12 step 1: once a group has gone unseen past max_discovery_defer_ms
+   (but not yet past lost_ms), the freshness bound last_seen + defer lies
+   in the past. Without a floor, every live frame (SetDesired) made a poll
+   due, so each frame paid a full blocking discovery read. A ~60 fps stream
+   to an unseen group must still poll only at the poll_ms cadence. */
+static void TestRuntimeUnseenGroupPollsAtPollCadence()
+{
+    FakeClock clk; FakeLink link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    link.poll_fn = [] { return MakeDiscovery(); };
+    rt.Tick();
+    CHECK(rt.State() == WirelessState::Holding, "unseen cadence: target validated");
+
+    /* the group vanishes; 2 s later it is still a (stale) sighting */
+    link.poll_fn = [] { return std::vector<uint8_t>{}; };
+    RunFor(rt, clk, 2000);
+    CHECK(rt.Latest() != nullptr && rt.State() != WirelessState::Lost,
+          "unseen cadence: 2 s unseen is still inside lost_ms");
+
+    const WirelessRuntimeConfig cfg;
+    const int polls_before = link.poll_calls;
+    for(uint64_t t = 0; t < 1000; t += 16)
+    {
+        clk.Advance(16);
+        rt.SetDesired(std::make_shared<RgbUpload>(MakeUpload((uint8_t)t)));
+        rt.Tick();
+    }
+    const int polls = link.poll_calls - polls_before;
+    const int bound = (int)((1000 + cfg.poll_ms - 1) / cfg.poll_ms) + 1;
+    CHECK(polls <= bound, "unseen cadence: live frames do not poll every frame");
+    CHECK(polls >= 2, "unseen cadence: an unseen group is still polled");
+    if(polls > bound)
+    {
+        printf("  unseen cadence: %d polls in 1 s (bound %d)\n", polls, bound);
+    }
+}
+
 /*-------------------------------------------------------------*\
 | 11. Channel/slot refresh from latest sighting                 |
 \*-------------------------------------------------------------*/
@@ -1663,6 +1701,7 @@ int main()
     TestRuntimeNewestWins();
     TestRuntimeStreamsBetweenPolls();
     TestRuntimeContinuousStreamDefersDiscovery();
+    TestRuntimeUnseenGroupPollsAtPollCadence();
     TestRuntimeChannelRefresh();
     TestRuntimeLostRecovery();
     TestService();

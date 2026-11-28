@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -337,6 +338,32 @@ nlohmann::json EngineStateToJson(const EngineState& state)
     /* The last managed workspace id — the engine re-adopts it
        at start (adoption only, never a scene re-apply). */
     j["active_workspace"] = state.active_workspace;
+
+    /* R-1: the runtime output control's persisted half — only
+       written once something set it (an older file stays
+       byte-for-byte free of the member). Unknown members a
+       newer build put in `output` are written back first; the
+       known fields win on collision. */
+    if(state.output)
+    {
+        nlohmann::json out = nlohmann::json::object();
+        if(state.output_extensions.is_object())
+        {
+            for(auto it = state.output_extensions.begin();
+                it != state.output_extensions.end(); ++it)
+            {
+                out[it.key()] = it.value();
+            }
+        }
+        out["master"] =
+            std::round(double(state.output->master) * 10000.0) /
+            10000.0;
+        out["blackout"] = state.output->blackout;
+        j["output"] = std::move(out);
+    }
+
+    /* E-12b exit/idle output policy (OutputPolicy.h shape). */
+    j["output_policy"] = OutputPolicyToJson(state.output_policy);
     return j;
 }
 
@@ -783,6 +810,76 @@ bool EngineStateFromJson(const nlohmann::json& j,
         }
     }
 
+    /*---- runtime output control (R-1) ----------------------*\
+    || {master: 0..1, blackout: bool}. Read leniently in every ||
+    || schema: a malformed member is dropped with a warning —  ||
+    || failing the document would cost the bindings to LKG     ||
+    || recovery over a tray brightness. Out-of-range masters   ||
+    || clamp; unknown members ride output_extensions.          ||
+    \*---------------------------------------------------------*/
+    const auto oit = j.find("output");
+    if(oit != j.end() && !oit->is_null())
+    {
+        const nlohmann::json& o = *oit;
+        const auto mit = o.is_object() ? o.find("master") : o.end();
+        const auto bit = o.is_object() ? o.find("blackout") : o.end();
+        const bool master_ok =
+            o.is_object() &&
+            (mit == o.end() || (mit->is_number() &&
+                                std::isfinite(mit->get<double>())));
+        const bool blackout_ok =
+            o.is_object() && (bit == o.end() || bit->is_boolean());
+        if(master_ok && blackout_ok)
+        {
+            PersistedOutput po;
+            if(mit != o.end())
+            {
+                const double m = mit->get<double>();
+                po.master = float(m < 0.0 ? 0.0 : (m > 1.0 ? 1.0 : m));
+            }
+            if(bit != o.end())
+            {
+                po.blackout = bit->get<bool>();
+            }
+            candidate.output = po;
+            for(auto it = o.begin(); it != o.end(); ++it)
+            {
+                if(it.key() != "master" && it.key() != "blackout")
+                {
+                    candidate.output_extensions[it.key()] = it.value();
+                }
+            }
+        }
+        else
+        {
+            warn.push_back("output: expected {master:number, "
+                           "blackout:bool} — ignored");
+        }
+    }
+
+    /*---- E-12b exit/idle output policy --------------------*\
+    || A real field, validated by the same OutputPolicyFrom-  ||
+    || Json the set_policy verb uses. Absent -> hold/hold.    ||
+    \*---------------------------------------------------------*/
+    const auto pit = j.find("output_policy");
+    if(pit != j.end() && !pit->is_null())
+    {
+        std::string perr;
+        if(!OutputPolicyFromJson(*pit, candidate.output_policy, perr))
+        {
+            if(legacy)
+            {
+                warn.push_back("output_policy: " + perr +
+                               " — ignored (hold)");
+            }
+            else
+            {
+                AddErr(errs, "output_policy", perr);
+                return false;
+            }
+        }
+    }
+
     /* Unknown top-level members are retained verbatim — a
        migrated document never silently drops fields that
        still apply. */
@@ -791,7 +888,9 @@ bool EngineStateFromJson(const nlohmann::json& j,
         if(it.key() != "kind" && it.key() != "schema_version" &&
            it.key() != "scenes" && it.key() != "bindings" &&
            it.key() != "reactive" &&
-           it.key() != "active_workspace")
+           it.key() != "active_workspace" &&
+           it.key() != "output" &&
+           it.key() != "output_policy")
         {
             candidate.extensions[it.key()] = it.value();
         }

@@ -127,6 +127,7 @@ Defined values:
 | capability | surface |
 | --- | --- |
 | `studio_workspace_v1` | `WORKSPACE_COMMAND` (managed workspace jobs, revisions, transfers — §5) |
+| `output_control_v1` | `OUTPUT_COMMAND` + the `output` event (R-1 runtime master brightness, Off, pause — §5, §7). Clients that do not see it hide those controls |
 
 After the handshake every message's header `version` MUST equal
 `negotiated_version`. A mismatched message gets `ERROR(version_mismatch)`;
@@ -199,14 +200,16 @@ Request → reply. `request_id` echoes.
 | 0x0109 | UNSUBSCRIBE | `{}` | OK `{subscribed:[]}` |
 | 0x010A | PING | `{}` | PONG `{}` |
 | 0x010B | GET_PRESETS | `{}` | PRESETS |
-| 0x010C | QUIT | `{}` or `{stop_backend:true}` | OK `{shutting_down:true, ordered:true, stop_backend:bool, backend?, backend_pid?}` / ERROR |
+| 0x010C | QUIT | `{}` or `{stop_backend:true}` | OK `{shutting_down:true, ordered:true, stop_backend:bool, exit_policy?, backend?, backend_pid?}` / ERROR |
 | 0x010D | REACTIVE_COMMAND | `{verb, ...args}` | OK `<reactive body>` / ERROR |
 | 0x010E | WORKSPACE_COMMAND | `{verb, ...args}` | OK `<verb body>` / ERROR |
+| 0x010F | OUTPUT_COMMAND | `{verb, ...args}` (requires `output_control_v1`) | OUTPUT / ERROR |
 | 0x0300 | DIAG_GET | `{}` | DIAGNOSTICS (valid on both pipes) |
 
 Reply types: WELCOME 0x8001, OK 0x8002, ERROR 0x8003, SNAPSHOTS 0x8100,
 SCENE 0x8101, PLAYBACK 0x8102, DELIVERY_STATS 0x8103, STATE 0x8104,
-PONG 0x8105, PRESETS 0x8106, EVENT 0x8200, DIAGNOSTICS 0x8300.
+PONG 0x8105, PRESETS 0x8106, OUTPUT 0x8107, EVENT 0x8200,
+DIAGNOSTICS 0x8300.
 
 ## 5. Body schemas
 
@@ -350,11 +353,43 @@ counters alone cannot distinguish from "nothing submitted".
 
 **STATE** — `{engine:{running,scene_clock_hz,scene_sequence}, scene:{...},
 sdk:{...}, playback:{...}, power:{...}, reactive:{...}, ownership:{...}|null,
-ipc:{sessions_active, sessions_total, messages_in, responses_out, events_sent,
+output:{...}|null, ipc:{sessions_active, sessions_total, messages_in, responses_out, events_sent,
 events_dropped, events_oversize, queued_events, resync_bytes, rejected_hellos,
-rate_limited, refused_busy}}` (`sessions_total` counts every accepted session
-since start; `events_oversize` counts events whose body exceeded the 1 MiB
-cap and were never sent — they are in `events_dropped` too).
+rate_limited, refused_busy}, output_policy:{...}|null}` (`sessions_total`
+counts every accepted session since start; `events_oversize` counts events
+whose body exceeded the 1 MiB cap and were never sent — they are in
+`events_dropped` too).
+
+**OUTPUT_POLICY** (STATE field, audit E-12b; `null` when no policy is
+wired) — what the LEDs show when the engine exits and while it has
+nothing to drive:
+
+```json
+{ "on_exit": "hold", "on_idle": "hold",
+  "per_controller": [ {"match": {"location_prefix": "Wireless:"},
+                       "on_exit": "black"} ],
+  "idle": false }
+```
+
+Each action is `hold` (leave the last frame — the default, today's
+behaviour), `black` (all lights off) or `restore` (back to the hardware
+mode the controller reported before the engine first switched it to
+Direct this run; with no usable record — none, or a Direct/Custom mode
+left by an earlier run — and always on the Lian Li wireless group, it
+falls back to `black`). `per_controller` is ordered: the first rule whose
+given `match` fields all match (`device` exact, `location_prefix` a
+prefix of the location, `serial` exact) AND that sets the field wins;
+otherwise the global value. A loop-owned wireless group under `black`
+gets the playback stop-black; under `hold`/`restore` its uploaded loop
+keeps playing. `on_exit` runs in the ordered shutdown (the
+`output-policy` step, bound 2000 ms) and `on_idle` once per idle entry
+(no scene, or an empty one, applied for 5 s; the next applied scene
+ends it) — over the connected controllers the scene binds or the
+engine switched to Direct this run. Both are skipped while the power
+gate is on (display off / suspend). `idle` is true from the idle entry
+until the next applied scene. The policy is persisted in the engine
+profile and read or replaced with the `OUTPUT_COMMAND` verbs
+`get_policy` / `set_policy` (below).
 
 **OWNERSHIP** (STATE/DIAGNOSTICS field, `null` when no ownership
 report is wired) — the Task-3.9 startup scan's verbatim,
@@ -397,7 +432,7 @@ decision (plan section 4).
 
 **QUIT** — the "Quit All" hook (plan section 4): requests the engine's
 ordered, bounded shutdown (the power monitor, IPC intake, scene worker,
-delivery lanes, and SDK transport stop in order; the reply is prepared
+the exit output policy, delivery lanes, and SDK transport run in order; the reply is prepared
 before the hook fires). `unavailable` when the process has no shutdown
 hook wired. Owning the backend's process is normally the caller's
 concern — the engine never spawns it — **except** the opt-in
@@ -415,7 +450,11 @@ reply reports the decision honestly in `backend` (`closing`,
 `not_configured`, `not_found`, `unverifiable`) — `closing` is a
 decision at request time, not a guarantee the process exited — and,
 with `closing`, `backend_pid`: the verified process the handoff will
-signal.
+signal. `exit_policy` (audit E-12b; omitted when no output policy is
+wired) is the global `on_exit` action the teardown's `output-policy`
+step will apply — `hold`, `black` or `restore` — so a client can say
+"lights will turn off"; per-controller overrides are in STATE's
+`output_policy`.
 
 **POWER** (STATE/DIAGNOSTICS field, `null` when unwired) —
 `{display_on, suspended, output_paused, power_hold, restore_pending,
@@ -550,6 +589,54 @@ not apply to the named input → `bad_request`, never silently ignored.
 State changes emit the `reactive` event exactly once for other
 subscribers (through the manager's changed hook). The selected
 inputs persist in the engine profile and re-arm on engine start.
+
+**OUTPUT_COMMAND** (`0x010F`, requires `output_control_v1`) — R-1
+runtime output overrides that live **outside any document**: the
+tray's master brightness, "Off" and pause. They never touch the
+applied scene or a workspace draft (nothing goes dirty, nothing is
+committed). Every request carries `{verb:"<name>", ...args}`; an
+unknown verb → `bad_request`; an engine without the control →
+`unavailable`. The four output verbs reply **OUTPUT** (`0x8107`) with
+the full body below; the two policy verbs reply `OK` (see the end of
+the table):
+
+| verb | body | effect |
+| --- | --- | --- |
+| `get` | `{}` | read only |
+| `set_master` | `{value: number in [0, 1]}` | master scale (out of range / non-number → `bad_request`) |
+| `set_blackout` | `{on: bool}` | "Off": effective scale 0; `master` is kept for the release |
+| `set_hold` | `{on: bool}` | pause: live scene clock frozen at the current frame (no input pull); an uploaded loop gets control `paused`. Release resumes from the paused frame and drops input queued across the hold |
+| `get_policy` | `{}` | E-12b: reply `OK {output_policy}` (the STATE OUTPUT_POLICY body). Works without the runtime output control; `unavailable` when no policy is wired |
+| `set_policy` | `{on_exit?, on_idle?, per_controller?}` | E-12b: **replaces** the whole policy (an absent field returns to `hold` / no rules) and persists it in the engine profile; reply `OK {output_policy}`. Invalid shape → `bad_request` (policy unchanged); a failed profile save → `internal` (policy unchanged). Takes effect at the next exit / idle entry |
+
+Arbitration (decided once, engine-side):
+`effective = blackout ? 0 : master × min(contributors)`. Contributors
+are named runtime slots (R-4 `schedule` / `lock` / `idle`); R-1 sets
+none. Live lanes apply `effective` on the next worker tick (it
+multiplies the document `brightness`; unmapped LEDs keep their
+colors). **Uploaded loops are not scaled** (playback params carry no
+brightness): `set_blackout` sends them control `stopped` (stop-black)
+and `set_hold` control `paused`; the release restores the control the
+user had, unless the user changed it while the override was engaged.
+An engaged hold/Off also survives a scene re-apply (a workspace
+switch). `master` and `blackout` persist in the engine profile
+(`engine-state.json` member `output`, read leniently: a malformed
+member is ignored with a warning) and restore on engine start;
+`hold` and contributors never persist — a restart resumes. Each
+change emits the `output` event once.
+
+**OUTPUT** (OUTPUT_COMMAND reply, STATE field — `null` when no
+control is wired — and `output` event body) —
+
+```json
+{ "master": 0.75, "blackout": false, "hold": false,
+  "effective": 0.75, "contributors": {},
+  "uploaded_unscaled": false }
+```
+
+Numbers are rounded to four decimals. `uploaded_unscaled` is true
+while an uploaded loop is requested or applied: the UI should say
+that brightness does not reach it (Off and pause still do).
 
 **REACTIVE** (STATE/DIAGNOSTICS field and `reactive` event body) —
 
@@ -875,6 +962,7 @@ matches the corresponding pull body:
 | `connection` | `sdk` object | SDK link state change |
 | `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |
 | `ownership` | OWNERSHIP body (§ STATE) | R-10: the periodic competitor re-scan (~5 s) found a writer appear or clear; SUBSCRIBE initial push carries the current report (`null` when none is wired) |
+| `output` | OUTPUT body (§5) | R-1: once per OUTPUT_COMMAND change (any session), and when `uploaded_unscaled` flips with the playback mode; SUBSCRIBE initial push carries the current body (`null` when no control is wired) |
 | `frame_status` | `{aggregate, wireless, controllers:[{key,delivered,lane,wireless,suppressed,owned,pending,sequence,colors,stats}]}` | ≤ ~30 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses. `wireless` is the wireless lane's own `{key,stats,suppressed,pending,owned}` summary (`null` when no wireless lane exists — the `aggregate` mixes wired lanes and is never a wireless measure). Every enumerated controller produces a `controllers` row: a lane that never delivered reports `delivered:false` + zeroed `stats` + empty `colors` (`lane:false` when the pipeline has no lane for it) — a "bound but never delivered" controller is a visible row, not an absent one |
 | `workspace` | `get` body (initial snapshot AND published-state change) / job status record (terminal job event) | SUBSCRIBE initial push; every published-state change (adopt, commit, restore, resource install/remove) — so a session whose snapshot raced boot re-adoption re-converges; a workspace job reaching a terminal state |
 | `preview` | `{type:"status"\|"frame", ...}` (below) | ≤ 30 Hz, **session-targeted** — delivered only to the session that owns the preview, never broadcast |

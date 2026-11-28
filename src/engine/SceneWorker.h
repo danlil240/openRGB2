@@ -154,6 +154,24 @@ public:
     using EvaluateGate = std::function<bool()>;
     void     SetEvaluateGate(EvaluateGate gate);
 
+    /* R-1 user hold (the tray's Pause, OutputControl::hold).
+       While held, Step still produces a frame every tick — the
+       runtime master scale must keep reaching the LEDs — but
+       evaluates at the FROZEN scene time captured at `now`, and
+       skips the input pull. Releasing shifts the epoch by the
+       time spent held, so the animation resumes from the frame
+       where it paused, and drops input queued across the hold
+       (the depth-1 slot and the active input — their event ages
+       were stamped on the old epoch; the host clears the
+       InputBus queue too). Returns true when the state moved.
+       Safe from any thread. */
+    bool     SetHold(bool on, TimePoint now = Clock::now());
+    bool     Held() const;
+
+    /* Test introspection: the reactive-input slots. */
+    std::shared_ptr<const studio::InputState> PendingInputForTesting() const;
+    std::shared_ptr<const studio::InputState> ActiveInputForTesting() const;
+
     /* Ticks that actually ran the scene evaluation (gated and
        idle-hook frames excluded) — diagnostics/tests. */
     uint64_t Evaluations() const;
@@ -219,6 +237,9 @@ private:
     };
 
     void Run();
+    /* Under mutex_: the scene time a tick at `now` samples —
+       the frozen value while held. */
+    double SceneTimeLocked(TimePoint now) const;
     void NoteStepFailure(const std::string& msg);
     void Log(const std::string& line);
 
@@ -229,6 +250,11 @@ private:
 
     TimePoint               epoch_{};
     uint64_t                sequence_ = 0;
+    /* R-1 hold (mutex_): when it began and the scene time it
+       froze at. */
+    bool                    held_        = false;
+    TimePoint               hold_start_{};
+    double                  held_time_s_ = 0.0;
 
     /* Depth-1 pending slots + applied state (mutex_). */
     SceneState                                    pending_scene_;

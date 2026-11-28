@@ -51,8 +51,10 @@
 #pragma once
 
 #include "EngineTypes.h"
+#include "OutputPolicy.h"     /* E-12b exit/idle output policy     */
 #include "PlaybackPresets.h"   /* PersistedSceneMode, PlaybackParams */
 #include "ReactiveInputs.h"    /* ReactiveInputs::PersistedInput     */
+#include "OutputControl.h"     /* PersistedOutput (R-1)              */
 
 #include "scene/SceneTypes.h"  /* studio::DeviceBinding           */
 
@@ -62,6 +64,7 @@
 #include <filesystem>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -98,6 +101,18 @@ struct EngineState
        means "nothing managed" (fresh profile or a workspace
        that never adopted). */
     std::string                              active_workspace;
+    /* R-1: the runtime output control's persisted half (master
+       + blackout; hold is never persisted — a restart resumes).
+       Absent = nothing to restore (older file, or never set).
+       Unknown members inside `output` (a newer build's
+       additions) ride output_extensions and are written back
+       beside the known fields. */
+    std::optional<PersistedOutput>           output;
+    nlohmann::json                           output_extensions;
+    /* Audit E-12b: what the LEDs show at engine exit and while
+       idle (hold/black/restore + per-controller overrides).
+       Absent in older profiles -> hold/hold (no change). */
+    OutputPolicy                             output_policy;
     nlohmann::json                           extensions;
 };
 

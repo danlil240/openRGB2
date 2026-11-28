@@ -239,6 +239,83 @@ static void TestMigration()
 }
 
 /*---------------------------------------------------------*\
+||| R-1: EngineState.output — the tray's master + blackout  ||
+|||     survive a restart; an older file (no member) loads; ||
+|||     unknown members inside `output` survive a save      ||
+\*---------------------------------------------------------*/
+
+static void TestOutputState()
+{
+    /* An older file: no `output` member -> nothing restored,
+       and a save does not invent one. */
+    const std::string p = Path("no-output.json");
+    WriteText(p, "{ \"schema_version\": 1, \"scenes\": [], "
+                 "\"bindings\": {} }");
+    ProfileStore            store(p);
+    ProfileStore::LoadResult lr = store.Load();
+    CHECK(lr.status == ProfileStore::LoadStatus::Loaded);
+    CHECK(!lr.state.output.has_value());
+    CHECK(EngineStateToJson(lr.state).count("output") == 0);
+
+    /* Round trip. */
+    PersistedOutput po;
+    po.master   = 0.25f;
+    po.blackout = true;
+    lr.state.output = po;
+    std::string err;
+    CHECK(store.Save(lr.state, err));
+    lr = store.Load();
+    CHECK(lr.status == ProfileStore::LoadStatus::Loaded);
+    CHECK(lr.state.output.has_value());
+    if(lr.state.output)
+    {
+        CHECK(lr.state.output->master == 0.25f);
+        CHECK(lr.state.output->blackout);
+    }
+    /* `output` is a known member — never an extension copy. */
+    CHECK(lr.state.extensions.count("output") == 0);
+
+    /* Unknown members inside `output` (a newer build's
+       additions) survive a save beside the known fields. */
+    WriteText(Path("output-extra.json"),
+              "{ \"schema_version\": 1, \"scenes\": [], "
+              "\"bindings\": {}, \"output\": { \"master\": 0.5, "
+              "\"blackout\": false, \"policy\": { \"idle\": 0.3 } } }");
+    ProfileStore            ext(Path("output-extra.json"));
+    ProfileStore::LoadResult el = ext.Load();
+    CHECK(el.status == ProfileStore::LoadStatus::Loaded);
+    CHECK(el.state.output.has_value() &&
+          el.state.output->master == 0.5f);
+    CHECK(ext.Save(el.state, err));
+    el = ext.Load();
+    const nlohmann::json saved = EngineStateToJson(el.state);
+    CHECK(saved["output"]["policy"]["idle"].get<double>() == 0.3);
+    CHECK(saved["output"]["master"].get<double>() == 0.5);
+
+    /* A malformed member never fails the whole document (it
+       would cost the bindings to LKG recovery): it is dropped
+       with a warning and the restart simply has no override. */
+    WriteText(Path("output-bad.json"),
+              "{ \"schema_version\": 1, \"scenes\": [], "
+              "\"bindings\": {}, \"output\": { \"master\": \"loud\" } }");
+    ProfileStore            bad(Path("output-bad.json"));
+    ProfileStore::LoadResult bl = bad.Load();
+    CHECK(bl.status == ProfileStore::LoadStatus::Loaded);
+    CHECK(!bl.state.output.has_value());
+    CHECK(!bl.warnings.empty());
+
+    /* Out-of-range masters clamp into [0, 1]. */
+    WriteText(Path("output-range.json"),
+              "{ \"schema_version\": 1, \"scenes\": [], "
+              "\"bindings\": {}, \"output\": { \"master\": 7 } }");
+    ProfileStore            rng(Path("output-range.json"));
+    ProfileStore::LoadResult rl = rng.Load();
+    CHECK(rl.state.output.has_value() &&
+          rl.state.output->master == 1.0f &&
+          !rl.state.output->blackout);
+}
+
+/*---------------------------------------------------------*\
 ||| T3: offline bindings — a missing device keeps its       ||
 |||     identity; a same-named different device never       ||
 |||     inherits the binding                                ||
@@ -878,6 +955,92 @@ static void TestWriteCache()
     CHECK(store.LoadSceneSnapshot().present);
 }
 
+/*---------------------------------------------------------*\
+||| E-12b: the exit/idle output policy is a real persisted  |||
+|||     field — round-trips, defaults to hold/hold when     |||
+|||     absent, and a malformed value fails validation      |||
+|||     (never retained as an extension passthrough)        |||
+\*---------------------------------------------------------*/
+
+static void TestOutputPolicyPersistence()
+{
+    const std::string p = Path("output-policy.json");
+    ProfileStore      store(p);
+    std::string       err;
+
+    EngineState st = SampleState("name:policy",
+                                 PlaybackMode::LiveEffects);
+    CHECK(st.output_policy.IsDefault());
+    st.output_policy.on_exit = OutputAction::Black;
+    st.output_policy.on_idle = OutputAction::Restore;
+    OutputPolicyRule r;
+    r.match.location_prefix = "Wireless:";
+    r.on_exit               = OutputAction::Hold;
+    st.output_policy.per_controller.push_back(r);
+    CHECK(store.Save(st, err));
+
+    ProfileStore::LoadResult lr = store.Load();
+    CHECK(lr.status == ProfileStore::LoadStatus::Loaded);
+    CHECK(lr.state.output_policy == st.output_policy);
+    CHECK(!lr.state.extensions.contains("output_policy"));
+
+    /* On disk it is the documented wire shape. */
+    {
+        std::ifstream in(p);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        const nlohmann::json j = nlohmann::json::parse(ss.str());
+        CHECK(j["output_policy"]["on_exit"] == "black");
+        CHECK(j["output_policy"]["on_idle"] == "restore");
+        CHECK(j["output_policy"]["per_controller"][0]["match"]
+               ["location_prefix"] == "Wireless:");
+    }
+
+    /* A profile written before E-12b has no member: hold/hold. */
+    {
+        nlohmann::json j = EngineStateToJson(
+            SampleState("name:old", PlaybackMode::LiveEffects));
+        j.erase("output_policy");
+        EngineState out;
+        std::vector<std::string> errs;
+        CHECK(EngineStateFromJson(j, out, &errs));
+        CHECK(out.output_policy.IsDefault());
+        CHECK(!out.extensions.contains("output_policy"));
+    }
+
+    /* Malformed in a current-schema document: strict failure
+       naming the field (the store then recovers LKG). */
+    {
+        nlohmann::json j = EngineStateToJson(st);
+        j["output_policy"]["on_exit"] = "off";
+        EngineState out;
+        out.output_policy.on_idle = OutputAction::Black;
+        std::vector<std::string> errs;
+        CHECK(!EngineStateFromJson(j, out, &errs));
+        CHECK(out.output_policy.on_idle == OutputAction::Black);
+        bool named = false;
+        for(const std::string& e : errs)
+        {
+            named = named ||
+                    e.find("output_policy") != std::string::npos;
+        }
+        CHECK(named);
+    }
+
+    /* A legacy (schema-less) document reads leniently: a bad
+       policy is a warning and the default stands. */
+    {
+        nlohmann::json j = EngineStateToJson(st);
+        j.erase("schema_version");
+        j["output_policy"] = "black";
+        EngineState out;
+        std::vector<std::string> errs, warns;
+        CHECK(EngineStateFromJson(j, out, &errs, &warns));
+        CHECK(out.output_policy.IsDefault());
+        CHECK(!warns.empty());
+    }
+}
+
 int main()
 {
     g_tmp = fs::temp_directory_path() /
@@ -888,6 +1051,7 @@ int main()
 
     TestAtomicity();
     TestMigration();
+    TestOutputState();
     TestOfflineBindings();
     TestRecovery();
     TestBoundaryValidation();
@@ -895,6 +1059,7 @@ int main()
     TestSceneSnapshot();
     TestWriteCache();
     TestSceneLoader();
+    TestOutputPolicyPersistence();
 
     /* Opt-in manual check: point OPENRGB2_SCENE_FILE at a real
        scene/workspace file (e.g. a studio.v2.backup.json) to

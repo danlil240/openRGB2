@@ -529,6 +529,7 @@ static int SleeperMain(int secs)
 #endif
 
 static int TestBody(const std::filesystem::path& self_exe);
+static int TestExitPolicy();
 int main(int argc, char** argv)
 {
 #ifdef _WIN32
@@ -548,8 +549,9 @@ int main(int argc, char** argv)
     {
         wchar_t self[4096];
         DWORD n = GetModuleFileNameW(nullptr, self, 4096);
-        return TestBody(std::filesystem::path(
+        const int rc = TestBody(std::filesystem::path(
             std::wstring(self, n)));
+        return rc != 0 ? rc : TestExitPolicy();
     }
     catch(const std::exception& e)
     {
@@ -1192,4 +1194,304 @@ static int TestBody(const std::filesystem::path& self_exe)
         }
     }
     return 0;
+}
+
+/*---------------------------------------------------------*\
+||| E-12b: the exit output policy, on the REAL Stop() path  |||
+|||   black   -> the last frame per controller is all zero  |||
+|||   restore -> UPDATEMODE back to the recorded "Rainbow"; |||
+|||              a Direct-only controller falls back to     |||
+|||              black                                       |||
+|||   gate on -> nothing written at all                      |||
+|||   loop    -> an uploaded loop under black is stopped by |||
+|||              the playback owner (stop-black)            |||
+\*---------------------------------------------------------*/
+
+static sdk_test::FakeController RainbowWired()
+{
+    sdk_test::FakeController c;
+    c.type     = 2;
+    c.name     = "E12B RAINBOW STRIP LIFECYCLE";
+    c.vendor   = "ASUS";
+    c.serial   = "RB-LIFECYCLE-1";
+    c.location = "smbus:1-e12b";
+    sdk_test::FakeMode direct;
+    direct.name = "Direct";
+    sdk_test::FakeMode rainbow;
+    rainbow.name      = "Rainbow";
+    rainbow.speed     = 42;
+    rainbow.direction = 1;
+    c.modes       = { direct, rainbow };
+    c.active_mode = 1;                    /* hardware effect on */
+    c.zones       = { { "Strip", 0, 6, 6, 6 } };
+    c.colors.assign(6, 0x00010101u);
+    return c;
+}
+
+/* Wireless (dev 0) + wired Direct-only (dev 1) + Rainbow
+   (dev 2), every zone bound. */
+static json ExitSceneDoc(bool playback)
+{
+    json doc = playback ? PlaybackSceneDoc() : LiveSceneDoc();
+    doc["bindings"].push_back({
+        { "id",              "b-rb"         },
+        { "controller_name", "E12B RAINBOW" },
+        { "zone_name",       "Strip"        },
+        { "zone_leds",       6              },
+    });
+    doc["objects"].push_back({
+        { "id", "o-rb" }, { "kind", "device" },
+        { "binding", "b-rb" }, { "verified", true },
+        { "visible", true },
+        { "emitters", EmitterArray(0, 6) },
+    });
+    return doc;
+}
+
+/* The last UPDATELEDS body for dev `dev`: true when one was
+   seen; `black` = every color in it is zero. */
+static bool LastFrameBlack(const sdk_test::FakeSdkServer& server,
+                           uint32_t dev, bool& black)
+{
+    bool seen = false;
+    for(const sdk_test::ServerEvent& e : server.SnapshotEvents())
+    {
+        if(e.pkt_id != sdk::kPktUpdateLEDs || e.dev_id != dev ||
+           e.body.size() < 6)
+        {
+            continue;
+        }
+        uint16_t count = 0;
+        memcpy(&count, e.body.data() + 4, 2);
+        if(e.body.size() < 6u + 4u * count)
+        {
+            continue;
+        }
+        seen  = true;
+        black = count > 0;
+        for(uint16_t i = 0; i < count; ++i)
+        {
+            uint32_t c = 0;
+            memcpy(&c, e.body.data() + 6 + 4 * i, 4);
+            black = black && (c & 0x00FFFFFFu) == 0;
+        }
+    }
+    return seen;
+}
+
+static const OutputPolicyOutcome* OutcomeFor(
+    const std::vector<OutputPolicyOutcome>& v, const char* needle)
+{
+    for(const OutputPolicyOutcome& o : v)
+    {
+        if(o.key.device.find(needle) != std::string::npos)
+        {
+            return &o;
+        }
+    }
+    return nullptr;
+}
+
+static int RunExitCase(const char* tag, OutputAction action,
+                       bool gate_on, bool loop)
+{
+    std::error_code ec;
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path(ec) /
+        ("openrgb2-e12b-exit-" + std::string(tag) + "-" +
+         std::to_string(_getpid()));
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    sdk_test::FakeSdkServer server;
+    server.controllers = { WirelessGroup(), Wired(), RainbowWired() };
+
+    EngineHostOptions o;
+    o.sdk_enabled       = true;
+    o.transport_factory =
+        [&server]() -> std::unique_ptr<sdk::IStreamTransport>
+        { return std::make_unique<sdk_test::FakeStream>(server); };
+    o.ipc_enabled     = false;
+    o.power_monitor   = false;
+    o.reactive_inputs = false;
+    o.scan_owners     = false;
+    o.single_instance = true;
+    o.instance_name   = "Local\\openrgb2-engine-e12b-exit-" +
+                        std::string(tag) + "-" +
+                        std::to_string(_getpid());
+    o.scene_restore   = false;
+    o.state_path      = (dir / "engine-state.json").generic_string();
+    o.log             = [](const std::string&) {};
+
+    EngineHost host(std::move(o));
+    std::string err;
+    CHECKV(host.Start(err), "[%s] Start: %s", tag, err.c_str());
+    CHECKV(ApplyScene(host.GetService(), ExitSceneDoc(loop), err),
+           "[%s] apply: %s", tag, err.c_str());
+    CHECKV(WaitFor(host, [&]{
+        return server.CountEvents(sdk::kPktUpdateLEDs, 1) >= 1 &&
+               server.CountEvents(sdk::kPktUpdateLEDs, 2) >= 1;
+    }, 10000), "[%s] no live frames", tag);
+    if(loop)
+    {
+        PlaybackParams params;
+        params.speed = 100;
+        const PlaybackController::Result r =
+            host.GetPlayback()->Request(PlaybackMode::AnimationPlayback,
+                                        PlaybackControl::Playing,
+                                        params);
+        CHECKV(r.accepted, "[%s] animation rejected: %s", tag,
+               r.reason.c_str());
+        CHECKV(WaitFor(host, [&]{
+            const PlaybackStatus s = host.GetPlayback()->Status();
+            return s.mode == PlaybackMode::AnimationPlayback &&
+                   s.upload == UploadState::Active;
+        }, 10000), "[%s] loop never became active", tag);
+    }
+
+    OutputPolicy policy;
+    policy.on_exit = action;
+    CHECKV(host.SetOutputPolicy(policy, err), "[%s] set policy: %s",
+           tag, err.c_str());
+    CHECK(host.GetOutputPolicy() == policy);
+    if(gate_on)
+    {
+        host.GetLifecycle()->PostEvent(
+            PowerLifecycle::Event::DisplayOff);
+        CHECK(WaitFor(host, [&]{
+            return host.GetLifecycle()->OutputPaused();
+        }, 3000));
+        PumpFor(host, 300);
+    }
+    else
+    {
+        PumpFor(host, 200);
+    }
+    const size_t leds0 = server.CountEvents(sdk::kPktUpdateLEDs);
+    const size_t mode0 = server.CountEvents(sdk::kPktUpdateMode);
+    const size_t cust0 = server.CountEvents(sdk::kPktSetCustomMode);
+    const size_t cust_w0 =
+        server.CountEvents(sdk::kPktSetCustomMode, 0);
+
+    host.RequestStop();
+    const OrderlyShutdown::Result& sd = host.Stop();
+    const std::vector<OutputPolicyOutcome> rep =
+        host.ExitPolicyReport();
+
+    /* The step ran, in order, within its bound. */
+    size_t at = 0, worker = 0, lanes = 0;
+    for(size_t i = 0; i < sd.steps.size(); ++i)
+    {
+        if(sd.steps[i].name == "output-policy")     at = i;
+        if(sd.steps[i].name == "reactive-inputs")   worker = i;
+        if(sd.steps[i].name == "delivery-pipeline") lanes = i;
+    }
+    CHECKV(at != 0 && worker < at && at < lanes,
+           "[%s] output-policy step out of order", tag);
+    CHECKV(sd.steps[at].bound == std::chrono::milliseconds(2000),
+           "[%s] output-policy bound changed", tag);
+    CHECKV(sd.steps[at].within && !sd.steps[at].failed,
+           "[%s] output-policy overran or threw", tag);
+    CHECKV(rep.size() == 3, "[%s] report has %zu entries", tag,
+           rep.size());
+    const OutputPolicyOutcome* fans = OutcomeFor(rep, "UNI FAN");
+    const OutputPolicyOutcome* mb   = OutcomeFor(rep, "X870E");
+    const OutputPolicyOutcome* rb   = OutcomeFor(rep, "E12B RAINBOW");
+    CHECK(fans && mb && rb);
+
+    if(gate_on)
+    {
+        /* Not one byte of RGB/mode traffic across the gate. */
+        CHECKV(server.CountEvents(sdk::kPktUpdateLEDs) == leds0 &&
+               server.CountEvents(sdk::kPktUpdateMode) == mode0 &&
+               server.CountEvents(sdk::kPktSetCustomMode) == cust0,
+               "[%s] the exit policy wrote across the power gate",
+               tag);
+        CHECK(fans->outcome == "skipped_power_gate");
+        CHECK(mb->outcome == "skipped_power_gate");
+        CHECK(rb->outcome == "skipped_power_gate");
+    }
+    else if(action == OutputAction::Black)
+    {
+        bool black = false;
+        CHECKV(LastFrameBlack(server, 1, black) && black,
+               "[%s] wired controller's last frame is not black",
+               tag);
+        CHECKV(LastFrameBlack(server, 2, black) && black,
+               "[%s] rainbow controller's last frame is not black",
+               tag);
+        CHECKV(LastFrameBlack(server, 0, black) && black,
+               "[%s] wireless group's last frame is not black", tag);
+        CHECK(mb->outcome == "black" && rb->outcome == "black");
+        if(loop)
+        {
+            CHECKV(fans->outcome == "loop_stopped",
+                   "[%s] loop outcome '%s' (%s)", tag,
+                   fans->outcome.c_str(), fans->detail.c_str());
+            CHECK(server.CountEvents(sdk::kPktSetCustomMode, 0) >
+                  cust_w0);
+        }
+        else
+        {
+            CHECK(fans->outcome == "black");
+        }
+    }
+    else if(action == OutputAction::Restore)
+    {
+        /* UPDATEMODE(dev 2, mode index 1 = "Rainbow") with no
+           frame after it, and the backend reports Rainbow. */
+        bool restored    = false;
+        bool frame_after = false;
+        for(const sdk_test::ServerEvent& e : server.SnapshotEvents())
+        {
+            if(e.pkt_id == sdk::kPktUpdateMode && e.dev_id == 2 &&
+               e.body.size() >= 8)
+            {
+                int32_t idx = -1;
+                memcpy(&idx, e.body.data() + 4, 4);
+                restored    = idx == 1;
+                frame_after = false;
+            }
+            else if(restored && e.pkt_id == sdk::kPktUpdateLEDs &&
+                    e.dev_id == 2)
+            {
+                frame_after = true;
+            }
+        }
+        CHECKV(restored, "[%s] no UPDATEMODE back to Rainbow", tag);
+        CHECKV(!frame_after, "[%s] a frame followed the restore",
+               tag);
+        CHECK(server.controllers[2].active_mode == 1);
+        CHECKV(rb->outcome == "restored" && rb->detail == "Rainbow",
+               "[%s] rainbow outcome '%s' (%s)", tag,
+               rb->outcome.c_str(), rb->detail.c_str());
+        /* Direct-only board: no hardware mode to go back to. */
+        CHECK(mb->outcome == "black_fallback");
+        bool black = false;
+        CHECK(LastFrameBlack(server, 1, black) && black);
+        /* Wireless group: restore is not offered (ruling). */
+        CHECK(fans->outcome == "black_fallback");
+    }
+    fprintf(stderr, "e12b exit case '%s' OK (step %lld ms)\n", tag,
+            (long long)std::chrono::duration_cast<
+                std::chrono::milliseconds>(sd.steps[at].elapsed)
+                .count());
+    std::filesystem::remove_all(dir, ec);
+    return 0;
+}
+
+static int TestExitPolicy()
+{
+    int rc = RunExitCase("black", OutputAction::Black, false, false);
+    if(rc == 0) rc = RunExitCase("restore", OutputAction::Restore,
+                                 false, false);
+    if(rc == 0) rc = RunExitCase("gate", OutputAction::Black,
+                                 true, false);
+    if(rc == 0) rc = RunExitCase("loop", OutputAction::Black,
+                                 false, true);
+    if(rc == 0)
+    {
+        fprintf(stderr, "e12b exit policy OK\n");
+    }
+    return rc;
 }

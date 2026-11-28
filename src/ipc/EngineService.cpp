@@ -1270,6 +1270,216 @@ void EngineService::EmitOwnership()
     Emit(event_kind::kOwnership, OwnershipJson());
 }
 
+void EngineService::EmitOutput()
+{
+    EmitOutputIfChanged(true);
+}
+
+void EngineService::EmitOutputIfChanged(bool force)
+{
+    if(!deps_.output)
+    {
+        return;
+    }
+    /* Held across build + emit: a hook on an IPC thread and the
+       owner-loop diff can never push an older body after a
+       newer one. Emit only queues (IpcServer::Emit). */
+    std::lock_guard<std::mutex> lock(output_sig_mutex_);
+    nlohmann::json body = OutputJson();
+    auto dumped = std::make_shared<const std::string>(body.dump());
+    if(!force && *dumped == last_output_sig_)
+    {
+        return;
+    }
+    last_output_sig_ = *dumped;
+    IpcEvent ev;
+    ev.kind      = event_kind::kOutput;
+    ev.data      = std::move(body);
+    ev.data_json = std::move(dumped);
+    EmitEvent(std::move(ev));
+}
+
+nlohmann::json EngineService::OutputJson() const
+{
+    if(!deps_.output)
+    {
+        return nullptr;
+    }
+    const OutputState s = deps_.output->State();
+    /* Four decimals: 0.3f reads 0.3 on the wire, not
+       0.30000001192092896. */
+    auto num = [](float v)
+    {
+        return std::round(double(v) * 10000.0) / 10000.0;
+    };
+    nlohmann::json contributors = nlohmann::json::object();
+    for(const auto& kv : s.contributors)
+    {
+        contributors[kv.first] = num(kv.second);
+    }
+    /* Uploaded loops are never scaled by the master (the
+       playback params carry no brightness): hold/Off reach
+       them as Paused/Stopped, brightness does not. */
+    bool uploaded = false;
+    if(deps_.playback)
+    {
+        uploaded =
+            deps_.playback->RequestedMode() ==
+                PlaybackMode::AnimationPlayback ||
+            deps_.playback->Status().mode ==
+                PlaybackMode::AnimationPlayback;
+    }
+    return nlohmann::json::object({
+        { "master",            num(s.master)    },
+        { "blackout",          s.blackout       },
+        { "hold",              s.hold           },
+        { "effective",         num(s.effective) },
+        { "contributors",      std::move(contributors) },
+        { "uploaded_unscaled", uploaded         },
+    });
+}
+
+/*---------------------------------------------------------*\
+||| OUTPUT_COMMAND handlers (R-1)                             ||
+|||                                                            ||
+|||   get                       — read the OUTPUT body         ||
+|||   set_master   {value:0..1} — master scale                 ||
+|||   set_blackout {on:bool}    — "Off" (effective 0)          ||
+|||   set_hold     {on:bool}    — pause (frozen clock / paused ||
+|||                               uploaded loop)               ||
+|||   Every reply is the full OUTPUT body. The "output" event  ||
+|||   for other subscribers comes from the host's changed hook ||
+|||   (EngineHost::OnOutputChanged -> EmitOutput), never from  ||
+|||   here. The table below is the whole verb space — a new    ||
+|||   verb is one row plus its handler.                        ||
+\*---------------------------------------------------------*/
+const std::vector<EngineService::OutputVerb>& EngineService::OutputVerbs()
+{
+    static const std::vector<OutputVerb> verbs = {
+        { "get",          &EngineService::OutputGet         },
+        { "set_master",   &EngineService::OutputSetMaster   },
+        { "set_blackout", &EngineService::OutputSetBlackout },
+        { "set_hold",     &EngineService::OutputSetHold     },
+        /* E-12b exit/idle policy: own dependency, OK reply. */
+        { "get_policy",   &EngineService::OutputGetPolicy, false },
+        { "set_policy",   &EngineService::OutputSetPolicy, false },
+    };
+    return verbs;
+}
+
+IpcReply EngineService::HandleOutputCommand(const std::string& verb,
+                                            const nlohmann::json& body)
+{
+    const OutputVerb* found = nullptr;
+    for(const OutputVerb& v : OutputVerbs())
+    {
+        if(verb == v.name)
+        {
+            found = &v;
+            break;
+        }
+    }
+    if(!found)
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "unknown output verb '" + verb + "'");
+    }
+    if(found->needs_output_control && !deps_.output)
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "runtime output control is not wired on this engine");
+    }
+    return (this->*(found->fn))(body);
+}
+
+IpcReply EngineService::OutputGetPolicy(const nlohmann::json&)
+{
+    if(!deps_.output_policy)
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "the exit/idle output policy is not wired on this engine");
+    }
+    const nlohmann::json p = deps_.output_policy();
+    if(!p.is_object())
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "the exit/idle output policy is not available");
+    }
+    return IpcReply::Success(MsgType::Ok,
+        nlohmann::json::object({{ "output_policy", p }}));
+}
+
+IpcReply EngineService::OutputSetPolicy(const nlohmann::json& body)
+{
+    if(!deps_.set_output_policy || !deps_.output_policy)
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "the exit/idle output policy is not wired on this engine");
+    }
+    /* The flat body IS the policy ({verb, on_exit?, on_idle?,
+       per_controller?}); the parser ignores "verb". The policy
+       is REPLACED: an absent field returns to its default. */
+    OutputPolicy p;
+    std::string err;
+    if(!OutputPolicyFromJson(body, p, err))
+    {
+        return IpcReply::Fail(ErrCode::BadRequest, "set_policy: " + err);
+    }
+    if(!deps_.set_output_policy(p, err))
+    {
+        return IpcReply::Fail(ErrCode::Internal,
+            "set_policy: could not save the policy: " + err);
+    }
+    return OutputGetPolicy(body);
+}
+
+IpcReply EngineService::OutputGet(const nlohmann::json&)
+{
+    return IpcReply::Success(MsgType::Output, OutputJson());
+}
+
+IpcReply EngineService::OutputSetMaster(const nlohmann::json& body)
+{
+    const nlohmann::json& v = FieldOrNull(body, "value");
+    if(!v.is_number())
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "set_master requires {value:number in [0, 1]}");
+    }
+    const double value = v.get<double>();
+    if(!(value >= 0.0 && value <= 1.0))
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "set_master value must be within [0, 1]");
+    }
+    deps_.output->SetMaster(float(value));
+    return IpcReply::Success(MsgType::Output, OutputJson());
+}
+
+IpcReply EngineService::OutputSetBlackout(const nlohmann::json& body)
+{
+    const nlohmann::json& on = FieldOrNull(body, "on");
+    if(!on.is_boolean())
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "set_blackout requires {on:bool}");
+    }
+    deps_.output->SetBlackout(on.get<bool>());
+    return IpcReply::Success(MsgType::Output, OutputJson());
+}
+
+IpcReply EngineService::OutputSetHold(const nlohmann::json& body)
+{
+    const nlohmann::json& on = FieldOrNull(body, "on");
+    if(!on.is_boolean())
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "set_hold requires {on:bool}");
+    }
+    deps_.output->SetHold(on.get<bool>());
+    return IpcReply::Success(MsgType::Output, OutputJson());
+}
+
 nlohmann::json EngineService::OwnershipJson() const
 {
     /* Task 4.7: no provider wired -> honest null (the IPC
@@ -1283,6 +1493,18 @@ nlohmann::json EngineService::OwnershipJson() const
         return nullptr;
     }
     const nlohmann::json j = deps_.ownership();
+    return j.is_object() ? j : nullptr;
+}
+
+/* Audit E-12b: no provider -> honest null; a non-object
+   provider result is an owner bug, still null. */
+nlohmann::json EngineService::OutputPolicyJson() const
+{
+    if(!deps_.output_policy)
+    {
+        return nullptr;
+    }
+    const nlohmann::json j = deps_.output_policy();
     return j.is_object() ? j : nullptr;
 }
 
@@ -1326,7 +1548,9 @@ nlohmann::json EngineService::StateJson() const
         { "power",      PowerJson()                          },
         { "reactive",   ReactiveJson()                       },
         { "ownership",  OwnershipJson()                      },
+        { "output",     OutputJson()                         },
         { "ipc",        IpcStatsJson()                       },
+        { "output_policy", OutputPolicyJson()                },
     });
 }
 
@@ -1442,6 +1666,12 @@ nlohmann::json EngineService::OnWelcome()
            unchanged. */
         caps.push_back("studio_workspace_v1");
     }
+    if(deps_.output)
+    {
+        /* R-1: OUTPUT_COMMAND + the "output" event. A client
+           that doesn't see it hides the tray quick controls. */
+        caps.push_back("output_control_v1");
+    }
     return nlohmann::json::object({
         { "engine",       "openrgb2-engine" },
         { "running",      engine_.Running() },
@@ -1488,6 +1718,12 @@ bool EngineService::SnapshotEvent(const std::string& kind,
         /* R-10: a (re)subscribing UI gets the current report —
            null when none is wired, never an empty "clean" one. */
         out = OwnershipJson();
+        return true;
+    }
+    if(kind == event_kind::kOutput)
+    {
+        /* R-1: the current OUTPUT body (null when not wired). */
+        out = OutputJson();
         return true;
     }
     if(kind == event_kind::kWorkspace)
@@ -1926,6 +2162,21 @@ IpcReply EngineService::Dispatch(MsgType type,
         return HandleReactiveCommand(verb, body);
     }
 
+    case MsgType::OutputCommand:
+    {
+        const std::string verb =
+            (body.is_object()
+             && FieldOrNull(body, "verb").is_string())
+                ? body["verb"].get<std::string>()
+                : std::string();
+        if(verb.empty())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "OUTPUT_COMMAND requires {verb:<string>}");
+        }
+        return HandleOutputCommand(verb, body);
+    }
+
     case MsgType::Quit:
     {
         /* The "Quit All" hook (plan section 4): the UI's quit
@@ -1948,6 +2199,16 @@ IpcReply EngineService::Dispatch(MsgType type,
             { "ordered",       true          },
             { "stop_backend",  stop_backend  },
         });
+        /* E-12b: what the exit step will do (global on_exit;
+           per-controller overrides are in STATE). */
+        {
+            const nlohmann::json op = OutputPolicyJson();
+            if(op.is_object() && op.contains("on_exit") &&
+               op["on_exit"].is_string())
+            {
+                reply_body["exit_policy"] = op["on_exit"];
+            }
+        }
         const nlohmann::json extra =
             deps_.request_shutdown(stop_backend);
         if(extra.is_object())
@@ -3084,6 +3345,11 @@ void EngineService::PollEvents(TimePoint now)
     {
         EmitEvent(std::move(ev));
     }
+
+    /* R-1: uploaded_unscaled follows the playback mode, which
+       changes without an OutputControl write — diffed here on
+       the signature the changed hook shares. */
+    EmitOutputIfChanged(false);
 
     /* Idle workspace transfers expire on the owner tick too —
        the lazy sweep inside each WORKSPACE_COMMAND is the

@@ -36,8 +36,10 @@ add_library(openrgb2_engine STATIC
     CalibrationSession.cpp
     PowerLifecycle.cpp
     OrderlyShutdown.cpp
+    OutputPolicy.cpp
     ProfileStore.cpp
     ReactiveInputs.cpp
+    OutputControl.cpp
     SceneLoader.cpp
     StudioScenePreparation.cpp
     PreviewSession.cpp

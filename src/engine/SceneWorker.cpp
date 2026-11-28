@@ -141,6 +141,75 @@ void SceneWorker::SetEpoch(TimePoint epoch)
     epoch_ = epoch;
 }
 
+double SceneWorker::SceneTimeLocked(TimePoint now) const
+{
+    if(held_)
+    {
+        return held_time_s_;
+    }
+    return std::chrono::duration<double>(now - epoch_).count();
+}
+
+bool SceneWorker::SetHold(bool on, TimePoint now)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(on == held_)
+    {
+        return false;
+    }
+    if(on)
+    {
+        held_        = true;
+        hold_start_  = now;
+        /* A future epoch ("scene starts at T") freezes at t = 0
+           — the scene clock never runs backwards. */
+        held_time_s_ = now > epoch_
+            ? std::chrono::duration<double>(now - epoch_).count()
+            : 0.0;
+        return true;
+    }
+    held_ = false;
+    /* Resume from the paused frame: t = now - epoch must equal
+       the held time again — shift by the (integer) time spent
+       held; a hold that froze a future epoch at t = 0 resumes
+       at t = 0. */
+    if(hold_start_ > epoch_)
+    {
+        epoch_ += now - hold_start_;
+    }
+    else
+    {
+        epoch_ = now;
+    }
+    /* Input stamped on the old epoch would evaluate with wrong
+       ages — drop it; the provider's next pull (or the next
+       push) supplies fresh state. */
+    pending_input_.reset();
+    has_pending_input_ = false;
+    active_input_.reset();
+    return true;
+}
+
+bool SceneWorker::Held() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return held_;
+}
+
+std::shared_ptr<const studio::InputState>
+SceneWorker::PendingInputForTesting() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pending_input_;
+}
+
+std::shared_ptr<const studio::InputState>
+SceneWorker::ActiveInputForTesting() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return active_input_;
+}
+
 bool SceneWorker::Step(TimePoint now)
 {
     FrameCallback cb;
@@ -161,7 +230,8 @@ bool SceneWorker::Step(TimePoint now)
     EvaluateGate  eval_gate;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        provider  = input_provider_;
+        /* R-1: a held clock pulls no input (frozen frame). */
+        provider  = held_ ? InputProvider() : input_provider_;
         gate      = output_gate_;
         eval_gate = evaluate_gate_;
     }
@@ -193,7 +263,7 @@ bool SceneWorker::Step(TimePoint now)
                pattern where it is (t below is the same value). */
             engine_.ReplaceLayers(
                 active_scene_.scene.layers,
-                std::chrono::duration<double>(now - epoch_).count());
+                SceneTimeLocked(now));
             world_dirty_ = true;
         }
         if(has_pending_input_)
@@ -229,8 +299,8 @@ bool SceneWorker::Step(TimePoint now)
            actually runs at — a late tick evaluates the current scene
            time, never the scheduled tick it missed. */
         frame.sequence     = ++sequence_;
-        frame.scene_time_s =
-            std::chrono::duration<double>(now - epoch_).count();
+        frame.scene_time_s = SceneTimeLocked(now);   /* frozen
+                                                        while held */
         frame.sample_time  = now;
         frame.scene_revision = active_scene_.revision;
         if(evaluate && skip_eval)

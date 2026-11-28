@@ -503,6 +503,155 @@ int main()
         CHECK(osnap.is_object() && osnap.contains("scanned"));
     }
 
+    /*---- E-12b exit/idle output policy surface -------------------
+           STATE carries the policy (the REAL EngineHost
+           serializer on a never-started host), QUIT's reply
+           names the exit policy so a client can say "lights
+           will turn off"; unwired -> STATE null, QUIT omits it. */
+    {
+        EngineHostOptions oopts;
+        oopts.ipc_enabled     = false;
+        oopts.power_monitor   = false;
+        oopts.scan_owners     = false;
+        oopts.single_instance = false;
+        EngineHost host(oopts);
+
+        Engine           engine9;
+        DeliveryPipeline pipe9;
+        DeviceMapper     mapper9;
+        EngineService::Deps d9;
+        d9.pipeline      = &pipe9;
+        d9.mapper        = &mapper9;
+        d9.output_policy = [&host] { return host.OutputPolicyJson(); };
+        bool quit_called = false;
+        d9.request_shutdown = [&quit_called](bool)
+        {
+            quit_called = true;
+            return nlohmann::json::object();
+        };
+        EngineService svc9(engine9, d9);
+
+        /* default: hold/hold, not idle */
+        IpcReply r = svc9.Dispatch(MsgType::GetState,
+                                   nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        {
+            const nlohmann::json& op = r.body["output_policy"];
+            CHECK(op.is_object());
+            CHECK(op["on_exit"] == "hold");
+            CHECK(op["on_idle"] == "hold");
+            CHECK(op["per_controller"].is_array());
+            CHECK(op["idle"].get<bool>() == false);
+        }
+
+        OutputPolicy p;
+        p.on_exit = OutputAction::Black;
+        p.on_idle = OutputAction::Restore;
+        OutputPolicyRule rule;
+        rule.match.location_prefix = "Wireless:";
+        rule.on_exit = OutputAction::Hold;
+        p.per_controller.push_back(rule);
+        std::string perr;
+        CHECK(host.SetOutputPolicy(p, perr));
+        r = svc9.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r.body["output_policy"]["on_exit"] == "black");
+        CHECK(r.body["output_policy"]["on_idle"] == "restore");
+        CHECK(r.body["output_policy"]["per_controller"].size() == 1);
+
+        /* E-12b x R-1: get_policy / set_policy on OUTPUT_COMMAND.
+           They work without the runtime output control wired (this
+           service has none), reply OK {output_policy}, and
+           set_policy REPLACES the whole policy. */
+        {
+            EngineService::Deps d9b = d9;
+            d9b.set_output_policy =
+                [&host](const OutputPolicy& np, std::string& e)
+                { return host.SetOutputPolicy(np, e); };
+            Engine engine9b;
+            EngineService svc9b(engine9b, d9b);
+            r = svc9b.Dispatch(MsgType::OutputCommand,
+                nlohmann::json::object({{ "verb", "get_policy" }}));
+            CHECK(r.code == ErrCode::Ok);
+            CHECK(r.reply_type == MsgType::Ok);
+            CHECK(r.body["output_policy"]["on_exit"] == "black");
+
+            r = svc9b.Dispatch(MsgType::OutputCommand,
+                nlohmann::json::object({{ "verb", "set_policy" },
+                                        { "on_exit", "restore" }}));
+            CHECK(r.code == ErrCode::Ok);
+            CHECK(r.body["output_policy"]["on_exit"] == "restore");
+            CHECK(r.body["output_policy"]["on_idle"] == "hold");
+            CHECK(r.body["output_policy"]["per_controller"].empty());
+            CHECK(host.GetOutputPolicy().on_exit == OutputAction::Restore);
+
+            /* invalid -> bad_request, policy untouched */
+            r = svc9b.Dispatch(MsgType::OutputCommand,
+                nlohmann::json::object({{ "verb", "set_policy" },
+                                        { "on_exit", "sparkle" }}));
+            CHECK(r.code == ErrCode::BadRequest);
+            CHECK(host.GetOutputPolicy().on_exit == OutputAction::Restore);
+
+            /* a failed save is reported, not swallowed */
+            EngineService::Deps d9c = d9;
+            d9c.set_output_policy =
+                [](const OutputPolicy&, std::string& e)
+                { e = "disk full"; return false; };
+            Engine engine9c;
+            EngineService svc9c(engine9c, d9c);
+            r = svc9c.Dispatch(MsgType::OutputCommand,
+                nlohmann::json::object({{ "verb", "set_policy" },
+                                        { "on_exit", "black" }}));
+            CHECK(r.code != ErrCode::Ok);
+
+            /* put the earlier policy back for the QUIT case below */
+            CHECK(host.SetOutputPolicy(p, perr));
+        }
+
+        r = svc9.Dispatch(MsgType::Quit, nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(quit_called);
+        CHECK(r.body["exit_policy"] == "black");
+        CHECK(r.body["shutting_down"].get<bool>() == true);
+
+        /* unwired -> honest null / omitted */
+        Engine           engine10;
+        DeliveryPipeline pipe10;
+        DeviceMapper     mapper10;
+        EngineService::Deps d10;
+        d10.pipeline = &pipe10;
+        d10.mapper   = &mapper10;
+        d10.request_shutdown = [](bool)
+        { return nlohmann::json::object(); };
+        EngineService svc10(engine10, d10);
+        r = svc10.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r.body.contains("output_policy"));
+        CHECK(r.body["output_policy"].is_null());
+        r = svc10.Dispatch(MsgType::Quit, nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(!r.body.contains("exit_policy"));
+        /* policy verbs unwired -> unavailable, never a fake body */
+        r = svc10.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "get_policy" }}));
+        CHECK(r.code == ErrCode::Unavailable);
+        r = svc10.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "set_policy" },
+                                    { "on_exit", "black" }}));
+        CHECK(r.code == ErrCode::Unavailable);
+
+        /* a non-object provider result answers null, never a
+           bogus shape */
+        Engine           engine11;
+        EngineService::Deps d11;
+        d11.output_policy = [] { return nlohmann::json("black"); };
+        d11.request_shutdown = [](bool)
+        { return nlohmann::json::object(); };
+        EngineService svc11(engine11, d11);
+        r = svc11.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r.body["output_policy"].is_null());
+        r = svc11.Dispatch(MsgType::Quit, nlohmann::json::object());
+        CHECK(!r.body.contains("exit_policy"));
+    }
+
     /*---- layout verbs (Task 4.4) -------------------------------*/
     {
         /* verb surface still bounded first */
@@ -2269,6 +2418,144 @@ int main()
             std::lock_guard<std::mutex> lk(gate_m);
             CHECK(last12 == "q2");
         }
+    }
+
+    /*---- R-1 OUTPUT_COMMAND / "output" event ------------------*/
+    {
+        /* Not wired: honest Unavailable, no capability. */
+        IpcReply r = svc.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "get" }}));
+        CHECK(r.code == ErrCode::Unavailable);
+        {
+            const nlohmann::json w = svc.OnWelcome();
+            bool has = false;
+            for(const auto& c : w["capabilities"])
+            {
+                has = has || c == "output_control_v1";
+            }
+            CHECK(!has);
+        }
+
+        Engine        engine9;
+        OutputControl oc;
+        EngineService::Deps d9;
+        d9.output = &oc;
+        EngineService svc9(engine9, d9);
+        std::vector<IpcEvent> ev9;
+        svc9.SetEventSink([&ev9](const IpcEvent& e)
+                          { ev9.push_back(e); });
+
+        const nlohmann::json w = svc9.OnWelcome();
+        bool has = false;
+        for(const auto& c : w["capabilities"])
+        {
+            has = has || c == "output_control_v1";
+        }
+        CHECK(has);
+        /* WELCOME state paints the control immediately. */
+        CHECK(w["state"]["output"].is_object());
+
+        r = svc9.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "get" }}));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.reply_type == MsgType::Output);
+        CHECK(r.body["master"].get<double>() == 1.0);
+        CHECK(r.body["blackout"].get<bool>() == false);
+        CHECK(r.body["hold"].get<bool>() == false);
+        CHECK(r.body["effective"].get<double>() == 1.0);
+        CHECK(r.body["contributors"].is_object() &&
+              r.body["contributors"].empty());
+        CHECK(r.body["uploaded_unscaled"].get<bool>() == false);
+
+        r = svc9.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "set_master" },
+                                    { "value", 0.5 }}));
+        CHECK(r.code == ErrCode::Ok && r.reply_type == MsgType::Output);
+        CHECK(r.body["master"].get<double>() == 0.5);
+        CHECK(r.body["effective"].get<double>() == 0.5);
+        CHECK(oc.EffectiveScale() == 0.5f);
+
+        /* Range/type validation is bad_request, state unchanged. */
+        for(const nlohmann::json& bad : {
+                nlohmann::json::object({{ "verb", "set_master" },
+                                        { "value", 1.5 }}),
+                nlohmann::json::object({{ "verb", "set_master" },
+                                        { "value", -0.1 }}),
+                nlohmann::json::object({{ "verb", "set_master" },
+                                        { "value", "half" }}),
+                nlohmann::json::object({{ "verb", "set_master" }}),
+                nlohmann::json::object({{ "verb", "set_blackout" },
+                                        { "on", 1 }}),
+                nlohmann::json::object({{ "verb", "set_hold" }}),
+                nlohmann::json::object({{ "verb", "dim" }}),
+                nlohmann::json::object({{ "verb", 7 }}),
+                nlohmann::json::object() })
+        {
+            r = svc9.Dispatch(MsgType::OutputCommand, bad);
+            CHECK(r.code == ErrCode::BadRequest);
+        }
+        CHECK(oc.State().master == 0.5f);
+
+        r = svc9.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "set_blackout" },
+                                    { "on", true }}));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["blackout"].get<bool>() == true);
+        CHECK(r.body["effective"].get<double>() == 0.0);
+        CHECK(r.body["master"].get<double>() == 0.5);
+
+        r = svc9.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "set_hold" },
+                                    { "on", true }}));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["hold"].get<bool>() == true);
+        CHECK(oc.State().hold);
+
+        oc.SetContributor("idle", 0.5f);
+        r = svc9.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "get" }}));
+        CHECK(r.body["contributors"]["idle"].get<double>() == 0.5);
+
+        /* STATE carries the same body. */
+        r = svc9.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r.body["output"]["hold"].get<bool>() == true);
+
+        /* Push: EmitOutput (the host's changed hook) sends the
+           body; the SUBSCRIBE snapshot serves it; PollEvents
+           only re-sends when the body moved since. */
+        ev9.clear();
+        svc9.EmitOutput();
+        CHECK(ev9.size() == 1 && ev9[0].kind == event_kind::kOutput &&
+              ev9[0].data["blackout"].get<bool>() == true);
+        svc9.PollEvents();
+        size_t outs = 0;
+        for(const IpcEvent& e : ev9)
+        {
+            outs += e.kind == event_kind::kOutput ? 1 : 0;
+        }
+        CHECK(outs == 1);                       /* no duplicate */
+        oc.SetBlackout(false);                  /* no hook wired */
+        svc9.PollEvents();
+        outs = 0;
+        for(const IpcEvent& e : ev9)
+        {
+            outs += e.kind == event_kind::kOutput ? 1 : 0;
+        }
+        CHECK(outs == 2);                       /* diff caught it */
+        nlohmann::json osnap;
+        CHECK(svc9.SnapshotEvent(event_kind::kOutput, osnap));
+        CHECK(osnap["blackout"].get<bool>() == false);
+
+        bool known = false;
+        for(const std::string& k : EventKinds())
+        {
+            known = known || k == event_kind::kOutput;
+        }
+        CHECK(known);
+        CHECK(std::string(MsgTypeName(MsgType::OutputCommand)) ==
+              "OUTPUT_COMMAND");
+        CHECK(std::string(MsgTypeName(MsgType::Output)) == "OUTPUT");
+        CHECK(uint16_t(MsgType::OutputCommand) == 0x010f);
     }
 
     std::printf("ipc_engine_service_test: %d checks, %d failures\n",

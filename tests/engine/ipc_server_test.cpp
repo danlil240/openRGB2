@@ -163,10 +163,13 @@ static bool IsError(const Message& m, ErrCode code)
 }
 
 /*---------------------------------------------------------*\
-| Integrity probe (audit I-9): the suite runs at medium     |
-| integrity and cannot elevate, so the elevated / low /     |
-| unreadable-token paths are driven through the injected    |
-| probe. -1 = "token cannot be read".                        |
+| Integrity probe (audit I-9): the suite cannot change its  |
+| own integrity, so the elevated / low / unreadable-token   |
+| paths are driven through the injected probe. -1 = "token  |
+| cannot be read". It normally runs at medium (a dev PC);   |
+| on a GitHub-hosted runner it runs ELEVATED (admin token,  |
+| UAC off), and its pipes are then owned by Administrators  |
+| -- see PipeOwnerIsPrivileged (HYG-1).                     |
 \*---------------------------------------------------------*/
 static long g_il_self   = (long)kIntegrityMedium;
 static long g_il_server = (long)kIntegrityMedium;
@@ -257,6 +260,39 @@ static bool ReadPipeLabel(const std::string& pipe, DWORD& rid,
     }
     CloseHandle(h);
     return found;
+}
+
+/* True when the pipe object's owner is BUILTIN\Administrators or
+   LocalSystem. Under the default-owner policy an ELEVATED creator
+   (this suite on a GitHub-hosted runner) owns its objects as
+   Administrators; a medium creator (a dev PC) owns them as the
+   user. The pipe server's trust rules read that owner as a High
+   lower bound, so a few expectations depend on it. */
+static bool PipeOwnerIsPrivileged(const std::string& pipe)
+{
+    HANDLE h = CreateFileA(pipe.c_str(), GENERIC_READ | GENERIC_WRITE,
+                           0, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_OVERLAPPED, nullptr);
+    if(h == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+    PSID owner = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    bool privileged = false;
+    if(GetSecurityInfo(h, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
+                       &owner, nullptr, nullptr, nullptr, &sd)
+           == ERROR_SUCCESS && owner)
+    {
+        privileged = IsWellKnownSid(owner, WinBuiltinAdministratorsSid) ||
+                     IsWellKnownSid(owner, WinLocalSystemSid);
+    }
+    if(sd)
+    {
+        LocalFree(sd);
+    }
+    CloseHandle(h);
+    return privileged;
 }
 
 int main()
@@ -1297,7 +1333,14 @@ int main()
         CHECK(rid == kIntegrityMedium);
         CHECK((policy & SYSTEM_MANDATORY_LABEL_NO_WRITE_UP) != 0);
 
-        /* no probe: the real tokens (this medium test) */
+        const bool privileged_owner = PipeOwnerIsPrivileged(pipe);
+        std::printf("integrity: pipe owner is %s\n",
+                    privileged_owner
+                        ? "Administrators/SYSTEM (elevated test run)"
+                        : "this user (medium test run)");
+
+        /* no probe: the real tokens (medium on a dev PC, elevated
+           on a hosted runner -- allowed either way) */
         err.clear();
         CHECK(PipeHandshake(pipe, err));
 
@@ -1322,9 +1365,21 @@ int main()
         err.clear();
         CHECK(!PipeHandshake(pipe, err));
         CHECK(err.find("integrity") != std::string::npos);
+        /* ...and with the server token unreadable, the owner
+           decides: a user-owned (medium-created) pipe is refused;
+           an Administrators-owned one (this suite run elevated)
+           is the shipped elevated-UI -> elevated-engine case and
+           is trusted by design (EvaluatePipeServerTrust step 2) */
         set(HI, -1, ME);
         err.clear();
-        CHECK(!PipeHandshake(pipe, err));
+        if(privileged_owner)
+        {
+            CHECK(PipeHandshake(pipe, err));
+        }
+        else
+        {
+            CHECK(!PipeHandshake(pipe, err));
+        }
 
         /* elevated client, server token read as High (creator-
            owner policy elevated engine): allowed */
