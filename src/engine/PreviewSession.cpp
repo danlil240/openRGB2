@@ -104,7 +104,7 @@ void PreviewSession::Stop()
     active_       = false;
     pending_cand_.reset();
     has_pending_  = false;
-    prepared_     = PreparedStudioScene{};
+    applied_.reset();
     error_.clear();
 }
 
@@ -136,6 +136,51 @@ std::string PreviewSession::Error() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return error_;
+}
+
+uint64_t PreviewSession::DraftCacheBuilds() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cache_builds_;
+}
+
+std::shared_ptr<const PreviewSession::AppliedDraft>
+PreviewSession::BuildDraft(PreparedStudioScene prepared)
+{
+    auto d = std::make_shared<AppliedDraft>();
+    d->prepared = std::move(prepared);
+    const studio::SceneDocument& doc = *d->prepared.doc;
+    d->world = studio::ResolveWorldMatrices(doc);
+    /* Same object order, Previewable filter, EmitterSource
+       redirect and EmitterColor fallback the per-sample loop
+       used — only hoisted to the apply. */
+    for(const studio::SceneObject& o : doc.objects)
+    {
+        if(!Previewable(doc, o))
+        {
+            continue;
+        }
+        AppliedDraft::Entry e;
+        e.obj = &o;
+        e.src = &EmitterSource(doc, o);
+        switch(o.kind)
+        {
+        case studio::ObjectKind::Device: e.kind = "device"; break;
+        case studio::ObjectKind::Linked: e.kind = "linked"; break;
+        case studio::ObjectKind::Decor:  e.kind = "decor";  break;
+        default:                         e.kind = "group";  break;
+        }
+        const size_t n = e.src->emitters.size();
+        e.painted.reserve(n);
+        for(size_t i = 0; i < n; ++i)
+        {
+            e.painted.push_back(
+                studio::EmitterColor(doc, o.id, (int)i));
+        }
+        d->emitter_total += n;
+        d->entries.push_back(std::move(e));
+    }
+    return d;
 }
 
 bool PreviewSession::Sample(double scene_time_s,
@@ -177,72 +222,67 @@ bool PreviewSession::Sample(double scene_time_s,
             error_ = err;
             return false;
         }
+        /* The per-draft cache is built here, once per applied
+           candidate, outside the lock (audit E-8). */
+        std::vector<studio::EffectLayer> layers = prepared.layers;
+        std::shared_ptr<const AppliedDraft> built =
+            BuildDraft(std::move(prepared));
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            prepared_         = std::move(prepared);
+            applied_          = std::move(built);
             applied_revision_ = to_apply_rev;
+            ++cache_builds_;
             error_.clear();
         }
         /* Audit C-2: a draft edit continues each layer's motion
            at this sample's time instead of jumping it. */
-        engine_.ReplaceLayers(prepared_.layers, scene_time_s);
+        engine_.ReplaceLayers(std::move(layers), scene_time_s);
     }
 
     /* Snapshot the applied state under the lock — a concurrent
-       Stop() clears prepared_, so the evaluation must hold the
-       shared document + key lookup itself, never a reference
-       into member storage. */
-    std::shared_ptr<const studio::SceneDocument> doc_sp;
-    std::map<int, studio::Vec3>                  key_positions;
+       Stop() drops applied_, so the evaluation holds its own
+       reference to the immutable draft (document, key lookup,
+       matrices, per-object plan) — never a reference into
+       member storage, and no per-sample copy of the key map. */
+    std::shared_ptr<const AppliedDraft> draft;
     uint64_t rev;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if(!active_ || !prepared_.doc)
+        if(!active_ || !applied_ || !applied_->prepared.doc)
         {
             return false;
         }
-        rev           = applied_revision_;
-        doc_sp        = prepared_.doc;
-        key_positions = prepared_.key_positions;
+        rev   = applied_revision_;
+        draft = applied_;
     }
-    const studio::SceneDocument& doc = *doc_sp;
+    const studio::SceneDocument& doc = *draft->prepared.doc;
 
     /* Transient key events position through THIS draft's key
-       lookup — the prepared copy stays local to the sample,
+       lookup — the positioned copy stays local to the sample,
        exactly like SceneWorker::Step. Disabled/absent inputs
        contribute an empty state: preview NEVER starts a
        source, it consumes the snapshot it is handed. */
     const studio::InputState* in = input;
     studio::InputState        positioned;
     if(in != nullptr && !in->events.empty() &&
-       !key_positions.empty())
+       !draft->prepared.key_positions.empty())
     {
-        PreparedStudioScene view;
-        view.doc           = doc_sp;
-        view.key_positions = key_positions;
-        positioned = PositionStudioInput(*in, view);
+        positioned = PositionStudioInput(*in, draft->prepared);
         in = &positioned;
     }
 
     studio::FrameColors eval;
-    engine_.Evaluate(doc, scene_time_s, eval, in);
+    engine_.Evaluate(doc, draft->world, scene_time_s, eval, in);
 
     PreviewFrame f;
     f.valid          = true;
     f.scene_time_s   = scene_time_s;
     f.draft_revision = rev;
 
-    /* Size pass first: emitter_total decides dense-vs-reduced
-       for the WHOLE frame, so a reduced frame's stride is
-       uniform and honest across objects. */
-    size_t emitter_total = 0;
-    for(const studio::SceneObject& o : doc.objects)
-    {
-        if(Previewable(doc, o))
-        {
-            emitter_total += EmitterSource(doc, o).emitters.size();
-        }
-    }
+    /* emitter_total decides dense-vs-reduced for the WHOLE
+       frame (cached per draft), so a reduced frame's stride
+       is uniform and honest across objects. */
+    const size_t emitter_total = draft->emitter_total;
     const bool reduced =
         emitter_total > options_.display_budget_leds;
     const size_t stride =
@@ -254,13 +294,11 @@ bool PreviewSession::Sample(double scene_time_s,
     f.reduced        = reduced;
     f.emitter_total  = emitter_total;
 
-    for(const studio::SceneObject& o : doc.objects)
+    f.objects.reserve(draft->entries.size());
+    for(const AppliedDraft::Entry& ent : draft->entries)
     {
-        if(!Previewable(doc, o))
-        {
-            continue;
-        }
-        const studio::SceneObject& src = EmitterSource(doc, o);
+        const studio::SceneObject& o   = *ent.obj;
+        const studio::SceneObject& src = *ent.src;
         PreviewObjectColors pc;
         pc.object_id     = o.id;
         pc.parent_id     = o.parent_id;
@@ -271,33 +309,32 @@ bool PreviewSession::Sample(double scene_time_s,
         pc.bound         = !o.binding.empty();
         pc.verified      = o.verified;
         pc.emitter_total = src.emitters.size();
-        switch(o.kind)
-        {
-        case studio::ObjectKind::Device: pc.kind = "device"; break;
-        case studio::ObjectKind::Linked: pc.kind = "linked"; break;
-        case studio::ObjectKind::Decor:  pc.kind = "decor";  break;
-        default:                         pc.kind = "group";  break;
-        }
+        pc.kind          = ent.kind;
 
         /* The evaluated frame is keyed by the OUTPUT owner —
-           a linked copy displays its owner's evaluation. */
+           a linked copy displays its owner's evaluation; an
+           emitter no layer touched shows its painted color. */
         const auto fit = eval.find(src.id);
+        const std::vector<studio::SceneColor>* evald =
+            fit != eval.end() ? &fit->second : nullptr;
+        auto color_at = [&](size_t e)
+        {
+            const studio::SceneColor c =
+                (evald != nullptr && e < evald->size())
+                    ? (*evald)[e]
+                    : ent.painted[e];
+            return PreviewScale(c, doc.brightness);
+        };
 
         const size_t n = src.emitters.size();
         if(reduced)
         {
+            pc.indices.reserve(n / stride + 1);
+            pc.colors.reserve(n / stride + 1);
             for(size_t e = 0; e < n; e += stride)
             {
-                studio::SceneColor c =
-                    studio::EmitterColor(doc, o.id, (int)e);
-                if(fit != eval.end() &&
-                   e < fit->second.size())
-                {
-                    c = fit->second[e];
-                }
                 pc.indices.push_back((uint32_t)e);
-                pc.colors.push_back(
-                    PreviewScale(c, doc.brightness));
+                pc.colors.push_back(color_at(e));
             }
         }
         else
@@ -305,15 +342,7 @@ bool PreviewSession::Sample(double scene_time_s,
             pc.colors.reserve(n);
             for(size_t e = 0; e < n; ++e)
             {
-                studio::SceneColor c =
-                    studio::EmitterColor(doc, o.id, (int)e);
-                if(fit != eval.end() &&
-                   e < fit->second.size())
-                {
-                    c = fit->second[e];
-                }
-                pc.colors.push_back(
-                    PreviewScale(c, doc.brightness));
+                pc.colors.push_back(color_at(e));
             }
         }
         f.emitter_sent += pc.colors.size();
