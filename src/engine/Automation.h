@@ -42,6 +42,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -353,10 +354,25 @@ public:
         /* The AUTOMATION body moved (emit the event). */
         std::function<void()>                     changed;
         std::function<void(const std::string&)>  log;
+
+        /* R-4 dimming sources. Each is consulted only while a
+           rule needs it (nothing enabled -> never called):
+           wall_now for schedule windows (empty = the process's
+           local time), idle_seconds since the last user input
+           (< 0 = unknown -> never idle), fullscreen only once
+           the idle threshold is reached. */
+        std::function<LocalTime()> wall_now;
+        std::function<double()>    idle_seconds;
+        std::function<bool()>      fullscreen;
     };
 
     /* Presses inside this window move the target only. */
     static constexpr std::chrono::milliseconds kWorkspaceDebounce{ 1000 };
+    /* R-4: the dimming rules are re-evaluated at most this
+       often (a lock/unlock or a config change re-evaluates on
+       the next Poll). Minute-scale rules; ramps tick every
+       Poll. */
+    static constexpr std::chrono::milliseconds kDimEvalInterval{ 100 };
 
     explicit Automation(Deps deps);
 
@@ -382,9 +398,19 @@ public:
     /* Registrar thread: queue a WM_HOTKEY id. */
     void PostHotkey(int id);
 
-    /* Owner loop: run queued presses, then the trailing
-       workspace debounce. */
+    /* Owner loop: run queued presses, the trailing workspace
+       debounce, the R-4 dimming rules, then OutputControl's
+       contributor ramps. */
     void Poll(TimePoint now);
+
+    /* R-4 set_dimming: validate (DimmingConfigFromJson did the
+       shape) -> persist -> adopt; re-evaluated on the next Poll.
+       False + err (state unchanged) on a save failure. */
+    bool SetDimming(const DimmingConfig& d, std::string& err);
+    /* Session lock/unlock (WinPowerMonitor's thread): records
+       the state; the next Poll applies it. */
+    void PostSessionLock(bool locked);
+    bool SessionLocked() const { return locked_.load(); }
 
     /* Runs one action now (owner loop / tests). */
     void RunAction(HotkeyAction a, TimePoint now);
@@ -405,6 +431,8 @@ private:
 
     /* Registers `config_.hotkeys` (apply_mutex_ held). */
     void RegisterLocked();
+    /* R-4: evaluate the rules and drive the contributors. */
+    void PollDimming(TimePoint now);
     void Notify();
     void Log(const std::string& line) const;
     void StepWorkspace(int dir, TimePoint now);
@@ -428,6 +456,14 @@ private:
     std::string       cursor_;      /* latest target         */
     std::string       fired_;       /* last reload enqueued  */
     bool              pending_    = false;
+
+    /* R-4 dimming state. locked_/dim_dirty_ are written from
+       other threads; the rest is owner-loop only, except
+       active_ which ToJson reads under mutex_. */
+    std::atomic<bool> locked_    { false };
+    std::atomic<bool> dim_dirty_ { true };
+    TimePoint         next_dim_eval_{};
+    DimResult         active_;      /* guarded by mutex_ */
 };
 
 } /* namespace openrgb2 */

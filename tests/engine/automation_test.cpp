@@ -729,6 +729,88 @@ static void TestDimmingJson()
     CHECK(!warn.empty());
 }
 
+/* R-4 step 4: Automation drives the contributors from its
+   Poll — rules re-evaluate on a lock post or after the eval
+   interval, ramps advance every Poll, and an unconfigured
+   engine never asks the sources. */
+static void TestDimmingRuntime()
+{
+    using ms = std::chrono::milliseconds;
+    Rig rig;
+    Automation::Deps d = rig.Deps();
+    double idle = 0.0;
+    int    idle_calls = 0, fs_calls = 0;
+    LocalTime wall = At(3, 12, 0);
+    d.idle_seconds = [&] { ++idle_calls; return idle; };
+    d.fullscreen   = [&] { ++fs_calls; return false; };
+    d.wall_now     = [&] { return wall; };
+    Automation a(std::move(d));
+    const TimePoint t0 = TimePoint{} + std::chrono::hours(2);
+
+    a.Poll(t0);
+    CHECK(idle_calls == 0 && fs_calls == 0);   /* nothing enabled */
+    CHECK(a.ToJson()["dimming"]["configured"] == false);
+
+    DimmingConfig cfg;
+    cfg.idle.enabled = true;
+    cfg.idle.after_s = 60;
+    cfg.idle.level   = 0.3f;
+    cfg.lock.enabled = true;
+    cfg.lock.level   = 0.0f;
+    cfg.schedule     = { Window({}, 22, 0, 6, 0, 0.5f) };
+    std::string err;
+    const int changes0 = rig.changes;
+    CHECK(a.SetDimming(cfg, err));
+    CHECK(rig.saved.back().dimming && *rig.saved.back().dimming == cfg);
+    CHECK(rig.changes == changes0 + 1);
+
+    /* Idle: dims over the 600 ms ramp, monotonic. */
+    idle = 120.0;
+    a.Poll(t0 + ms(1));
+    CHECK(idle_calls >= 1 && fs_calls >= 1);
+    CHECK(Near(rig.oc.EffectiveScale(), 1.0));
+    a.Poll(t0 + ms(301));
+    CHECK(Near(rig.oc.EffectiveScale(), 0.65, 1e-3));
+    a.Poll(t0 + ms(700));
+    CHECK(Near(rig.oc.EffectiveScale(), 0.3));
+    CHECK(a.ToJson()["dimming"]["active"]["idle"].get<double>() == 0.3);
+    CHECK(a.ToJson()["dimming"]["active"]["lock"].is_null());
+
+    /* Input: lifted at once (restore 0) on the next evaluation. */
+    idle = 1.0;
+    a.Poll(t0 + ms(850));
+    CHECK(Near(rig.oc.EffectiveScale(), 1.0));
+    CHECK(rig.oc.State().contributors.empty());
+
+    /* A lock post re-evaluates on the very next Poll (no wait for
+       the interval); level 0 is "off". */
+    a.PostSessionLock(true);
+    a.Poll(t0 + ms(851));
+    CHECK(OutputControl::AnyContributorOff(rig.oc.State()));
+    a.Poll(t0 + ms(1500));
+    CHECK(Near(rig.oc.EffectiveScale(), 0.0));
+    a.PostSessionLock(false);
+    a.Poll(t0 + ms(1501));
+    CHECK(Near(rig.oc.EffectiveScale(), 1.0));
+
+    /* The night window from the injected wall clock. */
+    wall = At(3, 23, 0);
+    a.Poll(t0 + ms(2000));
+    a.Poll(t0 + ms(2700));
+    CHECK(Near(rig.oc.EffectiveScale(), 0.5));
+    CHECK(rig.oc.State().contributors.count("schedule") == 1);
+    wall = At(4, 6, 0);
+    a.Poll(t0 + ms(2900));
+    CHECK(Near(rig.oc.EffectiveScale(), 1.0));
+
+    /* Save failure: refused, nothing changes. */
+    rig.fail_save = true;
+    DimmingConfig off;
+    CHECK(!a.SetDimming(off, err));
+    CHECK(err.find("disk full") != std::string::npos);
+    CHECK(a.Config().dimming && *a.Config().dimming == cfg);
+}
+
 int main()
 {
     TestParseChord();
@@ -741,6 +823,7 @@ int main()
     TestScheduleWindows();
     TestDimRules();
     TestDimmingJson();
+    TestDimmingRuntime();
     std::printf("automation: %d checks, %d failures\n",
                 checks, failures);
     return failures ? 1 : 0;

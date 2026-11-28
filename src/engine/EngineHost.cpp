@@ -13,6 +13,7 @@
 #include "SceneLoader.h"
 
 #include "WinReactiveInputs.h"
+#include "WinUserActivity.h"
 
 #include "TcpSocket.h"
 
@@ -1080,7 +1081,18 @@ bool EngineHost::Start(std::string& err)
         std::string perr;
         if(!power_monitor_.Start(
             [this](PowerLifecycle::Event e)
-            { lifecycle_->PostEvent(e); }, perr))
+            {
+                lifecycle_->PostEvent(e);
+                /* R-4: the lock rule reads lock/unlock (the
+                   lifecycle accepts and ignores them). */
+                if(automation_ &&
+                   (e == PowerLifecycle::Event::SessionLock ||
+                    e == PowerLifecycle::Event::SessionUnlock))
+                {
+                    automation_->PostSessionLock(
+                        e == PowerLifecycle::Event::SessionLock);
+                }
+            }, perr))
         {
             Log("power monitoring unavailable: " + perr +
                 " (continuing)");
@@ -1294,6 +1306,18 @@ bool EngineHost::Start(std::string& err)
                 }
             };
         adeps.log = [this](const std::string& l) { Log(l); };
+        /* R-4: the dimming sources (injectable for the suites). */
+        adeps.idle_seconds =
+            opts_.idle_seconds
+                ? opts_.idle_seconds
+                : std::function<double()>(
+                      [] { return platform::UserIdleSeconds(); });
+        adeps.fullscreen =
+            opts_.fullscreen
+                ? opts_.fullscreen
+                : std::function<bool()>(
+                      [] { return platform::FullscreenAppActive(); });
+        adeps.wall_now = opts_.wall_clock;   /* empty = local time */
         automation_ = std::make_unique<Automation>(std::move(adeps));
     }
 
@@ -1698,11 +1722,16 @@ void EngineHost::OnOutputChanged()
         reactive_->Bus()->ClearEvents();
     }
     /* Uploaded loops: hold -> Paused, Off -> Stopped (they are
-       never scaled by the master). */
+       never scaled by the master). R-4: a level-0 dimming rule
+       (schedule / lock / idle at "off") stops them the same way
+       — a dimmed level leaves the loop running, reported
+       unscaled. */
     if(playback_)
     {
         const PlaybackController::Result r =
-            playback_->SetUserOverride(s.hold, s.blackout);
+            playback_->SetUserOverride(
+                s.hold,
+                s.blackout || OutputControl::AnyContributorOff(s));
         if(!r.accepted)
         {
             Log("output control: uploaded playback did not take "

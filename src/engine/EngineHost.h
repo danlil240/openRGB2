@@ -225,6 +225,15 @@ struct EngineHostOptions
     bool                              hotkeys = true;
     std::shared_ptr<IHotkeyRegistrar> hotkey_registrar;
 
+    /* R-4 dimming sources (Automation::Deps). Empty = the
+       platform: GetLastInputInfo, SHQueryUserNotificationState,
+       the local wall clock. Each is only consulted while a rule
+       needs it, so a test that sets no dimming never reaches
+       the desktop. */
+    std::function<double()>    idle_seconds;
+    std::function<bool()>      fullscreen;
+    std::function<LocalTime()> wall_clock;
+
     /* Log sink (default: stderr with the engine prefix). */
     std::function<void(const std::string&)> log;
 };

@@ -972,6 +972,7 @@ void Automation::Restore(const AutomationConfig& config)
         }
         RegisterLocked();
     }
+    dim_dirty_ = true;   /* R-4: persisted dimming applies at once */
     Notify();
 }
 
@@ -1069,6 +1070,13 @@ void Automation::Poll(TimePoint now)
     for(HotkeyAction a : run)
     {
         RunAction(a, now);
+    }
+
+    /* R-4: dimming rules, then the contributor ramps. */
+    PollDimming(now);
+    if(deps_.output)
+    {
+        deps_.output->Tick(now);
     }
 
     /* Trailing edge of a workspace burst: the latest target,
@@ -1199,6 +1207,127 @@ void Automation::RunAction(HotkeyAction a, TimePoint now)
     }
 }
 
+bool Automation::SetDimming(const DimmingConfig& d, std::string& err)
+{
+    {
+        std::lock_guard<std::mutex> apply(apply_mutex_);
+        AutomationConfig next;
+        {
+            std::lock_guard<std::mutex> g(mutex_);
+            next = config_;
+        }
+        next.dimming = d;
+        if(deps_.persist)
+        {
+            std::string serr;
+            if(!deps_.persist(next, serr))
+            {
+                err = "could not save the dimming rules: " + serr;
+                return false;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> g(mutex_);
+            config_ = std::move(next);
+        }
+    }
+    dim_dirty_ = true;
+    Notify();
+    return true;
+}
+
+void Automation::PostSessionLock(bool locked)
+{
+    if(locked_.exchange(locked) != locked)
+    {
+        dim_dirty_ = true;
+    }
+}
+
+void Automation::PollDimming(TimePoint now)
+{
+    if(!deps_.output)
+    {
+        return;
+    }
+    if(!dim_dirty_.load() && now < next_dim_eval_)
+    {
+        return;
+    }
+    dim_dirty_     = false;
+    next_dim_eval_ = now + kDimEvalInterval;
+
+    DimmingConfig cfg;
+    bool          configured = false;
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        if(config_.dimming)
+        {
+            cfg        = *config_.dimming;
+            configured = true;
+        }
+    }
+    DimInputs in;
+    if(configured && !cfg.schedule.empty())
+    {
+        in.wall = deps_.wall_now ? deps_.wall_now() : SystemLocalTime();
+    }
+    in.locked = locked_.load();
+    if(configured && cfg.idle.enabled)
+    {
+        in.idle_s = deps_.idle_seconds ? deps_.idle_seconds() : -1.0;
+        /* The (costlier) fullscreen probe only once the idle
+           threshold is reached. */
+        if(cfg.idle.skip_fullscreen && in.idle_s >= 0.0 &&
+           in.idle_s >= double(cfg.idle.after_s))
+        {
+            in.fullscreen = deps_.fullscreen ? deps_.fullscreen()
+                                             : false;
+        }
+    }
+    const DimResult r = configured ? EvaluateDimRules(cfg, in)
+                                   : DimResult{};
+
+    const std::chrono::milliseconds down(cfg.ramp_ms);
+    const std::chrono::milliseconds up(cfg.restore_ms);
+    const std::pair<const char*, const std::optional<float>*> slots[] = {
+        { "schedule", &r.schedule },
+        { "lock",     &r.lock     },
+        { "idle",     &r.idle     },
+    };
+    for(const auto& s : slots)
+    {
+        if(*s.second)
+        {
+            deps_.output->SetContributorTarget(s.first, **s.second,
+                                               now, down, up);
+        }
+        else
+        {
+            deps_.output->ReleaseContributor(s.first, now, up);
+        }
+    }
+
+    bool moved = false;
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        moved = r.schedule != active_.schedule ||
+                r.lock != active_.lock || r.idle != active_.idle;
+        active_ = r;
+    }
+    if(moved)
+    {
+        auto name = [](const std::optional<float>& v)
+        {
+            return v ? std::to_string(int(*v * 100.0f + 0.5f)) + "%"
+                     : std::string("off");
+        };
+        Log("dimming: schedule " + name(r.schedule) + ", lock " +
+            name(r.lock) + ", idle " + name(r.idle));
+        Notify();
+    }
+}
+
 nlohmann::json Automation::ToJson() const
 {
     std::lock_guard<std::mutex> g(mutex_);
@@ -1232,6 +1361,30 @@ nlohmann::json Automation::ToJson() const
           std::round(config_.brightness_step * 10000.0) / 10000.0 },
         { "registrar",       deps_.registrar != nullptr },
         { "max_hotkeys",     kMaxHotkeys },
+        /* R-4: the rules, which ones hold now, and the
+           arbitrated output scale they feed. */
+        { "dimming", nlohmann::json::object({
+            { "config",     DimmingConfigToJson(
+                                config_.dimming ? *config_.dimming
+                                                : DimmingConfig{}) },
+            { "configured", config_.dimming.has_value() },
+            { "active", nlohmann::json::object({
+                { "schedule", active_.schedule
+                                  ? nlohmann::json(Round4(*active_.schedule))
+                                  : nlohmann::json() },
+                { "lock",     active_.lock
+                                  ? nlohmann::json(Round4(*active_.lock))
+                                  : nlohmann::json() },
+                { "idle",     active_.idle
+                                  ? nlohmann::json(Round4(*active_.idle))
+                                  : nlohmann::json() },
+            }) },
+            { "effective", deps_.output
+                               ? nlohmann::json(Round4(
+                                     deps_.output->EffectiveScale()))
+                               : nlohmann::json() },
+            { "session_locked", locked_.load() },
+        }) },
     });
 }
 

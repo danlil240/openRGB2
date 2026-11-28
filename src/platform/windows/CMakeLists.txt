@@ -17,7 +17,8 @@ add_library(openrgb2_platform_windows STATIC
     WinKeyHook.cpp
     WinSessionEnd.cpp
     WinTimerResolution.cpp
-    WinHotkeys.cpp)
+    WinHotkeys.cpp
+    WinUserActivity.cpp)
 target_include_directories(openrgb2_platform_windows PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(openrgb2_platform_windows PUBLIC
@@ -31,4 +32,5 @@ target_link_libraries(openrgb2_platform_windows PRIVATE
     gdi32
     ole32
     winmm
-    wtsapi32)
+    wtsapi32
+    shell32)
