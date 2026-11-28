@@ -1,6 +1,6 @@
 # E-12c: Tick-cadence and per-lane latency histograms
 
-Status: proposed · Size: S · Source: audit 2026-11-28 E-12 (part c) · Related: E-2 / P-8
+Status: implemented on `feat/e-12c-histograms` (not merged); step 6 baseline is manual · Size: S · Source: audit 2026-11-28 E-12 (part c) · Related: E-2 / P-8
 
 ## Goal
 

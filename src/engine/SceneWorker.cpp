@@ -111,6 +111,18 @@ uint64_t SceneWorker::Evaluations() const
     return evaluations_;
 }
 
+Histogram SceneWorker::TickStats() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return tick_hist_;
+}
+
+void SceneWorker::ResetTickStats()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    tick_hist_.Reset();   /* baseline kept: the next tick counts */
+}
+
 TimePoint SceneWorker::Epoch() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -251,6 +263,23 @@ bool SceneWorker::Step(TimePoint now)
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
+        /* E-12c: the actual tick interval, from the `now` this
+           Step already has (no extra clock read). Every tick
+           counts — gated, held and no-scene too. The baseline
+           is monotonic: an out-of-order stamp records nothing
+           and does not drag it back. */
+        if(has_last_step_ && now > last_step_)
+        {
+            tick_hist_.Record(
+                std::chrono::duration<double, std::milli>(
+                    now - last_step_).count());
+        }
+        if(!has_last_step_ || now > last_step_)
+        {
+            last_step_     = now;
+            has_last_step_ = true;
+        }
+
         /* Latest-wins: apply the newest submitted state; anything it
            replaced is dropped, never replayed. */
         if(has_pending_scene_)
@@ -390,6 +419,9 @@ bool SceneWorker::Start()
     }
     epoch_ = Clock::now();
     run_   = true;
+    /* E-12c: the first tick after a (re)start seeds the cadence
+       baseline — a stop/start gap is not a tick interval. */
+    has_last_step_ = false;
     thread_ = std::thread(&SceneWorker::Run, this);
     return true;
 }

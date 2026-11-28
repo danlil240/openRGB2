@@ -743,6 +743,58 @@ static void TestEvaluateGate()
     CHECK(!idle.Step(Clock::now()));
 }
 
+/* Audit E-12c: the scene clock's actual tick-to-tick interval is
+   recorded per Step into a fixed-bucket histogram. Synthetic
+   steps 16.7 ms then 31 ms apart land in the 17 and 33 ms
+   buckets; gated and no-scene ticks count too (the clock keeps
+   ticking); ResetTickStats clears the histogram but keeps the
+   baseline, so the next interval is still measured. */
+static void TestTickHistogram()
+{
+    using std::chrono::microseconds;
+    const auto bucket = [](double edge)
+    {
+        for(size_t i = 0; i < Histogram::kFiniteEdges; ++i)
+        {
+            if(Histogram::kEdgesMs[i] == edge) return i;
+        }
+        return Histogram::kBuckets - 1;
+    };
+
+    SceneWorker worker;
+    CHECK(worker.TickStats().Total() == 0);
+
+    const TimePoint t0 = Clock::now();
+    worker.SetEpoch(t0);
+    worker.Step(t0);                               /* seeds only */
+    CHECK(worker.TickStats().Total() == 0);
+    worker.Step(t0 + microseconds(16700));         /* no scene   */
+    worker.Step(t0 + microseconds(16700 + 31000));
+    Histogram h = worker.TickStats();
+    CHECK(h.Total() == 2);
+    CHECK(h.Counts()[bucket(17)] == 1);
+    CHECK(h.Counts()[bucket(33)] == 1);
+    CHECK(h.Percentile(50) == 17.0);
+    CHECK(h.Percentile(99) == 33.0);
+
+    /* A gated tick (display off) still counts. */
+    worker.SetOutputGate([] { return true; });
+    worker.SubmitScene(WaveDoc(), WaveLayers(), 1);
+    CHECK(!worker.Step(t0 + microseconds(47700 + 16700)));
+    CHECK(worker.TickStats().Total() == 3);
+    CHECK(worker.TickStats().Counts()[bucket(17)] == 2);
+
+    /* An out-of-order synthetic stamp is not an interval. */
+    worker.Step(t0);
+    CHECK(worker.TickStats().Total() == 3);
+
+    worker.ResetTickStats();
+    CHECK(worker.TickStats().Total() == 0);
+    worker.Step(t0 + microseconds(64400 + 4000));
+    CHECK(worker.TickStats().Total() == 1);
+    CHECK(worker.TickStats().Counts()[bucket(4)] == 1);
+}
+
 int main()
 {
     TestDeterministicStep();
@@ -762,6 +814,7 @@ int main()
     TestFutureEpochWorker();
     TestWorkerThread();
     TestEngineComposition();
+    TestTickHistogram();
     std::printf("scene worker: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

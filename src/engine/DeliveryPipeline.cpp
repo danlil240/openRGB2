@@ -624,6 +624,25 @@ bool DeliveryPipeline::DeliverOne(Lane& lane, RgbFrame frame,
                                              : Clock::now();
     lane.stats.RecordTransportCompletion(completed);
     aggregate_.RecordTransportCompletion(completed);
+    /* E-12c timing from the stamps already taken — no new clock
+       read: queue = scene sample -> send start, send = send
+       start -> completion. A synthetic frame's sample_time is
+       not a scene sample and an unstamped one has none, so
+       neither enters the queue histogram (both still count as
+       sends). Negative deltas (out-of-order synthetic clocks)
+       are refused by Histogram::Record. */
+    {
+        using Ms = std::chrono::duration<double, std::milli>;
+        if(!frame.synthetic && frame.sample_time != TimePoint{})
+        {
+            const double queue_ms = Ms(now - frame.sample_time).count();
+            lane.stats.queue_hist.Record(queue_ms);
+            aggregate_.queue_hist.Record(queue_ms);
+        }
+        const double send_ms = Ms(completed - now).count();
+        lane.stats.send_hist.Record(send_ms);
+        aggregate_.send_hist.Record(send_ms);
+    }
     if(keyframe)
     {
         ++lane.stats.keyframes;
@@ -797,6 +816,18 @@ DeliveryStats DeliveryPipeline::Stats() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return aggregate_;
+}
+
+void DeliveryPipeline::ResetTimingStats()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    for(auto& entry : lanes_)
+    {
+        entry.second->stats.queue_hist.Reset();
+        entry.second->stats.send_hist.Reset();
+    }
+    aggregate_.queue_hist.Reset();
+    aggregate_.send_hist.Reset();
 }
 
 bool DeliveryPipeline::LastDelivered(const DeviceKey& controller,

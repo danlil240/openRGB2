@@ -12,6 +12,10 @@ function(engine_suite NAME)
 endfunction()
 
 engine_suite(engine_types_test)
+
+# Audit E-12c — the fixed-bucket timing histogram (tick cadence,
+# per-lane queue and send latency).
+engine_suite(histogram_test)
 engine_suite(frame_sink_test)
 engine_suite(scene_worker_test)
 engine_suite(delivery_pipeline_test)

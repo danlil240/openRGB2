@@ -2558,6 +2558,135 @@ int main()
         CHECK(uint16_t(MsgType::OutputCommand) == 0x010f);
     }
 
+    /*---- E-12c timing histograms + reset_stats ----------------*/
+    {
+        Engine           engine12;
+        DeliveryPipeline pipe12(std::make_shared<NullFrameSink>());
+        DeviceSnapshot   lane = fsnap;
+        pipe12.RegisterDevice(lane);
+        EngineService::Deps d12;
+        d12.pipeline  = &pipe12;
+        d12.snapshots = [&lane]
+        {
+            return std::vector<DeviceSnapshot>{ lane };
+        };
+        EngineService svc12(engine12, d12);
+
+        /* One live frame sampled 29 ms before its send (bucket
+           33) and one synthetic frame (send only). */
+        const TimePoint t0 = TimePoint{} + std::chrono::hours(1);
+        RgbFrame f;
+        f.controller          = lane.key;
+        f.topology_generation = lane.topology_generation;
+        f.sequence            = 1;
+        f.sample_time         = t0;
+        f.colors.assign(lane.LedCount(), RgbColor{ 9, 9, 9 });
+        CHECK(pipe12.SubmitLatest(f).status == SubmitStatus::Accepted);
+        CHECK(pipe12.DrainDue(lane.key,
+                              t0 + std::chrono::milliseconds(29)) == 1);
+        f.synthetic = true;
+        f.sequence  = 2;
+        f.colors.assign(lane.LedCount(), RgbColor{ 1, 1, 1 });
+        CHECK(pipe12.SubmitLatest(f).status == SubmitStatus::Accepted);
+        CHECK(pipe12.DrainDue(lane.key, t0 + std::chrono::seconds(1))
+              == 1);
+
+        /* Scene clock: two synthetic ticks, 16.7 ms apart. */
+        engine12.Worker().Step(t0);
+        engine12.Worker().Step(t0 + std::chrono::microseconds(16700));
+
+        const auto shape_ok = [](const nlohmann::json& h)
+        {
+            return h.is_object() &&
+                   h["edges_ms"].is_array() &&
+                   h["edges_ms"].size() == Histogram::kFiniteEdges &&
+                   h["edges_ms"][7].get<double>() == 17.0 &&
+                   h["counts"].is_array() &&
+                   h["counts"].size() == Histogram::kBuckets &&
+                   h["total"].is_number_unsigned() &&
+                   h.contains("p50") && h.contains("p95") &&
+                   h.contains("p99");
+        };
+
+        IpcReply r = svc12.Dispatch(MsgType::GetDeliveryStats,
+                                    nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        const nlohmann::json& agg = r.body["aggregate"];
+        CHECK(shape_ok(agg["queue_hist"]));
+        CHECK(shape_ok(agg["send_hist"]));
+        CHECK(agg["queue_hist"]["total"].get<uint64_t>() == 1);
+        CHECK(agg["queue_hist"]["counts"][10].get<uint64_t>() == 1);
+        CHECK(agg["queue_hist"]["p50"].get<double>() == 33.0);
+        CHECK(agg["queue_hist"]["provenance"].get<std::string>()
+              == "transport_measured");
+        CHECK(agg["send_hist"]["total"].get<uint64_t>() == 2);
+        CHECK(r.body["controllers"].size() == 1);
+        const nlohmann::json& cst = r.body["controllers"][0]["stats"];
+        CHECK(shape_ok(cst["queue_hist"]));
+        CHECK(cst["queue_hist"]["total"].get<uint64_t>() == 1);
+        CHECK(cst["send_hist"]["total"].get<uint64_t>() == 2);
+        /* The per-controller query carries them too. */
+        r = svc12.Dispatch(MsgType::GetDeliveryStats,
+            nlohmann::json::object({{ "controller", nlohmann::json::object({
+                { "device",   lane.key.device   },
+                { "serial",   lane.key.serial   },
+                { "location", lane.key.location },
+            })}}));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["found"].get<bool>());
+        CHECK(shape_ok(r.body["stats"]["queue_hist"]));
+
+        /* frame_status: percentile summary only — no bucket
+           arrays on the ~30 Hz feed. */
+        nlohmann::json fs;
+        CHECK(svc12.SnapshotEvent(event_kind::kFrameStatus, fs));
+        const nlohmann::json& fq = fs["aggregate"]["queue_hist"];
+        CHECK(fq.is_object());
+        CHECK(!fq.contains("counts"));
+        CHECK(!fq.contains("edges_ms"));
+        CHECK(fq["total"].get<uint64_t>() == 1);
+        CHECK(fq["p95"].get<double>() == 33.0);
+        CHECK(fs["controllers"][0]["stats"]["send_hist"]["total"]
+                  .get<uint64_t>() == 2);
+
+        /* GET_STATE: scene.tick_hist. */
+        r = svc12.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        const nlohmann::json& th = r.body["scene"]["tick_hist"];
+        CHECK(shape_ok(th));
+        CHECK(th["total"].get<uint64_t>() == 1);
+        CHECK(th["p50"].get<double>() == 17.0);
+
+        /* An overflow percentile is null with total > 0; an
+           empty histogram reports null percentiles. */
+        engine12.Worker().Step(t0 + std::chrono::milliseconds(400));
+        engine12.Worker().Step(t0 + std::chrono::milliseconds(800));
+        r = svc12.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r.body["scene"]["tick_hist"]["total"].get<uint64_t>() == 3);
+        CHECK(r.body["scene"]["tick_hist"]["p99"].is_null());
+        CHECK(r.body["scene"]["tick_hist"]["counts"][16]
+                  .get<uint64_t>() == 2);
+
+        /* reset_stats: works without runtime output control,
+           clears tick/queue/send histograms, keeps counters. */
+        r = svc12.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "reset_stats" }}));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.reply_type == MsgType::Ok);
+        CHECK(r.body["reset"].get<bool>() == true);
+        r = svc12.Dispatch(MsgType::GetDeliveryStats,
+                           nlohmann::json::object());
+        CHECK(r.body["aggregate"]["queue_hist"]["total"]
+                  .get<uint64_t>() == 0);
+        CHECK(r.body["aggregate"]["queue_hist"]["p50"].is_null());
+        CHECK(r.body["aggregate"]["send_hist"]["total"]
+                  .get<uint64_t>() == 0);
+        CHECK(r.body["aggregate"]["transport_completed"]
+                  .get<uint64_t>() == 2);
+        r = svc12.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r.body["scene"]["tick_hist"]["total"].get<uint64_t>() == 0);
+    }
+
     std::printf("ipc_engine_service_test: %d checks, %d failures\n",
                 checks, failures);
     return failures ? 1 : 0;

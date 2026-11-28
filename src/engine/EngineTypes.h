@@ -16,6 +16,7 @@
 #pragma once
 
 #include "scene/SceneTypes.h" /* studio::SceneColor */
+#include "Histogram.h"        /* E-12c DeliveryStats timing */
 
 #include <chrono>
 #include <cstdint>
@@ -261,6 +262,18 @@ struct DeliveryStats
     double   max_interval_s  = 0.0;
 
     MeasurementProvenance provenance = MeasurementProvenance::Unknown;
+
+    /* Audit E-12c timing distributions (ms), recorded by the
+       delivery pipeline for transport-completed sends only —
+       same TransportMeasured provenance, never "displayed":
+         queue_hist — frame sample_time -> send start (queue +
+                      budget wait); synthetic and unstamped
+                      frames excluded (not a scene sample)
+         send_hist  — send start -> transport completion
+       Cumulative since start or DeliveryPipeline::
+       ResetTimingStats. Empty for other IFrameSinks. */
+    Histogram queue_hist;
+    Histogram send_hist;
 
     /* Records a completed handoff at `at`; intervals derive from
        consecutive completions. */

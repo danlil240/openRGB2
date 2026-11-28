@@ -860,6 +860,160 @@ static void TestStaticKeyframe()
     CHECK(st.keyframes == 3);
 }
 
+/*---------------------------------------------------------*\
+|| Audit E-12c — queue (sample -> send start) and send      |
+|| (send start -> completion) histograms                    |
+\*---------------------------------------------------------*/
+static size_t BucketOf(double edge_ms)
+{
+    for(size_t i = 0; i < Histogram::kFiniteEdges; ++i)
+    {
+        if(Histogram::kEdgesMs[i] == edge_ms)
+        {
+            return i;
+        }
+    }
+    return Histogram::kBuckets - 1;
+}
+
+/* A wireless-budget lane: a frame sampled just after a send
+   waits out the 30 ms budget, so its queue time lands in the
+   (25, 33] bucket. The synchronous drain's completion stamp is
+   the caller's `now`, so send time is 0 here. Lane and
+   aggregate both record. */
+static void TestQueueHistogramWirelessBudget()
+{
+    auto transport = std::make_shared<FakeTransport>();
+    DeliveryPipeline pipe(transport);
+    const DeviceSnapshot w = Wireless();
+    pipe.RegisterDevice(w);
+    pipe.SetBudget(w.key, 30ms);
+
+    const TimePoint t0 = TimePoint{} + 1h;
+    uint64_t seq = 0;
+    /* First send: sampled and drained at the same instant. */
+    pipe.SubmitLatest(MakeFrame(w, ++seq, { 1, 0, 0 }, t0));
+    CHECK(pipe.DrainDue(w.key, t0) == 1);
+
+    TimePoint last = t0;
+    for(int i = 0; i < 5; ++i)
+    {
+        const TimePoint sampled = last + 1ms;
+        pipe.SubmitLatest(MakeFrame(w, ++seq,
+                                    { uint8_t(10 + i), 0, 0 },
+                                    sampled));
+        CHECK(pipe.DrainDue(w.key, sampled) == 0);    /* budget */
+        last += 30ms;
+        CHECK(pipe.DrainDue(w.key, last) == 1);       /* due    */
+    }
+
+    DeliveryStats st;
+    CHECK(pipe.Stats(w.key, st));
+    CHECK(st.queue_hist.Total() == 6);
+    CHECK(st.queue_hist.Counts()[BucketOf(0.5)] == 1);
+    CHECK(st.queue_hist.Counts()[BucketOf(33)] == 5);   /* 29 ms */
+    CHECK(st.queue_hist.Percentile(50) == 33.0);
+    CHECK(st.send_hist.Total() == 6);
+    CHECK(st.send_hist.Counts()[BucketOf(0.5)] == 6);
+    const DeliveryStats agg = pipe.Stats();
+    CHECK(agg.queue_hist.Total() == 6);
+    CHECK(agg.queue_hist.Counts()[BucketOf(33)] == 5);
+    CHECK(agg.send_hist.Total() == 6);
+
+    /* Suppressed (identical) frames are not sent: nothing is
+       recorded for them. */
+    pipe.SubmitLatest(MakeFrame(w, ++seq, { 14, 0, 0 }, last));
+    CHECK(pipe.DrainDue(w.key, last + 30ms) == 0);
+    CHECK(pipe.Stats(w.key, st));
+    CHECK(st.suppressed == 1);
+    CHECK(st.queue_hist.Total() == 6);
+    CHECK(st.send_hist.Total() == 6);
+}
+
+/* Synthetic frames (playback bakes, stop-black) carry a
+   sample_time that is not a scene sample: excluded from the
+   queue histogram, still counted in the send histogram. An
+   unstamped frame (sample_time == TimePoint{}) has no scene
+   sample either. */
+static void TestQueueExcludesSynthetic()
+{
+    auto transport = std::make_shared<FakeTransport>();
+    DeliveryPipeline pipe(transport);
+    const DeviceSnapshot w = Wired();
+    pipe.RegisterDevice(w);
+
+    const TimePoint t0 = TimePoint{} + 1h;
+    RgbFrame f = MakeFrame(w, 1, { 5, 5, 5 }, t0 - 40ms);
+    f.synthetic = true;
+    CHECK(pipe.SubmitLatest(f).status == SubmitStatus::Accepted);
+    CHECK(pipe.DrainDue(w.key, t0) == 1);
+
+    pipe.SubmitLatest(MakeFrame(w, 2, { 6, 6, 6 }));  /* unstamped */
+    CHECK(pipe.DrainDue(w.key, t0 + 1s) == 1);
+
+    DeliveryStats st;
+    CHECK(pipe.Stats(w.key, st));
+    CHECK(st.transport_completed == 2);
+    CHECK(st.queue_hist.Total() == 0);
+    CHECK(st.send_hist.Total() == 2);
+}
+
+/* The lane-worker path: send time is send start -> the post-
+   send completion stamp. A fake transport that sleeps 20 ms
+   lands the sample at or above the 20 ms bucket. */
+static void TestSendHistogramLaneWorker()
+{
+    auto transport = std::make_shared<FakeTransport>();
+    transport->on_send = [] { std::this_thread::sleep_for(20ms); };
+    DeliveryPipeline pipe(transport);
+    const DeviceSnapshot w = Wired();
+    pipe.RegisterDevice(w);
+    CHECK(pipe.Start());
+
+    pipe.SubmitLatest(MakeFrame(w, 1, { 7, 0, 0 }, Clock::now()));
+    CHECK(transport->WaitDelivered(w.key, 1, 2000ms));
+    /* The stats land just after the transport returns. */
+    DeliveryStats st;
+    for(int i = 0; i < 200; ++i)
+    {
+        if(pipe.Stats(w.key, st) && st.send_hist.Total() >= 1)
+        {
+            break;
+        }
+        std::this_thread::sleep_for(2ms);
+    }
+    pipe.Stop();
+
+    CHECK(pipe.Stats(w.key, st));
+    CHECK(st.send_hist.Total() == 1);
+    CHECK(st.send_hist.Percentile(0) >= 20.0);
+    CHECK(st.queue_hist.Total() == 1);
+}
+
+/* ResetTimingStats clears every histogram (lanes + aggregate)
+   and leaves the cumulative counters alone. */
+static void TestResetTimingStats()
+{
+    auto transport = std::make_shared<FakeTransport>();
+    DeliveryPipeline pipe(transport);
+    const DeviceSnapshot w = Wired();
+    pipe.RegisterDevice(w);
+    const TimePoint t0 = TimePoint{} + 1h;
+    pipe.SubmitLatest(MakeFrame(w, 1, { 1, 2, 3 }, t0));
+    CHECK(pipe.DrainDue(w.key, t0 + 5ms) == 1);
+
+    DeliveryStats st;
+    CHECK(pipe.Stats(w.key, st) && st.queue_hist.Total() == 1);
+    pipe.ResetTimingStats();
+    CHECK(pipe.Stats(w.key, st));
+    CHECK(st.queue_hist.Total() == 0);
+    CHECK(st.send_hist.Total() == 0);
+    CHECK(st.transport_completed == 1);
+    CHECK(pipe.Stats().queue_hist.Total() == 0);
+    CHECK(pipe.Stats().send_hist.Total() == 0);
+    CHECK(pipe.Stats().transport_completed == 1);
+}
+
 int main()
 {
     TestBurstCollapse();
@@ -878,6 +1032,10 @@ int main()
     TestDrainVsDeviceRemoval();
     TestStopBoundedByInFlightSend();
     TestStaticKeyframe();
+    TestQueueHistogramWirelessBudget();
+    TestQueueExcludesSynthetic();
+    TestSendHistogramLaneWorker();
+    TestResetTimingStats();
     std::printf("delivery pipeline: %d checks, %d failures\n",
                 checks, failures);
     return failures ? 1 : 0;

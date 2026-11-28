@@ -159,9 +159,60 @@ nlohmann::json ColorsToJson(const std::vector<RgbColor>& colors)
     return out;
 }
 
-nlohmann::json StatsToJson(const DeliveryStats& s)
+/* Audit E-12c: one timing histogram on the wire. A percentile
+   is the bucket UPPER edge in ms; null when the histogram is
+   empty, or (total > 0) when it falls in the overflow bucket
+   (> the last finite edge). `full` adds the bucket arrays —
+   GET_DELIVERY_STATS / GET_STATE; frame_status carries the
+   summary only (its ~30 Hz size budget). `provenance` null =
+   omitted (the scene-clock tick histogram is the engine's own
+   clock, not a transport measurement). */
+nlohmann::json HistogramToJson(const Histogram& h, bool full,
+                               const char* provenance)
 {
-    return nlohmann::json::object({
+    const auto pct = [&h](double p) -> nlohmann::json
+    {
+        const double v = h.Percentile(p);
+        if(std::isnan(v) || std::isinf(v))
+        {
+            return nullptr;
+        }
+        return v;
+    };
+    nlohmann::json out = nlohmann::json::object({
+        { "total", h.Total() },
+        { "p50",   pct(50)   },
+        { "p95",   pct(95)   },
+        { "p99",   pct(99)   },
+    });
+    if(full)
+    {
+        nlohmann::json edges = nlohmann::json::array();
+        for(double e : Histogram::kEdgesMs)
+        {
+            edges.push_back(e);
+        }
+        nlohmann::json counts = nlohmann::json::array();
+        for(uint64_t c : h.Counts())
+        {
+            counts.push_back(c);
+        }
+        out["edges_ms"] = std::move(edges);
+        out["counts"]   = std::move(counts);
+    }
+    if(provenance)
+    {
+        out["provenance"] = provenance;
+    }
+    return out;
+}
+
+nlohmann::json StatsToJson(const DeliveryStats& s,
+                           bool full_timing = true)
+{
+    /* E-12c: queue/send share the stats' own provenance. */
+    const char* prov = ProvenanceName(s.provenance);
+    nlohmann::json out = nlohmann::json::object({
         { "submitted",           s.submitted           },
         { "replaced_pending",    s.replaced_pending    },
         { "rejected",            s.rejected            },
@@ -176,6 +227,9 @@ nlohmann::json StatsToJson(const DeliveryStats& s)
         { "interval_count",      s.IntervalCount()     },
         { "provenance",          ProvenanceName(s.provenance) },
     });
+    out["queue_hist"] = HistogramToJson(s.queue_hist, full_timing, prov);
+    out["send_hist"]  = HistogramToJson(s.send_hist, full_timing, prov);
+    return out;
 }
 
 /* QA F04: the mapper's per-pass counters — object
@@ -1090,7 +1144,7 @@ nlohmann::json EngineService::DeliveryStatsJson(
 }
 
 nlohmann::json EngineService::WirelessLaneJson(
-    const std::vector<DeviceSnapshot>& snaps) const
+    const std::vector<DeviceSnapshot>& snaps, bool full_timing) const
 {
     /* The Lian Li wireless service owns ONE full-group LED
        buffer — its controllers carry the "Wireless:" location
@@ -1117,7 +1171,7 @@ nlohmann::json EngineService::WirelessLaneJson(
         }
         return nlohmann::json::object({
             { "key",        KeyToJson(snap.key)                  },
-            { "stats",      StatsToJson(ws)                      },
+            { "stats",      StatsToJson(ws, full_timing)         },
             { "suppressed", deps_.pipeline->IsSuppressed(
                                 snap.key)                        },
             { "pending",    (uint64_t)deps_.pipeline->PendingCount(
@@ -1168,17 +1222,17 @@ nlohmann::json EngineService::FrameStatusJson(
                 { "colors",     has_delivered
                                     ? ColorsToJson(delivered.colors)
                                     : nlohmann::json::array()      },
-                { "stats",      StatsToJson(stats)                 },
+                { "stats",      StatsToJson(stats, false)          },
             }));
         }
     }
     return nlohmann::json::object({
         { "aggregate",   deps_.pipeline
-                             ? StatsToJson(deps_.pipeline->Stats())
-                             : StatsToJson(DeliveryStats{}) },
+                             ? StatsToJson(deps_.pipeline->Stats(), false)
+                             : StatsToJson(DeliveryStats{}, false) },
         /* QA F11: the wireless lane's own counters — never the
            wired-mixing aggregate under a wireless label. */
-        { "wireless",    WirelessLaneJson(snaps)              },
+        { "wireless",    WirelessLaneJson(snaps, false)       },
         { "controllers", std::move(controllers)               },
     });
 }
@@ -1363,6 +1417,9 @@ const std::vector<EngineService::OutputVerb>& EngineService::OutputVerbs()
         /* E-12b exit/idle policy: own dependency, OK reply. */
         { "get_policy",   &EngineService::OutputGetPolicy, false },
         { "set_policy",   &EngineService::OutputSetPolicy, false },
+        /* E-12c: clears the timing histograms — measurement
+           state only, no output effect. */
+        { "reset_stats",  &EngineService::OutputResetStats, false },
     };
     return verbs;
 }
@@ -1431,6 +1488,21 @@ IpcReply EngineService::OutputSetPolicy(const nlohmann::json& body)
             "set_policy: could not save the policy: " + err);
     }
     return OutputGetPolicy(body);
+}
+
+IpcReply EngineService::OutputResetStats(const nlohmann::json&)
+{
+    /* Histograms only: the cumulative counters and interval
+       stats keep their meaning (the Dashboard's delivery rate
+       reads them). Cumulative-since-reset is the before/after
+       comparison window. */
+    engine_.Worker().ResetTickStats();
+    if(deps_.pipeline)
+    {
+        deps_.pipeline->ResetTimingStats();
+    }
+    return IpcReply::Success(MsgType::Ok,
+        nlohmann::json::object({{ "reset", true }}));
 }
 
 IpcReply EngineService::OutputGet(const nlohmann::json&)
@@ -1534,15 +1606,26 @@ nlohmann::json EngineService::IpcStatsJson() const
     });
 }
 
+nlohmann::json EngineService::TickHistJson() const
+{
+    /* The engine's own scene clock — no transport provenance. */
+    return HistogramToJson(engine_.Worker().TickStats(), true, nullptr);
+}
+
 nlohmann::json EngineService::StateJson() const
 {
+    /* E-12c: STATE's scene section carries the tick-interval
+       histogram (not the SCENE event/reply — those fire on scene
+       changes, where a cadence snapshot would only go stale). */
+    nlohmann::json scene = SceneJsonLocked();
+    scene["tick_hist"] = TickHistJson();
     return nlohmann::json::object({
         { "engine", nlohmann::json::object({
             { "running",         engine_.Running()          },
             { "scene_clock_hz",  SceneWorker::kTickHz       },
             { "scene_sequence",  engine_.Worker().Sequence()},
         })},
-        { "scene",      SceneJsonLocked()                    },
+        { "scene",      std::move(scene)                     },
         { "sdk",        ConnectionJson()                     },
         { "playback",   PlaybackJson()                       },
         { "power",      PowerJson()                          },

@@ -23,6 +23,7 @@
 
 #include "EngineLog.h"
 #include "EngineTypes.h"
+#include "Histogram.h"
 #include "StudioScenePreparation.h"
 
 #include "effects/EffectEngine.h"
@@ -176,6 +177,16 @@ public:
        idle-hook frames excluded) — diagnostics/tests. */
     uint64_t Evaluations() const;
 
+    /* Audit E-12c: the scene clock's ACTUAL tick-to-tick
+       interval — the delta between consecutive Step calls,
+       cumulative since start or the last ResetTickStats. Every
+       Step counts (gated, held and no-scene ticks too: the clock
+       keeps ticking). An out-of-order Step stamp is ignored. The
+       first Step after Start() only seeds the baseline, so a
+       stop/start gap is never recorded. Snapshot copy. */
+    Histogram TickStats() const;
+    void      ResetTickStats();
+
     /* The scene clock's t = 0 reference. Reactive-input
        providers stamp event times on this base so event ages
        evaluate correctly against the tick's scene_time_s. */
@@ -281,6 +292,10 @@ private:
     OutputGate            output_gate_;
     EvaluateGate          evaluate_gate_;
     uint64_t              evaluations_ = 0;     /* mutex_ */
+    /* E-12c tick cadence (mutex_): the previous Step's stamp. */
+    Histogram             tick_hist_;
+    TimePoint             last_step_{};
+    bool                  has_last_step_ = false;
     EngineLogFn           log_;
     /* Worker-thread-only counter (Step is single-caller) —
        throttles the per-fault log line. */
