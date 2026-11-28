@@ -1195,6 +1195,97 @@ static void TestSceneApplyResolvesWithoutResync()
           bs != studio::BindingStatus::Resolved);
 }
 
+/* Audit E-4: identify on an UNBOUND controller spends sequence
+   numbers in the lane's live space (overlay-only frames). A
+   binding applied while the blink runs must continue that
+   space — restarting it at 1 in the same topology generation
+   made the lane reject every frame as out-of-order until the
+   scene caught up with the identify's frame count. */
+static void TestIdentifyThenBindKeepsSequence()
+{
+    auto transport = std::make_shared<FakeTransport>();
+    DeliveryPipeline pipe(transport);
+    DeviceMapper mapper;
+
+    const DeviceSnapshot mb  = Motherboard();
+    const DeviceSnapshot gpu = Gpu();
+    pipe.SyncDevices({ mb, gpu });
+
+    /* Scene binds the motherboard only: the GPU is unbound. */
+    auto docA = std::make_shared<studio::SceneDocument>();
+    docA->brightness = 1.0f;
+    docA->bindings = { Binding("b-h1", "X870E", "", "", "ARGB_V2_1", 8) };
+    docA->objects  = { DevObj("o-a", "b-h1", 0, 8) };
+    mapper.SetScene(docA);
+    mapper.SyncDevices({ mb, gpu });
+
+    const TimePoint t0 = Clock::now();
+    std::string err;
+    CHECK(mapper.StartIdentify(gpu.key, 0, 26,
+                               std::chrono::seconds(10), t0, err));
+
+    /* 20 identify frames: the GPU gets overlay-only frames. */
+    TimePoint t = t0;
+    for(int i = 0; i < 20; ++i)
+    {
+        t += std::chrono::milliseconds(16);
+        EvaluatedFrame eval = EvalAll(*docA, { { "o-a", SC(1, 1, 1) } });
+        eval.sample_time = t;
+        for(const RgbFrame& f : mapper.MapFrame(eval))
+        {
+            CHECK(pipe.SubmitLatest(f).status != SubmitStatus::Rejected);
+        }
+        pipe.DrainAllDue(t);
+    }
+    /* Identical blink phases are suppressed downstream; the
+       lane's sequence high-water is what matters here. */
+    CHECK(!transport->Delivered(gpu.key).empty());
+
+    /* The user binds the blinking GPU (set_binding re-applies
+       the scene, no topology change), then cancels identify. */
+    auto docB = std::make_shared<studio::SceneDocument>();
+    docB->brightness = 1.0f;
+    docB->bindings = { Binding("b-h1", "X870E", "", "", "ARGB_V2_1", 8),
+                       Binding("b-gpu", "5080 MASTER", "", "", "", 0) };
+    docB->objects  = { DevObj("o-a", "b-h1", 0, 8),
+                       DevObj("o-b", "b-gpu", 0, 26) };
+    mapper.SetScene(docB);
+
+    /* Still identifying: the scene frame for the GPU carries the
+       blink and must stay admissible. */
+    t += std::chrono::milliseconds(16);
+    {
+        EvaluatedFrame eval = EvalAll(*docB, { { "o-a", SC(1, 1, 1) },
+                                               { "o-b", SC(4, 5, 6) } });
+        eval.sample_time = t;
+        const std::vector<RgbFrame> frames = mapper.MapFrame(eval);
+        const RgbFrame* g = FrameFor(frames, gpu.key);
+        CHECK(g != nullptr);
+        CHECK(g != nullptr && g->sequence > 20);
+        CHECK(g != nullptr &&
+              pipe.SubmitLatest(*g).status != SubmitStatus::Rejected);
+        pipe.DrainAllDue(t);
+    }
+
+    CHECK(mapper.CancelIdentify(gpu.key, t));
+    for(int i = 0; i < 3; ++i)
+    {
+        t += std::chrono::milliseconds(16);
+        EvaluatedFrame eval = EvalAll(*docB, { { "o-a", SC(1, 1, 1) },
+                                               { "o-b", SC(4, 5, 6) } });
+        eval.sample_time = t;
+        const std::vector<RgbFrame> frames = mapper.MapFrame(eval);
+        const RgbFrame* g = FrameFor(frames, gpu.key);
+        CHECK(g != nullptr &&
+              pipe.SubmitLatest(*g).status != SubmitStatus::Rejected);
+        pipe.DrainAllDue(t);
+    }
+    /* The bound scene colors reached the hardware at once. */
+    const std::vector<RgbFrame> sent = transport->Delivered(gpu.key);
+    CHECK(!sent.empty() &&
+          AllEqual(sent.back().colors, 0, 26, RGB(4, 5, 6)));
+}
+
 int main()
 {
     TestWirelessGroupBatchesToOneWrite();
@@ -1212,6 +1303,7 @@ int main()
     TestBrightnessScalesMappedOnly();
     TestBrightnessClamps();
     TestSceneApplyResolvesWithoutResync();
+    TestIdentifyThenBindKeepsSequence();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
