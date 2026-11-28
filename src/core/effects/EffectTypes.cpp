@@ -209,7 +209,16 @@ bool LayerMatches(const EffectLayer& layer, const SceneObject& obj,
     }
     for(const std::string& t : layer.targets)
     {
-        if(t == obj.id || t == obj.geometry || t == emitter.group)
+        if(t == obj.geometry || t == emitter.group)
+        {
+            return true;
+        }
+        /* Object ids are resolved paths ("fan0/body",
+           "case/fan0/body"): a target naming an instance (what
+           the editor offers) reaches every object under it, on a
+           '/' boundary so "fan0" never matches "fan01/body". */
+        if(obj.id.compare(0, t.size(), t) == 0
+           && (obj.id.size() == t.size() || obj.id[t.size()] == '/'))
         {
             return true;
         }

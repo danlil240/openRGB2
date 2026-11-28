@@ -72,7 +72,9 @@ struct EvalInput
 };
 
 /* Does this layer touch this emitter? Empty targets = all.
-   Matches object id, object geometry tag, or emitter group. */
+   Matches object id (or an instance path above it, on a '/'
+   boundary: "fan0" reaches "fan0/body"), object geometry tag,
+   or emitter group. */
 bool   LayerMatches(const EffectLayer& layer, const SceneObject& obj,
                     const Emitter& emitter);
 

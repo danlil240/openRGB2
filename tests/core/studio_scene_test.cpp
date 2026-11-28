@@ -712,6 +712,65 @@ static void TestNoiseAndMasks()
     CHECK(LayerMatches(L, oth, oe),  "empty mask matches all");
 }
 
+/*---------------------------------------------------------*\
+||| Layer targets by instance id (audit C-7 / C-11): the     |
+||| resolver names emitting objects "<instance>/<entity>"   |
+||| (nested: "<inst>/<child>/<entity>"), so a target naming |
+||| the instance — what the editor's target picker offers — |
+||| must reach every object under it, on a '/' boundary.    |
+\*---------------------------------------------------------*/
+static int MaxCh(studio::SceneColor c);
+
+static void TestTargetInstanceIds()
+{
+    using namespace studio;
+    EffectLayer L; L.primitive = "static";
+    L.palette = MakePalette({ MakeSceneColor(255, 0, 0) });
+    Emitter e; e.group = "ring";
+
+    SceneObject body;  body.id  = "fan0/body";     body.geometry = "fan_body";
+    SceneObject deep;  deep.id  = "case/fan0/body";
+    SceneObject sib;   sib.id   = "fan01/body";    sib.geometry  = "fan_body";
+    SceneObject inst;  inst.id  = "fan0";
+
+    L.targets = { "fan0" };
+    CHECK(LayerMatches(L, body, e),  "target: instance id reaches its entity");
+    CHECK(LayerMatches(L, inst, e),  "target: exact id still matches");
+    CHECK(!LayerMatches(L, sib, e),  "target: prefix stops at a '/' boundary");
+    CHECK(!LayerMatches(L, deep, e), "target: prefix anchors at the root");
+
+    L.targets = { "case" };
+    CHECK(LayerMatches(L, deep, e),  "target: instance reaches its type-nested child");
+    L.targets = { "case/fan0" };
+    CHECK(LayerMatches(L, deep, e),  "target: nested instance path");
+    L.targets = { "fan0/body" };
+    CHECK(LayerMatches(L, body, e) && !LayerMatches(L, sib, e),
+          "target: entity path stays exact-or-below");
+    L.targets = { "fan" };
+    CHECK(!LayerMatches(L, body, e), "target: no bare string prefix");
+
+    /* Through the engine: a resolved two-fan scene, the layer
+       targeted at one instance colours only that instance. */
+    SceneDocument doc;
+    SceneObject a = OneLedDevice("fan0/body", 0.0f);
+    SceneObject b = OneLedDevice("fan01/body", 0.5f);
+    doc.objects.push_back(a);
+    doc.objects.push_back(b);
+    EffectLayer red = L;
+    red.targets = { "fan0" };
+    EffectEngine engine;
+    engine.SetLayers({ red });
+    FrameColors frame;
+    engine.Evaluate(doc, 0.0, frame);
+    /* Untouched objects get no frame entry. */
+    CHECK(frame.count("fan0/body") == 1
+          && frame["fan0/body"].size() == 1
+          && MaxCh(frame["fan0/body"][0]) > 200,
+          "target engine: the targeted instance is lit");
+    CHECK(frame.count("fan01/body") == 0,
+          "target engine: the sibling instance is untouched");
+}
+
 static void TestEngineMirrorAndJson()
 {
     using namespace studio;
@@ -1820,6 +1879,7 @@ int main()
     TestLongUptimePhase();
     TestSceneBrightnessRange();
     TestNoiseAndMasks();
+    TestTargetInstanceIds();
     TestEngineMirrorAndJson();
     TestPresetsAndRemix();
     TestInputBus();

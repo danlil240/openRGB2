@@ -610,8 +610,10 @@ std::optional<EditorEdit>
 EditorController::Rename(const std::string& id, const std::string& new_id)
 {
     last_error.clear();
-    if(gesture.active || !Exists(id) || new_id == id
-       || !IsPresetId(new_id) || Exists(new_id))
+    /* An open layer gesture is refused too: the rename may re-key
+       layer targets under its begin snapshot. */
+    if(gesture.active || layer_gesture.active || !Exists(id)
+       || new_id == id || !IsPresetId(new_id) || Exists(new_id))
     {
         return std::nullopt;
     }
@@ -711,6 +713,29 @@ EditorController::Rename(const std::string& id, const std::string& new_id)
         ws.emitter_colors[new_id + k.substr(id.size())] = v;
         CaptureKey(e.emitter_colors, ws.emitter_colors,
                    new_id + k.substr(id.size()));
+    }
+
+    /* effect-layer targets naming the instance subtree (LayerMatches
+       reaches "<id>/..." objects from "<id>") — authored stack only;
+       a registry-resolved look names types, not instances */
+    const EffectDelta effect_before = SnapEffect();
+    bool retargeted = false;
+    for(EffectLayer& l : ws.effect.layers)
+    {
+        for(std::string& t : l.targets)
+        {
+            if(PathBelongsTo(t, id))
+            {
+                t = new_id + t.substr(id.size());
+                retargeted = true;
+            }
+        }
+    }
+    if(retargeted)
+    {
+        e.has_effect    = true;
+        e.effect_before = effect_before;
+        e.effect_after  = SnapEffect();
     }
 
     for(std::string& s : selection)
