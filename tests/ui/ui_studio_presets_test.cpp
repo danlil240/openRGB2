@@ -666,6 +666,66 @@ int main(int argc, char** argv)
         }
     }
 
+    /* Audit Q-9: the three modal popups never took keyboard
+       focus — the focus item stayed BEHIND the modal, so typing
+       went nowhere visible and Escape (CloseOnEscape needs the
+       popup to hold focus) did not close them. Each must focus
+       its first field on open, and Escape must close it. */
+    std::printf("-- qml: modal popups take focus\n");
+    {
+        struct Case { const char* file; const char* field;
+                      const char* opener; };
+        const Case cases[] = {
+            { "WorkspaceActionsDialog.qml", "wsCopyName",      "open" },
+            { "WorkspaceImportDialog.qml",  "importPathField", "open" },
+            { "DevicePresetEditor.qml",     "presetIdField",   "openNew" },
+        };
+        for(const Case& tc : cases)
+        {
+            QQuickWindow win;
+            win.resize(800, 700);
+            QObject* dlg = load(tc.file);
+            if(dlg == nullptr)
+            {
+                continue;
+            }
+            dlg->setProperty("parent",
+                QVariant::fromValue(win.contentItem()));
+            win.show();
+            win.requestActivate();
+            QCoreApplication::processEvents();
+            QMetaObject::invokeMethod(dlg, tc.opener);
+            QCoreApplication::processEvents();
+            auto* field = qobject_cast<QQuickItem*>(
+                dlg->findChild<QObject*>(tc.field));
+            CHECK(field != nullptr);
+            const bool focused =
+                field != nullptr && field->hasActiveFocus();
+            CHECK(focused);
+            if(!focused)
+            {
+                std::printf("   (%s: first field not focused)\n",
+                            tc.file);
+            }
+            QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape,
+                          Qt::NoModifier);
+            QCoreApplication::sendEvent(&win, &esc);
+            QKeyEvent escUp(QEvent::KeyRelease, Qt::Key_Escape,
+                            Qt::NoModifier);
+            QCoreApplication::sendEvent(&win, &escUp);
+            QCoreApplication::processEvents();
+            const bool closed = !dlg->property("visible").toBool();
+            CHECK(closed);
+            if(!closed)
+            {
+                std::printf("   (%s: Escape did not close)\n",
+                            tc.file);
+            }
+            dlg->setProperty("parent", QVariant());
+            delete dlg;
+        }
+    }
+
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }
