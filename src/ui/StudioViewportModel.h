@@ -180,6 +180,9 @@ private:
        debounced candidate; a refusal latches until the next edit. */
     quint64  push_rev_       = 0;
     int      pending_req_    = 0;
+    /* The outstanding preview_begin request — its OK reply
+       restarts the frame sequence (audit U-13). */
+    int      begin_req_      = 0;
     bool     refused_        = false;
     bool     begin_sent_     = false;
     int      debounce_ms_    = 120;

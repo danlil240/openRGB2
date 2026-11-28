@@ -809,6 +809,62 @@ int main(int argc, char** argv)
         }));
     }
 
+    /*========================================================*\
+    || Re-begin restarts the frame sequence (audit U-13)       ||
+    \*========================================================*/
+    std::printf("-- re-begin restarts the sequence\n");
+    {
+        /* preview_end erases the engine's PreviewSession, so a
+           re-begin numbers frames from 1 again. A late frame of
+           the old preview (high sequence) must not leave the
+           model dropping every new frame as "stale". */
+        PvRig rig;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] { return rig.bridge.connected(); }));
+        rig.LoadDraft(CompactDoc());
+        CHECK(rig.PumpUntil([&] { return rig.vm->previewActive(); }));
+        rig.engine.SendPreviewEvent(FrameChunk(
+            400, 1, 0, 1, json::array({ Obj("fan0",
+                json::array({ "#111111" })) })));
+        CHECK(rig.PumpUntil([&] { return rig.vm->sequence() == 400; }));
+
+        /* End, then a late old-preview frame lands. */
+        rig.vm->setWantPreview(false);
+        CHECK(rig.PumpUntil([&] { return rig.engine.ends == 1; }));
+        rig.engine.SendPreviewEvent(FrameChunk(
+            401, 1, 0, 1, json::array({ Obj("fan0",
+                json::array({ "#222222" })) })));
+        rig.PumpUntil([&] { return false; }, 150);
+
+        /* Re-begin; the fresh preview's first frame is seq 1. */
+        rig.vm->setWantPreview(true);
+        CHECK(rig.PumpUntil([&] { return rig.engine.begins == 2; }));
+        CHECK(rig.PumpUntil([&] { return rig.vm->previewActive(); }));
+        rig.engine.SendPreviewEvent(FrameChunk(
+            1, 2, 0, 1, json::array({ Obj("fan0",
+                json::array({ "#333333" })) })));
+        CHECK(rig.PumpUntil([&] { return rig.vm->sequence() == 1; }));
+        CHECK(rig.vm->colorsFor("fan0", 1).toList().value(0)
+                  .toString() == "#333333");
+
+        /* An old-preview frame still on the wire AHEAD of the
+           begin reply must not stick either. */
+        rig.vm->setWantPreview(false);
+        CHECK(rig.PumpUntil([&] { return rig.engine.ends == 2; }));
+        rig.vm->setWantPreview(true);
+        rig.engine.SendPreviewEvent(FrameChunk(
+            900, 2, 0, 1, json::array({ Obj("fan0",
+                json::array({ "#444444" })) })));
+        CHECK(rig.PumpUntil([&] { return rig.engine.begins == 3; }));
+        CHECK(rig.PumpUntil([&] { return rig.vm->previewActive(); }));
+        rig.engine.SendPreviewEvent(FrameChunk(
+            1, 3, 0, 1, json::array({ Obj("fan0",
+                json::array({ "#555555" })) })));
+        CHECK(rig.PumpUntil([&] { return rig.vm->sequence() == 1; }));
+        CHECK(rig.vm->colorsFor("fan0", 1).toList().value(0)
+                  .toString() == "#555555");
+    }
+
     std::printf("ui studio preview: %d checks, %d failures\n",
                 checks, failures);
     return failures ? 1 : 0;
