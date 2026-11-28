@@ -304,6 +304,11 @@ Item {
                 }
             }
 
+            /*---- Global hotkeys (R-2, engine-side) ------------*/
+            HotkeysCard {
+                Layout.fillWidth: true
+            }
+
             /*---- Session --------------------------------------*/
             Card {
                 Layout.fillWidth: true

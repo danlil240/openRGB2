@@ -35,6 +35,29 @@ static int failures = 0;
 #define CHECK(x) do { ++checks; if(!(x)) { ++failures; \
     std::printf("FAIL line %d: %s\n", __LINE__, #x); } } while(0)
 
+/* Repeater delegates are not QObject children of the page —
+   walk the visual item tree instead of findChild. */
+static QObject* FindItem(QObject* root, const QString& name)
+{
+    QQuickItem* it = qobject_cast<QQuickItem*>(root);
+    if(!it)
+    {
+        return nullptr;
+    }
+    if(it->objectName() == name)
+    {
+        return it;
+    }
+    for(QQuickItem* k : it->childItems())
+    {
+        if(QObject* hit = FindItem(k, name))
+        {
+            return hit;
+        }
+    }
+    return nullptr;
+}
+
 int main(int argc, char** argv)
 {
     /* No windowing needed — the whole point is loading QML
@@ -220,6 +243,66 @@ int main(int argc, char** argv)
                     CHECK(hint->parentItem()->height()
                           >= hint->implicitHeight() + 400);
                 }
+            }
+        }
+
+        /* R-2: the Settings page's Hotkeys card renders one row
+           per action from the AUTOMATION body; a bound chord
+           shows in its capture field with a state pill. */
+        if(std::strcmp(f, "pages/SettingsPage.qml") == 0)
+        {
+            QObject* card = obj->findChild<QObject*>("hotkeysCard");
+            CHECK(card != nullptr);
+            QObject* cap = FindItem(obj,
+                "hotkeyCapture_lights_toggle");
+            CHECK(cap != nullptr);
+            for(const char* a : { "next_workspace", "prev_workspace",
+                                  "brightness_up", "brightness_down",
+                                  "pause_toggle" })
+            {
+                CHECK(FindItem(obj,
+                    QStringLiteral("hotkeyRow_") +
+                    QString::fromLatin1(a)) != nullptr);
+            }
+            if(card && cap)
+            {
+                /* Offline: no capability -> controls disabled. */
+                CHECK(!card->property("up").toBool());
+                CHECK(!cap->property("enabled").toBool());
+
+                QVariantMap b;
+                b.insert(QStringLiteral("action"),
+                         QStringLiteral("lights_toggle"));
+                b.insert(QStringLiteral("chord"),
+                         QStringLiteral("Ctrl+Alt+Shift+End"));
+                b.insert(QStringLiteral("state"),
+                         QStringLiteral("in_use"));
+                QVariantMap body;
+                body.insert(QStringLiteral("hotkeys"), QVariantList{ b });
+                body.insert(QStringLiteral("registrar"), true);
+                bridge.setAutomationCapabilityForTesting(true);
+                bridge.setAutomationForTesting(body);
+                QCoreApplication::processEvents();
+                CHECK(card->property("up").toBool());
+                CHECK(cap->property("enabled").toBool());
+                CHECK(cap->property("chord").toString() ==
+                      QLatin1String("Ctrl+Alt+Shift+End"));
+                QObject* pill = FindItem(obj,
+                    "hotkeyState_lights_toggle");
+                CHECK(pill != nullptr);
+                if(pill)
+                {
+                    CHECK(pill->property("visible").toBool());
+                    CHECK(pill->property("tone").toString() ==
+                          QLatin1String("bad"));
+                    CHECK(pill->property("text").toString()
+                              .contains(QLatin1String("in use")));
+                }
+                /* Unbound rows show no pill. */
+                QObject* none = FindItem(obj,
+                    "hotkeyState_pause_toggle");
+                CHECK(none && !none->property("visible").toBool());
+                bridge.setAutomationCapabilityForTesting(false);
             }
         }
 
