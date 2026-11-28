@@ -99,6 +99,57 @@ Popup {
             }
         }
 
+        /* Audit Q-8: Open / Reload / Restore over a dirty draft
+           latch a replace for confirmation. The shell strip that
+           also shows it sits BEHIND this modal popup — its buttons
+           can't be reached while the dialog is up, so the action
+           looked like it did nothing. The choice is offered here
+           too, on the same controller calls. */
+        Rectangle {
+            objectName: "wsDlgReplaceBar"
+            Layout.fillWidth: true
+            visible: dialog.connected()
+                     && dialog.ctl().replaceOffered === true
+            implicitHeight: replaceCol.implicitHeight
+                            + 2 * Theme.spaceM
+            radius: Theme.radiusS
+            color: Qt.rgba(0.878, 0.643, 0.345, 0.14)
+            border.color: Theme.warn
+            ColumnLayout {
+                id: replaceCol
+                anchors.fill: parent
+                anchors.margins: Theme.spaceM
+                spacing: Theme.spaceS
+                Text {
+                    objectName: "wsDlgReplaceText"
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSizeBody
+                    text: {
+                        var c = dialog.ctl()
+                        return (c !== null && c.replaceText !== undefined)
+                               ? c.replaceText : ""
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spaceS
+                    Item { Layout.fillWidth: true }
+                    AppButton {
+                        objectName: "wsDlgConfirmReplace"
+                        text: qsTr("Replace my draft")
+                        onClicked: dialog.ctl().confirmReplace()
+                    }
+                    AppButton {
+                        objectName: "wsDlgCancelReplace"
+                        text: qsTr("Keep my draft")
+                        onClicked: dialog.ctl().cancelReplace()
+                    }
+                }
+            }
+        }
+
         Flickable {
             Layout.fillWidth: true
             Layout.fillHeight: true
