@@ -51,6 +51,14 @@
     this script under UAC, same user-visible step as
     start-openrgb2.ps1.
 
+    Stop marker (R-9): for the whole run the script holds
+    state\openrgb2.stopping (written before step 0, removed in
+    `finally`). The UI's engine supervisor and the engine's backend
+    supervisor never restart anything while it exists, so an
+    intended stop -- including a -Force kill, which exits non-zero
+    -- is never mistaken for a crash. A marker older than 10
+    minutes (a stop that died mid-way) is ignored by both.
+
     Exit codes: 0 clean (or nothing verifiably ours running),
     1 partial (a process outlived its bound without -Force, or
     same-named processes exist that cannot be verified -- hence
@@ -262,6 +270,24 @@ function Invoke-ManagedStop {
         try { $run = Get-Content $RunFile -Raw | ConvertFrom-Json }
         catch { Info "run file unreadable -- falling back to image-path discovery" }
     }
+
+    # R-9: tell both supervisors a stop is in progress (see the
+    # header). Best effort: an unwritable state\ only costs the
+    # guard, never the stop. The body below runs inside try so the
+    # marker goes away on every exit path, an exception included.
+    $StopMarker    = Join-Path $StateDir "openrgb2.stopping"
+    $markerWritten = $false
+    try {
+        New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+        [ordered]@{
+            pid         = $PID
+            started_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        } | ConvertTo-Json | Set-Content -Encoding UTF8 $StopMarker
+        $markerWritten = $true
+    } catch {
+        Info "could not write the stop marker ($StopMarker): $($_.Exception.Message)"
+    }
+    try {
 
     $exitCode   = 0
     $engineGone = $false
@@ -484,6 +510,12 @@ function Invoke-ManagedStop {
         Write-Host "OpenRGB2 stopped cleanly." -ForegroundColor Green
     }
     return $exitCode
+
+    } finally {
+        if($markerWritten) {
+            Remove-Item -Force -ErrorAction SilentlyContinue $StopMarker
+        }
+    }
 }
 
 # Dot-source guard (packaging suite imports the functions).
