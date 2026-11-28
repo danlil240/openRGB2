@@ -334,6 +334,10 @@ public:
        before Stop() or when no controller was a target. */
     std::vector<OutputPolicyOutcome> ExitPolicyReport() const;
 
+    /* The STATE "output_policy" body: OutputPolicyToJson plus
+       "idle" (OutputIdle()). */
+    nlohmann::json                   OutputPolicyJson();
+
     /* Idle rule state: true from the idle entry (on_idle ran)
        until the next applied scene; the report is that entry's
        outcomes. */

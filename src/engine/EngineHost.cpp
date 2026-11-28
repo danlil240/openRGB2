@@ -1237,6 +1237,10 @@ bool EngineHost::Start(std::string& err)
            listeners) makes the provider race-free. */
         ipc_deps.ownership =
             [this] { return OwnershipJson(); };
+        /* Audit E-12b: the exit/idle output policy in STATE and
+           the QUIT reply's exit_policy. */
+        ipc_deps.output_policy =
+            [this] { return OutputPolicyJson(); };
         /* Task 3.8 offline bindings: a persisted resolved
            identity completes name-only scene bindings before
            apply — the same binding id keeps pointing at the
@@ -1948,6 +1952,13 @@ void EngineHost::RunExitPolicy()
     LogOutcomes("exit", out);
     std::lock_guard<std::mutex> g(output_mutex_);
     exit_outcomes_ = std::move(out);
+}
+
+nlohmann::json EngineHost::OutputPolicyJson()
+{
+    nlohmann::json j = OutputPolicyToJson(GetOutputPolicy());
+    j["idle"] = OutputIdle();
+    return j;
 }
 
 std::vector<OutputPolicyOutcome> EngineHost::IdleReport() const

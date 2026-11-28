@@ -199,7 +199,7 @@ Request → reply. `request_id` echoes.
 | 0x0109 | UNSUBSCRIBE | `{}` | OK `{subscribed:[]}` |
 | 0x010A | PING | `{}` | PONG `{}` |
 | 0x010B | GET_PRESETS | `{}` | PRESETS |
-| 0x010C | QUIT | `{}` or `{stop_backend:true}` | OK `{shutting_down:true, ordered:true, stop_backend:bool, backend?, backend_pid?}` / ERROR |
+| 0x010C | QUIT | `{}` or `{stop_backend:true}` | OK `{shutting_down:true, ordered:true, stop_backend:bool, exit_policy?, backend?, backend_pid?}` / ERROR |
 | 0x010D | REACTIVE_COMMAND | `{verb, ...args}` | OK `<reactive body>` / ERROR |
 | 0x010E | WORKSPACE_COMMAND | `{verb, ...args}` | OK `<verb body>` / ERROR |
 | 0x0300 | DIAG_GET | `{}` | DIAGNOSTICS (valid on both pipes) |
@@ -352,9 +352,41 @@ counters alone cannot distinguish from "nothing submitted".
 sdk:{...}, playback:{...}, power:{...}, reactive:{...}, ownership:{...}|null,
 ipc:{sessions_active, sessions_total, messages_in, responses_out, events_sent,
 events_dropped, events_oversize, queued_events, resync_bytes, rejected_hellos,
-rate_limited, refused_busy}}` (`sessions_total` counts every accepted session
-since start; `events_oversize` counts events whose body exceeded the 1 MiB
-cap and were never sent — they are in `events_dropped` too).
+rate_limited, refused_busy}, output_policy:{...}|null}` (`sessions_total`
+counts every accepted session since start; `events_oversize` counts events
+whose body exceeded the 1 MiB cap and were never sent — they are in
+`events_dropped` too).
+
+**OUTPUT_POLICY** (STATE field, audit E-12b; `null` when no policy is
+wired) — what the LEDs show when the engine exits and while it has
+nothing to drive:
+
+```json
+{ "on_exit": "hold", "on_idle": "hold",
+  "per_controller": [ {"match": {"location_prefix": "Wireless:"},
+                       "on_exit": "black"} ],
+  "idle": false }
+```
+
+Each action is `hold` (leave the last frame — the default, today's
+behaviour), `black` (all lights off) or `restore` (back to the hardware
+mode the controller reported before the engine first switched it to
+Direct this run; with no usable record — none, or a Direct/Custom mode
+left by an earlier run — and always on the Lian Li wireless group, it
+falls back to `black`). `per_controller` is ordered: the first rule whose
+given `match` fields all match (`device` exact, `location_prefix` a
+prefix of the location, `serial` exact) AND that sets the field wins;
+otherwise the global value. A loop-owned wireless group under `black`
+gets the playback stop-black; under `hold`/`restore` its uploaded loop
+keeps playing. `on_exit` runs in the ordered shutdown (the
+`output-policy` step, bound 2000 ms) and `on_idle` once per idle entry
+(no scene, or an empty one, applied for 5 s; the next applied scene
+ends it) — over the connected controllers the scene binds or the
+engine switched to Direct this run. Both are skipped while the power
+gate is on (display off / suspend). `idle` is true from the idle entry
+until the next applied scene. The policy is persisted in the engine
+profile; the `get_policy`/`set_policy` verbs that change it are not
+on the wire yet (they belong on `OUTPUT_COMMAND`, plan R-1).
 
 **OWNERSHIP** (STATE/DIAGNOSTICS field, `null` when no ownership
 report is wired) — the Task-3.9 startup scan's verbatim,
@@ -397,7 +429,7 @@ decision (plan section 4).
 
 **QUIT** — the "Quit All" hook (plan section 4): requests the engine's
 ordered, bounded shutdown (the power monitor, IPC intake, scene worker,
-delivery lanes, and SDK transport stop in order; the reply is prepared
+the exit output policy, delivery lanes, and SDK transport run in order; the reply is prepared
 before the hook fires). `unavailable` when the process has no shutdown
 hook wired. Owning the backend's process is normally the caller's
 concern — the engine never spawns it — **except** the opt-in
@@ -415,7 +447,11 @@ reply reports the decision honestly in `backend` (`closing`,
 `not_configured`, `not_found`, `unverifiable`) — `closing` is a
 decision at request time, not a guarantee the process exited — and,
 with `closing`, `backend_pid`: the verified process the handoff will
-signal.
+signal. `exit_policy` (audit E-12b; omitted when no output policy is
+wired) is the global `on_exit` action the teardown's `output-policy`
+step will apply — `hold`, `black` or `restore` — so a client can say
+"lights will turn off"; per-controller overrides are in STATE's
+`output_policy`.
 
 **POWER** (STATE/DIAGNOSTICS field, `null` when unwired) —
 `{display_on, suspended, output_paused, power_hold, restore_pending,

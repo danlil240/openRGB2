@@ -503,6 +503,98 @@ int main()
         CHECK(osnap.is_object() && osnap.contains("scanned"));
     }
 
+    /*---- E-12b exit/idle output policy surface -------------------
+           STATE carries the policy (the REAL EngineHost
+           serializer on a never-started host), QUIT's reply
+           names the exit policy so a client can say "lights
+           will turn off"; unwired -> STATE null, QUIT omits it. */
+    {
+        EngineHostOptions oopts;
+        oopts.ipc_enabled     = false;
+        oopts.power_monitor   = false;
+        oopts.scan_owners     = false;
+        oopts.single_instance = false;
+        EngineHost host(oopts);
+
+        Engine           engine9;
+        DeliveryPipeline pipe9;
+        DeviceMapper     mapper9;
+        EngineService::Deps d9;
+        d9.pipeline      = &pipe9;
+        d9.mapper        = &mapper9;
+        d9.output_policy = [&host] { return host.OutputPolicyJson(); };
+        bool quit_called = false;
+        d9.request_shutdown = [&quit_called](bool)
+        {
+            quit_called = true;
+            return nlohmann::json::object();
+        };
+        EngineService svc9(engine9, d9);
+
+        /* default: hold/hold, not idle */
+        IpcReply r = svc9.Dispatch(MsgType::GetState,
+                                   nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        {
+            const nlohmann::json& op = r.body["output_policy"];
+            CHECK(op.is_object());
+            CHECK(op["on_exit"] == "hold");
+            CHECK(op["on_idle"] == "hold");
+            CHECK(op["per_controller"].is_array());
+            CHECK(op["idle"].get<bool>() == false);
+        }
+
+        OutputPolicy p;
+        p.on_exit = OutputAction::Black;
+        p.on_idle = OutputAction::Restore;
+        OutputPolicyRule rule;
+        rule.match.location_prefix = "Wireless:";
+        rule.on_exit = OutputAction::Hold;
+        p.per_controller.push_back(rule);
+        std::string perr;
+        CHECK(host.SetOutputPolicy(p, perr));
+        r = svc9.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r.body["output_policy"]["on_exit"] == "black");
+        CHECK(r.body["output_policy"]["on_idle"] == "restore");
+        CHECK(r.body["output_policy"]["per_controller"].size() == 1);
+
+        r = svc9.Dispatch(MsgType::Quit, nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(quit_called);
+        CHECK(r.body["exit_policy"] == "black");
+        CHECK(r.body["shutting_down"].get<bool>() == true);
+
+        /* unwired -> honest null / omitted */
+        Engine           engine10;
+        DeliveryPipeline pipe10;
+        DeviceMapper     mapper10;
+        EngineService::Deps d10;
+        d10.pipeline = &pipe10;
+        d10.mapper   = &mapper10;
+        d10.request_shutdown = [](bool)
+        { return nlohmann::json::object(); };
+        EngineService svc10(engine10, d10);
+        r = svc10.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r.body.contains("output_policy"));
+        CHECK(r.body["output_policy"].is_null());
+        r = svc10.Dispatch(MsgType::Quit, nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(!r.body.contains("exit_policy"));
+
+        /* a non-object provider result answers null, never a
+           bogus shape */
+        Engine           engine11;
+        EngineService::Deps d11;
+        d11.output_policy = [] { return nlohmann::json("black"); };
+        d11.request_shutdown = [](bool)
+        { return nlohmann::json::object(); };
+        EngineService svc11(engine11, d11);
+        r = svc11.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r.body["output_policy"].is_null());
+        r = svc11.Dispatch(MsgType::Quit, nlohmann::json::object());
+        CHECK(!r.body.contains("exit_policy"));
+    }
+
     /*---- layout verbs (Task 4.4) -------------------------------*/
     {
         /* verb surface still bounded first */
