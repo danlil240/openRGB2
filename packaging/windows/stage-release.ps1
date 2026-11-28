@@ -204,6 +204,24 @@ function ConvertTo-ManifestPath([string]$p) {
     return $norm
 }
 
+# The vendored backend's pin as the provenance record states it
+# (vendor/provenance/MANIFEST.md, row "OpenRGB submodule (backend)":
+# fork commit + branch). It used to be a string literal here that
+# could silently drift from the record (audit P-14); a record without
+# that row is an error, never a default.
+function Get-BackendPin([string]$Root) {
+    $md = Join-Path $Root "vendor\provenance\MANIFEST.md"
+    if(-not (Test-Path -LiteralPath $md)) { throw "provenance record not found: $md" }
+    $row = [regex]::Match((Get-Content -Raw -LiteralPath $md),
+                          '(?m)^\|\s*OpenRGB submodule \(backend\)\s*\|.*$')
+    $sha = if($row.Success) { [regex]::Match($row.Value, '\b[0-9a-f]{40}\b') } else { $null }
+    $branch = if($row.Success) { [regex]::Match($row.Value, 'branch\s+`([^`]+)`') } else { $null }
+    if(-not $sha -or -not $sha.Success -or -not $branch.Success) {
+        throw "$md has no 'OpenRGB submodule (backend)' row with a 40-hex commit and a branch"
+    }
+    return "vendor/OpenRGB @ $($sha.Value) ($($branch.Groups[1].Value); see vendor/provenance/MANIFEST.md)"
+}
+
 #--------------------------------------------------------------------#
 # Input binaries                                                      #
 #--------------------------------------------------------------------#
@@ -233,6 +251,8 @@ if(-not $VerifyOnly) {
                     "install-recovery.md","RELEASE.md")) {
         Require (Join-Path $PkgDir $s) "managed-lifecycle file $s" | Out-Null
     }
+    try { $backendPin = Get-BackendPin $RepoRoot }
+    catch { Fail "backend pin: $($_.Exception.Message)" }
 
     Step "Staging OpenRGB2 $version -> $OutDir"
     if(Test-Path $OutDir) {
@@ -549,7 +569,7 @@ if(-not $VerifyOnly) {
             configuration= $Configuration
             qt_dir       = ConvertTo-ManifestPath $QtDir
             backend_dir  = ConvertTo-ManifestPath $BackendDeployDir
-            backend_pin  = "vendor/OpenRGB @ 53a477eab8d14b0bc49aeb40e3d569cbcb16a377 (lianli-wireless; see vendor/provenance/MANIFEST.md)"
+            backend_pin  = $backendPin
             vc_redist    = ConvertTo-ManifestPath $VcRedistDir
         }
         exclusions_verified = @(
