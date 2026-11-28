@@ -787,6 +787,37 @@ $rc = Invoke-PackageRollback -InstallDir $instE -BackupDir $pkgEvil -SkipVerify 
 Check ($rc -eq 1 -and (Read-Tag $instE) -eq "V2") "rollback refuses a backup manifest with a '..' path"
 
 #====================================================================#
+Section "T12b -InstallDir with a trailing separator"
+#====================================================================#
+# Resolve-Path keeps a trailing '\', and the snapshot path is built
+# as "$InstallDir.previous" -- "C:\x\inst\.previous" lands INSIDE the
+# install, so the update copied the install into itself (audit P-9).
+$instH = Join-Path $TestRoot "install-h"
+New-UserStateInstall $instH
+foreach($sep in @('\', '/')) {
+    $threw = $null
+    try {
+        $rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir ($instH + $sep) `
+            -SkipVerify $false -SkipAclHardening $true -ProcessList $NoProcs
+    } catch { $threw = $_.Exception.Message; $rc = -1 }
+    Check ($rc -eq 0 -and $null -eq $threw) "update with -InstallDir '...$sep' returns 0 ($threw)"
+    Check (-not (Test-Path (Join-Path $instH ".previous")) -and
+           -not (Test-Path (Join-Path $instH ".previous.tmp"))) `
+          "update with '...$sep': no snapshot inside the install"
+    Check ((Test-Path "$instH.previous") -and (Read-Tag "$instH.previous") -eq "V1") `
+          "update with '...$sep': snapshot is the sibling install-h.previous"
+    $threw = $null
+    try {
+        $rc = Invoke-PackageRollback -InstallDir ($instH + $sep) -BackupDir "" `
+            -SkipVerify $false -ProcessList $NoProcs
+    } catch { $threw = $_.Exception.Message; $rc = -1 }
+    Check ($rc -eq 0 -and (Read-Tag $instH) -eq "V1") `
+          "rollback with -InstallDir '...$sep' finds the sibling snapshot ($threw)"
+    Remove-Item -LiteralPath "$instH.previous" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $instH ".previous") -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+#====================================================================#
 Section "T13 start: unreadable image path is unverifiable, never foreign"
 #====================================================================#
 # PID 4 (System) is a live process whose image path no user-mode

@@ -212,7 +212,10 @@ function Invoke-PackageRollback {
             return 1
         }
     }
-    $InstallDir = (Resolve-Path $InstallDir).Path
+    # No trailing separator: the default snapshot is the SIBLING
+    # "$InstallDir.previous" that update-openrgb2.ps1 writes, never a
+    # folder inside the install (audit P-9).
+    $InstallDir = (Resolve-Path $InstallDir).Path.TrimEnd('\','/')
     if(-not $BackupDir) { $BackupDir = "$InstallDir.previous" }
 
     Write-Host "==> OpenRGB2 rollback: $BackupDir -> $InstallDir" -ForegroundColor Cyan
