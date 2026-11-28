@@ -1301,11 +1301,18 @@ bool EngineHost::Start(std::string& err)
        engine continues unmanaged — a stale pointer is never
        a startup failure. The guard leaves a client-driven
        adopt alone if one raced ahead (IPC listeners are
-       already up). */
-    if(workspaces_ && !engine_state_.active_workspace.empty() &&
+       already up). Because they are, the persisted id is
+       copied under state_mutex_: a client adopt writes it
+       from a workspace job through active_workspace_changed
+       at the same time (audit E-9). */
+    std::string wsid;
+    {
+        std::lock_guard<std::mutex> g(state_mutex_);
+        wsid = engine_state_.active_workspace;
+    }
+    if(workspaces_ && !wsid.empty() &&
        !workspaces_->ManagedActive())
     {
-        const std::string wsid = engine_state_.active_workspace;
         const WorkspaceService::Result wr = workspaces_->Open(wsid);
         if(wr.ok)
         {
