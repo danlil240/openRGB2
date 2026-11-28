@@ -117,5 +117,14 @@ private:
     \*-----------------------------------------------------*/
     std::vector<std::pair<uint16_t, uint8_t>> led_to_keytype_keyid_8080;
 
+    /*-----------------------------------------------------*\
+    | 0x8080 delta sends: sent_colors (above) holds the     |
+    | dimmed wire color per LED. A full repaint is forced   |
+    | every full_refresh_ms_8080 (0 disables); the clock    |
+    | restarts at each full repaint.                        |
+    \*-----------------------------------------------------*/
+    uint32_t                                full_refresh_ms_8080 = HIDPP20_8080_FULL_REFRESH_MS;
+    std::chrono::steady_clock::time_point   last_full_8080;
+
     std::function<void()> shutdown_callback;
 };

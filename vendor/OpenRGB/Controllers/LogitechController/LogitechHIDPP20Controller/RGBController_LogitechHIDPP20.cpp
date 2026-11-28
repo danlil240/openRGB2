@@ -2271,8 +2271,8 @@ void RGBController_LogitechHIDPP20::DeviceUpdateLEDs()
     }
 
     /*-----------------------------------------------------*\
-    | Feature 0x8080 (Per Key Lighting). Full repaint       |
-    | grouped by keyType, then one FlushLEDS.               |
+    | Feature 0x8080 (Per Key Lighting). Delta against      |
+    | sent_colors grouped by keyType, then one FlushLEDS.   |
     | led_to_keytype_keyid_8080 (built in SetupZones8080)   |
     | maps each LED to its wire (keyType, keyId).           |
     \*-----------------------------------------------------*/
@@ -2281,54 +2281,105 @@ void RGBController_LogitechHIDPP20::DeviceUpdateLEDs()
     {
         std::vector<RGBColor> snapshot(colors.begin(), colors.end());
 
-        int brightness = controller->GetDimBrightness();
+        int  brightness     = controller->GetDimBrightness();
+        bool kt40_id12_only = (caps.quirks & HIDPP20_QUIRK_8080_KEYTYPE40_ID12_ONLY) != 0;
 
         /*-------------------------------------------------*\
-        | Group painted LEDs by keyType, preserving         |
-        | keyType order of first appearance. Skip           |
-        | unaddressable LEDs (keyType 0 + keyId 0, present  |
-        | in the matrix but not enumerated on the device).  |
+        | Re-initialization (reconnect, wake from sleep):   |
+        | the device state is unknown, repaint in full.     |
+        | The other full-repaint triggers are the existing  |
+        | sent_colors.clear() sites (SetupZones, Direct,    |
+        | ReapplyActiveMode after ClaimSWControlIfNeeded),  |
+        | the HIDPP20_UNCOMMITTED fill on wake, and the     |
+        | timed refresh below. A dim change re-sends every  |
+        | lit key by itself: sent_colors holds the dimmed   |
+        | wire colors.                                      |
         \*-------------------------------------------------*/
-        std::vector<std::pair<uint16_t, std::vector<std::pair<uint8_t, RGBColor>>>> by_type;
-        std::map<uint16_t, size_t> type_slot;
+        uint32_t gen = controller->GetInitGeneration();
+
+        if(gen != last_init_gen)
+        {
+            sent_colors.clear();
+            last_init_gen = gen;
+        }
+
+        /*-------------------------------------------------*\
+        | Timed full refresh (HIDPP20_8080_FULL_REFRESH_MS, |
+        | 2 s placeholder): the safety net against a        |
+        | competing writer and against a frame the          |
+        | keyboard dropped silently, since fn3 ACKs are     |
+        | not read yet.                                     |
+        \*-------------------------------------------------*/
+        std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+        uint64_t since_full_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     now - last_full_8080).count();
+        bool     refresh_due   = (last_full_8080 == std::chrono::steady_clock::time_point()) ||
+                                 LogitechPerKey8080Plan::RefreshDue(since_full_ms, full_refresh_ms_8080);
+        bool     full          = LogitechPerKey8080Plan::IsFullRepaint(sent_colors, snapshot.size(), refresh_due);
+
+        /*-------------------------------------------------*\
+        | LogitechPerKey8080Plan groups the changed LEDs    |
+        | (all of them on a full repaint) by keyType        |
+        | (order of first appearance), skips unaddressable  |
+        | LEDs (keyType 0 + keyId 0, present in the matrix  |
+        | but not enumerated on the device), applies the    |
+        | dim brightness and the G410 filter, and chunks    |
+        | at 14 keys. The 2 ms gap per frame stays.         |
+        \*-------------------------------------------------*/
+        std::vector<LogitechPerKey8080Frame> frames =
+            LogitechPerKey8080Plan::PlanLeds(snapshot, led_to_keytype_keyid_8080,
+                                             brightness, kt40_id12_only,
+                                             sent_colors, refresh_due);
+
+        /*-------------------------------------------------*\
+        | A full repaint commits whenever at least one LED  |
+        | is addressable, even when the G410 filter left    |
+        | no frame, as before the delta. A delta with       |
+        | nothing changed sends nothing at all.             |
+        \*-------------------------------------------------*/
+        bool any_addressable = false;
 
         for(size_t i = 0; i < snapshot.size() && i < led_to_keytype_keyid_8080.size(); i++)
         {
-            uint16_t key_type = led_to_keytype_keyid_8080[i].first;
-            uint8_t  key_id   = led_to_keytype_keyid_8080[i].second;
-
-            if(key_type == 0 && key_id == 0)
+            if(led_to_keytype_keyid_8080[i].first != 0 || led_to_keytype_keyid_8080[i].second != 0)
             {
-                continue;
+                any_addressable = true;
+                break;
             }
-
-            RGBColor color = snapshot[i];
-
-            if(brightness < 100)
-            {
-                uint8_t r = RGBGetRValue(color) * brightness / 100;
-                uint8_t g = RGBGetGValue(color) * brightness / 100;
-                uint8_t b = RGBGetBValue(color) * brightness / 100;
-                color = ToRGBColor(r, g, b);
-            }
-
-            std::map<uint16_t, size_t>::iterator slot = type_slot.find(key_type);
-
-            if(slot == type_slot.end())
-            {
-                type_slot[key_type] = by_type.size();
-                by_type.emplace_back(key_type, std::vector<std::pair<uint8_t, RGBColor>>());
-                slot = type_slot.find(key_type);
-            }
-
-            by_type[slot->second].second.emplace_back(key_id, color);
         }
 
-        if(!by_type.empty())
+        bool              sent      = !frames.empty() || (full && any_addressable);
+        std::vector<bool> written;
+        bool              committed = false;
+
+        if(sent)
         {
-            controller->SetPerKey8080(by_type);
-            controller->PerKeyCommit8080();
+            written   = controller->SetPerKey8080(frames);
+            committed = controller->PerKeyCommit8080();
+
+            /*---------------------------------------------*\
+            | Advance sent_colors for the frames that went  |
+            | out and committed; anything else is marked    |
+            | HIDPP20_UNCOMMITTED and rides the next delta. |
+            \*---------------------------------------------*/
+            LogitechPerKey8080Plan::Settle(frames, written, committed, sent_colors,
+                                           snapshot.size(), HIDPP20_UNCOMMITTED);
         }
+
+        if(full)
+        {
+            last_full_8080 = now;
+        }
+
+        /*-------------------------------------------------*\
+        | Link summary: wall time of this update, planning  |
+        | through settle (dominated by the per-frame gap    |
+        | and the ACKed FlushLEDS).                         |
+        \*-------------------------------------------------*/
+        uint64_t send_us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - now).count();
+
+        controller->NotePerKey8080Update(full, frames, written, sent, committed, send_us);
 
         return;
     }
@@ -3012,7 +3063,9 @@ void RGBController_LogitechHIDPP20::DeviceUpdateMode()
 
             if(!by_type.empty())
             {
-                controller->SetPerKey8080(by_type);
+                bool kt40_id12_only = (caps.quirks & HIDPP20_QUIRK_8080_KEYTYPE40_ID12_ONLY) != 0;
+
+                controller->SetPerKey8080(LogitechPerKey8080Plan::ChunkGroups(by_type, kt40_id12_only));
                 controller->PerKeyCommit8080();
             }
 

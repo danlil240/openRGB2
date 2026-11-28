@@ -63,6 +63,18 @@ if(WIN32)
         LABELS packaging
         TIMEOUT 300)
 
+    # Audit P-7 step 6: the backend staleness check -- the stamp the
+    # recipe step writes next to OpenRGB.exe against a hash of the
+    # backend sources, and build-and-deploy.ps1's gate on it, driven
+    # against throwaway git trees with a fake recipe.
+    add_test(NAME package_backend_stamp_test
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/backend_stamp_tests.ps1
+            -PkgDir ${CMAKE_SOURCE_DIR}/packaging/windows)
+    set_tests_properties(package_backend_stamp_test PROPERTIES
+        LABELS packaging
+        TIMEOUT 120)
+
     add_test(NAME package_lifecycle_test
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
             -File ${CMAKE_CURRENT_SOURCE_DIR}/package_lifecycle_tests.ps1

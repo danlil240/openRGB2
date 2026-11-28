@@ -27,6 +27,7 @@
 #include <hidapi.h>
 #include "RGBController.h"
 #include "LogitechProtocolCommon.h"
+#include "LogitechPerKey8080Plan.h"
 
 /*---------------------------------------------------------*\
 | HID++ 2.0 Feature Page IDs                                |
@@ -113,9 +114,10 @@
 /*---------------------------------------------------------*\
 | 0x8080 carries up to 14 (keyId,R,G,B) tuples in one       |
 | very-long (report 0x12) frame, and GetKeyColors           |
-| paginates its readback by the same count.                 |
+| paginates its readback by the same count:                 |
+| HIDPP20_8080_KEYS_PER_FRAME, defined with the send        |
+| planner in LogitechPerKey8080Plan.h.                      |
 \*---------------------------------------------------------*/
-#define HIDPP20_8080_KEYS_PER_FRAME         14
 #define HIDPP20_8080_FRAME_GAP_MS           2   /* gap between SetKeyColors frames */
 
 /*---------------------------------------------------------*\
@@ -715,9 +717,21 @@ public:
     | keyId); fn3 rides the 0x12 report on dev_perkey_vl,   |
     | fn5 FlushLEDS commits on dev. The key set comes       |
     | from DiscoverPerKey8080: never hardcoded.             |
+    | SetPerKey8080 returns per-frame write success;        |
+    | PerKeyCommit8080 returns whether FlushLEDS acked.     |
     \*-----------------------------------------------------*/
-    void              SetPerKey8080(const std::vector<std::pair<uint16_t, std::vector<std::pair<uint8_t, RGBColor>>>>& by_type);
-    void              PerKeyCommit8080();
+    std::vector<bool> SetPerKey8080(const std::vector<LogitechPerKey8080Frame>& frames);
+    bool              PerKeyCommit8080();
+
+    /*-----------------------------------------------------*\
+    | Account one 0x8080 update for the link summary,       |
+    | logged at debug level once per                        |
+    | HIDPP20_8080_SUMMARY_S. Caller holds the transaction  |
+    | mutex.                                                |
+    \*-----------------------------------------------------*/
+    void              NotePerKey8080Update(bool is_full, const std::vector<LogitechPerKey8080Frame>& frames,
+                                           const std::vector<bool>& written, bool sent, bool committed,
+                                           uint64_t send_us);
 
     /*-----------------------------------------------------*\
     | Zone effects (0x8071 / 0x8070)                        |
@@ -1255,6 +1269,12 @@ private:
     size_t          perkey_frames_no_end  = 0;
     size_t          perkey_acks_lost      = 0;
     std::chrono::steady_clock::time_point perkey_summary_time;
+
+    /*-----------------------------------------------------*\
+    | 0x8080 link summary (NotePerKey8080Update).           |
+    \*-----------------------------------------------------*/
+    LogitechPerKey8080Stats               perkey8080_stats;
+    std::chrono::steady_clock::time_point perkey8080_summary_time;
 
     void            ResetPerKeyFrameState();
 

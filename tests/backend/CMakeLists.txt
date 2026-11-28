@@ -180,3 +180,21 @@ add_test(NAME lianli_transport_test COMMAND lianli_transport_test)
 set_tests_properties(lianli_transport_test PROPERTIES
     LABELS backend
     TIMEOUT 60)
+
+# Audit P-7: the Logitech HID++ 0x8080 per-key send planner
+# (LogitechPerKey8080Plan, Qt-free and hidapi-free): grouping by
+# keyType, chunking at 14 keys, the G410 keyType-0x40 filter,
+# brightness scaling, the delta against sent_colors and the forced
+# full repaints. Pins the full repaint byte for byte against a copy
+# of the pre-extraction send loop.
+set(LOGI8080 ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/Controllers/LogitechController/LogitechHIDPP20Controller)
+add_executable(logitech_8080_plan_test
+    logitech_8080_plan_test.cpp
+    ${LOGI8080}/LogitechPerKey8080Plan.cpp)
+target_include_directories(logitech_8080_plan_test PRIVATE
+    ${LOGI8080}
+    ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/RGBController
+    ${DEPS}/json)
+target_compile_definitions(logitech_8080_plan_test PRIVATE NDEBUG)
+add_test(NAME logitech_8080_plan_test COMMAND logitech_8080_plan_test)
+set_tests_properties(logitech_8080_plan_test PROPERTIES LABELS backend)
