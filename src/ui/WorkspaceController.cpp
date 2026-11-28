@@ -2732,6 +2732,30 @@ void WorkspaceController::FinishDownload()
         FetchDocument();
         return;
     }
+    /* Audit U-9: adoption labels the bytes with the CURRENT
+       ws_rev_/res_rev_. A snapshot that moved while this
+       transfer was in flight (its own fetch was refused: one
+       download at a time) means these are an older revision's
+       bytes — adopting them under the newer label is a lost
+       update. Both hashes cover the same deterministic
+       serialization, so a mismatch is exactly that case:
+       refetch. Bounded, so a mis-hashing engine cannot spin. */
+    if(!d.sha256.isEmpty() && !ws_sha256_.isEmpty() &&
+       d.sha256 != ws_sha256_)
+    {
+        if(++stale_fetches_ <= kMaxStaleFetches)
+        {
+            FetchDocument();
+            return;
+        }
+        stale_fetches_ = 0;
+        SetError(QStringLiteral("the workspace document keeps "
+                                "changing during download — "
+                                "reload to retry"),
+                 QStringLiteral("engine"));
+        return;
+    }
+    stale_fetches_ = 0;
     AdoptFetchedDocument(d.bytes);
 }
 

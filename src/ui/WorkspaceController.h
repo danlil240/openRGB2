@@ -540,6 +540,11 @@ private:
        record. Stale-epoch finishes are dropped, never
        adopted. */
     quint64     fetch_epoch_ = 0;
+    /* Consecutive document downloads whose hash no longer
+       matched the current snapshot (overtaken mid-transfer) —
+       refetched up to the bound (audit U-9). */
+    int         stale_fetches_ = 0;
+    static constexpr int kMaxStaleFetches = 3;
     struct Upload
     {
         QString    purpose;        /* "commit"|"save_copy"|"import" */
