@@ -113,6 +113,7 @@ itemized here yet (`git log -- vendor/OpenRGB` lists them).
 | Commit | Files | Change | Reason |
 | --- | --- | --- | --- |
 | `9c866ca` (2026-11-28) | `Controllers/LogitechController/LogitechHIDPP20Controller/LogitechHIDPP20Controller.{cpp,h}` | `SetPerKey8080` sleeps `HIDPP20_8080_FRAME_GAP_MS` (2 ms) after every 0x8080 SetKeyColors frame | a G512 RGB (0xC33C, US) dropped the tail keys of a frame when the next one arrived too soon (F5–F12, PrtSc, `0` and `-` kept stale colours). The 2 ms value was found by trial on one G512. The pacing is open-loop: ACKs are not read, and every update repaints all keys (audit P-7) |
+| P-12 step 1 (2026-11-28, branch `perf/p-12-lianli-poll-cost`) | `Controllers/LianLiWirelessController/LianLiWirelessRuntime.{cpp,h}`, `LianLiWirelessDiagnostics.{cpp,h}` | `WirelessRuntime::SetDesired` floors the next discovery poll at `last_poll_ms + min_poll_gap_ms` (new config field, 0 = `poll_ms`); `last_poll_ms` is set when `PollAndMerge` calls `PollDiscovery`; new `discovery_clamped` counter and `poll_clamp` trace row | a group unseen for longer than `max_discovery_defer_ms` (1 s) but not yet Lost (8 s) made every live frame a blocking discovery poll (63 polls/s in the offline test, bound 5). Plan `docs/plans/P-12-lianli-discovery-poll-cost.md` |
 
 Deploying a change here needs a backend rebuild
 (`vendor\OpenRGB\scripts\build-windows.bat`):

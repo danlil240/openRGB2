@@ -75,11 +75,25 @@ void WirelessRuntime::SetDesired(std::shared_ptr<const RgbUpload> upload)
        continuous frames must not hide a lost or re-bound group. */
     if(have_sighting)
     {
-        const uint64_t postponed = std::min(now + cfg.poll_ms,
+        uint64_t postponed = std::min(now + cfg.poll_ms,
             last_seen_ms + cfg.max_discovery_defer_ms);
         if(postponed > next_poll_ms)
         {
             Diagnostics::Get().RecordDiscoveryDeferred();
+        }
+        /* P-12: once the group has gone unseen past the freshness bound,
+           last_seen + defer lies in the past and every frame would make a
+           poll due. Floor it at the poll cadence measured from the last
+           poll. have_sighting implies a poll has happened, so
+           last_poll_ms is valid here. A recently seen group never hits
+           the floor (last_poll - last_seen < defer - gap). */
+        const uint64_t gap   = cfg.min_poll_gap_ms ? cfg.min_poll_gap_ms
+                                                   : cfg.poll_ms;
+        const uint64_t earliest = last_poll_ms + gap;
+        if(postponed < earliest)
+        {
+            Diagnostics::Get().RecordDiscoveryClamped();
+            postponed = earliest;
         }
         next_poll_ms = postponed;
     }
@@ -507,6 +521,7 @@ bool WirelessRuntime::PollAndMerge(uint64_t now)
     }
 
     std::vector<uint8_t> response;
+    last_poll_ms = now;
     const auto poll_begin = std::chrono::steady_clock::now();
     bool poll_ok = link.PollDiscovery(response);
     const uint64_t poll_duration_us =

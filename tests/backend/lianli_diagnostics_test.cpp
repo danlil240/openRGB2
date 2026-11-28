@@ -306,6 +306,40 @@ static void TestDiscoveryDeferral()
     DiagCounters c = DIAG.Snapshot();
     CHECK(c.discovery_deferred == 1,
           "fresh frame with a due poll records a discovery deferral");
+    CHECK(c.discovery_clamped == 0,
+          "a seen group's deferral is not a poll-gap clamp");
+}
+
+/*-------------------------------------------------------------*\
+|| 6b. Poll-gap clamp (P-12): an unseen group's frames no      ||
+||     longer make every frame a discovery poll                ||
+\*-------------------------------------------------------------*/
+static void TestDiscoveryClamp()
+{
+    DIAG.Reset();
+    FakeClock clk;
+    FakeLink  link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    link.poll_fn = [] { return MakeDiscovery(); };
+    rt.Tick();
+    link.poll_fn = [] { return std::vector<uint8_t>{}; };
+    RunFor(rt, clk, 2000);            /* unseen past the defer bound */
+
+    DIAG.Reset();
+    for(int i = 0; i < 10; i++)
+    {
+        clk.Advance(16);
+        rt.SetDesired(std::make_shared<RgbUpload>(MakeUpload((uint8_t)i)));
+        rt.Tick();
+    }
+    DiagCounters c = DIAG.Snapshot();
+    CHECK(c.discovery_clamped >= 1,
+          "unseen group's frames record poll-gap clamps");
+    CHECK(c.discovery_polls <= 1,
+          "clamped frames do not each poll");
+    nlohmann::json cj = CountersToJson(c);
+    CHECK(cj.contains("discovery_clamped"), "clamp counter serialized");
 }
 
 /*-------------------------------------------------------------*\
@@ -539,6 +573,7 @@ int main()
     TestAdmissionDeferral();
     TestDiscoveryCounters();
     TestDiscoveryDeferral();
+    TestDiscoveryClamp();
     TestKeepaliveGap();
     TestUploadRetryAndFailure();
     TestCompressionViaController();

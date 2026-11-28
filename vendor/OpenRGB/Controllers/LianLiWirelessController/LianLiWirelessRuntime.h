@@ -82,6 +82,10 @@ namespace LianLiWireless
     {
         uint64_t poll_ms          = 300;
         uint64_t max_discovery_defer_ms = 1000; /* continuous frames cannot hide stale routes */
+        /* P-12: floor on the gap between two discovery polls that a live
+           frame (SetDesired) can schedule. Without it a group unseen past
+           max_discovery_defer_ms made every frame a poll. 0 = poll_ms. */
+        uint64_t min_poll_gap_ms  = 0;
         uint64_t stream_ms        = 25;     /* minimum gap between RGB uploads */
         uint64_t resend_ms        = 1500;
         uint64_t keepalive_ms     = 750;
@@ -214,6 +218,7 @@ namespace LianLiWireless
         bool                 keepalive_completed = false;
         uint64_t             last_keepalive_ms = 0;
         uint64_t             next_poll_ms = 0;
+        uint64_t             last_poll_ms = 0;  /* last PollDiscovery call */
 
         std::string          last_error;
         bool                 cancelled = false;
