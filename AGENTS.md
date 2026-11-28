@@ -1,5 +1,7 @@
 # AGENTS.md — OpenRGB2
 
+[![CI](https://github.com/danlil240/openRGB2/actions/workflows/ci.yml/badge.svg)](https://github.com/danlil240/openRGB2/actions/workflows/ci.yml)
+
 Windows RGB application with uploaded animation playback and live-effects
 modes for Lian Li SL Wireless fans, driven through the wireless-enabled
 OpenRGB backend. See `IMPLEMENTATION_PLAN.md` for the full spec and
@@ -44,6 +46,10 @@ CM="/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/C
 # Backend only (its own qmake recipe, in-tree; does not touch installed OpenRGB)
 cd vendor/OpenRGB && cmd //c "scripts\\build-windows.bat 6.8.3 2022 64"
 ```
+
+## CI
+
+`.github/workflows/ci.yml` (HYG-1, report-only): every push/PR builds Release on a hosted `windows-2022` runner and runs CTest labels `core|engine|sdk|backend` and `ui` (offscreen); nightly/manual runs add the qmake backend, label `packaging` and an unsigned `stage-release.ps1`.
 
 ## QA automation harness
 
