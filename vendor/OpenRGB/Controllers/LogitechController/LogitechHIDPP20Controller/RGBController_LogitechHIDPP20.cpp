@@ -2348,10 +2348,14 @@ void RGBController_LogitechHIDPP20::DeviceUpdateLEDs()
             }
         }
 
-        if(!frames.empty() || (full && any_addressable))
+        bool              sent      = !frames.empty() || (full && any_addressable);
+        std::vector<bool> written;
+        bool              committed = false;
+
+        if(sent)
         {
-            std::vector<bool> written   = controller->SetPerKey8080(frames);
-            bool              committed = controller->PerKeyCommit8080();
+            written   = controller->SetPerKey8080(frames);
+            committed = controller->PerKeyCommit8080();
 
             /*---------------------------------------------*\
             | Advance sent_colors for the frames that went  |
@@ -2366,6 +2370,16 @@ void RGBController_LogitechHIDPP20::DeviceUpdateLEDs()
         {
             last_full_8080 = now;
         }
+
+        /*-------------------------------------------------*\
+        | Link summary: wall time of this update, planning  |
+        | through settle (dominated by the per-frame gap    |
+        | and the ACKed FlushLEDS).                         |
+        \*-------------------------------------------------*/
+        uint64_t send_us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - now).count();
+
+        controller->NotePerKey8080Update(full, frames, written, sent, committed, send_us);
 
         return;
     }

@@ -5579,6 +5579,46 @@ bool LogitechHIDPP20Controller::PerKeyCommit8080()
 }
 
 /*---------------------------------------------------------*\
+| 0x8080 link summary: one debug line per                   |
+| HIDPP20_8080_SUMMARY_S with the achieved update rate,     |
+| full vs delta updates, frames and keys per frame, write   |
+| and FlushLEDS failures and the mean / max wall time per   |
+| update. The window opens at the first update after the    |
+| last line, so an idle stretch inside a window lowers the  |
+| reported rate.                                            |
+\*---------------------------------------------------------*/
+void LogitechHIDPP20Controller::NotePerKey8080Update
+    (
+    bool                                            is_full,
+    const std::vector<LogitechPerKey8080Frame>&     frames,
+    const std::vector<bool>&                        written,
+    bool                                            sent,
+    bool                                            committed,
+    uint64_t                                        send_us
+    )
+{
+    perkey8080_stats.Add(is_full, frames, written, sent, committed, send_us);
+
+    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+
+    if(perkey8080_summary_time == std::chrono::steady_clock::time_point())
+    {
+        perkey8080_summary_time = now;
+    }
+    else if(now - perkey8080_summary_time >= std::chrono::seconds(HIDPP20_8080_SUMMARY_S))
+    {
+        double window_s = std::chrono::duration<double>(now - perkey8080_summary_time).count();
+
+        LOG_DEBUG("%s 0x8080 per-key link, last %.1fs: %s; %d ms gap per frame, fn3 ACKs not read",
+                  LOG_TAG, window_s, perkey8080_stats.Summary(window_s).c_str(),
+                  HIDPP20_8080_FRAME_GAP_MS);
+
+        perkey8080_stats.Reset();
+        perkey8080_summary_time = now;
+    }
+}
+
+/*---------------------------------------------------------*\
 | Zone effects (0x8071 / 0x8070)                            |
 \*---------------------------------------------------------*/
 

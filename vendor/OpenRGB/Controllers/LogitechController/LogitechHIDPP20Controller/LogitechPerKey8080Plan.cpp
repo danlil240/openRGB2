@@ -8,6 +8,7 @@
 |   SPDX-License-Identifier: GPL-2.0-or-later               |
 \*---------------------------------------------------------*/
 
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include "LogitechPerKey8080Plan.h"
@@ -249,4 +250,75 @@ size_t LogitechPerKey8080Plan::EncodeSetKeyColors(const LogitechPerKey8080Frame&
     }
 
     return pos;
+}
+
+void LogitechPerKey8080Stats::Add
+    (
+    bool                                            is_full,
+    const std::vector<LogitechPerKey8080Frame>&     planned,
+    const std::vector<bool>&                        written,
+    bool                                            sent,
+    bool                                            committed,
+    uint64_t                                        send_us
+    )
+{
+    updates++;
+
+    if(is_full)
+    {
+        full++;
+    }
+
+    if(!sent)
+    {
+        idle++;
+        return;
+    }
+
+    frames += planned.size();
+
+    for(size_t f = 0; f < planned.size(); f++)
+    {
+        keys += planned[f].keys.size();
+
+        if(f >= written.size() || !written[f])
+        {
+            write_failures++;
+        }
+    }
+
+    if(!committed)
+    {
+        commit_failures++;
+    }
+
+    send_us_total += send_us;
+
+    if(send_us > send_us_max)
+    {
+        send_us_max = send_us;
+    }
+}
+
+void LogitechPerKey8080Stats::Reset()
+{
+    *this = LogitechPerKey8080Stats();
+}
+
+std::string LogitechPerKey8080Stats::Summary(double window_s) const
+{
+    size_t sending      = updates - idle;
+    double rate         = (window_s > 0.0)  ? (double)updates / window_s              : 0.0;
+    double keys_per     = (frames > 0)      ? (double)keys / (double)frames           : 0.0;
+    double mean_ms      = (sending > 0)     ? (double)send_us_total / 1000.0 / (double)sending : 0.0;
+    double max_ms       = (double)send_us_max / 1000.0;
+
+    char line[256];
+    snprintf(line, sizeof(line),
+             "%zu updates (%.1f/s), %zu full, %zu idle, %zu frames (%.1f keys/frame), "
+             "%zu write failed, %zu FlushLEDS unacked, send %.1f ms mean, %.1f ms max",
+             updates, rate, full, idle, frames, keys_per,
+             write_failures, commit_failures, mean_ms, max_ms);
+
+    return std::string(line);
 }

@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -693,8 +694,58 @@ static void TestDeltaRandomized()
     }
 }
 
+/*---------------------------------------------------------*\
+| Step 5: the summary-line accumulator.                     |
+\*---------------------------------------------------------*/
+static void TestStats()
+{
+    LogitechPerKey8080Stats stats;
+
+    CHECK(stats.updates == 0 && stats.Summary(10.0).find("0 updates") != std::string::npos,
+          "empty stats summarise to zero updates");
+
+    std::vector<RGBColor> snapshot;
+    LedMap                led_map;
+    Board(30, 0x0001, snapshot, led_map);
+
+    std::vector<LogitechPerKey8080Frame> full = LogitechPerKey8080Plan::PlanLeds(snapshot, led_map, 100, false);
+
+    /* One full repaint: 3 frames, 30 keys, 8 ms. */
+    stats.Add(true, full, std::vector<bool>(3, true), true, true, 8000);
+
+    /* One delta: 1 frame of 2 keys, frame write failed, commit unacked, 3 ms. */
+    std::vector<LogitechPerKey8080Frame> delta(1);
+    delta[0].key_type = 0x0001;
+    delta[0].keys.resize(2);
+    stats.Add(false, delta, std::vector<bool>(1, false), true, false, 3000);
+
+    /* One idle update: nothing to send. */
+    stats.Add(false, std::vector<LogitechPerKey8080Frame>(), std::vector<bool>(), false, false, 0);
+
+    CHECK(stats.updates == 3, "three updates");
+    CHECK(stats.full == 1, "one full repaint");
+    CHECK(stats.idle == 1, "one idle update");
+    CHECK(stats.frames == 4 && stats.keys == 32, "frames and keys summed");
+    CHECK(stats.write_failures == 1, "one failed frame write");
+    CHECK(stats.commit_failures == 1, "one unacked FlushLEDS");
+    CHECK(stats.send_us_total == 11000 && stats.send_us_max == 8000, "send time summed and maxed");
+
+    std::string line = stats.Summary(2.0);
+    CHECK(line.find("3 updates (1.5/s)") != std::string::npos, "updates and rate over the window");
+    CHECK(line.find("1 full") != std::string::npos && line.find("1 idle") != std::string::npos, "full and idle");
+    CHECK(line.find("4 frames (8.0 keys/frame)") != std::string::npos, "keys per frame");
+    CHECK(line.find("1 write failed") != std::string::npos, "write failures");
+    CHECK(line.find("1 FlushLEDS unacked") != std::string::npos, "commit failures");
+    CHECK(line.find("send 5.5 ms mean, 8.0 ms max") != std::string::npos,
+          "mean wall time over the updates that sent");
+
+    stats.Reset();
+    CHECK(stats.updates == 0 && stats.frames == 0 && stats.send_us_max == 0, "reset clears every counter");
+}
+
 int main()
 {
+    TestStats();
     TestMatchesLegacyRandomized();
     TestChunkGroupsMatchesLegacy();
     TestChunkingAt14();

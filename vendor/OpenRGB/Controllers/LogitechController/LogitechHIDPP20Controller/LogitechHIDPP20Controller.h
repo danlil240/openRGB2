@@ -724,6 +724,16 @@ public:
     bool              PerKeyCommit8080();
 
     /*-----------------------------------------------------*\
+    | Account one 0x8080 update for the link summary,       |
+    | logged at debug level once per                        |
+    | HIDPP20_8080_SUMMARY_S. Caller holds the transaction  |
+    | mutex.                                                |
+    \*-----------------------------------------------------*/
+    void              NotePerKey8080Update(bool is_full, const std::vector<LogitechPerKey8080Frame>& frames,
+                                           const std::vector<bool>& written, bool sent, bool committed,
+                                           uint64_t send_us);
+
+    /*-----------------------------------------------------*\
     | Zone effects (0x8071 / 0x8070)                        |
     \*-----------------------------------------------------*/
     void            SetZoneEffect(uint8_t cluster_idx, uint8_t effect_idx,
@@ -1259,6 +1269,12 @@ private:
     size_t          perkey_frames_no_end  = 0;
     size_t          perkey_acks_lost      = 0;
     std::chrono::steady_clock::time_point perkey_summary_time;
+
+    /*-----------------------------------------------------*\
+    | 0x8080 link summary (NotePerKey8080Update).           |
+    \*-----------------------------------------------------*/
+    LogitechPerKey8080Stats               perkey8080_stats;
+    std::chrono::steady_clock::time_point perkey8080_summary_time;
 
     void            ResetPerKeyFrameState();
 

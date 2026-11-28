@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 #include "RGBControllerInterface.h"
@@ -65,6 +66,46 @@ struct LogitechPerKey8080Frame
 };
 
 typedef std::vector<std::pair<uint16_t, std::vector<std::pair<uint8_t, RGBColor>>>> LogitechPerKey8080Groups;
+
+/*---------------------------------------------------------*\
+| Link summary for the 0x8080 send path, logged once per    |
+| HIDPP20_8080_SUMMARY_S by the controller: what one        |
+| hardware run needs to read the achieved update rate.      |
+| fn3 ACKs are not read yet (plan P-7 step 4), so there     |
+| is no matched/lost ACK count.                             |
+\*---------------------------------------------------------*/
+#define HIDPP20_8080_SUMMARY_S              10
+
+struct LogitechPerKey8080Stats
+{
+    size_t      updates         = 0;    /* DeviceUpdateLEDs calls on the 0x8080 path    */
+    size_t      full            = 0;    /* of which full repaints                       */
+    size_t      idle            = 0;    /* of which sent nothing (no key changed)       */
+    size_t      frames          = 0;    /* fn3 SetKeyColors frames planned              */
+    size_t      keys            = 0;    /* keys carried by those frames                 */
+    size_t      write_failures  = 0;    /* frames whose hid_write failed                */
+    size_t      commit_failures = 0;    /* FlushLEDS sent but not acked                 */
+    uint64_t    send_us_total   = 0;    /* wall time of the updates that sent           */
+    uint64_t    send_us_max     = 0;
+
+    /*-----------------------------------------------------*\
+    | Account one update. sent: frames and FlushLEDS went   |
+    | out (false for an idle update); written and           |
+    | committed as returned by SetPerKey8080 and            |
+    | PerKeyCommit8080; send_us: wall time of the update.   |
+    \*-----------------------------------------------------*/
+    void        Add(bool is_full, const std::vector<LogitechPerKey8080Frame>& planned,
+                    const std::vector<bool>& written, bool sent, bool committed, uint64_t send_us);
+    void        Reset();
+
+    /*-----------------------------------------------------*\
+    | One-line body, e.g. "600 updates (60.0/s), 20 full,   |
+    | 4 idle, 1500 frames (6.1 keys/frame), 0 write failed, |
+    | 0 FlushLEDS unacked, send 9.8 ms mean, 21.0 ms max".  |
+    | window_s is the time the counters cover.              |
+    \*-----------------------------------------------------*/
+    std::string Summary(double window_s) const;
+};
 
 namespace LogitechPerKey8080Plan
 {
