@@ -188,6 +188,13 @@ std::vector<uint8_t> EncodeMessage(MsgType type, uint32_t request_id,
 {
     const std::string raw = body.is_discarded() ? std::string()
                                               : body.dump();
+    return EncodeRawMessage(type, request_id, raw, version);
+}
+
+std::vector<uint8_t> EncodeRawMessage(MsgType type, uint32_t request_id,
+                                      const std::string& raw,
+                                      uint16_t version)
+{
     if(raw.size() > kMaxBodyBytes)
     {
         return {};

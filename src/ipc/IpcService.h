@@ -30,6 +30,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <memory>
 #include <string>
 
 namespace openrgb2
@@ -58,6 +59,13 @@ struct IpcEvent
        carries "job/<id>" so it never replaces — or is replaced
        by — a snapshot or another job's record. */
     std::string    coalesce_key;
+    /* Optional: `data` already serialized (exactly
+       data.dump()) by a producer that had to dump it anyway —
+       a diff signature, a size-budgeted preview chunk. The
+       server frames these bytes verbatim instead of dumping
+       `data` a second time (audit I-7). `data` stays filled
+       for in-process consumers. */
+    std::shared_ptr<const std::string> data_json;
 };
 
 struct IpcReply

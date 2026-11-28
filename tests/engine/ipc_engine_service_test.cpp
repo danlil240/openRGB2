@@ -1227,6 +1227,24 @@ int main()
         }
         CHECK(saw_conn && saw_topo && saw_play && saw_frame
               && saw_react);
+        /* I-7: a diff body travels with the dump its signature
+           already made — exactly data.dump() — and the framed
+           EVENT is byte-identical to the old envelope encode. */
+        int pre_serialized = 0;
+        for(const IpcEvent& e : events)
+        {
+            if(e.data_json)
+            {
+                ++pre_serialized;
+                CHECK(*e.data_json == e.data.dump());
+            }
+            CHECK(EncodeEventMessage(e) ==
+                  EncodeMessage(MsgType::Event, 0,
+                      nlohmann::json::object({
+                          { "kind", e.kind },
+                          { "data", e.data } })));
+        }
+        CHECK(pre_serialized == 3);   /* connection/playback/reactive */
 
         events.clear();
         svc.PollEvents();

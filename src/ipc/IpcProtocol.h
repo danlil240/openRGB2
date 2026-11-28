@@ -200,6 +200,12 @@ std::vector<uint8_t> EncodeMessage(MsgType type, uint32_t request_id,
                                    const nlohmann::json& body,
                                    uint16_t version = kProtocolVersion);
 
+/* Same framing for an already-serialized JSON body (the
+   caller guarantees `raw` is one JSON object). */
+std::vector<uint8_t> EncodeRawMessage(MsgType type, uint32_t request_id,
+                                      const std::string& raw,
+                                      uint16_t version = kProtocolVersion);
+
 std::vector<uint8_t> EncodeError(uint32_t request_id, ErrCode code,
                                  const std::string& message);
 

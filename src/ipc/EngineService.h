@@ -419,8 +419,13 @@ private:
     std::string         last_stats_sig_;
     TimePoint           last_frame_status_{};
 
-    void   Emit(const std::string& kind, const nlohmann::json& data,
+    /* Bodies are taken by value and moved into the event —
+       callers hand temporaries, so nothing is deep-copied on
+       the way to the sink (audit I-7). coalesce_key partitions
+       latest-wins inside the kind (audit I-8). */
+    void   Emit(const std::string& kind, nlohmann::json data,
                 const std::string& coalesce_key = std::string());
+    void   EmitEvent(IpcEvent ev);
     /* Task 4.4 LAYOUT_COMMAND surface (docs/ipc-protocol.md
        §5): identify drives the mapper's bounded blink
        overlay; the other verbs mutate the applied scene

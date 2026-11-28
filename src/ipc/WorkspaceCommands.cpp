@@ -1744,30 +1744,49 @@ void WorkspaceCommands::PollPreviews(TimePoint now)
            reassemble strictly by sequence and never present a
            partial set as complete. */
         const size_t budget = preview_deps_.chunk_bytes;
-        nlohmann::json objects = nlohmann::json::array();
+        /* Each object is serialized ONCE: the dump that sizes
+           it against the chunk budget is the text the chunk
+           carries (audit I-7) — the server frames the
+           assembled data_json verbatim instead of dumping the
+           chunk again. */
+        struct Chunk
+        {
+            nlohmann::json objects = nlohmann::json::array();
+            std::string    text;          /* "o1,o2,..." */
+        };
+        std::vector<Chunk> chunks(1);
         size_t bytes = 2;
         int    chunk = 0;
         /* Two passes: count chunks first so every chunk knows
            `chunks` — a single-object overflow still emits (the
            1 MiB envelope bound applies at encode, honestly). */
-        std::vector<nlohmann::json> chunks;
         for(const PreviewObjectColors& o : frame.objects)
         {
             nlohmann::json jo = PreviewObjectJson(o);
-            const size_t n = jo.dump().size() + 1;
-            if(bytes + n > budget && !objects.empty())
+            std::string    js = jo.dump();
+            const size_t n = js.size() + 1;
+            if(bytes + n > budget && !chunks.back().objects.empty())
             {
-                chunks.push_back(std::move(objects));
-                objects = nlohmann::json::array();
+                chunks.emplace_back();
                 bytes = 2;
             }
-            objects.push_back(std::move(jo));
+            Chunk& ck = chunks.back();
+            if(!ck.text.empty())
+            {
+                ck.text += ',';
+            }
+            ck.text += js;
+            ck.objects.push_back(std::move(jo));
             bytes += n;
         }
-        chunks.push_back(std::move(objects));
         const int total = (int)chunks.size();
-        for(nlohmann::json& objs : chunks)
+        for(Chunk& ck : chunks)
         {
+            /* The envelope fields serialize with an EMPTY
+               objects array; the chunk's pre-dumped objects
+               are spliced into that one "[]" slot — the same
+               bytes data.dump() yields once objects is moved
+               in below. */
             nlohmann::json data = nlohmann::json::object({
                 { "type",           "frame"              },
                 { "sequence",       frame.sequence       },
@@ -1775,12 +1794,25 @@ void WorkspaceCommands::PollPreviews(TimePoint now)
                 { "scene_time_s",   frame.scene_time_s   },
                 { "chunk",          chunk                },
                 { "chunks",         total                },
-                { "objects",        std::move(objs)      },
+                { "objects",        nlohmann::json::array() },
                 { "reduced",        frame.reduced        },
                 { "emitter_total",  frame.emitter_total  },
                 { "emitter_sent",   frame.emitter_sent   },
                 { "object_total",   frame.object_total   },
             });
+            std::string text = data.dump();
+            static const char kSlot[] = "\"objects\":[]";
+            const size_t at = text.find(kSlot);
+            IpcEvent ev;
+            ev.kind = event_kind::kPreview;
+            if(at != std::string::npos)
+            {
+                text.insert(at + sizeof(kSlot) - 2, ck.text);
+                ev.data_json =
+                    std::make_shared<const std::string>(std::move(text));
+            }
+            data["objects"] = std::move(ck.objects);
+            ev.data = std::move(data);
             /* Key on the chunk SLOT, not the sequence: a newer
                frame's chunk k replaces a still-queued older
                chunk k (latest-wins across sequences), so a slow
@@ -1788,8 +1820,7 @@ void WorkspaceCommands::PollPreviews(TimePoint now)
                chunks. Each chunk carries its own sequence; the
                client assembles strictly by sequence, so a mix of
                old and new chunks never paints (audit I-8). */
-            preview_deps_.emit(sid,
-                IpcEvent{ event_kind::kPreview, std::move(data) },
+            preview_deps_.emit(sid, ev,
                 "frame/" + std::to_string(chunk));
             ++chunk;
         }
