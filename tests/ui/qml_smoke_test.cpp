@@ -104,6 +104,34 @@ int main(int argc, char** argv)
             CHECK(window != nullptr);
             if(window)
             {
+                /* R-10: the shell banner is wired to the bridge's
+                   ownership store, stays down while the engine is
+                   not connected (the report may be stale), and
+                   "How to fix" lands on Devices. */
+                QObject* ob =
+                    window->findChild<QObject*>("ownershipBanner");
+                CHECK(ob != nullptr);
+                if(ob)
+                {
+                    QVariantMap c;
+                    c.insert(QStringLiteral("owner"),
+                             QStringLiteral("Windows Dynamic Lighting"));
+                    c.insert(QStringLiteral("key"),
+                             QStringLiteral("dynamic_lighting"));
+                    QVariantMap rep;
+                    rep.insert(QStringLiteral("scanned"), true);
+                    rep.insert(QStringLiteral("conflicts"),
+                               QVariantList{ c });
+                    bridge.setOwnershipForTesting(rep);
+                    CHECK(ob->property("conflicts").toList().size()
+                          == 1);
+                    CHECK(!ob->property("shown").toBool());
+                    CHECK(QMetaObject::invokeMethod(
+                        window, "showOwnershipFix"));
+                    CHECK(window->property("currentView").toInt()
+                          == 3);
+                    window->setProperty("currentView", 0);
+                }
                 CHECK(window->isVisible());
                 CHECK(!window->close());
                 CHECK(!window->isVisible());

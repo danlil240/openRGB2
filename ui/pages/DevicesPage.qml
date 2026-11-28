@@ -58,6 +58,12 @@ Item {
     }
     Component.onCompleted: syncDiagActive()
     onVisibleChanged: syncDiagActive()
+
+    /* R-10: the shell banner's "How to fix" — bring the
+       Ownership card (and its steps) into view. */
+    function showOwnership() {
+        flick.ensureVisible(ownershipCard);
+    }
     /* The target resolves through the page item — a bare
        `Window.window` here looks the attached property up
        on this (non-Item) Connections object, binds null,
@@ -70,6 +76,7 @@ Item {
     }
 
     PageFlickable {     /* scroll bar + focus-follow (audit Q-12) */
+        id: flick
         anchors.fill: parent
         contentHeight: col.implicitHeight
         clip: true
@@ -551,6 +558,8 @@ Item {
                contract (plan section 4): conflicts are
                surfaced with guidance, never kill buttons. */
             Card {
+                id: ownershipCard
+                objectName: "ownershipCard"
                 title: qsTr("OWNERSHIP SCAN")
                 width: parent.width - 2 * col.padding
                 Column {

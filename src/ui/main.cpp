@@ -14,6 +14,7 @@
 #include "DiagnosticsController.h"
 #include "EngineBridge.h"
 #include "LaunchHardening.h"
+#include "OwnershipNotice.h"
 #include "LayoutController.h"
 #include "QaServer.h"
 #include "SceneEditController.h"
@@ -488,6 +489,10 @@ int main(int argc, char** argv)
     QMenu tray_menu;
     QSystemTrayIcon tray(app_icon);
     QProcess shutdown;
+    /* R-10: a competing writer that appears while the window is
+       hidden gets one tray message per writer key per session. */
+    openrgb2::ui::ConflictNoticeTracker conflict_notices;
+    bool ownership_msg_pending = false;
     if(tray_available)
     {
         auto show_ui = [window] { ShowRestored(window); };
@@ -562,9 +567,39 @@ int main(int argc, char** argv)
                 show_ui();
         });
         /* The background takeover notification opens the window,
-           where the confirmation dialog is waiting. */
+           where the confirmation dialog is waiting; the R-10
+           ownership notice opens it at the fix steps. */
         QObject::connect(&tray, &QSystemTrayIcon::messageClicked,
-                         &app, show_ui);
+                         &app, [show_ui, window,
+                                &ownership_msg_pending] {
+            show_ui();
+            if(ownership_msg_pending)
+            {
+                ownership_msg_pending = false;
+                QMetaObject::invokeMethod(window, "showOwnershipFix");
+            }
+        });
+        QObject::connect(&bridge,
+                         &openrgb2::ui::EngineBridge::ownershipChanged,
+                         &app, [&bridge, &tray, window,
+                                &conflict_notices,
+                                &ownership_msg_pending] {
+            /* Keys are marked seen while the window is up too: the
+               banner already told the user about those. */
+            const QStringList fresh =
+                conflict_notices.NewConflicts(bridge.ownership());
+            const bool hidden = !window->isVisible()
+                || window->visibility() == QWindow::Minimized;
+            if(fresh.isEmpty() || !hidden)
+                return;
+            ownership_msg_pending = true;
+            tray.showMessage(
+                QObject::tr("Another app is controlling your lights"),
+                QObject::tr("%1. Open OpenRGB2 for the steps to turn "
+                            "it off - OpenRGB2 never closes it for you.")
+                    .arg(fresh.join(QStringLiteral(", "))),
+                QSystemTrayIcon::Warning, 10000);
+        });
         QObject::connect(&instance_server, &QLocalServer::newConnection,
                          &app, [&instance_server, show_ui] {
             while(auto* client = instance_server.nextPendingConnection())

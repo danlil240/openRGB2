@@ -75,6 +75,7 @@ qt_add_qml_module(openrgb2_ui
         components/FrameStrip.qml
         components/GroupChip.qml
         components/NavButton.qml
+        components/OwnershipBanner.qml
         components/PageFlickable.qml
         components/PageHeader.qml
         components/PaletteSwatch.qml
@@ -124,6 +125,8 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/StartupTaskController.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/LaunchHardening.h
         ${CMAKE_SOURCE_DIR}/src/ui/LaunchHardening.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/OwnershipNotice.h
+        ${CMAKE_SOURCE_DIR}/src/ui/OwnershipNotice.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceEditSession.h
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceEditSession.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceDraftStore.h

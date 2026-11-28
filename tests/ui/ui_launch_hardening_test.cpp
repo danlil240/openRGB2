@@ -8,6 +8,7 @@
      output (exit 3 banner + "ownership CONFLICT:" lines). */
 
 #include "LaunchHardening.h"
+#include "OwnershipNotice.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -128,6 +129,51 @@ static void TestOwnershipParse()
 /* Audit U-6: engine-reported folders reach the shell only as an
    existing absolute local directory, opened by an absolute
    explorer.exe. */
+/* R-10: the tray notice fires once per writer key per session —
+   a writer that stays, or comes back, never re-notifies. */
+static void TestConflictNotice()
+{
+    using openrgb2::ui::ConflictNoticeTracker;
+    auto conflict = [](const char* owner, const char* key)
+    {
+        QVariantMap c;
+        c.insert(QStringLiteral("owner"), QString::fromUtf8(owner));
+        c.insert(QStringLiteral("key"), QString::fromUtf8(key));
+        return QVariant(c);
+    };
+    auto report = [](const QVariantList& conflicts)
+    {
+        QVariantMap m;
+        m.insert(QStringLiteral("conflicts"), conflicts);
+        return m;
+    };
+    ConflictNoticeTracker t;
+    CHECK(t.NewConflicts(QVariantMap()).isEmpty(),
+          "notice: no report -> nothing");
+    QStringList n = t.NewConflicts(report({
+        conflict("Windows Dynamic Lighting", "dynamic_lighting") }));
+    CHECK(n == QStringList{QStringLiteral("Windows Dynamic Lighting")},
+          "notice: first sighting of a key -> one notice");
+    CHECK(t.NewConflicts(report({
+              conflict("Windows Dynamic Lighting",
+                       "dynamic_lighting") })).isEmpty(),
+          "notice: same key again -> nothing");
+    n = t.NewConflicts(report({
+        conflict("Windows Dynamic Lighting", "dynamic_lighting"),
+        conflict("Logitech G Hub / Options", "logitech"),
+        conflict("Logitech G Hub / Options", "logitech") }));
+    CHECK(n == QStringList{QStringLiteral("Logitech G Hub / Options")},
+          "notice: only the new key, once even with two processes");
+    t.NewConflicts(report({}));
+    CHECK(t.NewConflicts(report({
+              conflict("Logitech G Hub / Options", "logitech") }))
+              .isEmpty(),
+          "notice: a key that cleared and came back -> nothing");
+    n = t.NewConflicts(report({ conflict("Mystery RGB", "") }));
+    CHECK(n == QStringList{QStringLiteral("Mystery RGB")},
+          "notice: a keyless finding is keyed by its label");
+}
+
 static void TestShellFolder()
 {
 #ifdef Q_OS_WIN
@@ -193,6 +239,7 @@ int main(int argc, char** argv)
     TestRealChild();
 #endif
     TestOwnershipParse();
+    TestConflictNotice();
     TestShellFolder();
     if(g_fail)
     {

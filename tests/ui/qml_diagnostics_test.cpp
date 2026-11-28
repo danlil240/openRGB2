@@ -18,6 +18,7 @@
 #include "DiagnosticsController.h"
 #include "EngineBridge.h"
 
+#include <QElapsedTimer>
 #include <QGuiApplication>
 #include <QQmlComponent>
 #include <QQmlContext>
@@ -119,6 +120,109 @@ int main(int argc, char** argv)
     if(exportBtn)
     {
         CHECK(!exportBtn->property("enabled").toBool());
+    }
+
+    /*---- R-10: the Ownership card is a jump target -----------*/
+    {
+        QObject* card = page->findChild<QObject*>("ownershipCard");
+        CHECK(card != nullptr);
+        /* the banner's "How to fix" lands here */
+        CHECK(QMetaObject::invokeMethod(page.get(), "showOwnership"));
+    }
+
+    /*---- R-10: the shell's conflict banner --------------------*/
+    {
+        QQmlComponent bcomp(&engine,
+            QUrl(QStringLiteral(
+                "qrc:/qt/qml/OpenRGB2/UI/components/OwnershipBanner.qml")));
+        if(bcomp.isError())
+        {
+            std::printf("FAIL load OwnershipBanner.qml:\n%s\n",
+                        bcomp.errorString().toUtf8().constData());
+        }
+        std::unique_ptr<QObject> banner(
+            bcomp.isError() ? nullptr
+                            : bcomp.create(engine.rootContext()));
+        CHECK(banner != nullptr);
+        if(banner)
+        {
+            auto conflict = [](const char* owner, const char* key)
+            {
+                QVariantMap c;
+                c.insert(QStringLiteral("owner"),
+                         QString::fromUtf8(owner));
+                c.insert(QStringLiteral("key"),
+                         QString::fromUtf8(key));
+                return QVariant(c);
+            };
+            auto report = [](const QVariantList& conflicts)
+            {
+                QVariantMap m;
+                m.insert(QStringLiteral("scanned"), true);
+                m.insert(QStringLiteral("conflicts"), conflicts);
+                m.insert(QStringLiteral("notices"), QVariantList{});
+                return m;
+            };
+            banner->setProperty("holdMs", 0);
+
+            /* no report / a clean report -> hidden */
+            CHECK(!banner->property("shown").toBool());
+            banner->setProperty("ownership", report({}));
+            CHECK(!banner->property("shown").toBool());
+
+            /* a conflict -> shown, naming the writers */
+            banner->setProperty("ownership", report({
+                conflict("Windows Dynamic Lighting",
+                         "dynamic_lighting"),
+                conflict("LampArray service (Dynamic Lighting)",
+                         "lamparray") }));
+            CHECK(banner->property("shown").toBool());
+            QObject* msg = banner->findChild<QObject*>(
+                "ownershipBannerText");
+            CHECK(msg != nullptr &&
+                  msg->property("text").toString().contains(
+                      QStringLiteral("Windows Dynamic Lighting")));
+            CHECK(banner->findChild<QObject*>(
+                      "ownershipFixButton") != nullptr);
+
+            /* the surface can be switched off (engine down) */
+            banner->setProperty("active", false);
+            CHECK(!banner->property("shown").toBool());
+            banner->setProperty("active", true);
+            CHECK(banner->property("shown").toBool());
+
+            /* cleared -> hidden (no hold) */
+            banner->setProperty("ownership", report({}));
+            CHECK(!banner->property("shown").toBool());
+
+            /* flap guard: with a hold the banner stays up for a
+               moment after the clear, then goes */
+            banner->setProperty("holdMs", 60);
+            banner->setProperty("ownership", report({
+                conflict("Logitech G Hub / Options", "logitech") }));
+            CHECK(banner->property("shown").toBool());
+            banner->setProperty("ownership", report({}));
+            CHECK(banner->property("shown").toBool());
+            QElapsedTimer t;
+            t.start();
+            while(banner->property("shown").toBool() &&
+                  t.elapsed() < 2000)
+            {
+                QCoreApplication::processEvents(
+                    QEventLoop::AllEvents, 20);
+            }
+            CHECK(!banner->property("shown").toBool());
+
+            /* a conflict that returns inside the hold keeps it
+               up without a gap */
+            banner->setProperty("holdMs", 5000);
+            banner->setProperty("ownership", report({
+                conflict("Logitech G Hub / Options", "logitech") }));
+            banner->setProperty("ownership", report({}));
+            banner->setProperty("ownership", report({
+                conflict("Logitech G Hub / Options", "logitech") }));
+            CHECK(banner->property("shown").toBool());
+        }
     }
 
     std::printf("%d checks, %d failures\n", checks, failures);
