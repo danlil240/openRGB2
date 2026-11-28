@@ -208,6 +208,112 @@ static void TestConcurrentWriters()
     CHECK(calls.load() > 0);
 }
 
+/* R-4: ramped contributor targets. Dimming ramps (the scale is
+   monotonic over the ticks), lifting is immediate unless a
+   restore ramp is given; the target shows at once, the
+   effective scale follows the ticks. */
+static void TestContributorRamps()
+{
+    using ms = std::chrono::milliseconds;
+    OutputControl oc;
+    int notes = 0;
+    oc.SetChanged([&notes](const OutputState&) { ++notes; });
+    const TimePoint t0 = TimePoint{} + std::chrono::hours(1);
+
+    CHECK(oc.SetContributorTarget("idle", 0.3f, t0, ms(600), ms(0)));
+    CHECK(notes == 1);
+    OutputState s = oc.State();
+    CHECK(s.ramping);
+    CHECK(Near(s.contributors.at("idle"), 0.3f));   /* the target */
+    CHECK(Near(oc.EffectiveScale(), 1.0f));         /* not yet    */
+    CHECK(OutputControl::AnyContributorOff(s) == false);
+
+    oc.Tick(t0 + ms(300));
+    CHECK(Near(oc.EffectiveScale(), 0.65f, 1e-3f));
+    CHECK(notes == 1);                  /* ticks never notify */
+
+    float prev = oc.EffectiveScale();
+    bool  mono = true;
+    for(int i = 19; i <= 40; ++i)
+    {
+        oc.Tick(t0 + ms(i * 17));
+        const float e = oc.EffectiveScale();
+        mono = mono && e <= prev + 1e-6f;
+        prev = e;
+    }
+    CHECK(mono);
+    CHECK(Near(oc.EffectiveScale(), 0.3f));
+    CHECK(!oc.State().ramping);
+    CHECK(notes == 2);                  /* completion notifies */
+
+    /* The same target again changes nothing, restarts nothing. */
+    CHECK(!oc.SetContributorTarget("idle", 0.3f, t0 + ms(700),
+                                   ms(600), ms(0)));
+    CHECK(!oc.Tick(t0 + ms(720)));
+
+    /* Restore is immediate (restore ramp 0). */
+    CHECK(oc.ReleaseContributor("idle", t0 + ms(800), ms(0)));
+    CHECK(Near(oc.EffectiveScale(), 1.0f));
+    CHECK(oc.State().contributors.empty());
+    CHECK(!oc.ReleaseContributor("idle", t0 + ms(810), ms(0)));
+
+    /* A brighter target (0.3 -> 0.8) is a lift: immediate. */
+    CHECK(oc.SetContributorTarget("schedule", 0.3f, t0, ms(0), ms(0)));
+    CHECK(Near(oc.EffectiveScale(), 0.3f));
+    CHECK(oc.SetContributorTarget("schedule", 0.8f, t0, ms(600), ms(0)));
+    CHECK(Near(oc.EffectiveScale(), 0.8f));
+
+    /* A deeper target mid-ramp starts from where the ramp is. */
+    CHECK(oc.SetContributorTarget("schedule", 0.4f, t0, ms(400), ms(0)));
+    oc.Tick(t0 + ms(200));
+    CHECK(Near(oc.EffectiveScale(), 0.6f, 1e-3f));
+    CHECK(oc.SetContributorTarget("schedule", 0.0f, t0 + ms(200),
+                                  ms(400), ms(0)));
+    CHECK(Near(oc.EffectiveScale(), 0.6f, 1e-3f));
+    CHECK(OutputControl::AnyContributorOff(oc.State()));
+    oc.Tick(t0 + ms(400));
+    CHECK(Near(oc.EffectiveScale(), 0.3f, 1e-3f));
+    oc.Tick(t0 + ms(700));
+    CHECK(Near(oc.EffectiveScale(), 0.0f));
+
+    /* A configured restore ramp lifts gradually, then the slot
+       disappears. */
+    CHECK(oc.ReleaseContributor("schedule", t0 + ms(1000), ms(500)));
+    CHECK(oc.State().contributors.empty());       /* not a dim */
+    CHECK(oc.State().ramping);
+    prev = oc.EffectiveScale();
+    mono = true;
+    for(int i = 1; i <= 35; ++i)
+    {
+        oc.Tick(t0 + ms(1000 + i * 17));
+        const float e = oc.EffectiveScale();
+        mono = mono && e >= prev - 1e-6f;
+        prev = e;
+    }
+    CHECK(mono);
+    CHECK(Near(oc.EffectiveScale(), 1.0f));
+    CHECK(!oc.State().ramping);
+
+    /* Master multiplies, blackout overrides a ramp, the minimum
+       contributor wins. */
+    oc.SetMaster(0.5f);
+    CHECK(oc.SetContributorTarget("lock", 0.5f, t0, ms(0), ms(0)));
+    CHECK(oc.SetContributorTarget("idle", 0.2f, t0, ms(0), ms(0)));
+    CHECK(Near(oc.EffectiveScale(), 0.1f));
+    oc.SetBlackout(true);
+    CHECK(Near(oc.EffectiveScale(), 0.0f));
+    /* An immediate SetContributor cancels a ramp in flight. */
+    oc.SetBlackout(false);
+    CHECK(oc.SetContributorTarget("idle", 0.0f, t0, ms(600), ms(0)));
+    CHECK(oc.SetContributor("idle", 0.6f));
+    CHECK(!oc.State().ramping);
+    CHECK(Near(oc.EffectiveScale(), 0.25f));
+    /* Refusals. */
+    CHECK(!oc.SetContributorTarget("", 0.5f, t0, ms(0), ms(0)));
+    CHECK(!oc.SetContributorTarget("x",
+        std::numeric_limits<float>::infinity(), t0, ms(0), ms(0)));
+}
+
 int main()
 {
     TestDefaults();
@@ -216,6 +322,7 @@ int main()
     TestHoldIsNotPersisted();
     TestChangedCallback();
     TestConcurrentWriters();
+    TestContributorRamps();
     std::printf("output control: %d checks, %d failures\n",
                 checks, failures);
     return failures ? 1 : 0;
