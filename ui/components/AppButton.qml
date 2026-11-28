@@ -2,7 +2,10 @@
 //
 // AppButton — themed button. `primary` paints the ICE accent.
 // Keyboard access: focusable, Space/Enter activates, visible
-// focus ring (plan section 5 — keyboard access).
+// focus ring (plan section 5 — keyboard access). A `checked`
+// button (a toggle / segment that is on) paints the muted accent
+// with an accent border — it used to look the same as unchecked
+// (audit Q-12).
 import QtQuick
 import QtQuick.Controls
 import OpenRGB2.UI.theme
@@ -36,11 +39,13 @@ Button {
              : root.primary  ? (root.pressed ? Theme.accentStrong
                               : root.hovered ? Theme.accentStrong
                               : Theme.accent)
+             : root.checked  ? Theme.accentMuted
              : (root.pressed ? Theme.surfaceHover
               : root.hovered ? Theme.surfaceHover
               : Theme.surfaceAlt)
         border.width: root.activeFocus ? 2 : 1
-        border.color: root.activeFocus ? Theme.accent : Theme.border
+        border.color: root.activeFocus || root.checked
+                      ? Theme.accent : Theme.border
 
         Behavior on color {
             ColorAnimation { duration: Theme.animFast }

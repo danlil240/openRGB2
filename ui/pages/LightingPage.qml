@@ -198,7 +198,7 @@ Item {
         anchors.fill: parent
         spacing: 0
 
-        Flickable {
+        PageFlickable {     /* scroll bar + focus-follow (audit Q-12) */
             objectName: "lightingScroll"
             Layout.fillWidth: true
             Layout.fillHeight: true
