@@ -1,0 +1,67 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default (today's flags: /W3, Release)",
+      "description": "The documented AGENTS.md configure: VS 2022 x64, Qt 6.8.3, /W3, no sanitizer.",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "C:/Qt/6.8.3/msvc2022_64"
+      }
+    },
+    {
+      "name": "w4",
+      "inherits": "default",
+      "displayName": "/W4 /permissive- on first-party targets",
+      "description": "Warning burn-down build: first-party targets at /W4 /permissive-, vendor sources at /W3, <...> and vendor/ headers external at /external:W0. No /WX.",
+      "binaryDir": "${sourceDir}/build-w4",
+      "cacheVariables": {
+        "OPENRGB2_WARNINGS_W4": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "inherits": "default",
+      "displayName": "AddressSanitizer (Qt-free targets)",
+      "description": "/fsanitize=address /Zi, /INCREMENTAL:NO, built RelWithDebInfo (no /RTC). Qt-free: the UI and its tests are off; build and test the core/engine/sdk/backend labels.",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "OPENRGB2_ASAN": "ON",
+        "OPENRGB2_BUILD_UI": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "default", "configurePreset": "default", "configuration": "Release" },
+    { "name": "w4", "configurePreset": "w4", "configuration": "Release" },
+    { "name": "asan", "configurePreset": "asan", "configuration": "RelWithDebInfo" }
+  ],
+  "testPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "w4",
+      "configurePreset": "w4",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "configuration": "RelWithDebInfo",
+      "description": "The Qt-free labels under ASan. CMake prepends the ASan runtime directory (the one cl.exe is in) to every test's PATH through ENVIRONMENT_MODIFICATION: a preset cannot discover the MSVC toolset directory itself.",
+      "filter": {
+        "include": { "label": "^(core|engine|sdk|backend)$" }
+      },
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

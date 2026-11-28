@@ -80,4 +80,28 @@ if(WIN32)
     set_tests_properties(package_stage_verify_test PROPERTIES
         LABELS packaging
         TIMEOUT 120)
+
+    # Audit P-13: the REAL stage-release.ps1 end to end -- this build
+    # tree's exes, the build's Qt kit (real windeployqt) and the
+    # pinned backend into a temp -OutDir; manifest, layout,
+    # windeployqt output and -VerifyOnly. Needs the UI and a built
+    # backend (OPENRGB2_BACKEND_DIR or vendor\OpenRGB); without the
+    # backend, or in a Debug build, it exits 77 = skipped.
+    if(OPENRGB2_BUILD_UI)
+        set(_stage_qt_dir "${QT6_INSTALL_PREFIX}")
+        if(NOT _stage_qt_dir)
+            get_filename_component(_stage_qt_dir "${Qt6_DIR}/../../.." ABSOLUTE)
+        endif()
+        add_test(NAME package_stage_release_test
+            COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                -File ${CMAKE_CURRENT_SOURCE_DIR}/stage_release_real_tests.ps1
+                -StageScript ${CMAKE_SOURCE_DIR}/packaging/windows/stage-release.ps1
+                -BuildDir ${CMAKE_BINARY_DIR}
+                -Configuration $<CONFIG>
+                -QtDir ${_stage_qt_dir})
+        set_tests_properties(package_stage_release_test PROPERTIES
+            LABELS packaging
+            SKIP_RETURN_CODE 77
+            TIMEOUT 900)
+    endif()
 endif()

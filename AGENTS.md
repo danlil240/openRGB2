@@ -41,6 +41,12 @@ CM="/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/C
 "$CM" --build build --config Release
 "$CM" -E chdir build ctest -C Release --output-on-failure   # or use ctest.exe path
 
+# Presets (CMakePresets.json): default = the configure above (build/);
+# w4 = first-party targets at /W4 /permissive- (build-w4/, no /WX);
+# asan = AddressSanitizer, Qt-free, RelWithDebInfo (build-asan/)
+"$CM" --preset asan && "$CM" --build --preset asan
+"$(dirname "$CM")/ctest.exe" --preset asan     # from the repo root (presets resolve there)
+
 # Backend only (its own qmake recipe, in-tree; does not touch installed OpenRGB)
 cd vendor/OpenRGB && cmd //c "scripts\\build-windows.bat 6.8.3 2022 64"
 ```

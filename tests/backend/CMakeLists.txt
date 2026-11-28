@@ -155,3 +155,28 @@ add_test(NAME skew_stats_test COMMAND skew_stats_test)
 set_tests_properties(skew_stats_test PROPERTIES
     LABELS backend
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Audit P-13: the REAL libusb transport (LianLiWirelessTransport.cpp)
+# against fake_libusb.cpp, a link-time stub of the libusb entry points
+# it calls (scripted read chunks, write results, failure injection,
+# a per-device transfer log -- API in fake_libusb.h). No libusb
+# library is linked and no USB device is touched. The vendored
+# libusb 1.0.27 header is still the one compiled against, so a
+# drifted stub prototype fails the build. Home for the P-10 (timeout,
+# close, reopen) and P-12 (length-bounded discovery reads) tests.
+add_executable(lianli_transport_test
+    lianli_transport_test.cpp
+    fake_libusb.cpp
+    ${CTRL}/LianLiWirelessTransport.cpp
+    ${LLW_SOURCES})
+target_include_directories(lianli_transport_test PRIVATE
+    ${LLW_INCLUDES}
+    ${DEPS}/libusb-1.0.27/include
+    ${CMAKE_CURRENT_SOURCE_DIR})
+# libusb.h pulls in <windows.h>: keep its min/max macros out.
+target_compile_definitions(lianli_transport_test PRIVATE
+    ${LLW_DEFINES} NOMINMAX WIN32_LEAN_AND_MEAN)
+add_test(NAME lianli_transport_test COMMAND lianli_transport_test)
+set_tests_properties(lianli_transport_test PROPERTIES
+    LABELS backend
+    TIMEOUT 60)

@@ -1197,6 +1197,200 @@ static void TestDeviceListUpdatedInvalidatesTopology()
     CHECK(client->Snapshots().size() == 2);
 }
 
+/*---------------------------------------------------------*\
+||| Audit P-13 step 2 — unsolicited server packets.         |||
+|||                                                         |||
+||| Request() drops up to 64 unrelated packets while it     |||
+||| waits for its reply; DrainPending() consumes whatever   |||
+||| is readable between operations. These pin today's      |||
+||| behaviour (P-5 already landed: a DEVICE_LIST_UPDATED    |||
+||| read anywhere bumps the topology generation).           |||
+\*---------------------------------------------------------*/
+
+/* n unrelated packets back to back (an id the client never
+   requests). */
+static std::vector<uint8_t> JunkPackets(unsigned n)
+{
+    std::vector<uint8_t> bytes;
+    for(unsigned i = 0; i < n; ++i)
+    {
+        const std::vector<uint8_t> p =
+            EncodePacket(0, 7777, { (uint8_t)i, 0xAA, 0x55 });
+        bytes.insert(bytes.end(), p.begin(), p.end());
+    }
+    return bytes;
+}
+
+/* Nothing left unread in the fake stream. */
+static bool StreamDrained(FakeStream& stream)
+{
+    bool        readable = true;
+    std::string err;
+    return stream.WaitReadable(0, readable, err) && !readable;
+}
+
+static void TestDeviceListUpdatedBeforeReply()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup(), Dimm() };
+    FakeStream* stream = nullptr;
+    auto client = MakeClient(server, &stream);
+    CHECK(client->Connect());
+    std::vector<DeviceSnapshot> snaps = client->Snapshots();
+    CHECK(snaps.size() == 2);
+    if(snaps.empty()) return;
+    const uint64_t gen0  = snaps[0].topology_generation;
+    const RgbFrame stale = MakeFrame(snaps[0], { 1, 1, 1 });
+
+    /* The notice arrives ahead of the controller-count reply of
+       a status refresh: Request() skips it as unrelated, still
+       matches its own reply, and the read flags the topology. */
+    stream->InjectServerBytes(EncodePacket(0, kPktDeviceListUpdated, {}));
+    server.ClearEvents();
+    CHECK(client->RefreshStatus());
+    CHECK(client->State() == ConnectionState::Connected);
+    /* Every byte consumed: the notice and the count reply (the
+       fake records no events for count/data requests, so the
+       drained stream is the evidence the reply was matched). */
+    CHECK(StreamDrained(*stream));
+
+    /* Generation bumped: a frame on the old topology is
+       refused, never sent to a possibly shifted index. */
+    CHECK(client->SubmitLatest(stale).status == SubmitStatus::Rejected);
+    CHECK(server.CountEvents(kPktUpdateLEDs) == 0);
+
+    /* Poll re-enumerates onto a newer generation. */
+    CHECK(client->Poll());
+    snaps = client->Snapshots();
+    CHECK(snaps.size() == 2);
+    if(snaps.empty()) return;
+    CHECK(snaps[0].topology_generation > gen0);
+    CHECK(client->SubmitLatest(MakeFrame(snaps[0], { 2, 2, 2 })).status ==
+          SubmitStatus::Accepted);
+}
+
+static void TestUnrelatedPacketFloodHitsBound()
+{
+    /* 63 unrelated packets + the reply = 64 reads: inside the
+       bound. The first junk packet is a controller-count reply
+       for the WRONG dev_id (claiming 99 controllers) — a match
+       on pkt_id alone would misread it, re-enumerate, and leave
+       the real reply in the stream. */
+    {
+        FakeSdkServer server;
+        server.controllers = { WirelessGroup(), Dimm() };
+        FakeStream* stream = nullptr;
+        auto client = MakeClient(server, &stream);
+        CHECK(client->Connect());
+        std::vector<uint8_t> bytes =
+            EncodePacket(5, kPktControllerCount, { 99, 0, 0, 0 });
+        const std::vector<uint8_t> junk = JunkPackets(62);
+        bytes.insert(bytes.end(), junk.begin(), junk.end());
+        stream->InjectServerBytes(bytes);
+        CHECK(client->RefreshStatus());
+        CHECK(client->State() == ConnectionState::Connected);
+        CHECK(StreamDrained(*stream));
+        CHECK(client->Snapshots().size() == 2);
+    }
+    /* 64 unrelated packets: the reply would be read 65th — the
+       bound throws and the connection is torn down (a flooding
+       peer cannot hold the wire lock forever). */
+    {
+        FakeSdkServer server;
+        server.controllers = { WirelessGroup(), Dimm() };
+        FakeStream* stream = nullptr;
+        auto client = MakeClient(server, &stream);
+        CHECK(client->Connect());
+        stream->InjectServerBytes(JunkPackets(64));
+        CHECK(!client->RefreshStatus());
+        CHECK(client->State() == ConnectionState::Reconnecting);
+        CHECK(client->LastError().find("too many unrelated packets") !=
+              std::string::npos);
+    }
+}
+
+static void TestUnsolicitedBetweenFramesIsDrained()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup(), Dimm() };
+    FakeStream* stream = nullptr;
+    auto client = MakeClient(server, &stream);
+    CHECK(client->Connect());
+    const std::vector<DeviceSnapshot> snaps = client->Snapshots();
+    CHECK(!snaps.empty());
+    if(snaps.empty()) return;
+    server.ClearEvents();
+
+    CHECK(client->SubmitLatest(MakeFrame(snaps[0], { 1, 0, 0 })).status ==
+          SubmitStatus::Accepted);
+
+    /* One unrelated packet between two frames: the next send
+       path drains it (ReadAsyncIo -> DrainPending) and, being
+       no topology notice, it costs the frame nothing. */
+    stream->InjectServerBytes(JunkPackets(1));
+    CHECK(!StreamDrained(*stream));
+    CHECK(client->SubmitLatest(MakeFrame(snaps[0], { 0, 1, 0 })).status ==
+          SubmitStatus::Accepted);
+    CHECK(StreamDrained(*stream));
+    CHECK(server.CountEvents(kPktUpdateLEDs) == 2);
+
+    /* Several at once, drained by the owner loop's Poll. */
+    stream->InjectServerBytes(JunkPackets(3));
+    CHECK(client->Poll());
+    CHECK(StreamDrained(*stream));
+    CHECK(client->State() == ConnectionState::Connected);
+
+    /* ...and by a mode command's trailing DrainPending. */
+    stream->InjectServerBytes(JunkPackets(2));
+    CHECK(client->SetCustomMode(snaps[0].key));
+    CHECK(StreamDrained(*stream));
+
+    /* The generation never moved: the original snapshot's
+       frames are still current. */
+    CHECK(client->SubmitLatest(MakeFrame(snaps[0], { 0, 0, 1 })).status ==
+          SubmitStatus::Accepted);
+    CHECK(client->State() == ConnectionState::Connected);
+}
+
+static void TestTornHeaderInDrainIsMidPacket()
+{
+    /* Half a header and silence, read by Poll's drain. */
+    {
+        FakeSdkServer server;
+        server.controllers = { WirelessGroup() };
+        FakeStream* stream = nullptr;
+        auto client = MakeClient(server, &stream);
+        CHECK(client->Connect());
+        std::vector<uint8_t> torn =
+            EncodePacket(0, kPktDeviceListUpdated, {});
+        torn.resize(8);
+        stream->InjectServerBytes(torn);
+        CHECK(!client->Poll());
+        CHECK(client->State() == ConnectionState::Reconnecting);
+        CHECK(client->LastError().find("mid-packet") != std::string::npos);
+    }
+    /* The same on the frame send path: the frame is refused. */
+    {
+        FakeSdkServer server;
+        server.controllers = { WirelessGroup() };
+        FakeStream* stream = nullptr;
+        auto client = MakeClient(server, &stream);
+        CHECK(client->Connect());
+        const std::vector<DeviceSnapshot> snaps = client->Snapshots();
+        CHECK(!snaps.empty());
+        if(snaps.empty()) return;
+        std::vector<uint8_t> torn = JunkPackets(1);
+        torn.resize(5);
+        stream->InjectServerBytes(torn);
+        server.ClearEvents();
+        CHECK(client->SubmitLatest(MakeFrame(snaps[0], { 3, 3, 3 })).status ==
+              SubmitStatus::Rejected);
+        CHECK(server.CountEvents(kPktUpdateLEDs) == 0);
+        CHECK(client->State() == ConnectionState::Reconnecting);
+        CHECK(client->LastError().find("mid-packet") != std::string::npos);
+    }
+}
+
 int main()
 {
     TestHandshakeCapsAt4();
@@ -1226,6 +1420,10 @@ int main()
     TestSubmitNeverReconnects();
     TestUnparsableControllerSkipped();
     TestDeviceListUpdatedInvalidatesTopology();
+    TestDeviceListUpdatedBeforeReply();
+    TestUnrelatedPacketFloodHitsBound();
+    TestUnsolicitedBetweenFramesIsDrained();
+    TestTornHeaderInDrainIsMidPacket();
     std::printf("sdk client: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
