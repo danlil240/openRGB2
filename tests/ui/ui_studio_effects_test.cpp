@@ -464,6 +464,24 @@ int main(int argc, char** argv)
         CHECK(rig2.ctl.flowState().value("available").toBool());
     }
 
+    std::printf("-- flowState follows the first flow layer, enabled "
+                "or not; speed is a magnitude\n");
+    {
+        /* Aurora: [0] static, [1] wave (4 stops), [2] noise. */
+        Rig rig;
+        rig.LoadDoc(CompactDoc("aurora"));
+        rig.ctl.setLayerEnabled(1, false);
+        QVariantMap f = rig.ctl.flowState();
+        CHECK(f.value("available").toBool());
+        CHECK(f.value("colors").toStringList().size() == 4);
+        rig.ctl.setLayerField(1, "speed", -0.2);
+        f = rig.ctl.flowState();
+        CHECK(std::fabs(f.value("speed").toDouble() - 0.2) < 1e-4);
+        CHECK(rig.ctl.setFlowSpeed(0.3));
+        CHECK(std::fabs(rig.Working().effect.layers[1].speed + 0.3f)
+              < 1e-4);
+    }
+
     std::printf("-- persisted input settings (draft inputs.*)\n");
     {
         Rig rig;
