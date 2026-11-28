@@ -429,6 +429,8 @@ int main(int argc, char** argv)
 
     /*---- preview cadence measured UI-side --------------------*/
     std::printf("-- preview cadence\n");
+    /* Rates recompute while the page is shown (audit U-5). */
+    diag.setActive(true);
     for(int i = 0; i < 4; ++i)
     {
         s.srv.SendMsg(MsgType::Event, 0,
@@ -448,6 +450,7 @@ int main(int argc, char** argv)
         return diag.rates()
             .value(QStringLiteral("preview_measured")).toBool();
     }));
+    diag.setActive(false);
 
     /*---- ownership: the engine's report verbatim -------------*/
     std::printf("-- ownership\n");
@@ -605,6 +608,113 @@ int main(int argc, char** argv)
         }
         CHECK(fs_rows == 0);
         CHECK(error_still);
+    }
+
+    /*---- journal: draft-preview frames are not journaled (U-5) --*/
+    std::printf("-- event log: preview frames never flood\n");
+    {
+        diag.clearEventLog();
+        s.srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "scene" }, { "data", SceneBody() } }));
+        int previews = 0;
+        QObject::connect(&bridge, &ui::EngineBridge::eventReceived,
+                         [&](const QString& k, const QVariantMap&) {
+                             if(k == QStringLiteral("preview"))
+                             {
+                                 ++previews;
+                             }
+                         });
+        /* The Studio viewport's chunked draft frames arrive at
+           frame rate x chunk count while Lighting/Layout is
+           open — journaled, they evicted every real entry. */
+        const int flood =
+            2 * ui::DiagnosticsController::kEventLogBound;
+        for(int i = 0; i < flood; ++i)
+        {
+            s.srv.SendMsg(MsgType::Event, 0,
+                nlohmann::json::object({
+                    { "kind", "preview" },
+                    { "data", nlohmann::json::object({
+                        { "type", "frame" }, { "sequence", i + 1 },
+                        { "chunk", 0 }, { "chunks", 1 },
+                        { "objects", nlohmann::json::array() } }) },
+                }));
+        }
+        /* A preview STATUS change is a real state transition —
+           still journaled. */
+        s.srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "preview" },
+                { "data", nlohmann::json::object({
+                    { "type", "status" }, { "active", false },
+                    { "paused", false } }) },
+            }));
+        CHECK(PumpBoth(s, [&] { return previews >= flood + 1; }));
+        PumpBoth(s, [&] { return false; }, 100);
+        int frame_rows = 0, status_rows = 0;
+        bool scene_still = false;
+        for(const QVariant& e : diag.eventLog())
+        {
+            const QVariantMap ev = e.toMap();
+            const QString k =
+                ev.value(QStringLiteral("kind")).toString();
+            if(k == QStringLiteral("preview"))
+            {
+                if(ev.value(QStringLiteral("detail")).toString()
+                       .contains(QStringLiteral("status")))
+                {
+                    ++status_rows;
+                }
+                else
+                {
+                    ++frame_rows;
+                }
+            }
+            if(k == QStringLiteral("scene"))
+            {
+                scene_still = true;
+            }
+        }
+        CHECK(frame_rows == 0);
+        CHECK(status_rows == 1);
+        CHECK(scene_still);
+    }
+
+    /*---- rates recompute only while the page is shown (U-5) ----*/
+    std::printf("-- rates idle while the page is hidden\n");
+    {
+        CHECK(!diag.active());
+        int rate_signals = 0;
+        auto conn = QObject::connect(&diag,
+            &ui::DiagnosticsController::ratesChanged,
+            [&] { ++rate_signals; });
+        int frames = 0;
+        auto conn2 = QObject::connect(&bridge,
+            &ui::EngineBridge::frameStatusChanged,
+            [&] { ++frames; });
+        for(int i = 0; i < 6; ++i)
+        {
+            s.srv.SendMsg(MsgType::Event, 0,
+                nlohmann::json::object({
+                    { "kind", "frame_status" },
+                    { "data", nlohmann::json::object({
+                        { "aggregate", StatsJson(10 + i, 0.033, 4) },
+                        { "controllers", nlohmann::json::array() }})},
+                }));
+            PumpBoth(s, [&] { return frames > i; }, 2000);
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(15));
+        }
+        CHECK(frames >= 6);
+        CHECK(rate_signals == 0);
+        QObject::disconnect(conn);
+        QObject::disconnect(conn2);
+        /* Shown again: the rates catch up at once. */
+        diag.setActive(true);
+        CHECK(diag.rates().value(QStringLiteral("preview_measured"))
+                  .toBool());
+        diag.setActive(false);
     }
 
     /*---- journal: pushed events carry detail (BUG-6) -----------*/

@@ -350,6 +350,8 @@ void DiagnosticsController::setActive(bool a)
     active_ = a;
     if(a)
     {
+        RecomputeRates();     /* frame stamps kept counting while
+                                 hidden — catch the rates up */
         refresh();            /* paint immediately on show */
         refresh_timer_.start();
     }
@@ -718,7 +720,14 @@ void DiagnosticsController::OnFrameStatus()
     {
         preview_stamps_.pop_front();
     }
-    RecomputeRates();
+    /* The stamp is the cheap part; rebuilding the rates map and
+       repainting its bindings per frame (~30 Hz) is wasted while
+       the Devices page is hidden. setActive(true) catches up
+       (audit U-5). */
+    if(active_)
+    {
+        RecomputeRates();
+    }
 }
 
 void DiagnosticsController::OnEventReceived(const QString& kind,
@@ -732,6 +741,17 @@ void DiagnosticsController::OnEventReceived(const QString& kind,
        rates evicted real error events before they could be
        read (BUG-3). */
     if(kind == QLatin1String(ipc::event_kind::kFrameStatus))
+    {
+        return;
+    }
+    /* The Studio draft preview streams chunked `frame` events at
+       its own frame rate (x chunk count) whenever Lighting or
+       Layout shows the viewport — the same flood (audit U-5).
+       Its `status` events (begin/end/pause) are real state
+       transitions and stay journaled. */
+    if(kind == QLatin1String(ipc::event_kind::kPreview) &&
+       data.value(QStringLiteral("type")).toString() ==
+           QLatin1String("frame"))
     {
         return;
     }
