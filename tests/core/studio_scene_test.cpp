@@ -24,11 +24,33 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <new>
 #include <vector>
 #include <string>
 
 static int failures = 0;
 static int checks   = 0;
+
+/* Heap-allocation counter for the steady-state Evaluate test
+   (audit C-10): this executable replaces global operator new and
+   counts only while g_count_allocs is set. */
+static bool g_count_allocs = false;
+static long g_allocs       = 0;
+
+void* operator new(std::size_t n)
+{
+    if(g_count_allocs)
+    {
+        ++g_allocs;
+    }
+    if(void* p = std::malloc(n ? n : 1))
+    {
+        return p;
+    }
+    throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept              { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 
 #define CHECK(cond, name)                                              \
     do {                                                               \
@@ -658,6 +680,417 @@ static void TestLongUptimePhase()
                       L.primitive.c_str(), worst);
         CHECK(worst <= 1, msg);
     }
+}
+
+/* Audit C-2: the time-driven term is t*speed (/scale) with t =
+   seconds since the worker started, so replacing a layer with a
+   new speed or wavelength jumped its pattern by an amount that
+   grows with uptime (at t = 600 s one 0.01 step of the Wave speed
+   slider moved the bands 4.8 cycles). ReplaceLayers(layers, t)
+   keeps each layer's motion continuous at t: the frame right
+   after the edit matches the frame right before it, and the
+   pattern then moves at the new rate. SetLayers stays a fresh
+   start (absolute-time phase; the golden fixtures rely on it). */
+static int MaxDelta(const studio::FrameColors& a,
+                    const studio::FrameColors& b)
+{
+    int worst = 0;
+    for(const auto& kv : a)
+    {
+        const auto it = b.find(kv.first);
+        if(it == b.end() || it->second.size() != kv.second.size())
+        {
+            return 999;
+        }
+        for(size_t i = 0; i < kv.second.size(); i++)
+        {
+            const studio::SceneColor x = kv.second[i], y = it->second[i];
+            for(int sh = 0; sh <= 16; sh += 8)
+            {
+                const int d = std::abs((int)((x >> sh) & 0xFF)
+                                       - (int)((y >> sh) & 0xFF));
+                worst = d > worst ? d : worst;
+            }
+        }
+    }
+    return a.size() == b.size() ? worst : 999;
+}
+
+static void TestPhaseContinuity()
+{
+    using namespace studio;
+
+    const Palette rgb = MakePalette({ MakeSceneColor(255, 0, 0),
+                                      MakeSceneColor(0, 255, 0),
+                                      MakeSceneColor(0, 0, 255) });
+    std::vector<EffectLayer> base;
+    {
+        EffectLayer L; L.primitive = "wave";
+        L.direction = { 1, 0, 0 }; L.scale = 1.25f; L.speed = 0.12f;
+        L.density = 0.0f; L.palette = rgb; base.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "pulse";
+        L.origin = { 0, 0, 0 }; L.scale = 0.5f; L.speed = 0.25f;
+        L.density = 0.0f; L.palette = rgb; base.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "gradient";
+        L.direction = { 1, 0, 0 }; L.scale = 1.0f; L.speed = 0.3f;
+        L.palette = rgb; base.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "spin";
+        L.scale = 1.0f; L.speed = 0.3f; L.palette = rgb;
+        base.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "comet";
+        L.path = { { 0, 0, 0 }, { 1.0f, 0, 0 } };   /* 2 m loop */
+        L.speed = 0.5f; L.scale = 0.6f; L.palette = rgb;
+        base.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "noise";
+        L.direction = { 1, 0, 0.5f }; L.scale = 3.0f; L.speed = 0.4f;
+        L.density = 0.5f; L.palette = rgb; base.push_back(L);
+    }
+
+    SceneDocument doc;
+    for(int k = 0; k < 9; k++)
+    {
+        doc.objects.push_back(OneLedDevice("d" + std::to_string(k),
+                                           0.05f + 0.11f * (float)k));
+    }
+
+    const double t0 = 600.0;
+    const double dt = 1.0 / 60.0;
+    for(const EffectLayer& L0 : base)
+    {
+        EffectLayer L1 = L0;
+        L1.speed = L0.speed * 1.043f;           /* one slider step */
+
+        EffectEngine engine;
+        engine.SetLayers({ L0 });
+        FrameColors before, after, next, jumped;
+        engine.Evaluate(doc, t0, before);
+
+        engine.ReplaceLayers({ L1 }, t0);
+        engine.Evaluate(doc, t0, after);
+        engine.Evaluate(doc, t0 + dt, next);
+
+        /* The old behaviour for contrast: a fresh start jumps. */
+        EffectEngine fresh;
+        fresh.SetLayers({ L1 });
+        fresh.Evaluate(doc, t0, jumped);
+
+        char msg[128];
+        std::snprintf(msg, sizeof(msg),
+                      "%s: no jump on a speed edit at t=600 (delta %d)",
+                      L0.primitive.c_str(), MaxDelta(before, after));
+        CHECK(MaxDelta(before, after) <= 1, msg);
+        std::snprintf(msg, sizeof(msg),
+                      "%s: keeps moving smoothly after the edit (delta %d)",
+                      L0.primitive.c_str(), MaxDelta(after, next));
+        CHECK(MaxDelta(after, next) <= 40, msg);
+        std::snprintf(msg, sizeof(msg),
+                      "%s: the test edit is big enough to jump (delta %d)",
+                      L0.primitive.c_str(), MaxDelta(before, jumped));
+        CHECK(MaxDelta(before, jumped) > 40, msg);
+
+        /* Re-applying an UNCHANGED stack (every scene submit does)
+           is bit-exact, not just close. */
+        FrameColors same_a, same_b;
+        engine.Evaluate(doc, t0 + 5.0, same_a);
+        engine.ReplaceLayers({ L1 }, t0 + 5.0);
+        engine.Evaluate(doc, t0 + 5.0, same_b);
+        CHECK(same_a == same_b,
+              (L0.primitive + ": unchanged re-apply is exact").c_str());
+
+        /* SetLayers is still a fresh start. */
+        FrameColors reset;
+        engine.SetLayers({ L1 });
+        engine.Evaluate(doc, t0, reset);
+        CHECK(reset == jumped,
+              (L0.primitive + ": SetLayers resets to absolute time").c_str());
+    }
+
+    /* A different primitive at the same index starts fresh. */
+    EffectEngine engine;
+    engine.SetLayers({ base[0] });
+    FrameColors a, b, want;
+    engine.Evaluate(doc, t0, a);
+    engine.ReplaceLayers({ base[2] }, t0);
+    engine.Evaluate(doc, t0, b);
+    EffectEngine fresh;
+    fresh.SetLayers({ base[2] });
+    fresh.Evaluate(doc, t0, want);
+    CHECK(b == want, "continuity: primitive change starts fresh");
+
+    /* A wavelength edit rescales the spatial term too, which by
+       design stretches the bands about the world origin (an
+       intended look change, independent of uptime). The TIME
+       term must still be continuous: at the origin the spatial
+       term is 0 for any scale, so that LED must not jump. */
+    SceneDocument odoc;
+    odoc.objects.push_back(OneLedDevice("o", 0.0f));
+    for(int k = 0; k < 2; k++)
+    {
+        EffectLayer L0 = base[k];               /* wave, pulse */
+        EffectLayer L1 = L0;
+        L1.scale = L0.scale * 1.1f;
+        EffectEngine e2;
+        e2.SetLayers({ L0 });
+        FrameColors pre, post, jump;
+        e2.Evaluate(odoc, t0, pre);
+        e2.ReplaceLayers({ L1 }, t0);
+        e2.Evaluate(odoc, t0, post);
+        EffectEngine f2;
+        f2.SetLayers({ L1 });
+        f2.Evaluate(odoc, t0, jump);
+        CHECK(MaxDelta(pre, post) <= 1,
+              (L0.primitive + ": wavelength edit keeps the time term").c_str());
+        CHECK(MaxDelta(pre, jump) > 40,
+              (L0.primitive + ": the wavelength edit is big enough").c_str());
+    }
+}
+
+/* Audit C-9: the engine evaluates through per-layer prepared
+   invariants and per-frame terms. Its frames must equal, bit for
+   bit, a per-sample EvalPrimitive composite of the same stack and
+   drives — across every primitive, local/world space, targets,
+   disabled layers, blends, comet paths of 0..4 points, large t,
+   and a ReplaceLayers to a stack of a different size. */
+static void TestPreparedMatchesPerSample()
+{
+    using namespace studio;
+    RemixRng rng(9001u);
+    const char* prims[] = { "wave", "pulse", "gradient", "spin", "comet",
+                            "noise", "ripple", "screenfield", "level",
+                            "static" };
+    SceneDocument doc;
+    for(int k = 0; k < 4; k++)
+    {
+        SceneObject o;
+        o.id       = "o" + std::to_string(k);
+        o.kind     = ObjectKind::Device;
+        o.geometry = (k % 2) ? "fan_body" : "strip_body";
+        o.verified = true;
+        o.transform.position = { rng.Range(-0.5f, 0.5f), 0.0f,
+                                 rng.Range(-0.5f, 0.5f) };
+        o.emitters = (k % 2) ? layout::Ring(8, 0.06f, 30.0f, k == 3, o.id)
+                             : layout::Strip(6, 0.04f, { 0, 0, 0 }, o.id);
+        doc.objects.push_back(o);
+    }
+    InputState in;
+    in.audio_level = 0.5f;
+    InputEvent ev; ev.t = 99.5; ev.source = "key"; ev.has_pos = true;
+    ev.pos = { 0.1f, 0.0f, 0.1f };
+    in.events.push_back(ev);
+    in.screen_cols = 2; in.screen_rows = 2;
+    in.screen_cells = { ColorF{ 1, 0, 0, 1 }, ColorF{ 0, 1, 0, 1 },
+                        ColorF{ 0, 0, 1, 1 }, ColorF{ 1, 1, 0, 1 } };
+    const std::map<std::string, Mat4> world = ResolveWorldMatrices(doc);
+
+    auto random_stack = [&](int n)
+    {
+        std::vector<EffectLayer> out;
+        for(int i = 0; i < n; i++)
+        {
+            EffectLayer L;
+            L.primitive = prims[rng.Next() % 10];
+            L.space   = (rng.Next() % 2) ? CoordSpace::Local : CoordSpace::World;
+            L.blend   = (BlendMode)(rng.Next() % 3);
+            L.opacity = rng.Range(0.2f, 1.0f);
+            L.speed   = rng.Range(-0.8f, 0.8f);
+            L.scale   = rng.Range(0.05f, 2.0f);
+            L.phase   = rng.Range(-1.0f, 1.0f);
+            L.density = rng.Range(0.0f, 2.0f);
+            L.origin  = { rng.Range(-0.3f, 0.3f), 0.0f, rng.Range(-0.3f, 0.3f) };
+            L.direction = { rng.Range(-1, 1), rng.Range(-1, 1), rng.Range(-1, 1) };
+            const int np = (int)(rng.Next() % 5);
+            for(int q = 0; q < np; q++)
+            {
+                L.path.push_back({ rng.Range(-0.6f, 0.6f), 0.0f,
+                                   rng.Range(-0.6f, 0.6f) });
+            }
+            L.palette = MakePalette({ MakeSceneColor(rng.Next() & 255, 40, 200),
+                                      MakeSceneColor(10, rng.Next() & 255, 90) });
+            if(rng.Next() % 5 == 0) L.targets = { "o1", "strip_body" };
+            if(rng.Next() % 7 == 0) L.enabled = false;
+            L.seed = rng.Next();
+            out.push_back(L);
+        }
+        return out;
+    };
+    /* Reference: per-sample EvalPrimitive with the drives the engine
+       would hold, composited exactly like Evaluate (no painted
+       colors in this document, so the base is black). */
+    auto reference = [&](const std::vector<EffectLayer>& layers,
+                         const std::vector<LayerDrive>& drives, double t)
+    {
+        FrameColors f;
+        for(const SceneObject& o : doc.objects)
+        {
+            std::vector<SceneColor> colors(o.emitters.size());
+            bool touched = false;
+            for(size_t i = 0; i < o.emitters.size(); i++)
+            {
+                EvalInput ei;
+                ei.local   = o.emitters[i].local_pos;
+                ei.world   = TransformPoint(world.at(o.id), ei.local);
+                ei.object  = &o;
+                ei.emitter = &o.emitters[i];
+                ei.t       = t;
+                ei.input   = &in;
+                ColorF acc = ToColorF(0);
+                for(size_t k = 0; k < layers.size(); k++)
+                {
+                    if(!layers[k].enabled
+                       || !LayerMatches(layers[k], o, o.emitters[i]))
+                    {
+                        continue;
+                    }
+                    touched = true;
+                    acc = BlendOver(acc, EvalPrimitive(layers[k], ei, drives[k]),
+                                    layers[k].blend);
+                }
+                colors[i] = ToSceneColor(acc);
+            }
+            if(touched)
+            {
+                f[o.id] = colors;
+            }
+        }
+        return f;
+    };
+
+    int mismatches = 0;
+    for(int trial = 0; trial < 60; trial++)
+    {
+        const std::vector<EffectLayer> a = random_stack(1 + (int)(rng.Next() % 4));
+        std::vector<EffectLayer> b = random_stack(1 + (int)(rng.Next() % 4));
+        for(size_t k = 0; k < a.size() && k < b.size(); k++)
+        {
+            b[k].primitive = a[k].primitive;   /* drives carry over */
+        }
+        const double t0 = (trial % 3 == 0) ? 864000.25 : 100.0 + trial;
+        EffectEngine engine;
+        engine.SetLayers(a);
+        FrameColors got;
+        engine.Evaluate(doc, world, t0, got, &in);
+        if(got != reference(a, std::vector<LayerDrive>(a.size()), t0))
+        {
+            ++mismatches;
+        }
+        engine.ReplaceLayers(b, t0 + 0.5);
+        std::vector<LayerDrive> d(b.size());
+        for(size_t k = 0; k < a.size() && k < b.size(); k++)
+        {
+            d[k] = ContinueDrive(a[k], LayerDrive{}, b[k], t0 + 0.5);
+        }
+        engine.Evaluate(doc, world, t0 + 0.75, got, &in);
+        if(got != reference(b, d, t0 + 0.75))
+        {
+            ++mismatches;
+        }
+    }
+    CHECK(mismatches == 0, "prepared engine path == per-sample EvalPrimitive");
+}
+
+/* Audit C-10: Evaluate cleared the frame map and rebuilt every
+   entry (a map node + a color vector per object) each tick, and
+   looked each object's output owner up with a linear scan of the
+   document (always the object itself for a Device). A steady-state
+   Evaluate into the previous tick's frame now reuses its entries
+   and allocates nothing, while still matching a fresh evaluation
+   and dropping entries for objects that stop being touched. */
+static void TestEvaluateReusesFrame()
+{
+    using namespace studio;
+    SceneDocument doc;
+    for(int k = 0; k < 6; k++)
+    {
+        SceneObject o;
+        o.id       = "o" + std::to_string(k);
+        o.kind     = ObjectKind::Device;
+        o.geometry = (k % 2) ? "fan_body" : "strip_body";
+        o.verified = true;
+        o.transform.position = { 0.15f * (float)k, 0.0f, 0.05f * (float)k };
+        o.emitters = (k % 2) ? layout::Ring(8, 0.06f, 0.0f, false, o.id)
+                             : layout::Strip(6, 0.04f, { 0, 0, 0 }, o.id);
+        doc.objects.push_back(o);
+    }
+    doc.object_colors["o1"]       = MakeSceneColor(10, 20, 30);
+    doc.emitter_colors["o2"][3]   = MakeSceneColor(200, 100, 50);
+
+    const Palette pal = MakePalette({ MakeSceneColor(255, 0, 0),
+                                      MakeSceneColor(0, 0, 255) });
+    std::vector<EffectLayer> layers;
+    {
+        EffectLayer L; L.primitive = "wave"; L.scale = 0.7f; L.speed = 0.2f;
+        L.density = 1.0f; L.palette = pal; L.opacity = 0.8f;
+        layers.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "comet"; L.speed = 0.4f; L.scale = 0.3f;
+        L.path = { { 0, 0, 0 }, { 0.8f, 0, 0 }, { 0.8f, 0, 0.3f } };
+        L.palette = pal; L.blend = BlendMode::Add; layers.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "noise"; L.scale = 2.0f; L.speed = 0.3f;
+        L.density = 0.4f; L.palette = pal; L.blend = BlendMode::Screen;
+        layers.push_back(L);
+    }
+    {
+        EffectLayer L; L.primitive = "gradient"; L.targets = { "o1" };
+        L.palette = pal; L.opacity = 0.5f; layers.push_back(L);
+    }
+
+    EffectEngine engine;
+    engine.SetLayers(layers);
+    const std::map<std::string, Mat4> world = ResolveWorldMatrices(doc);
+    FrameColors frame;
+    engine.Evaluate(doc, world, 1.0, frame);    /* entries created */
+    engine.Evaluate(doc, world, 1.1, frame);    /* warm            */
+
+    g_allocs       = 0;
+    g_count_allocs = true;
+    engine.Evaluate(doc, world, 1.2, frame);
+    g_count_allocs = false;
+    char msg[96];
+    std::snprintf(msg, sizeof(msg),
+                  "steady-state Evaluate allocates nothing (%ld)", g_allocs);
+    CHECK(g_allocs == 0, msg);
+
+    FrameColors fresh;
+    engine.Evaluate(doc, world, 1.2, fresh);
+    CHECK(frame == fresh && frame.size() == 6,
+          "reused frame equals a fresh evaluation");
+
+    /* Only o1 touched now: every other entry must go. */
+    EffectLayer only = layers[3];
+    engine.SetLayers({ only });
+    engine.Evaluate(doc, world, 1.3, frame);
+    CHECK(frame.size() == 1 && frame.count("o1") == 1,
+          "entries of untouched objects are dropped");
+
+    /* An object that leaves the document, and one that becomes a
+       Linked copy, lose their entries; a grown object resizes. */
+    engine.SetLayers(layers);
+    engine.Evaluate(doc, world, 1.4, frame);
+    SceneDocument doc2 = doc;
+    doc2.objects.erase(doc2.objects.begin() + 4);            /* o4 gone   */
+    doc2.objects[0].kind      = ObjectKind::Linked;          /* o0 linked */
+    doc2.objects[0].mirror_of = "o2";
+    doc2.objects[1].emitters  = layout::Ring(12, 0.06f, 0.0f, false, "o1");
+    const std::map<std::string, Mat4> world2 = ResolveWorldMatrices(doc2);
+    engine.Evaluate(doc2, world2, 1.5, frame);
+    FrameColors fresh2;
+    engine.Evaluate(doc2, world2, 1.5, fresh2);
+    CHECK(frame == fresh2 && frame.count("o4") == 0
+          && frame.count("o0") == 0 && frame["o1"].size() == 12,
+          "document changes sweep and resize reused entries");
 }
 
 /* Expanded-scene brightness follows the compact 0..1 contract. */
@@ -1818,6 +2251,9 @@ int main()
     TestLayerOpacityLinear();
     TestCometReverse();
     TestLongUptimePhase();
+    TestPhaseContinuity();
+    TestPreparedMatchesPerSample();
+    TestEvaluateReusesFrame();
     TestSceneBrightnessRange();
     TestNoiseAndMasks();
     TestEngineMirrorAndJson();

@@ -258,6 +258,95 @@ static void TestWorldCachePerScene()
     }
 }
 
+/* Audit C-2: a live speed edit (a new scene submission whose wave
+   layer differs only in speed) must not jump the pattern by an
+   amount that grows with uptime. Ten minutes in, the edited frame
+   at the same instant matches the frame before the edit, and the
+   pattern moves on at the new rate. */
+static void TestSpeedEditContinuity()
+{
+    SceneWorker worker;
+    std::vector<EvaluatedFrame> frames;
+    worker.SetFrameCallback([&frames](const EvaluatedFrame& f)
+    {
+        frames.push_back(f);
+    });
+    const TimePoint epoch = Clock::now();
+    worker.SetEpoch(epoch);
+
+    auto doc = WaveDoc();
+    const auto at = [&epoch](int ms)
+    {
+        return epoch + std::chrono::milliseconds(ms);
+    };
+    worker.SubmitScene(doc, WaveLayers(), 1);
+    CHECK(worker.Step(at(600000)));
+
+    std::vector<studio::EffectLayer> faster = WaveLayers();
+    faster[0].speed *= 1.043f;   /* 0.58 cycles off at t = 600 s */
+    worker.SubmitScene(doc, faster, 2);
+    CHECK(worker.Step(at(600000)));
+    CHECK(worker.Step(at(600016)));
+
+    CHECK(frames.size() == 3);
+    if(frames.size() == 3)
+    {
+        const auto red = [](const EvaluatedFrame& f)
+        {
+            return (int)(f.colors.at("mid")[0] & 0xFF);
+        };
+        CHECK(std::abs(red(frames[1]) - red(frames[0])) <= 1);
+        CHECK(std::abs(red(frames[2]) - red(frames[1])) <= 3);
+        /* ...where a fresh start at t = 600 s would have jumped. */
+        const int fresh =
+            (int)(Reference(*doc, faster, 600.0).at("mid")[0] & 0xFF);
+        CHECK(std::abs(fresh - red(frames[0])) > 40);
+    }
+}
+
+/* Audit C-10: the worker hands each tick's frame buffers back to
+   Evaluate. Every tick must still equal a fresh evaluation, and
+   an object that stops being touched (or leaves the document)
+   must not keep a stale entry from the reused buffers. */
+static void TestFrameBufferReuse()
+{
+    SceneWorker worker;
+    std::vector<EvaluatedFrame> frames;
+    worker.SetFrameCallback([&frames](const EvaluatedFrame& f)
+    {
+        frames.push_back(f);
+    });
+    const TimePoint epoch = Clock::now();
+    worker.SetEpoch(epoch);
+
+    auto two = std::make_shared<studio::SceneDocument>();
+    two->objects.push_back(OneLedDevice("a", 0.1f));
+    two->objects.push_back(OneLedDevice("b", 0.6f));
+    std::vector<studio::EffectLayer> only_a = WaveLayers();
+    only_a[0].targets = { "a" };
+
+    worker.SubmitScene(two, WaveLayers(), 1);
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(100)));
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(116)));
+    worker.SubmitScene(two, only_a, 2);
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(132)));
+    auto one = std::make_shared<studio::SceneDocument>();
+    one->objects.push_back(OneLedDevice("b", 0.6f));
+    worker.SubmitScene(one, WaveLayers(), 3);
+    CHECK(worker.Step(epoch + std::chrono::milliseconds(148)));
+
+    CHECK(frames.size() == 4);
+    if(frames.size() == 4)
+    {
+        CHECK(frames[0].colors == Reference(*two, WaveLayers(), 0.100));
+        CHECK(frames[1].colors == Reference(*two, WaveLayers(), 0.116));
+        CHECK(frames[2].colors == Reference(*two, only_a, 0.132)
+              && frames[2].colors.count("b") == 0);
+        CHECK(frames[3].colors == Reference(*one, WaveLayers(), 0.148)
+              && frames[3].colors.count("a") == 0);
+    }
+}
+
 static void TestNoScene()
 {
     SceneWorker worker;
@@ -512,6 +601,8 @@ int main()
     TestNoScene();
     TestOutputGate();
     TestWorldCachePerScene();
+    TestSpeedEditContinuity();
+    TestFrameBufferReuse();
     TestInputSlot();
     TestReentrantInputProvider();
     TestStepFaultIsContained();

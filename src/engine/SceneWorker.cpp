@@ -170,7 +170,12 @@ bool SceneWorker::Step(TimePoint now)
             active_scene_      = std::move(pending_scene_);
             pending_scene_     = SceneState{};
             has_pending_scene_ = false;
-            engine_.SetLayers(active_scene_.scene.layers);
+            /* Audit C-2: replace at this tick's scene time so a
+               layer whose speed/wavelength changed keeps its
+               pattern where it is (t below is the same value). */
+            engine_.ReplaceLayers(
+                active_scene_.scene.layers,
+                std::chrono::duration<double>(now - epoch_).count());
             world_dirty_ = true;
         }
         if(has_pending_input_)
@@ -249,6 +254,10 @@ bool SceneWorker::Step(TimePoint now)
                     *active_scene_.scene.doc);
                 world_dirty_  = false;
             }
+            /* Audit C-10: evaluate into last tick's buffers. The
+               callback only reads the frame (synchronously), so
+               the colors come back to the scratch afterwards. */
+            frame.colors.swap(frame_scratch_);
             engine_.Evaluate(*active_scene_.scene.doc, active_world_,
                              frame.scene_time_s,
                              frame.colors, input);
@@ -256,6 +265,10 @@ bool SceneWorker::Step(TimePoint now)
         if(cb)
         {
             cb(frame);
+        }
+        if(evaluate)
+        {
+            frame_scratch_.swap(frame.colors);
         }
     }
     catch(const std::exception& e)

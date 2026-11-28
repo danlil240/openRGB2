@@ -224,6 +224,11 @@ private:
        shared), not every 60 Hz tick. Worker-thread state. */
     std::map<std::string, studio::Mat4> active_world_;
     bool                                world_dirty_ = true;
+    /* The previous tick's frame colors, handed back to Evaluate so
+       it reuses their map nodes and vectors (audit C-10): swapped
+       into the frame for evaluation + callback, then swapped back.
+       Worker-thread state. */
+    studio::FrameColors                 frame_scratch_;
     FrameCallback         callback_;
     IdleFrameHook         idle_frame_hook_;
     InputProvider         input_provider_;
