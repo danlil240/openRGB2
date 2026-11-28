@@ -48,14 +48,32 @@ void OutputControl::SetChanged(ChangedFn fn)
     changed_ = std::move(fn);
 }
 
-OutputState OutputControl::CommitLocked()
+OutputState OutputControl::SnapshotLocked() const
 {
     OutputState s;
-    s.master       = master_;
-    s.blackout     = blackout_;
-    s.hold         = hold_;
-    s.contributors = contributors_;
-    s.effective    = Arbitrate(master_, blackout_, contributors_);
+    s.master   = master_;
+    s.blackout = blackout_;
+    s.hold     = hold_;
+    for(const auto& kv : contributors_)
+    {
+        const auto r = ramps_.find(kv.first);
+        if(r == ramps_.end())
+        {
+            s.contributors[kv.first] = kv.second;
+        }
+        else if(!r->second.release)
+        {
+            s.contributors[kv.first] = r->second.to;
+        }
+    }
+    s.ramping   = !ramps_.empty();
+    s.effective = Arbitrate(master_, blackout_, contributors_);
+    return s;
+}
+
+OutputState OutputControl::CommitLocked()
+{
+    const OutputState s = SnapshotLocked();
     effective_.store(s.effective);
     return s;
 }
@@ -137,11 +155,13 @@ bool OutputControl::SetContributor(const std::string& name, float scale)
         std::lock_guard<std::mutex> lock(mutex_);
         const float v  = Clamp01(scale);
         const auto  it = contributors_.find(name);
-        if(it != contributors_.end() && it->second == v)
+        if(it != contributors_.end() && it->second == v &&
+           ramps_.count(name) == 0)
         {
             return false;
         }
         contributors_[name] = v;
+        ramps_.erase(name);
         s = CommitLocked();
     }
     Notify(s);
@@ -157,10 +177,154 @@ bool OutputControl::ClearContributor(const std::string& name)
         {
             return false;
         }
+        ramps_.erase(name);
         s = CommitLocked();
     }
     Notify(s);
     return true;
+}
+
+bool OutputControl::SetContributorTarget(const std::string& name,
+                                         float scale, TimePoint now,
+                                         std::chrono::milliseconds down,
+                                         std::chrono::milliseconds up)
+{
+    if(name.empty() || !std::isfinite(scale))
+    {
+        return false;
+    }
+    OutputState s;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const float v  = Clamp01(scale);
+        const auto  cit = contributors_.find(name);
+        const float cur = cit != contributors_.end() ? cit->second
+                                                     : 1.0f;
+        const auto  rit = ramps_.find(name);
+        if(rit != ramps_.end())
+        {
+            if(!rit->second.release && rit->second.to == v)
+            {
+                return false;          /* already heading there */
+            }
+        }
+        else if(cit != contributors_.end() && cur == v)
+        {
+            return false;
+        }
+        const std::chrono::milliseconds dur = v < cur ? down : up;
+        if(dur.count() <= 0 || v == cur)
+        {
+            contributors_[name] = v;
+            ramps_.erase(name);
+        }
+        else
+        {
+            contributors_[name] = cur;
+            ramps_[name] = Ramp{ cur, v, now, dur, false };
+        }
+        s = CommitLocked();
+    }
+    Notify(s);
+    return true;
+}
+
+bool OutputControl::ReleaseContributor(const std::string& name,
+                                       TimePoint now,
+                                       std::chrono::milliseconds up)
+{
+    OutputState s;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto cit = contributors_.find(name);
+        if(cit == contributors_.end())
+        {
+            return false;
+        }
+        const auto rit = ramps_.find(name);
+        if(rit != ramps_.end() && rit->second.release)
+        {
+            return false;              /* already releasing */
+        }
+        const float cur = cit->second;
+        if(up.count() <= 0 || cur >= 1.0f)
+        {
+            contributors_.erase(cit);
+            ramps_.erase(name);
+        }
+        else
+        {
+            ramps_[name] = Ramp{ cur, 1.0f, now, up, true };
+        }
+        s = CommitLocked();
+    }
+    Notify(s);
+    return true;
+}
+
+bool OutputControl::Tick(TimePoint now)
+{
+    OutputState s;
+    bool completed = false;
+    bool moved     = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(ramps_.empty())
+        {
+            return false;
+        }
+        const float before = effective_.load();
+        for(auto it = ramps_.begin(); it != ramps_.end();)
+        {
+            const Ramp& r = it->second;
+            double frac = 1.0;
+            if(r.dur.count() > 0)
+            {
+                frac = std::chrono::duration<double>(now - r.start)
+                           .count() /
+                       std::chrono::duration<double>(r.dur).count();
+            }
+            frac = frac < 0.0 ? 0.0 : (frac > 1.0 ? 1.0 : frac);
+            const float v = float(r.from + (r.to - r.from) * frac);
+            if(frac >= 1.0)
+            {
+                if(r.release)
+                {
+                    contributors_.erase(it->first);
+                }
+                else
+                {
+                    contributors_[it->first] = r.to;
+                }
+                it = ramps_.erase(it);
+                completed = true;
+            }
+            else
+            {
+                contributors_[it->first] = v;
+                ++it;
+            }
+        }
+        s = CommitLocked();
+        moved = s.effective != before;
+    }
+    if(completed)
+    {
+        Notify(s);
+    }
+    return moved;
+}
+
+bool OutputControl::AnyContributorOff(const OutputState& s)
+{
+    for(const auto& kv : s.contributors)
+    {
+        if(kv.second <= 0.0f)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 void OutputControl::Restore(const PersistedOutput& p)
@@ -184,13 +348,7 @@ void OutputControl::Restore(const PersistedOutput& p)
 OutputState OutputControl::State() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    OutputState s;
-    s.master       = master_;
-    s.blackout     = blackout_;
-    s.hold         = hold_;
-    s.contributors = contributors_;
-    s.effective    = Arbitrate(master_, blackout_, contributors_);
-    return s;
+    return SnapshotLocked();
 }
 
 PersistedOutput OutputControl::Persisted() const

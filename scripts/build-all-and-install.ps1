@@ -16,7 +16,11 @@
          never touched.
       2. Builds the pinned vendored backend via
          vendor\OpenRGB\scripts\build-windows.bat 6.8.3 2022 64
-         (qmake + jom, incremental; -SkipBackend to skip).
+         (qmake + jom, incremental; -SkipBackend to skip) and stamps
+         it with a hash of its sources (packaging\windows\
+         backend-stamp.ps1). Step 3 refuses a backend whose stamp
+         does not match, so -SkipBackend after a vendor change fails
+         with "backend is stale" instead of deploying the old one.
       3. Runs packaging\windows\build-and-deploy.ps1 WITHOUT
          -InstallDir: CMake build of engine + UI + tools ->
          stage-release.ps1 (windeployqt + manifest).
@@ -108,6 +112,9 @@ $RelatedNames = @("openrgb2-ui","openrgb2-engine","openrgb2-ctl",
 
 function Info([string]$msg) { Write-Host "  $msg" }
 function Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
+
+# Write-BackendStamp (audit P-7): the stamp build-and-deploy.ps1 checks.
+. (Join-Path $PkgDir "backend-stamp.ps1")
 
 # The lifecycle scripts end in `exit <code>` -- invoke each in a
 # powershell -File subprocess so that exit lands in $LASTEXITCODE
@@ -301,6 +308,11 @@ function Invoke-Main {
                 throw "backend build recipe failed (exit $LASTEXITCODE)"
             }
         } finally { Pop-Location }
+        # Stamp the fresh build with its source hash: build-and-deploy.ps1
+        # (step 3) refuses a backend whose stamp does not match.
+        if(Test-Path $backendExe) {
+            Write-BackendStamp $RepoRoot (Split-Path -Parent $backendExe)
+        }
     }
     if(-not (Test-Path $backendExe)) {
         throw "pinned backend missing: $backendExe (re-run without -SkipBackend)"

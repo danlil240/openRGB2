@@ -73,6 +73,8 @@ enable_testing()
 # engine, ui, backend. Targets are added as their milestones land.
 # Shared Qt-free Studio model core — must precede every consumer.
 add_subdirectory(src/core)
+# R-9: crash dumps + restart budget, shared by engine and UI.
+add_subdirectory(src/supervise)
 add_subdirectory(src/engine)
 if(OPENRGB2_BUILD_UI)
     # Milestone 4 — the UI process (OpenRGB2.UI QML module + the

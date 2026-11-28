@@ -7,9 +7,9 @@ section 4 ("Process ownership").
 
 | Process | Owns | Started by |
 | --- | --- | --- |
-| `OpenRGB.exe` (vendored, `vendor/OpenRGB/release/`) | **all RGB hardware** — the sole hardware owner. USB/HID/SMBus access lives here and nowhere else | Externally, with `--server --server-host 127.0.0.1 --server-port 6744 --noautoconnect --localconfig`, its private configuration directory as working dir. The engine never spawns it: the managed launcher `packaging/windows/start-openrgb2.ps1` (Milestone 6, shipped as `scripts\start-openrgb2.ps1`) does |
+| `OpenRGB.exe` (vendored, `vendor/OpenRGB/release/`) | **all RGB hardware** — the sole hardware owner. USB/HID/SMBus access lives here and nowhere else | Externally, with `--server --server-host 127.0.0.1 --server-port 6744 --noautoconnect --localconfig`, its private configuration directory as working dir. The managed launcher `packaging/windows/start-openrgb2.ps1` (Milestone 6, shipped as `scripts\start-openrgb2.ps1`) starts it; the engine's backend supervisor (R-9) respawns it with the same arguments after it dies — see "What the engine does NOT do" for the exact gate |
 | `openrgb2-engine.exe` | the scene clock, delivery pipeline, playback-mode state machine, IPC surface | User/launcher. **Attaches** to the backend over the SDK; never touches hardware directly |
-| UI (Milestone 4) | nothing | attaches/detaches to the engine's named pipes freely — closing it never stops output |
+| UI (Milestone 4) | nothing | attaches/detaches to the engine's named pipes freely — closing it never stops output. In a managed session it **supervises the engine** (R-9): it watches the run file's `engine_pid` (verified engine image, passive handle) and, on a non-zero exit it did not cause, re-runs `start-openrgb2.ps1` — the same ownership gate, and the script never starts a second engine. Never while `state\openrgb2.stopping` exists; 3 restarts per 10 minutes |
 | `openrgb2-ctl` | nothing | one-shot IPC/SDK driver used for M3 verification |
 
 ## Startup ownership rules (enforced in `EngineHost::Start`)
@@ -63,7 +63,9 @@ section 4 ("Process ownership").
   backend's SDK on loopback TCP 6744.
 - Never kills or signals another process (competing owners, the old
   Studio path, a second OpenRGB) — conflicts are reported honestly.
-  The ONE exception is the operator's own explicit request: IPC QUIT
+  Besides the R-9 wedge close below (its OWN verified backend,
+  gracefully), the one exception is the operator's own explicit
+  request: IPC QUIT
   `{"stop_backend":true}` ("Quit all") adds a backend-handoff step to
   the ordered shutdown that signals the managed backend's PID-scoped
   shutdown event (`Local\OpenRGB2-Backend-Shutdown-<pid>` — the
@@ -73,6 +75,22 @@ section 4 ("Process ownership").
   `--backend-exe` exactly (the same verified-own standard
   `stop-openrgb2.ps1` enforces; a foreign or unverifiable process is
   reported and left running, and nothing is ever hard-killed).
-- Never spawns the backend — the managed launcher
-  (`packaging/windows/start-openrgb2.ps1`, Milestone 6) does.
+- Spawns the backend only as its **supervisor** (R-9), in the managed
+  layout (`--sdk` + `--backend-exe` + `--backend-config`), and only
+  when ALL hold: the SDK link has been down 5 s, no process with the
+  `--backend-exe` image exists (a starting or hung backend is never
+  doubled), nothing listens on :6744, no other `OpenRGB.exe` (foreign
+  or unreadable image) runs — the pinned backend's own single-instance
+  prompt could `TerminateProcess` it, the same reason
+  `start-openrgb2.ps1` refuses — no stop is in progress
+  (`state\openrgb2.stopping`), and the budget allows it (5 per hour,
+  backoff 0/10/30/60/120 s). The spawn uses the launcher's exact
+  arguments and working directory (parity is a test). Otherwise the
+  launcher starts the backend, as before.
+- Closes the backend on its own initiative in ONE case (R-9): a Lian
+  Li wireless group reported `wedged` + `state:"failed"` for 8 minutes
+  (twice the backend's own re-arm cap), at most twice per hour — the
+  same verified-own graceful channel as Quit-all (image re-verified,
+  shutdown event / WM_CLOSE, never a kill); the dead-backend rule then
+  respawns it. `foreign_master` never escalates.
 - Never touches FanControl, PWM, pump/fan speed, PawnIO, or sensors.

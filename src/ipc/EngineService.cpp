@@ -159,9 +159,60 @@ nlohmann::json ColorsToJson(const std::vector<RgbColor>& colors)
     return out;
 }
 
-nlohmann::json StatsToJson(const DeliveryStats& s)
+/* Audit E-12c: one timing histogram on the wire. A percentile
+   is the bucket UPPER edge in ms; null when the histogram is
+   empty, or (total > 0) when it falls in the overflow bucket
+   (> the last finite edge). `full` adds the bucket arrays —
+   GET_DELIVERY_STATS / GET_STATE; frame_status carries the
+   summary only (its ~30 Hz size budget). `provenance` null =
+   omitted (the scene-clock tick histogram is the engine's own
+   clock, not a transport measurement). */
+nlohmann::json HistogramToJson(const Histogram& h, bool full,
+                               const char* provenance)
 {
-    return nlohmann::json::object({
+    const auto pct = [&h](double p) -> nlohmann::json
+    {
+        const double v = h.Percentile(p);
+        if(std::isnan(v) || std::isinf(v))
+        {
+            return nullptr;
+        }
+        return v;
+    };
+    nlohmann::json out = nlohmann::json::object({
+        { "total", h.Total() },
+        { "p50",   pct(50)   },
+        { "p95",   pct(95)   },
+        { "p99",   pct(99)   },
+    });
+    if(full)
+    {
+        nlohmann::json edges = nlohmann::json::array();
+        for(double e : Histogram::kEdgesMs)
+        {
+            edges.push_back(e);
+        }
+        nlohmann::json counts = nlohmann::json::array();
+        for(uint64_t c : h.Counts())
+        {
+            counts.push_back(c);
+        }
+        out["edges_ms"] = std::move(edges);
+        out["counts"]   = std::move(counts);
+    }
+    if(provenance)
+    {
+        out["provenance"] = provenance;
+    }
+    return out;
+}
+
+nlohmann::json StatsToJson(const DeliveryStats& s,
+                           bool full_timing = true)
+{
+    /* E-12c: queue/send share the stats' own provenance. */
+    const char* prov = ProvenanceName(s.provenance);
+    nlohmann::json out = nlohmann::json::object({
         { "submitted",           s.submitted           },
         { "replaced_pending",    s.replaced_pending    },
         { "rejected",            s.rejected            },
@@ -176,6 +227,9 @@ nlohmann::json StatsToJson(const DeliveryStats& s)
         { "interval_count",      s.IntervalCount()     },
         { "provenance",          ProvenanceName(s.provenance) },
     });
+    out["queue_hist"] = HistogramToJson(s.queue_hist, full_timing, prov);
+    out["send_hist"]  = HistogramToJson(s.send_hist, full_timing, prov);
+    return out;
 }
 
 /* QA F04: the mapper's per-pass counters — object
@@ -1090,7 +1144,7 @@ nlohmann::json EngineService::DeliveryStatsJson(
 }
 
 nlohmann::json EngineService::WirelessLaneJson(
-    const std::vector<DeviceSnapshot>& snaps) const
+    const std::vector<DeviceSnapshot>& snaps, bool full_timing) const
 {
     /* The Lian Li wireless service owns ONE full-group LED
        buffer — its controllers carry the "Wireless:" location
@@ -1117,7 +1171,7 @@ nlohmann::json EngineService::WirelessLaneJson(
         }
         return nlohmann::json::object({
             { "key",        KeyToJson(snap.key)                  },
-            { "stats",      StatsToJson(ws)                      },
+            { "stats",      StatsToJson(ws, full_timing)         },
             { "suppressed", deps_.pipeline->IsSuppressed(
                                 snap.key)                        },
             { "pending",    (uint64_t)deps_.pipeline->PendingCount(
@@ -1168,17 +1222,17 @@ nlohmann::json EngineService::FrameStatusJson(
                 { "colors",     has_delivered
                                     ? ColorsToJson(delivered.colors)
                                     : nlohmann::json::array()      },
-                { "stats",      StatsToJson(stats)                 },
+                { "stats",      StatsToJson(stats, false)          },
             }));
         }
     }
     return nlohmann::json::object({
         { "aggregate",   deps_.pipeline
-                             ? StatsToJson(deps_.pipeline->Stats())
-                             : StatsToJson(DeliveryStats{}) },
+                             ? StatsToJson(deps_.pipeline->Stats(), false)
+                             : StatsToJson(DeliveryStats{}, false) },
         /* QA F11: the wireless lane's own counters — never the
            wired-mixing aggregate under a wireless label. */
-        { "wireless",    WirelessLaneJson(snaps)              },
+        { "wireless",    WirelessLaneJson(snaps, false)       },
         { "controllers", std::move(controllers)               },
     });
 }
@@ -1275,6 +1329,11 @@ void EngineService::EmitOutput()
     EmitOutputIfChanged(true);
 }
 
+void EngineService::EmitSupervisor(const nlohmann::json& body)
+{
+    Emit(event_kind::kSupervisor, body);
+}
+
 void EngineService::EmitOutputIfChanged(bool force)
 {
     if(!deps_.output)
@@ -1363,6 +1422,9 @@ const std::vector<EngineService::OutputVerb>& EngineService::OutputVerbs()
         /* E-12b exit/idle policy: own dependency, OK reply. */
         { "get_policy",   &EngineService::OutputGetPolicy, false },
         { "set_policy",   &EngineService::OutputSetPolicy, false },
+        /* E-12c: clears the timing histograms — measurement
+           state only, no output effect. */
+        { "reset_stats",  &EngineService::OutputResetStats, false },
     };
     return verbs;
 }
@@ -1433,6 +1495,21 @@ IpcReply EngineService::OutputSetPolicy(const nlohmann::json& body)
     return OutputGetPolicy(body);
 }
 
+IpcReply EngineService::OutputResetStats(const nlohmann::json&)
+{
+    /* Histograms only: the cumulative counters and interval
+       stats keep their meaning (the Dashboard's delivery rate
+       reads them). Cumulative-since-reset is the before/after
+       comparison window. */
+    engine_.Worker().ResetTickStats();
+    if(deps_.pipeline)
+    {
+        deps_.pipeline->ResetTimingStats();
+    }
+    return IpcReply::Success(MsgType::Ok,
+        nlohmann::json::object({{ "reset", true }}));
+}
+
 IpcReply EngineService::OutputGet(const nlohmann::json&)
 {
     return IpcReply::Success(MsgType::Output, OutputJson());
@@ -1480,6 +1557,164 @@ IpcReply EngineService::OutputSetHold(const nlohmann::json& body)
     return IpcReply::Success(MsgType::Output, OutputJson());
 }
 
+/*---------------------------------------------------------*\
+||| AUTOMATION_COMMAND handlers (R-2)                         ||
+|||                                                            ||
+|||   get                                — the AUTOMATION body ||
+|||   set_hotkeys {bindings:[{action,chord}], cycle?:[id],     ||
+|||                brightness_step?:0.01..0.5}                 ||
+|||       — validate -> persist -> register; a chord the OS    ||
+|||         refuses reports state in_use / invalid in the body ||
+|||         (never a verb failure)                             ||
+|||   set_dimming {schedule?, lock?, idle?, ramp_ms?,          ||
+|||                restore_ms?} — R-4: REPLACES the rules      ||
+|||       (absent sections reset to off) and persists them     ||
+|||   The "automation" event for other subscribers comes from  ||
+|||   Automation's changed hook (EngineHost -> EmitAutomation).||
+\*---------------------------------------------------------*/
+const std::vector<EngineService::AutomationVerb>&
+EngineService::AutomationVerbs()
+{
+    static const std::vector<AutomationVerb> verbs = {
+        { "get",         &EngineService::AutomationGet        },
+        { "set_hotkeys", &EngineService::AutomationSetHotkeys },
+        /* R-4: the schedule / lock / idle dimming rules. */
+        { "set_dimming", &EngineService::AutomationSetDimming },
+    };
+    return verbs;
+}
+
+IpcReply EngineService::HandleAutomationCommand(
+    const std::string& verb, const nlohmann::json& body)
+{
+    const AutomationVerb* found = nullptr;
+    for(const AutomationVerb& v : AutomationVerbs())
+    {
+        if(verb == v.name)
+        {
+            found = &v;
+            break;
+        }
+    }
+    if(!found)
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "unknown automation verb '" + verb + "'");
+    }
+    if(!deps_.automation)
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "automation is not wired on this engine");
+    }
+    return (this->*(found->fn))(body);
+}
+
+nlohmann::json EngineService::AutomationJson() const
+{
+    if(!deps_.automation)
+    {
+        return nullptr;
+    }
+    return deps_.automation->ToJson();
+}
+
+void EngineService::EmitAutomation()
+{
+    if(!deps_.automation)
+    {
+        return;
+    }
+    Emit(event_kind::kAutomation, AutomationJson());
+}
+
+IpcReply EngineService::AutomationGet(const nlohmann::json&)
+{
+    return IpcReply::Success(MsgType::Automation, AutomationJson());
+}
+
+IpcReply EngineService::AutomationSetHotkeys(const nlohmann::json& body)
+{
+    const nlohmann::json& list = FieldOrNull(body, "bindings");
+    if(!list.is_array())
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "set_hotkeys requires {bindings:[{action, chord}]}");
+    }
+    std::vector<HotkeyBinding> bindings;
+    for(const nlohmann::json& e : list)
+    {
+        if(!e.is_object() ||
+           !FieldOrNull(e, "action").is_string() ||
+           !FieldOrNull(e, "chord").is_string())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "set_hotkeys: every binding is {action:string, "
+                "chord:string}");
+        }
+        bindings.push_back({ e["action"].get<std::string>(),
+                             e["chord"].get<std::string>() });
+    }
+    std::optional<std::vector<std::string>> cycle;
+    const nlohmann::json& cj = FieldOrNull(body, "cycle");
+    if(!cj.is_null())
+    {
+        if(!cj.is_array())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "set_hotkeys: cycle is an array of workspace ids");
+        }
+        std::vector<std::string> ids;
+        for(const nlohmann::json& id : cj)
+        {
+            if(!id.is_string())
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "set_hotkeys: cycle is an array of workspace ids");
+            }
+            ids.push_back(id.get<std::string>());
+        }
+        cycle = std::move(ids);
+    }
+    std::optional<double> step;
+    const nlohmann::json& sj = FieldOrNull(body, "brightness_step");
+    if(!sj.is_null())
+    {
+        if(!sj.is_number())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "set_hotkeys: brightness_step is a number");
+        }
+        step = sj.get<double>();
+    }
+    std::string err;
+    if(!deps_.automation->SetHotkeys(bindings, cycle, step, err))
+    {
+        /* A save failure is the engine's, not the request's. */
+        const bool save = err.find("could not save") == 0;
+        return IpcReply::Fail(save ? ErrCode::Internal
+                                   : ErrCode::BadRequest,
+                              "set_hotkeys: " + err);
+    }
+    return IpcReply::Success(MsgType::Automation, AutomationJson());
+}
+
+IpcReply EngineService::AutomationSetDimming(const nlohmann::json& body)
+{
+    /* The flat body IS the rule set ({verb, schedule?, lock?,
+       idle?, ramp_ms?, restore_ms?}); the parser ignores "verb". */
+    DimmingConfig d;
+    std::string err;
+    if(!DimmingConfigFromJson(body, d, err))
+    {
+        return IpcReply::Fail(ErrCode::BadRequest, "set_dimming: " + err);
+    }
+    if(!deps_.automation->SetDimming(d, err))
+    {
+        return IpcReply::Fail(ErrCode::Internal, "set_dimming: " + err);
+    }
+    return IpcReply::Success(MsgType::Automation, AutomationJson());
+}
+
 nlohmann::json EngineService::OwnershipJson() const
 {
     /* Task 4.7: no provider wired -> honest null (the IPC
@@ -1505,6 +1740,18 @@ nlohmann::json EngineService::OutputPolicyJson() const
         return nullptr;
     }
     const nlohmann::json j = deps_.output_policy();
+    return j.is_object() ? j : nullptr;
+}
+
+/* R-9: no provider -> honest null; a non-object provider
+   result is an owner bug, still null. */
+nlohmann::json EngineService::SupervisorJson() const
+{
+    if(!deps_.supervisor)
+    {
+        return nullptr;
+    }
+    const nlohmann::json j = deps_.supervisor();
     return j.is_object() ? j : nullptr;
 }
 
@@ -1534,15 +1781,26 @@ nlohmann::json EngineService::IpcStatsJson() const
     });
 }
 
+nlohmann::json EngineService::TickHistJson() const
+{
+    /* The engine's own scene clock — no transport provenance. */
+    return HistogramToJson(engine_.Worker().TickStats(), true, nullptr);
+}
+
 nlohmann::json EngineService::StateJson() const
 {
+    /* E-12c: STATE's scene section carries the tick-interval
+       histogram (not the SCENE event/reply — those fire on scene
+       changes, where a cadence snapshot would only go stale). */
+    nlohmann::json scene = SceneJsonLocked();
+    scene["tick_hist"] = TickHistJson();
     return nlohmann::json::object({
         { "engine", nlohmann::json::object({
             { "running",         engine_.Running()          },
             { "scene_clock_hz",  SceneWorker::kTickHz       },
             { "scene_sequence",  engine_.Worker().Sequence()},
         })},
-        { "scene",      SceneJsonLocked()                    },
+        { "scene",      std::move(scene)                     },
         { "sdk",        ConnectionJson()                     },
         { "playback",   PlaybackJson()                       },
         { "power",      PowerJson()                          },
@@ -1551,6 +1809,8 @@ nlohmann::json EngineService::StateJson() const
         { "output",     OutputJson()                         },
         { "ipc",        IpcStatsJson()                       },
         { "output_policy", OutputPolicyJson()                },
+        { "automation", AutomationJson()                     },
+        { "supervisor",    SupervisorJson()                  },
     });
 }
 
@@ -1672,6 +1932,11 @@ nlohmann::json EngineService::OnWelcome()
            that doesn't see it hides the tray quick controls. */
         caps.push_back("output_control_v1");
     }
+    if(deps_.automation)
+    {
+        /* R-2: AUTOMATION_COMMAND + the "automation" event. */
+        caps.push_back("automation_v1");
+    }
     return nlohmann::json::object({
         { "engine",       "openrgb2-engine" },
         { "running",      engine_.Running() },
@@ -1724,6 +1989,22 @@ bool EngineService::SnapshotEvent(const std::string& kind,
     {
         /* R-1: the current OUTPUT body (null when not wired). */
         out = OutputJson();
+        return true;
+    }
+    if(kind == event_kind::kAutomation)
+    {
+        /* R-2: the current AUTOMATION body (null when not wired). */
+        out = AutomationJson();
+        return true;
+    }
+    if(kind == event_kind::kSupervisor)
+    {
+        /* R-9: status only — no "action", so a (re)subscribing
+           UI never re-announces an old restart. */
+        const nlohmann::json st = SupervisorJson();
+        out = nlohmann::json::object({
+            { "seq",    st.is_object() ? st.value("seq", 0) : 0 },
+            { "status", st } });
         return true;
     }
     if(kind == event_kind::kWorkspace)
@@ -2175,6 +2456,21 @@ IpcReply EngineService::Dispatch(MsgType type,
                 "OUTPUT_COMMAND requires {verb:<string>}");
         }
         return HandleOutputCommand(verb, body);
+    }
+
+    case MsgType::AutomationCommand:
+    {
+        const std::string verb =
+            (body.is_object()
+             && FieldOrNull(body, "verb").is_string())
+                ? body["verb"].get<std::string>()
+                : std::string();
+        if(verb.empty())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "AUTOMATION_COMMAND requires {verb:<string>}");
+        }
+        return HandleAutomationCommand(verb, body);
     }
 
     case MsgType::Quit:

@@ -13,6 +13,7 @@
 #define _WIN32_WINNT 0x0A00   /* Win10 — SuspendResume notification */
 #endif
 #include <windows.h>
+#include <wtsapi32.h>   /* R-4: session lock notifications */
 /* PBT_* power-broadcast constants and POWERBROADCAST_SETTING
    come from winuser.h (via windows.h) — no WDK header needed. */
 
@@ -69,6 +70,18 @@ __int64 __stdcall WinPowerMonitor::PowerWndProc(void* h,
                         )
                 {
                     self->Emit(Event::Resume);
+                }
+            }
+            else if(msg == WM_WTSSESSION_CHANGE)
+            {
+                /* R-4: lock / unlock of THIS session. */
+                if(w == (unsigned __int64)WTS_SESSION_LOCK)
+                {
+                    self->Emit(Event::SessionLock);
+                }
+                else if(w == (unsigned __int64)WTS_SESSION_UNLOCK)
+                {
+                    self->Emit(Event::SessionUnlock);
                 }
             }
             else if(msg == WM_DESTROY)
@@ -215,7 +228,7 @@ bool WinPowerMonitor::Registered() const
 {
     return hwnd_.load() != nullptr &&
            (reg_console_ != nullptr || reg_session_ != nullptr ||
-            reg_suspend_ != nullptr);
+            reg_suspend_ != nullptr || wts_registered_.load());
 }
 
 bool WinPowerMonitor::DisplayOn() const
@@ -256,6 +269,10 @@ void WinPowerMonitor::ThreadMain()
        plain broadcast never reaches a message-only window. */
     reg_suspend_ = RegisterSuspendResumeNotification(
         hwnd, DEVICE_NOTIFY_WINDOW_HANDLE);
+    /* R-4: session lock / unlock (Win+L, screen saver lock). */
+    wts_registered_ =
+        WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION)
+            != FALSE;
     init_done_ = true;   /* Start() may now judge registrations */
 
     MSG msg;
@@ -282,6 +299,11 @@ void WinPowerMonitor::ThreadMain()
         UnregisterSuspendResumeNotification(
             (HPOWERNOTIFY)reg_suspend_);
         reg_suspend_ = nullptr;
+    }
+    if(wts_registered_.load())
+    {
+        WTSUnRegisterSessionNotification(hwnd);
+        wts_registered_ = false;
     }
     DestroyWindow((HWND)hwnd_.load());
     hwnd_.store(nullptr);

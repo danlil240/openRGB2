@@ -1,6 +1,6 @@
 # P-7: Logitech 0x8080 per-key pacing is open-loop
 
-Status: proposed · Size: M · Source: audit 2026-11-28 P-7
+Status: steps 1–3, 5, 6 implemented on `perf/p-7-logitech-8080-delta` (not merged); step 4 waits for the G512 ACK-timing measurement · Size: M · Source: audit 2026-11-28 P-7
 
 ## Goal
 
@@ -142,3 +142,79 @@ Record `9c866ca` and this change in `MANIFEST.md`.
   PC. The fallback gap must remain their behaviour unless they are tested.
 - Should a vendor change that is not upstreamed live in a patch series under
   `vendor/provenance/` rather than only in-tree? Daniel's call.
+
+## Implementation record (2026-11-28)
+
+Branch `perf/p-7-logitech-8080-delta`, not merged. The qmake backend was
+not rebuilt and nothing ran on hardware.
+
+| Step | Commit | What |
+| --- | --- | --- |
+| 1 | `cffedce` (earlier) | `9c866ca` was already in `vendor/provenance/MANIFEST.md`; nothing to add |
+| 2 | `6a11027` | `LogitechPerKey8080Plan` extracted; `logitech_8080_plan_test` (label `backend`) pins the full repaint byte for byte against a copy of the pre-extraction loops |
+| 3 | `477a2f4` | delta against `sent_colors` with forced full repaints; 2 ms gap kept |
+| 5 | `323c0a6` | 10 s `LOG_DEBUG` summary for 0x8080 |
+| 6 | `39201f1` | `openrgb2-backend.stamp` + staleness check (`package_backend_stamp_test`, label `packaging`) |
+
+Decisions taken here (all reversible):
+
+- **Refresh period:** the 2 s placeholder, as the compile-time
+  `HIDPP20_8080_FULL_REFRESH_MS` (0 disables). It is "configurable" only by
+  rebuilding; there is no runtime setting yet.
+- **Patch series vs in-tree:** in-tree, with one MANIFEST row per commit
+  (the existing practice). No patch series under `vendor/provenance/`.
+- **What counts as committed:** without fn3 ACKs (step 4), a key advances in
+  `sent_colors` when its frame's `hid_write` succeeded and the update's
+  FlushLEDS acked. Otherwise it is marked `HIDPP20_UNCOMMITTED` and re-sent.
+  A frame the keyboard drops silently leaves its keys stale until they
+  change or the next 2 s refresh.
+- **`sent_colors` holds dimmed wire colors,** so a dim change re-sends every
+  lit key without a `clear()`.
+- **Re-init:** a changed `GetInitGeneration()` forces a full repaint, as on
+  the 0x8081 path.
+- **Idle updates:** a delta with no changed key sends nothing, FlushLEDS
+  included. A full repaint keeps the old rule: FlushLEDS whenever any LED is
+  addressable, even if the G410 filter left no frame.
+- **Summary period:** 10 s (`HIDPP20_8080_SUMMARY_S`, the figure in this
+  plan), not the 60 s `HIDPP20_PERKEY_SUMMARY_S`. It logs every window, not
+  only on errors, because it is the achieved-Hz readout. It has no
+  matched/lost ACK count until step 4.
+- **Stamp scope:** `vendor/OpenRGB` and `src/core/playback`, because
+  `OpenRGB.pro` compiles `../../src/core/playback/PlaybackLoop.cpp`.
+- **Missing stamp = stale.** Every backend built before this change fails
+  `build-and-deploy.ps1` once, until rebuilt with `-BuildBackend`. The new
+  `-AllowStaleBackend` stages it with a warning. An `OPENRGB2_BACKEND_DIR`
+  backend is not checked; a tree without git only warns.
+- **`build-all-and-install.ps1 -SkipBackend`** does not bypass the check.
+
+### Expected effect (derived from the code, not measured)
+
+Update time is about F x (write + 2 ms gap) + one ACKed FlushLEDS, where F
+is the number of 14-key frames. A full repaint is F of about 8 (the 20–25 ms
+in "Current state"). A delta has F = sum over keyTypes of
+ceil(changed keys / 14):
+
+- An unchanged frame costs nothing: no writes, no FlushLEDS.
+- A few changed keys of one keyType cost one frame plus the flush.
+- An effect that changes every key every frame (Wave, a fast hue sweep) gains
+  nothing. It still needs about 8 frames per update, and the 2 s refresh adds
+  nothing because every update is already full. Step 4 is what would help
+  those effects.
+
+### Step 4 measurement (needs the G512)
+
+Close G Hub, stop the LampArray service and turn Dynamic Lighting off first.
+Then decide whether the fn3 ACK arrives only after the frame has been
+parsed:
+
+1. Build a debug variant of `SetPerKey8080` with the 2 ms gap set to 0.
+   After each frame, block on the response queue for the fn3 ACK (feature
+   index `idx_perkey_8080`, function 0x30, software ID), with a 50 ms bound.
+   Log the write-to-ACK latency per frame.
+2. Run a full-white static scene, then a fast hue sweep. Watch the known tail
+   keys (F5–F12, PrtSc, `0`, `-`) with the timed refresh disabled
+   (`full_refresh_ms_8080 = 0`).
+3. If every frame ACKs and the tail keys never go stale, ACK pacing can
+   replace the gap. If keys go stale even though every frame ACKed, the ACK
+   comes before the frame is parsed: keep the gap and do not do step 4.
+   Record the latency distribution here either way.

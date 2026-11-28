@@ -11,6 +11,14 @@
          under vendor\OpenRGB ("OpenRGB Windows 64-bit" or release\)
          or in OPENRGB2_BACKEND_DIR. -BuildBackend runs the in-tree
          qmake recipe (long: full backend build) when it is missing.
+         A vendored backend must also be current: the stamp the
+         recipe step writes next to OpenRGB.exe
+         (openrgb2-backend.stamp, see backend-stamp.ps1) must match
+         a hash of vendor/OpenRGB + src/core/playback. A stale or
+         unstamped backend is rebuilt with -BuildBackend (incremental
+         qmake), staged with a warning under -AllowStaleBackend, and
+         otherwise fails with "backend is stale". An
+         OPENRGB2_BACKEND_DIR backend is not checked.
       3. Stop (only with -InstallDir): stops the running install via
          its own scripts\stop-openrgb2.ps1 (UI close -> graceful
          engine QUIT -> backend shutdown event; -ForceStop passes
@@ -54,8 +62,13 @@ param(
     [switch]$SkipBuild,
 
     # Run vendor\OpenRGB\scripts\build-windows.bat when the pinned
-    # backend binary is missing (long -- full qmake backend build).
+    # backend binary is missing (long -- full qmake backend build) or
+    # stale against its sources (incremental).
     [switch]$BuildBackend,
+
+    # Stage a stale or unstamped vendored backend anyway, with a
+    # warning, instead of failing.
+    [switch]$AllowStaleBackend,
 
     # Authenticode-sign staged exes via Azure Trusted Signing
     # (passthrough to stage-release.ps1).
@@ -82,7 +95,11 @@ if(-not $BuildDir) { $BuildDir = Join-Path $RepoRoot "build" }
 
 function Fail([string]$msg) { Write-Host "ERROR: $msg" -ForegroundColor Red; exit 1 }
 function Info([string]$msg) { Write-Host "  $msg" }
+function Warn([string]$msg) { Write-Host "  WARNING: $msg" -ForegroundColor Yellow }
 function Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
+
+# Get-BackendSourceHash / Write-BackendStamp / Test-BackendStamp
+. (Join-Path $PkgDir "backend-stamp.ps1")
 
 function Invoke-PsScript([string]$script, [string[]]$scriptArgs) {
     # The lifecycle scripts end in `exit <code>` -- invoke each in a
@@ -143,32 +160,71 @@ if($env:OPENRGB2_BACKEND_DIR) { $backendCandidates += $env:OPENRGB2_BACKEND_DIR 
 $backendCandidates += Join-Path $RepoRoot "vendor\OpenRGB\OpenRGB Windows 64-bit"
 $backendCandidates += Join-Path $RepoRoot "vendor\OpenRGB\release"
 
-$backendDir = $null
-foreach($d in $backendCandidates) {
-    if(Test-Path (Join-Path $d "OpenRGB.exe")) { $backendDir = $d; break }
+function Find-Backend {
+    foreach($d in $backendCandidates) {
+        if(Test-Path (Join-Path $d "OpenRGB.exe")) { return $d }
+    }
+    return $null
 }
 
-if(-not $backendDir -and $BuildBackend) {
+# Run the in-tree qmake recipe (incremental on a warm tree), then
+# stamp the result with the hash of the sources it was built from.
+function Invoke-BackendRecipe {
     Step "Building pinned backend (vendor\OpenRGB\scripts\build-windows.bat)"
     $recipe = Join-Path $RepoRoot "vendor\OpenRGB\scripts\build-windows.bat"
     if(-not (Test-Path $recipe)) { Fail "backend recipe not found: $recipe" }
     # The qmake recipe resolves OpenRGB.pro relative to the working
     # directory -- it must run from vendor\OpenRGB.
+    # Out-Host: the recipe's output must not become this function's
+    # return value.
     Push-Location (Join-Path $RepoRoot "vendor\OpenRGB")
     try {
-        & cmd.exe /c "`"$recipe`" 6.8.3 2022 64"
+        & cmd.exe /c "`"$recipe`" 6.8.3 2022 64" | Out-Host
         $recipeExit = $LASTEXITCODE
     } finally { Pop-Location }
     if($recipeExit -ne 0) { Fail "backend build recipe failed (exit $recipeExit)" }
-    foreach($d in $backendCandidates) {
-        if(Test-Path (Join-Path $d "OpenRGB.exe")) { $backendDir = $d; break }
-    }
+    $built = Find-Backend
+    if($built) { Write-BackendStamp $RepoRoot $built }
+    return $built
+}
+
+$backendDir = Find-Backend
+
+if(-not $backendDir -and $BuildBackend) {
+    $backendDir = Invoke-BackendRecipe
 }
 if(-not $backendDir) {
     Fail ("pinned backend OpenRGB.exe not found under vendor\OpenRGB -- " +
           "re-run with -BuildBackend, or " +
           "vendor\OpenRGB\scripts\build-windows.bat 6.8.3 2022 64 " +
           "(or set OPENRGB2_BACKEND_DIR)")
+}
+
+# Staleness: the vendored backend must have been built from the
+# current vendor/OpenRGB + src/core/playback sources.
+if($env:OPENRGB2_BACKEND_DIR -and $backendDir -eq $env:OPENRGB2_BACKEND_DIR) {
+    Info "backend from OPENRGB2_BACKEND_DIR: staleness not checked"
+} else {
+    $stamp = Test-BackendStamp $RepoRoot $backendDir
+    if($stamp.State -eq "fresh") {
+        Info $stamp.Message
+    } elseif($stamp.State -eq "unknown") {
+        Warn $stamp.Message
+    } elseif($BuildBackend) {
+        Info "$($stamp.Message) -- rebuilding (-BuildBackend)"
+        $backendDir = Invoke-BackendRecipe
+        if(-not $backendDir) { Fail "backend recipe ran but OpenRGB.exe is still missing" }
+        $stamp = Test-BackendStamp $RepoRoot $backendDir
+        if($stamp.State -ne "fresh" -and $stamp.State -ne "unknown") {
+            Fail "$($stamp.Message) (even after the rebuild)"
+        }
+        Info $stamp.Message
+    } elseif($AllowStaleBackend) {
+        Warn "$($stamp.Message) -- staging it anyway (-AllowStaleBackend)"
+    } else {
+        Fail ("$($stamp.Message). Re-run with -BuildBackend (incremental qmake " +
+              "rebuild), or -AllowStaleBackend to stage it anyway")
+    }
 }
 Info "backend: $backendDir"
 

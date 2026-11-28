@@ -826,6 +826,129 @@ int main(int argc, char** argv)
         bridge.stop();
     }
 
+    /*---- R-2 automation (hotkeys) ------------------------------
+      automation_v1 gates the surface; the WELCOME state, the
+      AUTOMATION reply and the "automation" EVENT all land in the
+      automation store; automationCommand puts AUTOMATION_COMMAND
+      {verb, ...args} on the wire. */
+    std::printf("-- automation store + verb\n");
+    for(const bool with_cap : { true, false })
+    {
+        ui::EngineBridge bridge;
+        auto pipe = std::make_shared<TestPipe>();
+        bridge.setChannelFactoryForTesting(
+            [&](std::string&) -> std::unique_ptr<IIpcChannel>
+            { return pipe->ClientChannel(); });
+        ui::EngineWireClient::Options wopts;
+        wopts.keepalive_ms = 0;
+        bridge.setWireOptionsForTesting(wopts);
+        int auto_signals = 0;
+        QObject::connect(&bridge, &ui::EngineBridge::automationChanged,
+                         [&] { ++auto_signals; });
+        bridge.start();
+        ServerPeer srv = pipe->Peer();
+        Message m;
+        CHECK(srv.RecvMsg(m, 4000) && m.type == MsgType::Hello);
+        const nlohmann::json a0 = nlohmann::json::object({
+            { "hotkeys", nlohmann::json::array() },
+            { "registrar", true },
+            { "brightness_step", 0.1 } });
+        nlohmann::json welcome = nlohmann::json::object({
+            { "server_version", 1 }, { "negotiated_version", 1 },
+            { "channel", "command" }, { "engine", "openrgb2-engine" },
+            { "running", true },
+            { "capabilities", with_cap
+                  ? nlohmann::json::array({ "automation_v1" })
+                  : nlohmann::json::array() },
+            { "state", nlohmann::json::object({
+                { "automation", with_cap ? a0 : nlohmann::json() } }) },
+        });
+        srv.SendMsg(MsgType::Welcome, 0, welcome);
+        CHECK(srv.RecvMsg(m, 4000) && m.type == MsgType::Subscribe);
+        srv.SendMsg(MsgType::Ok, m.request_id,
+                    nlohmann::json::object({
+                        { "subscribed", nlohmann::json::array() } }));
+        CHECK(PumpUntil([&] {
+            return bridge.connectionState() == "connected";
+        }));
+        CHECK(AnswerAutoPulls(srv));
+        CHECK(bridge.hasAutomation() == with_cap);
+        if(!with_cap)
+        {
+            CHECK(bridge.automation().isEmpty());
+            CHECK(bridge.automationCommand("get", {}) == 0);
+            bridge.stop();
+            continue;
+        }
+        CHECK(bridge.automation().value("registrar").toBool());
+        CHECK(auto_signals >= 1);
+
+        QVariantList bindings;
+        bindings.append(QVariantMap({
+            { "action", "lights_toggle" },
+            { "chord",  "Ctrl+Alt+Shift+End" } }));
+        const int id = bridge.automationCommand("set_hotkeys",
+            QVariantMap({{ "bindings", bindings }}));
+        CHECK(id > 0);
+        CHECK(srv.RecvMsg(m, 4000));
+        CHECK(m.type == MsgType::AutomationCommand);
+        CHECK(m.request_id == (uint32_t)id);
+        CHECK(m.Body().value("verb", std::string()) == "set_hotkeys");
+        CHECK(m.Body()["bindings"][0]["chord"] == "Ctrl+Alt+Shift+End");
+        nlohmann::json a1 = a0;
+        a1["hotkeys"] = nlohmann::json::array({ {
+            { "action", "lights_toggle" },
+            { "chord",  "Ctrl+Alt+Shift+End" },
+            { "state",  "in_use" },
+            { "detail", "in use by another app" } } });
+        srv.SendMsg(MsgType::Automation, m.request_id, a1);
+        CHECK(PumpUntil([&] {
+            return bridge.automation().value("hotkeys").toList()
+                       .size() == 1;
+        }));
+        CHECK(bridge.automation().value("hotkeys").toList()[0].toMap()
+                  .value("state").toString() == "in_use");
+
+        /* Another client's change arrives as the event; a null
+           body keeps the store. */
+        nlohmann::json a2 = a1;
+        a2["hotkeys"][0]["state"] = "ok";
+        srv.SendMsg(MsgType::Event, 0, nlohmann::json::object({
+            { "kind", "automation" }, { "data", a2 } }));
+        CHECK(PumpUntil([&] {
+            return bridge.automation().value("hotkeys").toList()[0]
+                       .toMap().value("state").toString() == "ok";
+        }));
+        srv.SendMsg(MsgType::Event, 0, nlohmann::json::object({
+            { "kind", "automation" }, { "data", nullptr } }));
+        PumpUntil([] { return false; }, 200);
+        CHECK(bridge.automation().value("hotkeys").toList().size() == 1);
+
+        /* R-4: set_dimming travels the same verb; the dimming
+           section of the reply lands in the store. */
+        const int did = bridge.automationCommand("set_dimming",
+            QVariantMap({{ "lock", QVariantMap({
+                { "enabled", true }, { "level", 0.0 } }) }}));
+        CHECK(did > 0);
+        CHECK(srv.RecvMsg(m, 4000));
+        CHECK(m.type == MsgType::AutomationCommand);
+        CHECK(m.Body().value("verb", std::string()) == "set_dimming");
+        CHECK(m.Body()["lock"]["enabled"] == true);
+        nlohmann::json a3 = a2;
+        a3["dimming"] = { { "configured", true },
+                          { "active", { { "lock", 0.0 } } } };
+        srv.SendMsg(MsgType::Automation, m.request_id, a3);
+        CHECK(PumpUntil([&] {
+            return bridge.automation().value("dimming").toMap()
+                       .value("configured").toBool();
+        }));
+
+        bridge.setAutomationForTesting(QVariantMap({
+            { "hotkeys", QVariantList() } }));
+        CHECK(bridge.automation().value("hotkeys").toList().isEmpty());
+        bridge.stop();
+    }
+
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

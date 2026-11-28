@@ -16,6 +16,7 @@
 ||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 \*---------------------------------------------------------*/
 
+#include "CrashDump.h"
 #include "EngineHost.h"
 
 #ifdef _WIN32
@@ -54,8 +55,12 @@ void Usage(const char* argv0)
         "          [--backend-config <dir>] [--backend-exe <path>]\n"
         "          [--no-scan]\n"
         "          [--no-instance-guard] [--no-scene-restore]\n"
-        "          [--no-power-monitor]\n"
+        "          [--no-power-monitor] [--crash-for-test <mode>]\n"
         "\n"
+        "  Crash dumps (R-9): an unhandled crash writes a minidump\n"
+        "  to <exe dir>\\state\\crash (OPENRGB2_CRASH_DIR overrides;\n"
+        "  newest 5 kept). --crash-for-test av|stack|abort crashes\n"
+        "  on purpose to check that a dump lands there.\n"
         "  Runs the lighting engine until SIGINT/SIGTERM. No UI is\n"
         "  required or expected. Every applied scene persists to\n"
         "  last-scene.json beside the state file; without --scene\n"
@@ -75,8 +80,13 @@ void Usage(const char* argv0)
         "  sink. The backend is launched EXTERNALLY with --server\n"
         "  --server-host 127.0.0.1 --server-port 6744 --noautoconnect\n"
         "  --localconfig and a private configuration directory as its\n"
-        "  working dir — this process attaches, it never spawns the\n"
-        "  backend. --backend-config points at that private config\n"
+        "  working dir — this process attaches. With --backend-exe AND\n"
+        "  --backend-config (the managed layout) it also supervises\n"
+        "  the backend (R-9): a backend that died is respawned with\n"
+        "  exactly those arguments (never while anything else holds\n"
+        "  the port or another OpenRGB.exe runs; 5 per hour), and a\n"
+        "  wireless group wedged for 8 min closes it once to restart\n"
+        "  it (2 per hour). --backend-config points at that private config\n"
         "  dir so startup can verify the legacy Studio/Effects/\n"
         "  HardwareSync scene producers are not enabled there\n"
         "  (sole-scene-writer check, report only). --backend-exe\n"
@@ -119,6 +129,19 @@ void Usage(const char* argv0)
 
 int main(int argc, char** argv)
 {
+    /* R-9: dumps first, before anything can crash. A failure
+       (unwritable dir) only costs the dump. */
+    {
+        std::string cerr;
+        if(!openrgb2::supervise::InstallCrashDumpHandler(
+               std::string(), "openrgb2-engine", 5, &cerr))
+        {
+            std::fprintf(stderr,
+                "openrgb2-engine: crash dumps disabled: %s\n",
+                cerr.c_str());
+        }
+    }
+
     openrgb2::EngineHostOptions opts;
     bool sdk_addr_set = false;
     std::string sdk_addr;
@@ -195,6 +218,13 @@ int main(int argc, char** argv)
         else if(arg == "--no-power-monitor")
         {
             opts.power_monitor = false;
+        }
+        else if((arg == "--crash-for-test") && i + 1 < argc)
+        {
+            openrgb2::supervise::CrashForTest(argv[++i]);
+            std::fprintf(stderr, "openrgb2-engine: unknown crash "
+                         "mode %s (av|stack|abort)\n", argv[i]);
+            return 2;
         }
         else if(arg == "--help" || arg == "-h")
         {

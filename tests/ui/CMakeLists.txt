@@ -88,6 +88,12 @@ ui_suite(ui_diagnostics_test)
 # workspace pick asking for the window.
 ui_suite(ui_tray_test)
 
+# R-9: the UI's engine supervisor — injected exit source, fake
+# clock/scheduler and state dir: intended stop / exit 0 / stop
+# marker never restart, a crash restarts after 2/10/30 s, the 4th
+# crash in 10 minutes gives a notice.
+ui_suite(ui_supervisor_test)
+
 # Task 4.8: the hardening suite — Quit-All issues IPC QUIT and
 # reads the ordered reply; an engine restart mid-edit keeps
 # the working copy while the restored session reports ENGINE

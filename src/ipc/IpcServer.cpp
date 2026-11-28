@@ -50,6 +50,7 @@ bool IsRequestType(MsgType t)
     case MsgType::WorkspaceCommand:
     case MsgType::ReactiveCommand:
     case MsgType::OutputCommand:
+    case MsgType::AutomationCommand:
     case MsgType::DiagGet:
         return true;
     default:

@@ -128,6 +128,7 @@ Defined values:
 | --- | --- |
 | `studio_workspace_v1` | `WORKSPACE_COMMAND` (managed workspace jobs, revisions, transfers — §5) |
 | `output_control_v1` | `OUTPUT_COMMAND` + the `output` event (R-1 runtime master brightness, Off, pause — §5, §7). Clients that do not see it hide those controls |
+| `automation_v1` | `AUTOMATION_COMMAND` + the `automation` event (R-2 engine-side global hotkeys — §5, §7). Clients that do not see it hide the Hotkeys card |
 
 After the handshake every message's header `version` MUST equal
 `negotiated_version`. A mismatched message gets `ERROR(version_mismatch)`;
@@ -204,11 +205,13 @@ Request → reply. `request_id` echoes.
 | 0x010D | REACTIVE_COMMAND | `{verb, ...args}` | OK `<reactive body>` / ERROR |
 | 0x010E | WORKSPACE_COMMAND | `{verb, ...args}` | OK `<verb body>` / ERROR |
 | 0x010F | OUTPUT_COMMAND | `{verb, ...args}` (requires `output_control_v1`) | OUTPUT / ERROR |
+| 0x0110 | AUTOMATION_COMMAND | `{verb, ...args}` (requires `automation_v1`) | AUTOMATION / ERROR |
 | 0x0300 | DIAG_GET | `{}` | DIAGNOSTICS (valid on both pipes) |
 
 Reply types: WELCOME 0x8001, OK 0x8002, ERROR 0x8003, SNAPSHOTS 0x8100,
 SCENE 0x8101, PLAYBACK 0x8102, DELIVERY_STATS 0x8103, STATE 0x8104,
-PONG 0x8105, PRESETS 0x8106, OUTPUT 0x8107, EVENT 0x8200,
+PONG 0x8105, PRESETS 0x8106, OUTPUT 0x8107, AUTOMATION 0x8108,
+EVENT 0x8200,
 DIAGNOSTICS 0x8300.
 
 ## 5. Body schemas
@@ -343,6 +346,45 @@ every wired lane and must never be read as the wireless rate (a
 "wireless performance" consumer uses `wireless.stats`, and reports
 unmeasured while `interval_count` is 0).
 
+**Timing histograms** (audit E-12c). Every `stats` object (per
+controller, `aggregate`, `wireless.stats`) also carries `queue_hist`
+and `send_hist`:
+
+```json
+{ "edges_ms": [0.5,1,2,4,8,12,16,17,20,25,33,40,50,75,100,250],
+  "counts":   [0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0],
+  "total": 5, "p50": 33, "p95": 33, "p99": 33,
+  "provenance": "transport_measured" }
+```
+
+- `queue_hist` — frame `sample_time` → send start (pipeline queue plus
+  the lane's budget wait). Synthetic frames (playback bakes,
+  stop-black, resends) and unstamped frames are excluded: their
+  `sample_time` is not a scene sample.
+- `send_hist` — send start → transport completion (the SDK write).
+  The synchronous drain path stamps completion with the caller's
+  time, so it records 0 there; the production lane workers stamp it
+  after the send returns.
+- Both are recorded for transport-completed sends only (suppressed
+  and transport-rejected frames record nothing), from stamps the
+  pipeline already takes — no extra clock reads. `provenance` is the
+  stats' own (`transport_measured`): *accepted by the transport*,
+  never "displayed".
+- `counts` has `edges_ms.length + 1` entries. Bucket `i` holds values
+  in `(edges_ms[i-1], edges_ms[i]]` (bucket 0 is `[0, 0.5]`); the last
+  entry is the overflow (> 250 ms). The edges straddle 16.7 ms and
+  33.3 ms so 60 Hz tick slip and wireless pacing are visible.
+- `p50`/`p95`/`p99` are the **upper edge** of the bucket the
+  percentile falls in, in ms — bucket resolution, not interpolated.
+  `null` when `total` is 0, or (with `total` > 0) when the percentile
+  falls in the overflow bucket ("> 250 ms").
+- Cumulative since engine start or the last `reset_stats`
+  (OUTPUT_COMMAND), which clears every histogram but none of the
+  counters above.
+- `frame_status` carries the summary only (`{total, p50, p95, p99,
+  provenance}` — no `edges_ms`/`counts`) to keep the ~30 Hz feed
+  small.
+
 `map_stats` (`null` when no device mapper is wired) is the last
 scene→frame mapping pass:
 `{objects_total, objects_bound, objects_writable, objects_emitted,
@@ -355,10 +397,43 @@ counters alone cannot distinguish from "nothing submitted".
 sdk:{...}, playback:{...}, power:{...}, reactive:{...}, ownership:{...}|null,
 output:{...}|null, ipc:{sessions_active, sessions_total, messages_in, responses_out, events_sent,
 events_dropped, events_oversize, queued_events, resync_bytes, rejected_hellos,
-rate_limited, refused_busy}, output_policy:{...}|null}` (`sessions_total`
+rate_limited, refused_busy}, output_policy:{...}|null,
+automation:{...}|null, supervisor:{...}|null}` (`automation` is the R-2 AUTOMATION body, `supervisor` the R-9 SUPERVISOR body; `sessions_total`
 counts every accepted session since start; `events_oversize` counts events
 whose body exceeded the 1 MiB cap and were never sent — they are in
 `events_dropped` too).
+
+STATE's `scene` (the SCENE body above) also carries `tick_hist` (audit
+E-12c): the scene clock's actual tick-to-tick interval, the same
+histogram shape as `queue_hist` without `provenance` — it is the
+engine's own clock, not a transport measurement. Every tick counts,
+including gated (display-off), held and no-scene ticks; the first tick
+after a worker start only seeds the baseline. The SCENE reply and the
+`scene` event do not carry it. Cleared by `reset_stats`.
+
+**SUPERVISOR** (STATE field, R-9; `null` when no supervisor is wired) —
+`{enabled, backend_restarts, wedge_restarts, last_reason, last_at,
+budget_exhausted, seq, history:[{at, action, reason, detail, pid}]}`.
+The engine's backend supervisor (`SupervisorPolicy.h`): `enabled` is
+true only in the managed layout (`--sdk` + `--backend-exe` +
+`--backend-config`). `backend_restarts` counts backend spawns (dead
+backend, and the respawn after a wedge close); `wedge_restarts`
+counts closes of the verified-own backend for a wireless group that
+stayed `wedged` + `state:"failed"` for 8 minutes (never
+`foreign_master`). `last_reason` is `backend_dead` or
+`wireless_wedge` (`null` before any action); `last_at` is the UTC
+ISO-8601 time of the last spawn/close. `budget_exhausted` is true
+while the spawn budget (5 per hour) or the wedge budget (2 per hour)
+is spent. `seq` counts actions (notices included) since engine start;
+`history` holds the last 16 actions. Actions: `backend_spawned`,
+`backend_spawn_failed`, `backend_closed_for_wedge`,
+`backend_close_failed`, `notice` (a refusal — `reason`
+`spawn_refused` when a foreign or unverifiable process holds :6744 or
+a foreign `OpenRGB.exe` runs, `budget_exhausted`,
+`wedge_unverifiable` — reported once per episode). The supervisor
+never acts while the engine stops or `state\openrgb2.stopping` (written
+by `stop-openrgb2.ps1`) is younger than 10 minutes. Each action is
+also one line in `state\supervisor.log`.
 
 **OUTPUT_POLICY** (STATE field, audit E-12b; `null` when no policy is
 wired) — what the LEDs show when the engine exits and while it has
@@ -597,7 +672,7 @@ applied scene or a workspace draft (nothing goes dirty, nothing is
 committed). Every request carries `{verb:"<name>", ...args}`; an
 unknown verb → `bad_request`; an engine without the control →
 `unavailable`. The four output verbs reply **OUTPUT** (`0x8107`) with
-the full body below; the two policy verbs reply `OK` (see the end of
+the full body below; the two policy verbs and `reset_stats` reply `OK` (see the end of
 the table):
 
 | verb | body | effect |
@@ -608,11 +683,14 @@ the table):
 | `set_hold` | `{on: bool}` | pause: live scene clock frozen at the current frame (no input pull); an uploaded loop gets control `paused`. Release resumes from the paused frame and drops input queued across the hold |
 | `get_policy` | `{}` | E-12b: reply `OK {output_policy}` (the STATE OUTPUT_POLICY body). Works without the runtime output control; `unavailable` when no policy is wired |
 | `set_policy` | `{on_exit?, on_idle?, per_controller?}` | E-12b: **replaces** the whole policy (an absent field returns to `hold` / no rules) and persists it in the engine profile; reply `OK {output_policy}`. Invalid shape → `bad_request` (policy unchanged); a failed profile save → `internal` (policy unchanged). Takes effect at the next exit / idle entry |
+| `reset_stats` | `{}` | E-12c: clears the timing histograms (STATE `scene.tick_hist`, every DELIVERY_STATS `queue_hist`/`send_hist`); counters and interval stats are kept. Measurement state only — no output effect. Reply `OK {reset:true}`; works without the runtime output control |
 
 Arbitration (decided once, engine-side):
 `effective = blackout ? 0 : master × min(contributors)`. Contributors
-are named runtime slots (R-4 `schedule` / `lock` / `idle`); R-1 sets
-none. Live lanes apply `effective` on the next worker tick (it
+are named runtime slots, set by the R-4 dimming rules (`schedule` /
+`lock` / `idle`, AUTOMATION_COMMAND `set_dimming`); `contributors`
+reports each slot's TARGET level (a slot ramping back up to release is
+already gone) while `effective` is the live, ramped scale. Live lanes apply `effective` on the next worker tick (it
 multiplies the document `brightness`; unmapped LEDs keep their
 colors). **Uploaded loops are not scaled** (playback params carry no
 brightness): `set_blackout` sends them control `stopped` (stop-black)
@@ -637,6 +715,86 @@ control is wired — and `output` event body) —
 Numbers are rounded to four decimals. `uploaded_unscaled` is true
 while an uploaded loop is requested or applied: the UI should say
 that brightness does not reach it (Off and pause still do).
+
+**AUTOMATION_COMMAND** (`0x0110`, requires `automation_v1`) — R-2
+engine-side automation. System-wide hotkeys are registered by the
+**engine** (`RegisterHotKey` on its own thread), so they work in any
+foreground app and while the UI is closed. Nothing is bound by default
+(opt-in); `proposed` only suggests chords. Every request carries
+`{verb:"<name>", ...args}`; an unknown verb → `bad_request`; an engine
+without automation → `unavailable`. Every verb replies **AUTOMATION**
+(`0x8108`) with the full body below:
+
+| verb | body | effect |
+| --- | --- | --- |
+| `get` | `{}` | read only |
+| `set_dimming` | `{schedule?:[{days?:[0..6], start:"HH:MM", end:"HH:MM", level}], lock?:{enabled?, level?}, idle?:{enabled?, after_s?, level?, skip_fullscreen?}, ramp_ms?, restore_ms?}` | R-4: **replaces** the dimming rules (an absent section returns to its default: no windows, lock/idle off) and persists them (`automation.dimming`). Days are 0 = Sunday .. 6 = Saturday (absent/empty = every day); a window with `start` > `end` crosses midnight and belongs to its start day; `start` = `end` is refused. Levels are scales in [0, 1] (0 = off); at most 8 windows; `after_s` 30 .. 86400; `ramp_ms` / `restore_ms` 0 .. 10000 (defaults 600 / 0). Any violation → `bad_request` (nothing changes); a failed profile save → `internal` |
+| `set_hotkeys` | `{bindings:[{action, chord}], cycle?:[workspace id], brightness_step?: 0.01..0.5}` | **replaces** the binding set, persists it (`engine-state.json` member `automation`) and registers it. `action` ∈ `next_workspace`, `prev_workspace`, `brightness_up`, `brightness_down`, `lights_toggle`, `pause_toggle`. `chord` is `"Ctrl+Alt+Shift+PgDn"`-style text (modifiers Ctrl/Alt/Shift/Win, case-insensitive; canonicalized in the reply). At least one of Ctrl/Alt/Win, no duplicate chord, at most 16 bindings; any violation → `bad_request` (nothing changes). `cycle` / `brightness_step` replace the stored value only when given. A failed profile save → `internal` (nothing changes) |
+
+A chord the OS refuses is **not** a verb failure: its entry reports
+`state:"in_use"` (held by another app or reserved by Windows) or
+`"invalid"`, with a `detail`, and never fires. Actions run on the
+engine's owner loop: `brightness_up/down` step the R-1 master by
+`brightness_step` (clamped to [0, 1]); `lights_toggle` toggles blackout;
+`pause_toggle` toggles hold; `next/prev_workspace` cycle `cycle` (ids
+that no longer exist are skipped) or every managed workspace in `list`
+order, enqueueing the `reload {id}` workspace job under internal
+session 0 — its terminal job record and the published-snapshot
+`workspace` event reach every subscriber. Presses within 1 s of the
+previous one collapse: the first press reloads at once, the burst ends
+with one reload of the latest target (none if it is the one already
+loading).
+
+**AUTOMATION** (AUTOMATION_COMMAND reply, STATE field — `null` when no
+automation is wired — and `automation` event body) —
+
+```json
+{ "hotkeys": [ { "action": "lights_toggle", "chord": "Ctrl+Alt+Shift+End",
+                 "state": "ok" },
+               { "action": "next_workspace", "chord": "Ctrl+Alt+Shift+PgDn",
+                 "state": "in_use", "detail": "in use by another app or reserved by Windows" } ],
+  "actions": ["next_workspace", "prev_workspace", "brightness_up",
+              "brightness_down", "lights_toggle", "pause_toggle"],
+  "proposed": { "next_workspace": "Ctrl+Alt+Shift+PgDn", "...": "..." },
+  "cycle": [], "brightness_step": 0.1, "registrar": true,
+  "max_hotkeys": 16 }
+```
+
+`state` ∈ `ok`, `in_use`, `invalid` (also a persisted binding that no
+longer validates), `unavailable` (`registrar:false` — no hotkey
+registrar on this engine). R-3 adds a section to this body.
+
+R-4 adds `dimming`:
+
+```json
+"dimming": {
+  "config": { "schedule": [ { "days": [5, 6], "start": "23:30",
+                              "end": "07:00", "level": 0.3 } ],
+              "lock": { "enabled": true, "level": 0.0 },
+              "idle": { "enabled": true, "after_s": 600, "level": 0.3,
+                        "skip_fullscreen": true },
+              "ramp_ms": 600, "restore_ms": 0 },
+  "configured": true,
+  "active": { "schedule": 0.3, "lock": null, "idle": null },
+  "effective": 0.3, "session_locked": false }
+```
+
+`config` is the stored rule set (defaults, `configured:false`, until a
+`set_dimming`). `active` names each rule that holds now with its level
+(`null` = not active). Each active rule is an OutputControl contributor
+(`schedule`, `lock`, `idle` — the OUTPUT body's `contributors`), so
+`effective = master × min(active levels)`: overlapping rules give the
+strongest dim, never a product. A dim ramps down over `ramp_ms`; a rule
+that lifts ramps back over `restore_ms` (0 = at once). The schedule
+reads the engine's local wall clock (plain HH:MM — on a DST
+spring-forward day a start inside the skipped hour begins at the next
+valid minute); lock follows the interactive session's lock/unlock; idle
+is the time since the last keyboard/mouse input (GetLastInputInfo) and
+never counts while a fullscreen app runs (`skip_fullscreen`). A
+level-0 rule stops an uploaded loop like `set_blackout`; any other
+level leaves it running, unscaled (`uploaded_unscaled`). The body moves
+— and the `automation` event fires — when the config changes or a rule
+starts or stops holding.
 
 **REACTIVE** (STATE/DIAGNOSTICS field and `reactive` event body) —
 
@@ -963,6 +1121,8 @@ matches the corresponding pull body:
 | `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |
 | `ownership` | OWNERSHIP body (§ STATE) | R-10: the periodic competitor re-scan (~5 s) found a writer appear or clear; SUBSCRIBE initial push carries the current report (`null` when none is wired) |
 | `output` | OUTPUT body (§5) | R-1: once per OUTPUT_COMMAND change (any session), and when `uploaded_unscaled` flips with the playback mode; SUBSCRIBE initial push carries the current body (`null` when no control is wired) |
+| `automation` | AUTOMATION body (§5) | R-2: once per AUTOMATION_COMMAND change (any session), at engine start when persisted bindings register, and (R-4) when a dimming rule starts or stops holding; SUBSCRIBE initial push carries the current body (`null` when not wired). A hotkey press itself is reported through the event of what it changed (`output`, `workspace`) |
+| `supervisor` | live: `{action, reason, detail, at, seq, status}`; SUBSCRIBE initial push: `{seq, status}` (no `action`) — `status` is the SUPERVISOR body (§5, `null` when unwired) | R-9: once per backend-supervisor action (spawn, wedge close, failure, or a once-per-episode notice). Clients announce only events that carry `action`, so a reconnect never re-announces an old restart |
 | `frame_status` | `{aggregate, wireless, controllers:[{key,delivered,lane,wireless,suppressed,owned,pending,sequence,colors,stats}]}` | ≤ ~30 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses. `wireless` is the wireless lane's own `{key,stats,suppressed,pending,owned}` summary (`null` when no wireless lane exists — the `aggregate` mixes wired lanes and is never a wireless measure). Every enumerated controller produces a `controllers` row: a lane that never delivered reports `delivered:false` + zeroed `stats` + empty `colors` (`lane:false` when the pipeline has no lane for it) — a "bound but never delivered" controller is a visible row, not an absent one |
 | `workspace` | `get` body (initial snapshot AND published-state change) / job status record (terminal job event) | SUBSCRIBE initial push; every published-state change (adopt, commit, restore, resource install/remove) — so a session whose snapshot raced boot re-adoption re-converges; a workspace job reaching a terminal state |
 | `preview` | `{type:"status"\|"frame", ...}` (below) | ≤ 30 Hz, **session-targeted** — delivered only to the session that owns the preview, never broadcast |

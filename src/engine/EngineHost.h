@@ -47,6 +47,7 @@
 
 #pragma once
 
+#include "Automation.h"
 #include "CalibrationSession.h"
 #include "DeliveryPipeline.h"
 #include "DeviceMapper.h"
@@ -60,6 +61,7 @@
 #include "ProfileStore.h"
 #include "ReactiveInputs.h"
 #include "SingleInstance.h"
+#include "SupervisorPolicy.h"
 #include "WorkspaceService.h"
 
 #include "EngineService.h"
@@ -69,11 +71,13 @@
 #include "OpenRgbClient.h"
 #include "Transport.h"
 
+#include "WinHotkeys.h"
 #include "WinPowerMonitor.h"
 #include "WinTimerResolution.h"
 
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -83,6 +87,14 @@
 
 namespace openrgb2
 {
+
+/* R-9: one backend launch the supervisor asks for. */
+struct BackendLaunch
+{
+    std::string              exe;     /* --backend-exe             */
+    std::vector<std::string> args;    /* BackendServerArgs(port)   */
+    std::string              cwd;     /* --backend-config dir      */
+};
 
 struct EngineHostOptions
 {
@@ -214,6 +226,50 @@ struct EngineHostOptions
     std::chrono::milliseconds   output_idle_after{ 5000 };
     std::function<TimePoint()>  output_clock;
 
+    /* R-2 system-wide hotkeys (Automation + WinHotkeys). True
+       wires the RegisterHotKey thread — it only starts once a
+       binding exists (nothing is bound by default). An
+       injected hotkey_registrar wins over the platform one
+       (the offline suites pass a fake, or hotkeys=false for
+       none: bindings then report "unavailable"). */
+    bool                              hotkeys = true;
+    std::shared_ptr<IHotkeyRegistrar> hotkey_registrar;
+
+    /* R-4 dimming sources (Automation::Deps). Empty = the
+       platform: GetLastInputInfo, SHQueryUserNotificationState,
+       the local wall clock. Each is only consulted while a rule
+       needs it, so a test that sets no dimming never reaches
+       the desktop. */
+    std::function<double()>    idle_seconds;
+    std::function<bool()>      fullscreen;
+    std::function<LocalTime()> wall_clock;
+    /*---- R-9 backend supervisor ----------------------------*\
+    | Active only in the managed layout: sdk_enabled AND both   |
+    | backend_exe and backend_config_dir set (the launcher      |
+    | passes them). Ticked from PollOnce. Decisions are         |
+    | SupervisorPolicy's; every action is logged, counted in    |
+    | STATE.supervisor and pushed as a "supervisor" event.      |
+    | Seams (empty = live): the policy clock, the probe         |
+    | (listener + process table, image-path verified), the      |
+    | launcher (CreateProcess, hidden, the script's exact       |
+    | arguments and working dir) and the closer (re-verified    |
+    | image, then the backend's shutdown event / WM_CLOSE —     |
+    | never a kill). The stop marker defaults to                |
+    | <backend_config_dir>\..\openrgb2.stopping, written by    |
+    | stop-openrgb2.ps1 for the length of a stop.               |
+    \*-------------------------------------------------------*/
+    bool                         backend_supervise = true;
+    SupervisorPolicyOptions      supervisor_policy;
+    std::function<TimePoint()>   supervisor_clock;
+    std::function<BackendProbe()> backend_probe;
+    std::function<bool(const BackendLaunch&, uint32_t& pid,
+                       std::string& err)> backend_launcher;
+    std::function<bool(uint32_t pid, std::string& err)>
+                                 backend_closer;
+    std::string                  stop_marker_path;
+    /* Action log; empty = <backend_config_dir>\..\supervisor.log. */
+    std::string                  supervisor_log_path;
+
     /* Log sink (default: stderr with the engine prefix). */
     std::function<void(const std::string&)> log;
 };
@@ -298,6 +354,8 @@ public:
     sdk::OpenRgbClient*      GetSdk()        { return sdk_.get(); }
     PowerLifecycle*          GetLifecycle()  { return lifecycle_.get(); }
     ReactiveInputs*          GetReactive()   { return reactive_.get(); }
+    /* R-2/R-4: hotkeys + dimming rules (null before Start). */
+    Automation*              GetAutomation() { return automation_.get(); }
     /* A copy: the maintenance tick re-scans while IPC threads
        read the report (B-1). */
     OwnershipReport          Ownership() const;
@@ -347,6 +405,11 @@ public:
     { return output_idle_.load(); }
     std::vector<OutputPolicyOutcome> IdleReport() const;
 
+    /* R-9: STATE "supervisor" — {enabled, backend_restarts,
+       wedge_restarts, last_reason, last_at, budget_exhausted,
+       seq, history[]} (docs/ipc-protocol.md). Thread-safe. */
+    nlohmann::json SupervisorJson() const;
+
     void Log(const std::string& line) const;
 
 private:
@@ -391,6 +454,15 @@ private:
        bounded retries per observed count, then Enumerate so
        the new topology lands in `snaps` this same poll. */
     void ReconcileZoneSizes(std::vector<DeviceSnapshot>& snaps);
+
+    /* R-9: one supervisor tick (PollOnce). */
+    void PollSupervisor();
+    BackendProbe ProbeBackend() const;
+    bool StopMarkerFresh() const;
+    void RecordSupervisorAction(const std::string& action,
+                                const SupervisorDecision& d,
+                                uint32_t pid);
+    TimePoint SupervisorNow() const;
 
     /* Event-interest gate for host-side event producers: true
        only while an IPC client subscribes to `kind`
@@ -439,6 +511,14 @@ private:
        capturing `this` in ~EngineService) dies before it — the
        hook clear can never touch freed state. */
     std::unique_ptr<WorkspaceService>        workspaces_;
+    /* R-2: the RegisterHotKey thread (null when opts_.hotkeys
+       is off or a registrar was injected) and the automation
+       owner. Declared after workspaces_/output_ (its deps) and
+       BEFORE service_, which holds a raw Automation*. */
+    std::shared_ptr<platform::WinHotkeys>    win_hotkeys_;
+    std::unique_ptr<Automation>              automation_;
+    /* Owner loop: queued hotkeys + debounce (fast tick). */
+    void PollAutomation(TimePoint now);
     std::unique_ptr<ipc::EngineService>      service_;
     std::unique_ptr<ipc::IpcServer>          ipc_server_;
     std::unique_ptr<ipc::NamedPipeListener>  cmd_listener_;
@@ -513,6 +593,21 @@ private:
     mutable std::mutex                       output_mutex_;
     std::map<DeviceKey, PriorMode>           prior_modes_;
     std::vector<OutputPolicyOutcome>         exit_outcomes_;
+
+    /* R-9 backend supervisor state (null = not managed). */
+    struct SupervisorEntry
+    {
+        std::string at;
+        std::string action;
+        std::string reason;
+        std::string detail;
+        uint32_t    pid = 0;
+    };
+    std::unique_ptr<SupervisorPolicy>        supervisor_;
+    mutable std::mutex                       supervisor_mutex_;
+    std::deque<SupervisorEntry>              supervisor_history_;
+    uint64_t                                 supervisor_seq_ = 0;
+    std::string                              supervisor_last_at_;
 };
 
 } /* namespace openrgb2 */

@@ -16,6 +16,7 @@ set_target_properties(openrgb2-ui PROPERTIES AUTORCC ON)
 target_link_libraries(openrgb2-ui PRIVATE
     openrgb2_ui
     openrgb2_uiplugin
+    openrgb2_supervise
     Qt6::QuickControls2
     Qt6::Widgets
     Qt6::Network)

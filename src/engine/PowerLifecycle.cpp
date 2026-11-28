@@ -31,6 +31,11 @@ PowerLifecycle::PowerLifecycle(Deps deps, Config cfg)
 
 void PowerLifecycle::PostEvent(Event e)
 {
+    if(e == Event::SessionLock || e == Event::SessionUnlock)
+    {
+        /* R-4: accepted, never queued — see the enum. */
+        return;
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if(pending_.size() >= cfg_.max_pending_events)
@@ -350,6 +355,10 @@ void PowerLifecycle::ApplyEvent(Event e)
         }
         return;
     }
+
+    case Event::SessionLock:
+    case Event::SessionUnlock:
+        return;                  /* R-4: not a power state */
     }
 }
 

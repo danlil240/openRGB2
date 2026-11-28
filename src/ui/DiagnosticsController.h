@@ -29,7 +29,9 @@
 |||   pull (GET_STATE / DIAG_GET / GET_DELIVERY_STATS /    ||
 |||   GET_SNAPSHOTS). Nothing on this page mutates engine  ||
 |||   or hardware state — identify-style probes belong to  ||
-|||   the Layout view.                                     ||
+|||   the Layout view. The one exception (E-12c):          ||
+|||   resetTiming() clears the engine's measurement        ||
+|||   histograms — no output/scene/hardware effect.        ||
 |||                                                           ||
 |||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 ||\*---------------------------------------------------------*/
@@ -124,6 +126,22 @@ class DiagnosticsController : public QObject
     Q_PROPERTY(QVariantList eventLog READ eventLog
                    NOTIFY eventLogChanged)
 
+    /* Audit E-12c timing card: the engine's cumulative timing
+       histograms, pulled with STATE / DELIVERY_STATS on the
+       page's refresh cadence:
+         {can_reset,
+          tick:<hist>,                       STATE scene.tick_hist
+          aggregate:{queue:<hist>, send:<hist>},
+          lanes:[{name, wireless, queue:<hist>, send:<hist>}]}
+       <hist> = HistogramView: {available, measured, total,
+       p50/p95/p99 (ms or null), p50_text/p95_text/p99_text,
+       provenance, bars:[{label, count, frac}]}. Percentiles are
+       bucket upper edges ("17 ms"); a null percentile with
+       samples reads "> 250 ms"; no samples reads "—" —
+       unmeasured, never 0. Transport-measured, never
+       "displayed". */
+    Q_PROPERTY(QVariantMap timing READ timing NOTIFY timingChanged)
+
     Q_PROPERTY(QString lastExport READ lastExport
                    NOTIFY lastExportChanged)
     Q_PROPERTY(QString exportError READ exportError
@@ -149,6 +167,12 @@ public:
     Q_INVOKABLE bool exportDiagnostics(const QString& path);
     Q_INVOKABLE QString defaultExportPath() const;
     Q_INVOKABLE void   clearEventLog();
+    /* E-12c: OUTPUT_COMMAND reset_stats, then a re-pull — the
+       ONE non-read verb on this page. It clears measurement
+       histograms only (no output, scene or hardware effect) so
+       a before/after comparison starts clean. False when the
+       engine does not advertise output_control_v1. */
+    Q_INVOKABLE bool   resetTiming();
 
     /*---- R-10 guided fix steps ------------------------------*/
     /* Opens one WHITELISTED system surface for the ownership
@@ -178,6 +202,7 @@ public:
     QVariantList controllers() const       { return controllers_; }
     QVariantList unresolvedBindings() const{ return unresolved_; }
     QVariantMap  ownership() const         { return ownership_; }
+    QVariantMap  timing() const            { return timing_; }
     QVariantList eventLog() const          { return event_log_; }
     QString      lastExport() const        { return last_export_; }
     QString      exportError() const       { return export_error_; }
@@ -200,12 +225,19 @@ public:
     static void     RedactJson(nlohmann::json& j);
     nlohmann::json  ExportBundle() const;
 
+    /* E-12c: one wire histogram ({edges_ms, counts, total, p50,
+       p95, p99, provenance?}) -> the QML view map documented on
+       the `timing` property. An absent/empty map (an engine
+       without the fields) -> available:false. */
+    static QVariantMap HistogramView(const QVariantMap& wire);
+
 signals:
     void activeChanged();
     void refreshIntervalMsChanged();
     void ratesChanged();
     void controllersChanged();
     void ownershipChanged();
+    void timingChanged();
     void eventLogChanged();
     void lastExportChanged();
     void exportErrorChanged();
@@ -214,6 +246,7 @@ private:
     void RecomputeRates();
     void RecomputeControllers();
     void RecomputeOwnership();
+    void RecomputeTiming();
     void AppendEvent(const QString& kind, const QString& detail);
     void OnEventReceived(const QString& kind,
                          const QVariantMap& data);
@@ -228,6 +261,7 @@ private:
     QVariantList   controllers_;
     QVariantList   unresolved_;
     QVariantMap    ownership_;
+    QVariantMap    timing_;
     QVariantList   event_log_;
     /* One change signal per event-loop turn — a wire burst
        rebuilds the QML tail once, not once per event

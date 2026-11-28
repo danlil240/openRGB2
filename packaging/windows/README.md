@@ -98,8 +98,16 @@ per-file `signed` flag and a `signing` block when a package was signed.
 - `build-and-deploy.ps1` — one-command wrapper: CMake build (fails
   early on a `Qt6_DIR-NOTFOUND` cache) → pinned backend check
   (`-BuildBackend` runs the qmake recipe from `vendor\OpenRGB`) →
+  backend staleness check (the `openrgb2-backend.stamp` next to
+  `OpenRGB.exe` must match a hash of `vendor/OpenRGB` +
+  `src/core/playback`; a stale or unstamped backend is rebuilt with
+  `-BuildBackend`, staged with a warning with `-AllowStaleBackend`,
+  and otherwise fails with "backend is stale") →
   with `-InstallDir`, stop the running install → `stage-release.ps1`
   → `update-openrgb2.ps1` into `-InstallDir`.
+- `backend-stamp.ps1` — the stamp writer and staleness check
+  (dot-sourced by `build-and-deploy.ps1` and
+  `build-all-and-install.ps1`; functions only, not staged).
 - `..\..\scripts\build-all-and-install.ps1` — repo-to-desktop-icon
   wrapper: builds and stages as you, and asks UAC only to stop and
   deploy the elevated install (plus a sweep when an elevated dev-run

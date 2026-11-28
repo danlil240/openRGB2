@@ -228,6 +228,13 @@ public:
                         DeliveryStats& out) const;
     DeliveryStats Stats() const override;
 
+    /* Audit E-12c: clears the queue/send timing histograms of
+       every lane and the aggregate — a before/after comparison
+       starts clean. The cumulative counters and interval stats
+       are left alone (the Dashboard's delivery rate reads
+       them). */
+    void          ResetTimingStats();
+
     /* The last frame handed to the transport for `controller`
        — the delivered-state preview (plan section 5: preview
        and output use the same sampled colors). False when the

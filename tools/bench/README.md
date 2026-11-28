@@ -47,6 +47,7 @@ Layout:
 | `bench_producer.cpp` | CLI, workload patterns, rate sweep, state capture/restore, CSV output |
 | `skew_bench.cpp` | M5 cross-device skew harness (below) |
 | `skew_stats.h` | Pure skew/distribution aggregation; offline-tested by `tests/backend/skew_stats_test.cpp` |
+| `loop_size.cpp` | R-11 offline loop-size measurement (below) |
 
 SDK send success is not hardware confirmation — physical presentation
 requires the measurement method in `docs/benchmarks/baseline.md` §6.5.
@@ -81,3 +82,21 @@ means **transport-admitted, never displayed**; the RTT probe
 connection) is the protocol's only true submit→ack observable.
 Physical LED skew requires hardware observation — see
 `docs/benchmarks/skew-result.md`.
+
+## Loop-size measurement (R-11)
+
+`loop_size` is offline only (no SDK, no hardware). It compiles every
+packaged look for the 120-LED SL Wireless group into one uploaded loop:
+`AnalyzeLookPeriod` for the cycle, `EffectEngine` for the frames,
+`BuildLoopFromRenderer` for the frame count and tinyuz payload. It
+prints Markdown tables of T, N, nominal fps and compressed bytes
+against the 12 KiB / 4096-frame limits, both without and with speed
+snapping, plus a sensitivity table, a cycle-length sweep, the nine
+backend presets as a baseline, and a remix-seed sweep.
+
+```bash
+build/tools/bench/Release/loop_size.exe              # ~20 s
+build/tools/bench/Release/loop_size.exe --seeds 0    # skip the seed sweep
+```
+
+Results and their reading: `docs/benchmarks/loop-size.md`.

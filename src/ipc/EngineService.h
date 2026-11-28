@@ -35,6 +35,7 @@
 #include "WorkspaceCommands.h"
 #include "WorkspaceTransfer.h"
 
+#include "Automation.h"
 #include "CalibrationSession.h"
 #include "DeliveryPipeline.h"
 #include "DeviceMapper.h"
@@ -162,6 +163,13 @@ public:
            controls). */
         OutputControl*      output = nullptr;
 
+        /* R-2: engine-side automation — the AUTOMATION_COMMAND
+           verb space (get / set_hotkeys; R-4 set_dimming), the
+           "automation" event, STATE "automation" and the
+           "automation_v1" WELCOME capability. Nullptr ->
+           Unavailable, STATE null, no capability. */
+        Automation*         automation = nullptr;
+
         /* IPC-side queue/counter source (IpcServer::Stats) —
            diagnostics exposes queue depths, not guesses. */
         std::function<IpcServerStats()> server_stats;
@@ -222,6 +230,11 @@ public:
            can say "lights will turn off". Empty -> STATE null,
            QUIT omits the field. */
         std::function<nlohmann::json()> output_policy;
+        /* R-9: the backend supervisor's status (EngineHost::
+           SupervisorJson) — STATE "supervisor" and the
+           "supervisor" event's SUBSCRIBE snapshot. Empty ->
+           STATE null (no supervisor wired). */
+        std::function<nlohmann::json()> supervisor;
         /* E-12b x R-1: OUTPUT_COMMAND set_policy persists through
            this (EngineHost::SetOutputPolicy: false + err when the
            profile save fails, state unchanged). The service
@@ -357,6 +370,14 @@ public:
        body — the engine's OutputControl changed hook calls
        this after applying a change. */
     void EmitOutput();
+    /* R-2: emits the "automation" event with the current
+       AUTOMATION body — Automation's changed hook calls it. */
+    void EmitAutomation();
+    /* R-9: emits the "supervisor" event — the host calls this
+       once per supervisor action (spawn, wedge close, refusal
+       or exhausted budget) with {action, reason, detail, at,
+       seq, status}. */
+    void EmitSupervisor(const nlohmann::json& body);
 
     /*---- IIpcService ---------------------------------------*/
     nlohmann::json OnWelcome() override;
@@ -506,10 +527,31 @@ private:
     IpcReply       OutputSetMaster(const nlohmann::json& body);
     IpcReply       OutputSetBlackout(const nlohmann::json& body);
     IpcReply       OutputSetHold(const nlohmann::json& body);
+    /* E-12c: clears the timing histograms (scene tick + every
+       lane's queue/send). Reply OK {reset:true}. */
+    IpcReply       OutputResetStats(const nlohmann::json& body);
     /* E-12b: reply OK {output_policy} — not the OUTPUT body, so a
        client's OUTPUT store is never overwritten by a policy. */
     IpcReply       OutputGetPolicy(const nlohmann::json& body);
     IpcReply       OutputSetPolicy(const nlohmann::json& body);
+
+    /* R-2 AUTOMATION_COMMAND surface — same table shape as
+       OutputVerbs; every reply is the full AUTOMATION body. */
+    using AutomationVerbFn =
+        IpcReply (EngineService::*)(const nlohmann::json&);
+    struct AutomationVerb
+    {
+        const char*      name;
+        AutomationVerbFn fn;
+    };
+    static const std::vector<AutomationVerb>& AutomationVerbs();
+    IpcReply       HandleAutomationCommand(const std::string& verb,
+                                           const nlohmann::json& body);
+    IpcReply       AutomationGet(const nlohmann::json& body);
+    IpcReply       AutomationSetHotkeys(const nlohmann::json& body);
+    IpcReply       AutomationSetDimming(const nlohmann::json& body);  /* R-4 */
+    /* Null when no Automation is wired. */
+    nlohmann::json AutomationJson() const;
     IpcReply       HandleIdentify(const nlohmann::json& body);
     /* studio-import Task 3 gate: HandleLayoutMutate refuses
        lossy legacy edits while a managed workspace is active
@@ -561,13 +603,18 @@ private:
        measured", never a wired number under a wireless
        label. */
     nlohmann::json WirelessLaneJson(
-        const std::vector<DeviceSnapshot>& snaps) const;
+        const std::vector<DeviceSnapshot>& snaps,
+        bool full_timing = true) const;
+    /* E-12c: the scene clock's tick-interval histogram (STATE
+       scene.tick_hist). */
+    nlohmann::json TickHistJson() const;
     /* IPC server counters (IpcServer::Stats provider) —
        shared by STATE and DIAGNOSTICS so DIAG never re-runs
        the whole StateJson for one field (QA F12). */
     nlohmann::json IpcStatsJson() const;
     nlohmann::json OwnershipJson() const;
     nlohmann::json OutputPolicyJson() const;     /* E-12b */
+    nlohmann::json SupervisorJson() const;       /* R-9 */
     /* The backend's own read-only diagnostics pipe: the
        SDK client's cached LIANLI_WIRELESS_STATUS snapshot
        (state-lock read only — this never queues behind

@@ -39,6 +39,212 @@ static int failures = 0;
 #define CHECK(x) do { ++checks; if(!(x)) { ++failures; \
     std::printf("FAIL line %d: %s\n", __LINE__, #x); } } while(0)
 
+/*---- R-2 AUTOMATION_COMMAND / "automation" event --------------*/
+
+/* Reports in_use for Ctrl+Alt+B, ok for everything else. */
+struct BusyRegistrar : IHotkeyRegistrar
+{
+    size_t applies = 0;
+    std::vector<HotkeyResult>
+        Apply(const std::vector<HotkeyRequest>& set) override
+    {
+        ++applies;
+        std::vector<HotkeyResult> out;
+        for(const HotkeyRequest& r : set)
+        {
+            const bool busy = r.mods == (kModCtrl | kModAlt) &&
+                              r.vk == 'B';
+            out.push_back({ r.id,
+                            busy ? HotkeyState::InUse : HotkeyState::Ok,
+                            busy ? "in use by another app" : "" });
+        }
+        return out;
+    }
+};
+
+static void TestAutomationCommand()
+{
+    /* Not wired: honest Unavailable, no capability. */
+    {
+        Engine        e0;
+        EngineService s0(e0, EngineService::Deps{});
+        IpcReply r = s0.Dispatch(MsgType::AutomationCommand,
+            nlohmann::json::object({{ "verb", "get" }}));
+        CHECK(r.code == ErrCode::Unavailable);
+        bool has = false;
+        for(const auto& c : s0.OnWelcome()["capabilities"])
+        {
+            has = has || c == "automation_v1";
+        }
+        CHECK(!has);
+        CHECK(s0.OnWelcome()["state"]["automation"].is_null());
+    }
+
+    OutputControl oc;
+    auto reg = std::make_shared<BusyRegistrar>();
+    Automation::Deps ad;
+    ad.output    = &oc;
+    ad.registrar = reg;
+    std::vector<AutomationConfig> saved;
+    ad.persist = [&saved](const AutomationConfig& c, std::string&)
+                 { saved.push_back(c); return true; };
+    Automation automation(std::move(ad));
+
+    Engine engine;
+    EngineService::Deps d;
+    d.automation = &automation;
+    EngineService svc(engine, d);
+    std::vector<IpcEvent> ev;
+    svc.SetEventSink([&ev](const IpcEvent& e) { ev.push_back(e); });
+
+    const nlohmann::json w = svc.OnWelcome();
+    bool has = false;
+    for(const auto& c : w["capabilities"])
+    {
+        has = has || c == "automation_v1";
+    }
+    CHECK(has);
+    CHECK(w["state"]["automation"].is_object());
+    CHECK(w["state"]["automation"]["hotkeys"].empty());
+
+    IpcReply r = svc.Dispatch(MsgType::AutomationCommand,
+        nlohmann::json::object({{ "verb", "get" }}));
+    CHECK(r.code == ErrCode::Ok);
+    CHECK(r.reply_type == MsgType::Automation);
+    CHECK(r.body["hotkeys"].is_array() && r.body["hotkeys"].empty());
+    CHECK(r.body["registrar"] == true);
+    CHECK(r.body["proposed"]["lights_toggle"] == "Ctrl+Alt+Shift+End");
+
+    r = svc.Dispatch(MsgType::AutomationCommand, nlohmann::json{
+        { "verb", "set_hotkeys" },
+        { "bindings", nlohmann::json::array({
+            { { "action", "lights_toggle" }, { "chord", "ctrl+alt+b" } },
+            { { "action", "brightness_up" }, { "chord", "Ctrl+Alt+Up" } },
+        }) },
+        { "cycle", nlohmann::json::array({ "a", "b" }) },
+        { "brightness_step", 0.2 },
+    });
+    CHECK(r.code == ErrCode::Ok && r.reply_type == MsgType::Automation);
+    CHECK(r.body["hotkeys"].size() == 2);
+    CHECK(r.body["hotkeys"][0]["chord"] == "Ctrl+Alt+B");
+    CHECK(r.body["hotkeys"][0]["state"] == "in_use");
+    CHECK(r.body["hotkeys"][0]["detail"].is_string());
+    CHECK(r.body["hotkeys"][1]["state"] == "ok");
+    CHECK(r.body["cycle"].size() == 2);
+    CHECK(r.body["brightness_step"].get<double>() == 0.2);
+    CHECK(saved.size() == 1 && reg->applies == 1);
+
+    /* Every malformed body is bad_request; nothing changes. */
+    for(const nlohmann::json& bad : {
+            nlohmann::json{ { "verb", "set_hotkeys" } },
+            nlohmann::json{ { "verb", "set_hotkeys" },
+                            { "bindings", "Ctrl+Alt+K" } },
+            nlohmann::json{ { "verb", "set_hotkeys" },
+                            { "bindings", nlohmann::json::array({
+                                { { "action", "lights_toggle" } } }) } },
+            nlohmann::json{ { "verb", "set_hotkeys" },
+                            { "bindings", nlohmann::json::array({
+                                { { "action", "lights_toggle" },
+                                  { "chord", "Shift+K" } } }) } },
+            nlohmann::json{ { "verb", "set_hotkeys" },
+                            { "bindings", nlohmann::json::array() },
+                            { "cycle", "a" } },
+            nlohmann::json{ { "verb", "set_hotkeys" },
+                            { "bindings", nlohmann::json::array() },
+                            { "cycle", nlohmann::json::array({ 1 }) } },
+            nlohmann::json{ { "verb", "set_hotkeys" },
+                            { "bindings", nlohmann::json::array() },
+                            { "brightness_step", 3 } },
+            nlohmann::json{ { "verb", "fly" } },
+            nlohmann::json{ { "verb", 3 } },
+            nlohmann::json::object() })
+    {
+        r = svc.Dispatch(MsgType::AutomationCommand, bad);
+        CHECK(r.code == ErrCode::BadRequest);
+    }
+    CHECK(saved.size() == 1 && reg->applies == 1);
+    CHECK(automation.Config().hotkeys.size() == 2);
+
+    /* STATE carries the body; the event + snapshot serve it. */
+    r = svc.Dispatch(MsgType::GetState, nlohmann::json::object());
+    CHECK(r.body["automation"]["hotkeys"].size() == 2);
+    ev.clear();
+    svc.EmitAutomation();
+    CHECK(ev.size() == 1 && ev[0].kind == event_kind::kAutomation &&
+          ev[0].data["hotkeys"].size() == 2);
+    nlohmann::json snap;
+    CHECK(svc.SnapshotEvent(event_kind::kAutomation, snap));
+    CHECK(snap["hotkeys"][0]["state"] == "in_use");
+
+    bool known = false;
+    for(const std::string& k : EventKinds())
+    {
+        known = known || k == event_kind::kAutomation;
+    }
+    CHECK(known);
+    CHECK(std::string(MsgTypeName(MsgType::AutomationCommand)) ==
+          "AUTOMATION_COMMAND");
+    CHECK(std::string(MsgTypeName(MsgType::Automation)) == "AUTOMATION");
+    CHECK(uint16_t(MsgType::AutomationCommand) == 0x0110);
+
+    /*---- R-4 set_dimming ---------------------------------------*/
+    r = svc.Dispatch(MsgType::AutomationCommand,
+        nlohmann::json::object({{ "verb", "get" }}));
+    CHECK(r.body["dimming"]["configured"] == false);
+    CHECK(r.body["dimming"]["config"]["lock"]["enabled"] == false);
+    CHECK(r.body["dimming"]["active"]["idle"].is_null());
+
+    const size_t saves = saved.size();
+    r = svc.Dispatch(MsgType::AutomationCommand, nlohmann::json{
+        { "verb", "set_dimming" },
+        { "schedule", nlohmann::json::array({
+            { { "days", { 5, 6 } }, { "start", "23:30" },
+              { "end", "07:00" }, { "level", 0.3 } } }) },
+        { "lock", { { "enabled", true }, { "level", 0.0 } } },
+        { "idle", { { "enabled", true }, { "after_s", 300 },
+                    { "level", 0.2 } } },
+    });
+    CHECK(r.code == ErrCode::Ok && r.reply_type == MsgType::Automation);
+    CHECK(r.body["dimming"]["configured"] == true);
+    CHECK(r.body["dimming"]["config"]["schedule"][0]["start"] == "23:30");
+    CHECK(r.body["dimming"]["config"]["lock"]["enabled"] == true);
+    CHECK(r.body["dimming"]["config"]["idle"]["after_s"] == 300);
+    CHECK(r.body["dimming"]["config"]["idle"]["skip_fullscreen"] == true);
+    CHECK(r.body["dimming"]["config"]["ramp_ms"] == 600);
+    CHECK(saved.size() == saves + 1 && saved.back().dimming &&
+          saved.back().dimming->lock.enabled);
+    /* The hotkeys stayed as they were. */
+    CHECK(r.body["hotkeys"].size() == 2);
+
+    /* The body REPLACES the rules: absent sections reset. */
+    r = svc.Dispatch(MsgType::AutomationCommand, nlohmann::json{
+        { "verb", "set_dimming" },
+        { "idle", { { "enabled", true }, { "after_s", 60 } } },
+    });
+    CHECK(r.code == ErrCode::Ok);
+    CHECK(r.body["dimming"]["config"]["schedule"].empty());
+    CHECK(r.body["dimming"]["config"]["lock"]["enabled"] == false);
+
+    for(const nlohmann::json& bad : {
+            nlohmann::json{ { "verb", "set_dimming" },
+                            { "schedule", "nightly" } },
+            nlohmann::json{ { "verb", "set_dimming" },
+                            { "lock", { { "level", 2 } } } },
+            nlohmann::json{ { "verb", "set_dimming" },
+                            { "idle", { { "after_s", 1 } } } },
+            nlohmann::json{ { "verb", "set_dimming" },
+                            { "schedule", nlohmann::json::array({
+                                { { "start", "08:00" },
+                                  { "end", "08:00" },
+                                  { "level", 0.5 } } }) } } })
+    {
+        r = svc.Dispatch(MsgType::AutomationCommand, bad);
+        CHECK(r.code == ErrCode::BadRequest);
+    }
+    CHECK(automation.Config().dimming &&
+          automation.Config().dimming->idle.after_s == 60);
+}
+
 int main()
 {
     /* unbuffered so a hard failure still shows progress */
@@ -2556,6 +2762,212 @@ int main()
               "OUTPUT_COMMAND");
         CHECK(std::string(MsgTypeName(MsgType::Output)) == "OUTPUT");
         CHECK(uint16_t(MsgType::OutputCommand) == 0x010f);
+    }
+
+    /*---- E-12c timing histograms + reset_stats ----------------*/
+    {
+        Engine           engine12;
+        DeliveryPipeline pipe12(std::make_shared<NullFrameSink>());
+        DeviceSnapshot   lane = fsnap;
+        pipe12.RegisterDevice(lane);
+        EngineService::Deps d12;
+        d12.pipeline  = &pipe12;
+        d12.snapshots = [&lane]
+        {
+            return std::vector<DeviceSnapshot>{ lane };
+        };
+        EngineService svc12(engine12, d12);
+
+        /* One live frame sampled 29 ms before its send (bucket
+           33) and one synthetic frame (send only). */
+        const TimePoint t0 = TimePoint{} + std::chrono::hours(1);
+        RgbFrame f;
+        f.controller          = lane.key;
+        f.topology_generation = lane.topology_generation;
+        f.sequence            = 1;
+        f.sample_time         = t0;
+        f.colors.assign(lane.LedCount(), RgbColor{ 9, 9, 9 });
+        CHECK(pipe12.SubmitLatest(f).status == SubmitStatus::Accepted);
+        CHECK(pipe12.DrainDue(lane.key,
+                              t0 + std::chrono::milliseconds(29)) == 1);
+        f.synthetic = true;
+        f.sequence  = 2;
+        f.colors.assign(lane.LedCount(), RgbColor{ 1, 1, 1 });
+        CHECK(pipe12.SubmitLatest(f).status == SubmitStatus::Accepted);
+        CHECK(pipe12.DrainDue(lane.key, t0 + std::chrono::seconds(1))
+              == 1);
+
+        /* Scene clock: two synthetic ticks, 16.7 ms apart. */
+        engine12.Worker().Step(t0);
+        engine12.Worker().Step(t0 + std::chrono::microseconds(16700));
+
+        const auto shape_ok = [](const nlohmann::json& h)
+        {
+            return h.is_object() &&
+                   h["edges_ms"].is_array() &&
+                   h["edges_ms"].size() == Histogram::kFiniteEdges &&
+                   h["edges_ms"][7].get<double>() == 17.0 &&
+                   h["counts"].is_array() &&
+                   h["counts"].size() == Histogram::kBuckets &&
+                   h["total"].is_number_unsigned() &&
+                   h.contains("p50") && h.contains("p95") &&
+                   h.contains("p99");
+        };
+
+        IpcReply r = svc12.Dispatch(MsgType::GetDeliveryStats,
+                                    nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        const nlohmann::json& agg = r.body["aggregate"];
+        CHECK(shape_ok(agg["queue_hist"]));
+        CHECK(shape_ok(agg["send_hist"]));
+        CHECK(agg["queue_hist"]["total"].get<uint64_t>() == 1);
+        CHECK(agg["queue_hist"]["counts"][10].get<uint64_t>() == 1);
+        CHECK(agg["queue_hist"]["p50"].get<double>() == 33.0);
+        CHECK(agg["queue_hist"]["provenance"].get<std::string>()
+              == "transport_measured");
+        CHECK(agg["send_hist"]["total"].get<uint64_t>() == 2);
+        CHECK(r.body["controllers"].size() == 1);
+        const nlohmann::json& cst = r.body["controllers"][0]["stats"];
+        CHECK(shape_ok(cst["queue_hist"]));
+        CHECK(cst["queue_hist"]["total"].get<uint64_t>() == 1);
+        CHECK(cst["send_hist"]["total"].get<uint64_t>() == 2);
+        /* The per-controller query carries them too. */
+        r = svc12.Dispatch(MsgType::GetDeliveryStats,
+            nlohmann::json::object({{ "controller", nlohmann::json::object({
+                { "device",   lane.key.device   },
+                { "serial",   lane.key.serial   },
+                { "location", lane.key.location },
+            })}}));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.body["found"].get<bool>());
+        CHECK(shape_ok(r.body["stats"]["queue_hist"]));
+
+        /* frame_status: percentile summary only — no bucket
+           arrays on the ~30 Hz feed. */
+        nlohmann::json fs;
+        CHECK(svc12.SnapshotEvent(event_kind::kFrameStatus, fs));
+        const nlohmann::json& fq = fs["aggregate"]["queue_hist"];
+        CHECK(fq.is_object());
+        CHECK(!fq.contains("counts"));
+        CHECK(!fq.contains("edges_ms"));
+        CHECK(fq["total"].get<uint64_t>() == 1);
+        CHECK(fq["p95"].get<double>() == 33.0);
+        CHECK(fs["controllers"][0]["stats"]["send_hist"]["total"]
+                  .get<uint64_t>() == 2);
+
+        /* GET_STATE: scene.tick_hist. */
+        r = svc12.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r.code == ErrCode::Ok);
+        const nlohmann::json& th = r.body["scene"]["tick_hist"];
+        CHECK(shape_ok(th));
+        CHECK(th["total"].get<uint64_t>() == 1);
+        CHECK(th["p50"].get<double>() == 17.0);
+
+        /* An overflow percentile is null with total > 0; an
+           empty histogram reports null percentiles. */
+        engine12.Worker().Step(t0 + std::chrono::milliseconds(400));
+        engine12.Worker().Step(t0 + std::chrono::milliseconds(800));
+        r = svc12.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r.body["scene"]["tick_hist"]["total"].get<uint64_t>() == 3);
+        CHECK(r.body["scene"]["tick_hist"]["p99"].is_null());
+        CHECK(r.body["scene"]["tick_hist"]["counts"][16]
+                  .get<uint64_t>() == 2);
+
+        /* reset_stats: works without runtime output control,
+           clears tick/queue/send histograms, keeps counters. */
+        r = svc12.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "reset_stats" }}));
+        CHECK(r.code == ErrCode::Ok);
+        CHECK(r.reply_type == MsgType::Ok);
+        CHECK(r.body["reset"].get<bool>() == true);
+        r = svc12.Dispatch(MsgType::GetDeliveryStats,
+                           nlohmann::json::object());
+        CHECK(r.body["aggregate"]["queue_hist"]["total"]
+                  .get<uint64_t>() == 0);
+        CHECK(r.body["aggregate"]["queue_hist"]["p50"].is_null());
+        CHECK(r.body["aggregate"]["send_hist"]["total"]
+                  .get<uint64_t>() == 0);
+        CHECK(r.body["aggregate"]["transport_completed"]
+                  .get<uint64_t>() == 2);
+        r = svc12.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r.body["scene"]["tick_hist"]["total"].get<uint64_t>() == 0);
+    }
+    TestAutomationCommand();
+    /*---- R-9 supervisor surface -------------------------------
+           STATE.supervisor is the REAL EngineHost serializer
+           (never-started host); the "supervisor" event carries
+           each action, while the SUBSCRIBE snapshot carries the
+           status only — a reconnecting UI must not re-announce
+           an old restart. Unwired -> STATE null. */
+    {
+        EngineHostOptions ho;
+        ho.sdk_enabled        = true;
+        ho.backend_exe        = "C:\\nowhere\\backend\\OpenRGB.exe";
+        ho.backend_config_dir = "C:\\nowhere\\state\\backend";
+        ho.log                = [](const std::string&) {};
+        EngineHost host(ho);
+        const nlohmann::json sj = host.SupervisorJson();
+        CHECK(sj.is_object());
+        CHECK(sj.value("enabled", false) == true);
+        CHECK(sj.value("backend_restarts", -1) == 0);
+        CHECK(sj.value("wedge_restarts", -1) == 0);
+        CHECK(sj.contains("last_reason") && sj["last_reason"].is_null());
+        CHECK(sj.contains("last_at") && sj["last_at"].is_null());
+        CHECK(sj.value("budget_exhausted", true) == false);
+        CHECK(sj.value("seq", -1) == 0);
+        CHECK(sj.contains("history") && sj["history"].is_array() &&
+              sj["history"].empty());
+
+        /* Unmanaged (no --backend-exe/--backend-config): the
+           supervisor never acts and says so. */
+        EngineHostOptions uo;
+        uo.log = [](const std::string&) {};
+        EngineHost uhost(uo);
+        CHECK(uhost.SupervisorJson().value("enabled", true) == false);
+
+        Engine engine10;
+        EngineService::Deps d10;
+        d10.supervisor = [&host] { return host.SupervisorJson(); };
+        EngineService svc10(engine10, d10);
+        IpcReply r10 = svc10.Dispatch(MsgType::GetState,
+                                      nlohmann::json::object());
+        CHECK(r10.code == ErrCode::Ok);
+        CHECK(r10.body["supervisor"].is_object() &&
+              r10.body["supervisor"].value("enabled", false));
+
+        std::vector<IpcEvent> ev10;
+        svc10.SetEventSink([&ev10](const IpcEvent& e)
+                           { ev10.push_back(e); });
+        svc10.EmitSupervisor(nlohmann::json::object({
+            { "action", "backend_spawned" },
+            { "reason", "backend_dead" },
+            { "detail", "backend link down and no backend process" },
+            { "at",     "2026-11-28T10:00:00Z" },
+            { "seq",    1 },
+            { "status", host.SupervisorJson() } }));
+        CHECK(ev10.size() == 1 &&
+              ev10[0].kind == event_kind::kSupervisor &&
+              ev10[0].data.value("action", std::string()) ==
+                  "backend_spawned" &&
+              ev10[0].data["status"].is_object());
+        nlohmann::json ssnap;
+        CHECK(svc10.SnapshotEvent(event_kind::kSupervisor, ssnap));
+        CHECK(ssnap.is_object() && !ssnap.contains("action") &&
+              ssnap["status"].is_object());
+        CHECK(std::string(event_kind::kSupervisor) == "supervisor");
+        bool known = false;
+        for(const std::string& k : EventKinds())
+        {
+            known = known || k == event_kind::kSupervisor;
+        }
+        CHECK(known);
+
+        Engine engine11;
+        EngineService::Deps d11;
+        EngineService svc11u(engine11, d11);
+        r10 = svc11u.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r10.body.contains("supervisor") &&
+              r10.body["supervisor"].is_null());
     }
 
     std::printf("ipc_engine_service_test: %d checks, %d failures\n",

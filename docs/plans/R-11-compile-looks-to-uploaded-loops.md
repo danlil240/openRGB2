@@ -1,6 +1,6 @@
 # R-11: Compile deterministic looks into uploaded loops (60 fps on wireless)
 
-Status: proposed · Size: L · Source: audit 2026-11-28 R-11
+Status: steps 1–3 implemented on `feat/r-11-look-period-measurement` (not merged); steps 4–8 wait for Daniel's decisions — see docs/benchmarks/loop-size.md · Size: L · Source: audit 2026-11-28 R-11
 
 ## Goal
 

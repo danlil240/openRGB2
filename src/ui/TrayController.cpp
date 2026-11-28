@@ -221,6 +221,37 @@ void TrayController::Rebuild()
             {
                 tip << tr("Paused");
             }
+            /* R-4: the strongest active dimming rule (an OUTPUT
+               contributor target) says why the lights are low. */
+            const QVariantMap contrib =
+                out.value(QStringLiteral("contributors")).toMap();
+            QString strongest;
+            double  level = 2.0;
+            for(auto it = contrib.cbegin(); it != contrib.cend(); ++it)
+            {
+                const double v = it.value().toDouble();
+                if(v < level)
+                {
+                    level     = v;
+                    strongest = it.key();
+                }
+            }
+            if(!strongest.isEmpty() && !blackout)
+            {
+                const QString why =
+                    strongest == QLatin1String("lock")
+                        ? tr("while locked")
+                    : strongest == QLatin1String("idle")
+                        ? tr("while idle")
+                    : strongest == QLatin1String("schedule")
+                        ? tr("by schedule")
+                        : tr("by %1").arg(strongest);
+                tip << (level <= 0.0
+                            ? tr("Off %1").arg(why)
+                            : tr("Dimmed %1 (%2%)")
+                                  .arg(why)
+                                  .arg(qRound(level * 100.0)));
+            }
         }
     }
     const QString tooltip = tip.join(QLatin1Char('\n'));

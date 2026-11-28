@@ -18,6 +18,12 @@
 |||   - RegisterSuspendResumeNotification — PBT_APMSUSPEND /||
 |||     PBT_APMRESUME* need the explicit register; plain    ||
 |||     broadcast would miss a message-only window          ||
+|||   - R-4: WTSRegisterSessionNotification (this session)  ||
+|||     — WM_WTSSESSION_CHANGE LOCK / UNLOCK travel as      ||
+|||     Event::SessionLock / SessionUnlock (PowerLifecycle  ||
+|||     ignores them; the dimming rules read them).         ||
+|||     Delivery to a message-only window is expected but   ||
+|||     unverified (manual check: Win+L).                   ||
 |||                                                           ||
 |||   Events funnel to one sink callback — production wires ||
 |||   PowerLifecycle::PostEvent. The sink is invoked on the ||
@@ -71,6 +77,8 @@ public:
     void Stop();
     bool Running()    const;
     bool Registered() const;   /* >= 1 notification registered  */
+    /* R-4: lock/unlock notifications registered. */
+    bool SessionNotifications() const { return wts_registered_.load(); }
     bool DisplayOn()  const;
 
 private:
@@ -100,6 +108,7 @@ private:
     void*                 reg_console_ = nullptr; /* HPOWERNOTIFY */
     void*                 reg_session_ = nullptr;
     void*                 reg_suspend_ = nullptr;
+    std::atomic<bool>     wts_registered_ { false };  /* R-4 */
     std::atomic<unsigned long> tid_   { 0 };      /* for WM_QUIT */
 };
 

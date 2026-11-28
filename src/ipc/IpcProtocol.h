@@ -86,6 +86,16 @@ constexpr const char* kOwnership   = "ownership";     /* R-10: competing-writer
 constexpr const char* kOutput      = "output";        /* R-1: runtime output
                                                          control changed — data =
                                                          the OUTPUT body */
+constexpr const char* kAutomation  = "automation";    /* R-2: hotkeys (+ R-4
+                                                         dimming) changed — data =
+                                                         the AUTOMATION body */
+constexpr const char* kSupervisor  = "supervisor";    /* R-9: the backend
+                                                         supervisor acted —
+                                                         data = {action, reason,
+                                                         detail, at, seq,
+                                                         status}; the SUBSCRIBE
+                                                         snapshot is {seq,
+                                                         status} (no action) */
 }
 
 /* The set SnapshotEvent/SUBSCRIBE validation knows. */
@@ -129,6 +139,10 @@ enum class MsgType : uint16_t
                                        runtime output control (master,
                                        blackout, hold — capability
                                        "output_control_v1")             */
+    AutomationCommand= 0x0110,   /* {verb,...args} -> Automation; R-2
+                                       engine-side hotkeys (R-4 adds
+                                       dimming) — capability
+                                       "automation_v1"                  */
 
     /*---- diagnostics channel (the only post-HELLO verb) ---*/
     DiagGet          = 0x0300,   /* -> Diagnostics                      */
@@ -145,6 +159,7 @@ enum class MsgType : uint16_t
     Pong             = 0x8105,
     Presets          = 0x8106,
     Output           = 0x8107,   /* R-1: the OUTPUT body                */
+    Automation       = 0x8108,   /* R-2: the AUTOMATION body            */
     Event            = 0x8200,   /* push: {kind,data}; request_id = 0   */
     Diagnostics      = 0x8300,
 };

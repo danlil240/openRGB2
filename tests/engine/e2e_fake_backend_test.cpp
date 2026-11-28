@@ -33,6 +33,7 @@
 #include <filesystem>
 #include <process.h>
 #include <fstream>
+#include <sstream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -404,6 +405,292 @@ static size_t CountRestores(const sdk_test::FakeSdkServer& server)
     return n;
 }
 
+/* R-9: the engine's backend supervisor end to end on the REAL
+   EngineHost composition. The fake backend "dies" (listener
+   gone, peer closed); after 5 s on the supervisor's fake clock
+   the injected launcher is asked to spawn the backend with the
+   script's exact arguments, "brings it up", and the SDK link
+   recovers. Then: the stop marker suppresses a respawn; a
+   foreign port holder is refused (reported once, never
+   replaced); a wireless group wedged+failed for 8 min closes
+   the verified-own backend through the injected closer and the
+   dead-backend rule brings it back; STATE.supervisor and the
+   "supervisor" event report every action. */
+static void TestBackendSupervisor(const std::filesystem::path& tmp)
+{
+    sdk_test::FakeSdkServer server;
+    server.controllers = { Wired() };
+    /* The lianli-wireless fork answers the status request from
+       the first connect (a healthy group), so the client
+       latches "supported" before the wedge appears. */
+    auto wireless = [](const char* state, bool wedged)
+    {
+        return nlohmann::json::object({
+            { "groups", nlohmann::json::array({ nlohmann::json::object({
+                { "mac", kMac }, { "state", state },
+                { "wedged", wedged } }) }) } }).dump();
+    };
+    server.wireless_status_json = wireless("ready", false);
+    const std::filesystem::path inst = tmp / "sup-install";
+    const std::filesystem::path cfg  = inst / "state" / "backend";
+    const std::filesystem::path marker =
+        inst / "state" / "openrgb2.stopping";
+    std::error_code ec;
+    std::filesystem::create_directories(cfg, ec);
+    std::filesystem::remove(marker, ec);
+
+    std::mutex              mu;
+    sdk_test::FakeStream*   stream = nullptr;
+    BackendProbe            probe;            /* guarded by mu */
+    std::vector<BackendLaunch> launches;      /* guarded by mu */
+    std::vector<uint32_t>   closes;           /* guarded by mu */
+    std::atomic<int64_t>    fake_ms{ 0 };
+    const TimePoint         base = Clock::now();
+
+    EngineHostOptions o = E12bOptions(server, tmp, "sup");
+    o.transport_factory = [&server, &stream, &mu]()
+        -> std::unique_ptr<sdk::IStreamTransport>
+    {
+        auto s = std::make_unique<sdk_test::FakeStream>(server);
+        std::lock_guard<std::mutex> g(mu);
+        stream = s.get();
+        return s;
+    };
+    o.sdk_backoff.initial_ms   = 20;
+    o.sdk_backoff.max_ms       = 100;
+    o.sdk_backoff.max_attempts = 3;
+    o.sdk_reprobe              = std::chrono::milliseconds(100);
+    o.sdk_topology_poll        = std::chrono::milliseconds(20);
+    o.backend_exe        = (inst / "backend" / "OpenRGB.exe").string();
+    o.backend_config_dir = cfg.string();
+    o.supervisor_clock = [&fake_ms, base]
+    { return base + std::chrono::milliseconds(fake_ms.load()); };
+    o.backend_probe = [&mu, &probe]
+    {
+        std::lock_guard<std::mutex> g(mu);
+        return probe;
+    };
+    o.backend_launcher = [&mu, &probe, &launches, &server](
+        const BackendLaunch& l, uint32_t& pid, std::string&)
+    {
+        std::lock_guard<std::mutex> g(mu);
+        launches.push_back(l);
+        probe.own_pid    = 4242;
+        server.listening = true;            /* it comes up */
+        pid = 4242;
+        return true;
+    };
+    o.backend_closer = [&mu, &probe, &closes, &server, &stream](
+        uint32_t pid, std::string&)
+    {
+        std::lock_guard<std::mutex> g(mu);
+        closes.push_back(pid);
+        probe.own_pid    = 0;               /* it exits */
+        server.listening = false;
+        if(stream) stream->SetPeerClosed(true);
+        return true;
+    };
+
+    EngineHost host(std::move(o));
+    std::string err;
+    CHECK(host.Start(err));
+    std::vector<nlohmann::json> events;
+    std::mutex ev_mu;
+    host.GetService()->SetEventSink([&events, &ev_mu](const ipc::IpcEvent& e)
+    {
+        if(e.kind == ipc::event_kind::kSupervisor)
+        {
+            std::lock_guard<std::mutex> g(ev_mu);
+            events.push_back(e.data);
+        }
+    });
+    auto connected = [&host]
+    { return host.GetSdk()->State() == ConnectionState::Connected; };
+    auto pump_until = [&host](const std::function<bool()>& f, int ms)
+    {
+        const auto end = std::chrono::steady_clock::now() +
+                         std::chrono::milliseconds(ms);
+        while(std::chrono::steady_clock::now() < end)
+        {
+            host.PollOnce();
+            if(f()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return f();
+    };
+    auto launch_count = [&mu, &launches]
+    { std::lock_guard<std::mutex> g(mu); return launches.size(); };
+    auto kill_backend = [&mu, &server, &stream, &probe]
+    {
+        std::lock_guard<std::mutex> g(mu);
+        server.listening = false;
+        probe.own_pid    = 0;
+        if(stream) stream->SetPeerClosed(true);
+    };
+    auto event_count = [&ev_mu, &events]
+    { std::lock_guard<std::mutex> g(ev_mu); return events.size(); };
+
+    CHECK(pump_until(connected, 5000));
+    CHECK(host.SupervisorJson().value("enabled", false));
+
+    /*---- the backend dies -> spawn after 5 s ---------------*/
+    kill_backend();
+    CHECK(pump_until([&] { return !connected(); }, 5000));
+    fake_ms += 4000;
+    for(int i = 0; i < 20; ++i) host.PollOnce();
+    CHECK(launch_count() == 0);              /* inside 5 s */
+    fake_ms += 2000;
+    CHECK(pump_until([&] { return launch_count() == 1; }, 2000));
+    {
+        std::lock_guard<std::mutex> g(mu);
+        if(!launches.empty())
+        {
+            CHECK(launches[0].exe == (inst / "backend" / "OpenRGB.exe")
+                                         .string());
+            CHECK(launches[0].args == BackendServerArgs(6744));
+            CHECK(launches[0].cwd == cfg.string());
+        }
+    }
+    CHECK(pump_until(connected, 5000));      /* the link recovers */
+    {
+        const nlohmann::json sj = host.SupervisorJson();
+        CHECK(sj.value("backend_restarts", 0) == 1);
+        CHECK(sj.value("last_reason", std::string()) == "backend_dead");
+        CHECK(sj["last_at"].is_string());
+        CHECK(sj["history"].is_array() && sj["history"].size() == 1);
+    }
+    CHECK(event_count() == 1);
+    {
+        std::lock_guard<std::mutex> g(ev_mu);
+        if(!events.empty())
+        {
+            CHECK(events[0].value("action", std::string()) ==
+                  "backend_spawned");
+            CHECK(events[0].value("reason", std::string()) ==
+                  "backend_dead");
+            CHECK(events[0]["status"].is_object());
+        }
+    }
+    /* STATE carries the same status. */
+    {
+        const ipc::IpcReply r = host.GetService()->Dispatch(
+            ipc::MsgType::GetState, nlohmann::json::object());
+        CHECK(r.body["supervisor"].is_object() &&
+              r.body["supervisor"].value("backend_restarts", 0) == 1);
+    }
+
+    /*---- a stop in progress: never respawned ----------------*/
+    {
+        std::ofstream(marker) << "{\"pid\":1}";
+    }
+    kill_backend();
+    CHECK(pump_until([&] { return !connected(); }, 5000));
+    fake_ms += 120000;
+    for(int i = 0; i < 40; ++i) host.PollOnce();
+    CHECK(launch_count() == 1);
+    std::filesystem::remove(marker, ec);
+    CHECK(pump_until([&] { return launch_count() == 2; }, 2000));
+    CHECK(pump_until(connected, 5000));
+
+    /*---- a foreign port holder: refused, reported once -----*/
+    kill_backend();
+    {
+        std::lock_guard<std::mutex> g(mu);
+        probe.port = PortHolder::Foreign;
+    }
+    CHECK(pump_until([&] { return !connected(); }, 5000));
+    const size_t ev_before = event_count();
+    fake_ms += 300000;
+    for(int i = 0; i < 40; ++i)
+    {
+        host.PollOnce();
+        fake_ms += 2000;
+    }
+    CHECK(launch_count() == 2);
+    CHECK(event_count() == ev_before + 1);
+    {
+        std::lock_guard<std::mutex> g(ev_mu);
+        if(!events.empty())
+        {
+            CHECK(events.back().value("action", std::string()) ==
+                  "notice");
+            CHECK(events.back().value("reason", std::string()) ==
+                  "spawn_refused");
+        }
+    }
+    {
+        std::lock_guard<std::mutex> g(mu);
+        probe.port = PortHolder::None;
+    }
+    CHECK(pump_until([&] { return launch_count() == 3; }, 2000));
+    CHECK(pump_until(connected, 5000));
+
+    /*---- wireless wedge for 8 min -> close + respawn --------*/
+    {
+        std::lock_guard<std::mutex> g(mu);
+        server.wireless_status_json = wireless("failed", true);
+    }
+    /* The status reaches the client on its refresh cadence. */
+    CHECK(pump_until([&] {
+        sdk::WirelessStatusSnapshot ws;
+        host.GetSdk()->WirelessStatus(ws);
+        return ws.have_data && !ws.status.groups.empty() &&
+               ws.status.groups[0].wedged;
+    }, 5000));
+    fake_ms += 7 * 60 * 1000;
+    for(int i = 0; i < 20; ++i) host.PollOnce();
+    {
+        std::lock_guard<std::mutex> g(mu);
+        CHECK(closes.empty());
+    }
+    fake_ms += 61 * 1000;
+    CHECK(pump_until([&] {
+        std::lock_guard<std::mutex> g(mu);
+        return !closes.empty();
+    }, 2000));
+    {
+        std::lock_guard<std::mutex> g(mu);
+        CHECK(closes.size() == 1 && closes[0] == 4242);
+        server.wireless_status_json = wireless("ready", false);
+    }
+    CHECK(pump_until([&] { return !connected(); }, 5000));
+    fake_ms += 6000;
+    CHECK(pump_until([&] { return launch_count() == 4; }, 2000));
+    CHECK(pump_until(connected, 5000));
+    {
+        const nlohmann::json sj = host.SupervisorJson();
+        CHECK(sj.value("wedge_restarts", 0) == 1);
+        CHECK(sj.value("backend_restarts", 0) == 4);
+        CHECK(sj.value("last_reason", std::string()) == "wireless_wedge");
+    }
+    {
+        std::lock_guard<std::mutex> g(ev_mu);
+        bool saw_close = false;
+        for(const nlohmann::json& e : events)
+        {
+            saw_close = saw_close ||
+                e.value("action", std::string()) ==
+                    "backend_closed_for_wedge";
+        }
+        CHECK(saw_close);
+    }
+    {
+        /* The managed engine's console is hidden: every action
+           is also in state\supervisor.log. */
+        std::ifstream lf(inst / "state" / "supervisor.log");
+        std::stringstream ss;
+        ss << lf.rdbuf();
+        CHECK(ss.str().find("backend_spawned") != std::string::npos);
+        CHECK(ss.str().find("backend_closed_for_wedge") != std::string::npos);
+    }
+    std::printf("supervisor: %zu launches, %zu events, status %s\n",
+                launch_count(), event_count(),
+                host.SupervisorJson().dump().substr(0, 160).c_str());
+
+    host.RequestStop();
+    host.Stop();
+}
+
 static void TestIdlePolicy(const std::filesystem::path& tmp)
 {
     sdk_test::FakeSdkServer server;
@@ -511,6 +798,141 @@ static void TestIdlePolicy(const std::filesystem::path& tmp)
     }
     CHECK(LastFrameBlack(server, 0));
     CHECK(CountRestores(server) == 1);
+
+    host.RequestStop();
+    host.Stop();
+}
+
+/* Max channel of the last UpdateLEDs frame for `dev` (-1 when
+   no frame was seen). */
+static int LastFrameMax(const sdk_test::FakeSdkServer& server,
+                        uint32_t dev)
+{
+    int best = -1;
+    for(const sdk_test::ServerEvent& e : server.SnapshotEvents())
+    {
+        if(e.pkt_id != sdk::kPktUpdateLEDs || e.dev_id != dev ||
+           e.body.size() < 6)
+        {
+            continue;
+        }
+        uint16_t count = 0;
+        memcpy(&count, e.body.data() + 4, 2);
+        if(count == 0 || e.body.size() < 6u + 4u * count)
+        {
+            continue;
+        }
+        best = 0;
+        for(uint16_t i = 0; i < count; ++i)
+        {
+            uint32_t c = 0;
+            memcpy(&c, e.body.data() + 6 + 4 * i, 4);
+            best = std::max({ best, int(c & 0xFF),
+                              int((c >> 8) & 0xFF),
+                              int((c >> 16) & 0xFF) });
+        }
+    }
+    return best;
+}
+
+/* R-4: user-idle dimming through the real host wiring —
+   injected idle seconds dim the mapped colors to the rule's
+   level, input restores them at once, a fullscreen app never
+   counts as idle, and a session lock dims through the lock
+   rule. No desktop, no GetLastInputInfo: every source is a
+   lambda. */
+static void TestIdleDimming(const std::filesystem::path& tmp)
+{
+    sdk_test::FakeSdkServer server;
+    server.controllers = { RainbowWired() };
+    std::atomic<double> idle_s{ 0.0 };
+    std::atomic<bool>   fullscreen{ false };
+    EngineHostOptions o = E12bOptions(server, tmp, "dim");
+    o.idle_seconds = [&idle_s] { return idle_s.load(); };
+    o.fullscreen   = [&fullscreen] { return fullscreen.load(); };
+    EngineHost host(std::move(o));
+    std::string err;
+    CHECK(host.Start(err));
+    CHECK(host.GetAutomation() != nullptr);
+    if(!host.GetAutomation())
+    {
+        return;
+    }
+    CHECK(ApplyDoc(host, RainbowSceneDoc()));
+
+    /* Poll the owner loop (past the rule-evaluation interval)
+       until `pred` holds on the frames the backend received. */
+    auto settle = [&](auto pred)
+    {
+        for(int i = 0; i < 300; ++i)
+        {
+            host.PollOnce();
+            if(pred())
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return pred();
+    };
+    CHECK(settle([&] { return LastFrameMax(server, 0) > 150; }));
+
+    DimmingConfig d;
+    d.idle.enabled = true;
+    d.idle.after_s = 60;
+    d.idle.level   = 0.25f;
+    d.lock.enabled = true;
+    d.lock.level   = 0.5f;
+    d.ramp_ms      = 0;          /* the ramp is output_control_test's */
+    CHECK(host.GetAutomation()->SetDimming(d, err));
+
+    /* Not idle yet: nothing dims. */
+    idle_s = 59.0;
+    for(int i = 0; i < 30; ++i)
+    {
+        host.PollOnce();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(host.GetOutput().EffectiveScale() == 1.0f);
+
+    /* Idle: the "idle" contributor dims the mapped colors. */
+    idle_s = 120.0;
+    CHECK(settle([&] {
+        return host.GetOutput().EffectiveScale() == 0.25f; }));
+    CHECK(host.GetOutput().State().contributors.count("idle") == 1);
+    CHECK(settle([&] {
+        const int m = LastFrameMax(server, 0);
+        return m >= 0 && m <= 66; }));
+    CHECK(host.GetAutomation()->ToJson()["dimming"]["active"]["idle"]
+              .get<double>() == 0.25);
+
+    /* Input restores at once (restore ramp 0). */
+    idle_s = 0.4;
+    CHECK(settle([&] {
+        return host.GetOutput().EffectiveScale() == 1.0f; }));
+    CHECK(host.GetOutput().State().contributors.empty());
+    CHECK(settle([&] { return LastFrameMax(server, 0) > 150; }));
+
+    /* A fullscreen app never counts as idle. */
+    fullscreen = true;
+    idle_s     = 4000.0;
+    for(int i = 0; i < 30; ++i)
+    {
+        host.PollOnce();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(host.GetOutput().EffectiveScale() == 1.0f);
+    fullscreen = false;
+    idle_s     = 0.0;
+
+    /* Session lock (what WinPowerMonitor posts) dims through the
+       lock rule; unlock lifts it. */
+    host.GetAutomation()->PostSessionLock(true);
+    CHECK(settle([&] {
+        return host.GetOutput().EffectiveScale() == 0.5f; }));
+    host.GetAutomation()->PostSessionLock(false);
+    CHECK(settle([&] {
+        return host.GetOutput().EffectiveScale() == 1.0f; }));
 
     host.RequestStop();
     host.Stop();
@@ -999,6 +1421,8 @@ int main()
     TestPartialStartTeardown(tmp);
     TestPriorModeRecording(tmp);
     TestIdlePolicy(tmp);
+    TestIdleDimming(tmp);
+    TestBackendSupervisor(tmp);
 
     std::printf("%d checks, %d failures\n", checks, failures);
     {

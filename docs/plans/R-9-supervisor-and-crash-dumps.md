@@ -1,6 +1,6 @@
 # R-9: Supervisor — restart a dead engine or backend, crash dumps, wireless wedge escalation
 
-Status: proposed · Size: M · Source: audit 2026-11-28 R-9
+Status: implemented on `feat/r-9-supervisor` (not merged) · Size: M · Source: audit 2026-11-28 R-9
 
 ## Goal
 
@@ -185,3 +185,40 @@ Status: proposed · Size: M · Source: audit 2026-11-28 R-9
 - **Restarting the backend drops the uploaded loop.** The engine
   re-applies on reconnect, but confirm the playback re-upload on
   hardware.
+
+## Implementation record (feat/r-9-supervisor)
+
+Decisions taken while implementing (each is the plan's
+recommendation or the conservative option; Daniel may overrule):
+
+- **Backend crash dumps: WER `LocalDumps\OpenRGB.exe`** (the plan
+  default). Set by an *elevated* `update-openrgb2.ps1` (DumpFolder
+  `<install>\state\crash`, DumpCount 5, custom flags 0x1040 like the
+  engine, plus an `OpenRGB2InstallDir` owner value); a key without
+  that owner value is never overwritten; an elevated rollback removes
+  only the key that names its own install. The note lives on the
+  Devices & Diagnostics "Restarts & crash dumps" card, not in Settings.
+- **Shared code in `src/supervise/`** (`CrashDump`, header-only
+  `RestartLedger`): Qt-free and engine-free, so the UI links it
+  without carrying the engine/SDK boundary.
+- **Default dump dir `<exe dir>\state\crash`** (`OPENRGB2_CRASH_DIR`
+  overrides) — no new launcher argument. The filter writes from a
+  helper thread and then ends the process with the exception code
+  (no WER dialog or delay for the engine/UI); `__fastfail` crashes
+  bypass it. `openrgb2-engine --crash-for-test av|stack|abort` exists
+  for the manual check.
+- **Restart = `run_start(false)`**: a restart never carries a
+  takeover; a conflict that appeared since goes through the existing
+  ask/notify path.
+- **Wedge close does not wait** for the backend to exit (the owner
+  loop must not block 8 s) and never kills; a backend that ignores
+  the signal keeps its pid, so it is never doubled.
+- **Stop marker**: both supervisors ignore a marker older than 10
+  minutes (a stop that died mid-way), so a stale file cannot disable
+  supervision forever.
+- **Log**: every action (engine and UI side) is one line in
+  `state\supervisor.log` — the engine's console is hidden in the
+  managed layout.
+- **WER test** lives in `package_lifecycle_tests.ps1` (T17, which
+  already dot-sources update/rollback) rather than
+  `launcher_tests.ps1` (which covers `OpenRGB2.cmd` only).

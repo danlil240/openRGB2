@@ -307,16 +307,23 @@ DiagnosticsController::DiagnosticsController(EngineBridge* bridge,
                 this, [this] { RecomputeRates(); });
         connect(bridge_, &EngineBridge::deliveryStatsChanged,
                 this, [this]
-                { RecomputeRates(); RecomputeControllers(); });
+                {
+                    RecomputeRates(); RecomputeControllers();
+                    RecomputeTiming();
+                });
         connect(bridge_, &EngineBridge::snapshotsChanged,
-                this, [this] { RecomputeControllers(); });
+                this, [this]
+                { RecomputeControllers(); RecomputeTiming(); });
+        connect(bridge_, &EngineBridge::hasOutputControlChanged,
+                this, [this] { RecomputeTiming(); });
         connect(bridge_, &EngineBridge::sceneChanged,
                 this, [this] { RecomputeControllers(); });
         connect(bridge_, &EngineBridge::diagnosticsChanged,
                 this, [this]
                 { RecomputeOwnership(); RecomputeRates(); });
         connect(bridge_, &EngineBridge::stateReportChanged,
-                this, [this] { RecomputeOwnership(); });
+                this, [this]
+                { RecomputeOwnership(); RecomputeTiming(); });
         connect(bridge_, &EngineBridge::ownershipChanged,
                 this, [this] { RecomputeOwnership(); });
         connect(bridge_, &EngineBridge::frameStatusChanged,
@@ -360,6 +367,7 @@ DiagnosticsController::DiagnosticsController(EngineBridge* bridge,
     RecomputeRates();
     RecomputeControllers();
     RecomputeOwnership();
+    RecomputeTiming();
 }
 
 /*---------------------------------------------------------*\
@@ -692,6 +700,175 @@ void DiagnosticsController::RecomputeControllers()
     controllers_ = rows;
     unresolved_  = unresolved;
     emit controllersChanged();
+}
+
+/*---------------------------------------------------------*\
+||| E-12c timing card                                       ||
+\*---------------------------------------------------------*/
+
+QVariantMap DiagnosticsController::HistogramView(const QVariantMap& wire)
+{
+    QVariantMap out;
+    const bool available = wire.contains(QStringLiteral("total")) &&
+                           wire.contains(QStringLiteral("counts"));
+    const qulonglong total =
+        wire.value(QStringLiteral("total")).toULongLong();
+    const bool measured = available && total > 0;
+    const QVariantList edges =
+        wire.value(QStringLiteral("edges_ms")).toList();
+    const QVariantList counts =
+        wire.value(QStringLiteral("counts")).toList();
+
+    const auto ms = [](double v)
+    {
+        return QString::number(v, 'g', 4) + QStringLiteral(" ms");
+    };
+    const QString last_edge = edges.isEmpty()
+        ? QString()
+        : QString::number(edges.back().toDouble(), 'g', 4);
+    const auto pct = [&](const char* key) -> QString
+    {
+        if(!measured)
+        {
+            return QStringLiteral("—");      /* unmeasured, not 0 */
+        }
+        const QVariant v = wire.value(QLatin1String(key));
+        if(!v.isValid() || v.isNull())
+        {
+            /* Samples exist, the percentile is in the overflow
+               bucket. */
+            return QStringLiteral("> ") + last_edge +
+                   QStringLiteral(" ms");
+        }
+        return ms(v.toDouble());
+    };
+
+    qulonglong max_count = 0;
+    for(const QVariant& c : counts)
+    {
+        max_count = qMax(max_count, c.toULongLong());
+    }
+    QVariantList bars;
+    for(int i = 0; i < counts.size(); ++i)
+    {
+        const qulonglong c = counts[i].toULongLong();
+        QVariantMap bar;
+        bar.insert(QStringLiteral("label"),
+                   i < edges.size()
+                       ? QString::number(edges[i].toDouble(), 'g', 4)
+                       : QStringLiteral(">") + last_edge);
+        bar.insert(QStringLiteral("count"), c);
+        bar.insert(QStringLiteral("frac"),
+                   max_count ? double(c) / double(max_count) : 0.0);
+        bars.push_back(bar);
+    }
+
+    out.insert(QStringLiteral("available"), available);
+    out.insert(QStringLiteral("measured"),  measured);
+    out.insert(QStringLiteral("total"),     total);
+    out.insert(QStringLiteral("p50"), wire.value(QStringLiteral("p50")));
+    out.insert(QStringLiteral("p95"), wire.value(QStringLiteral("p95")));
+    out.insert(QStringLiteral("p99"), wire.value(QStringLiteral("p99")));
+    out.insert(QStringLiteral("p50_text"), pct("p50"));
+    out.insert(QStringLiteral("p95_text"), pct("p95"));
+    out.insert(QStringLiteral("p99_text"), pct("p99"));
+    out.insert(QStringLiteral("provenance"),
+               wire.value(QStringLiteral("provenance")));
+    out.insert(QStringLiteral("bars"), bars);
+    return out;
+}
+
+void DiagnosticsController::RecomputeTiming()
+{
+    const QVariantMap st = bridge_
+        ? bridge_->stateReport() : QVariantMap();
+    const QVariantMap ds = bridge_
+        ? bridge_->deliveryStats() : QVariantMap();
+    const QVariantList snaps = bridge_
+        ? bridge_->snapshots() : QVariantList();
+
+    const auto pair = [](const QVariantMap& stats)
+    {
+        QVariantMap p;
+        p.insert(QStringLiteral("queue"), HistogramView(
+            stats.value(QStringLiteral("queue_hist")).toMap()));
+        p.insert(QStringLiteral("send"), HistogramView(
+            stats.value(QStringLiteral("send_hist")).toMap()));
+        return p;
+    };
+
+    QVariantList lanes;
+    for(const QVariant& cv :
+        ds.value(QStringLiteral("controllers")).toList())
+    {
+        const QVariantMap c   = cv.toMap();
+        const QVariantMap key = c.value(QStringLiteral("key")).toMap();
+        /* Display name from topology (exact key match), else the
+           key's device string. */
+        QString name = key.value(QStringLiteral("device")).toString();
+        for(const QVariant& sv : snaps)
+        {
+            const QVariantMap s  = sv.toMap();
+            const QVariantMap sk = s.value(QStringLiteral("key")).toMap();
+            if(sk.value(QStringLiteral("device")) ==
+                   key.value(QStringLiteral("device")) &&
+               sk.value(QStringLiteral("serial")) ==
+                   key.value(QStringLiteral("serial")) &&
+               sk.value(QStringLiteral("location")) ==
+                   key.value(QStringLiteral("location")))
+            {
+                const QString n =
+                    s.value(QStringLiteral("name")).toString();
+                if(!n.isEmpty())
+                {
+                    name = n;
+                }
+                break;
+            }
+        }
+        QVariantMap lane =
+            pair(c.value(QStringLiteral("stats")).toMap());
+        lane.insert(QStringLiteral("name"), name);
+        lane.insert(QStringLiteral("wireless"),
+                    c.value(QStringLiteral("wireless")).toBool());
+        lanes.push_back(lane);
+    }
+
+    QVariantMap out;
+    out.insert(QStringLiteral("can_reset"),
+               bridge_ && bridge_->hasOutputControl());
+    out.insert(QStringLiteral("tick"), HistogramView(
+        st.value(QStringLiteral("scene")).toMap()
+          .value(QStringLiteral("tick_hist")).toMap()));
+    out.insert(QStringLiteral("aggregate"),
+               pair(ds.value(QStringLiteral("aggregate")).toMap()));
+    out.insert(QStringLiteral("lanes"), lanes);
+
+    if(out != timing_)
+    {
+        timing_ = out;
+        emit timingChanged();
+    }
+}
+
+bool DiagnosticsController::resetTiming()
+{
+    if(!bridge_ || !bridge_->hasOutputControl())
+    {
+        return false;
+    }
+    if(bridge_->outputCommand(QStringLiteral("reset_stats"),
+                              QVariantMap()) == 0)
+    {
+        return false;
+    }
+    AppendEvent(QStringLiteral("timing"),
+                QStringLiteral("timing histograms reset"));
+    /* The reply is a bare OK; the re-pull (queued behind the
+       reset on the same session) brings the cleared state. */
+    bridge_->getState();
+    bridge_->getDeliveryStats();
+    return true;
 }
 
 bool DiagnosticsController::openOwnershipTarget(const QString& target)

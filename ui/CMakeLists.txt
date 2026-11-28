@@ -70,10 +70,13 @@ qt_add_qml_module(openrgb2_ui
         components/AppSlider.qml
         components/AppTextField.qml
         components/Card.qml
+        components/ChordCaptureField.qml
         components/ColorWell.qml
+        components/DimmingCard.qml
         components/EmptyState.qml
         components/FrameStrip.qml
         components/GroupChip.qml
+        components/HotkeysCard.qml
         components/NavButton.qml
         components/OwnershipBanner.qml
         components/OwnershipGuide.qml
@@ -81,6 +84,7 @@ qt_add_qml_module(openrgb2_ui
         components/PageHeader.qml
         components/PaletteSwatch.qml
         components/StatusPill.qml
+        components/TimingHistogram.qml
         pages/DashboardPage.qml
         pages/DevicesPage.qml
         pages/LayoutPage.qml
@@ -130,6 +134,8 @@ qt_add_qml_module(openrgb2_ui
         ${CMAKE_SOURCE_DIR}/src/ui/OwnershipNotice.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/TrayController.h
         ${CMAKE_SOURCE_DIR}/src/ui/TrayController.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/EngineSupervisor.h
+        ${CMAKE_SOURCE_DIR}/src/ui/EngineSupervisor.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceEditSession.h
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceEditSession.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/WorkspaceDraftStore.h
