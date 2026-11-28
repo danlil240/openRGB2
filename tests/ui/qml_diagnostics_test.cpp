@@ -274,6 +274,43 @@ int main(int argc, char** argv)
                   QStringLiteral("re-applies")));
     }
 
+    /*---- engine state reads the LIVE report, not WELCOME -------
+       A UI that connects while the engine is still starting gets
+       WELCOME running:false; the STATE report refreshed every 2 s
+       says running:true. The page showed "not running" for the
+       whole session. */
+    {
+        auto state = [&page](bool connected, const QVariantMap& info,
+                             const QVariantMap& report)
+        {
+            QVariant out;
+            QMetaObject::invokeMethod(page.get(), "engineStateText",
+                Q_RETURN_ARG(QVariant, out),
+                Q_ARG(QVariant, connected),
+                Q_ARG(QVariant, info),
+                Q_ARG(QVariant, report));
+            return out.toString();
+        };
+        QVariantMap welcomeStopped{ { QStringLiteral("running"), false } };
+        QVariantMap welcomeRunning{ { QStringLiteral("running"), true } };
+        QVariantMap liveRunning{ { QStringLiteral("engine"),
+            QVariantMap{ { QStringLiteral("running"), true } } } };
+        QVariantMap liveStopped{ { QStringLiteral("engine"),
+            QVariantMap{ { QStringLiteral("running"), false } } } };
+        /* the screenshot case */
+        CHECK(state(true, welcomeStopped, liveRunning) ==
+              QStringLiteral("running"));
+        CHECK(state(true, welcomeRunning, liveStopped) ==
+              QStringLiteral("not running"));
+        /* no STATE yet -> WELCOME is the fallback */
+        CHECK(state(true, welcomeStopped, QVariantMap()) ==
+              QStringLiteral("not running"));
+        CHECK(state(true, welcomeRunning, QVariantMap()) ==
+              QStringLiteral("running"));
+        CHECK(state(false, welcomeRunning, liveRunning) ==
+              QStringLiteral("offline"));
+    }
+
     /*---- R-10: the Ownership card is a jump target -----------*/
     {
         QObject* card = page->findChild<QObject*>("ownershipCard");
