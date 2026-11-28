@@ -107,13 +107,46 @@ std::vector<Sighting> SightingAccumulator::Snapshot(uint64_t now_ms, uint64_t ma
 }
 
 /*---------------------------------------------------------*\
+| ObservingLink                                             |
+\*---------------------------------------------------------*/
+bool LianLiWirelessService::ObservingLink::PollDiscovery(std::vector<uint8_t>& out)
+{
+    const uint64_t now = clock.NowMs();
+    if(shared_valid
+       && shared_generation == inner.ConnectionGeneration()
+       && now >= shared_ms
+       && now - shared_ms < share_window_ms)
+    {
+        /* Same reply another group read moments ago: no USB I/O, and
+           not re-added to the accumulator (one read, one vote). */
+        out = shared_reply;
+        Diagnostics::Get().RecordDiscoveryShared();
+        return true;
+    }
+
+    shared_valid = false;
+    const bool ok = inner.PollDiscovery(out);
+    if(ok)
+    {
+        const uint64_t seen = clock.NowMs();
+        sink.AddResponse(out, seen);
+        shared_reply      = out;
+        shared_ms         = seen;
+        /* read after the poll: a reopen inside it belongs to this reply */
+        shared_generation = inner.ConnectionGeneration();
+        shared_valid      = true;
+    }
+    return ok;
+}
+
+/*---------------------------------------------------------*\
 | LianLiWirelessService                                     |
 \*---------------------------------------------------------*/
 LianLiWirelessService::LianLiWirelessService(IWirelessLink& link_in,
                                              IWirelessClock& clock_in,
                                              WirelessRuntimeConfig cfg_in)
     : link(link_in), clock(clock_in), cfg(cfg_in),
-      observed(link_in, clock_in, sightings)
+      observed(link_in, clock_in, sightings, cfg_in.share_window_ms)
 {
 }
 

@@ -306,6 +306,63 @@ static void TestDiscoveryDeferral()
     DiagCounters c = DIAG.Snapshot();
     CHECK(c.discovery_deferred == 1,
           "fresh frame with a due poll records a discovery deferral");
+    CHECK(c.discovery_clamped == 0,
+          "a seen group's deferral is not a poll-gap clamp");
+}
+
+/*-------------------------------------------------------------*\
+|| 6b. Poll-gap clamp (P-12): an unseen group's frames no      ||
+||     longer make every frame a discovery poll                ||
+\*-------------------------------------------------------------*/
+static void TestDiscoveryClamp()
+{
+    DIAG.Reset();
+    FakeClock clk;
+    FakeLink  link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    link.poll_fn = [] { return MakeDiscovery(); };
+    rt.Tick();
+    link.poll_fn = [] { return std::vector<uint8_t>{}; };
+    RunFor(rt, clk, 2000);            /* unseen past the defer bound */
+
+    DIAG.Reset();
+    for(int i = 0; i < 10; i++)
+    {
+        clk.Advance(16);
+        rt.SetDesired(std::make_shared<RgbUpload>(MakeUpload((uint8_t)i)));
+        rt.Tick();
+    }
+    DiagCounters c = DIAG.Snapshot();
+    CHECK(c.discovery_clamped >= 1,
+          "unseen group's frames record poll-gap clamps");
+    CHECK(c.discovery_polls <= 1,
+          "clamped frames do not each poll");
+    nlohmann::json cj = CountersToJson(c);
+    CHECK(cj.contains("discovery_clamped"), "clamp counter serialized");
+}
+
+/*-------------------------------------------------------------*\
+|| 6c. Shared discovery reply (P-12): two groups due in one    ||
+||     step cost one read; the second poll is counted shared   ||
+\*-------------------------------------------------------------*/
+static void TestDiscoveryShared()
+{
+    DIAG.Reset();
+    FakeClock clk;
+    FakeLink  link;
+    int reads = 0;
+    link.poll_fn = [&] { reads++; return MakeDiscovery(); };
+    LianLiWirelessService svc(link, clk);
+    svc.AddGroup(MAC_TARGET, 3);
+    svc.AddGroup(MAC_FOREIGN, 3);
+    svc.StepAll();
+    DiagCounters c = DIAG.Snapshot();
+    CHECK(reads == 1, "two due groups share one discovery read");
+    CHECK(c.discovery_polls == 2 && c.discovery_shared == 1,
+          "every runtime poll counted; the second one as shared");
+    CHECK(CountersToJson(c).contains("discovery_shared"),
+          "shared counter serialized");
 }
 
 /*-------------------------------------------------------------*\
@@ -539,6 +596,8 @@ int main()
     TestAdmissionDeferral();
     TestDiscoveryCounters();
     TestDiscoveryDeferral();
+    TestDiscoveryClamp();
+    TestDiscoveryShared();
     TestKeepaliveGap();
     TestUploadRetryAndFailure();
     TestCompressionViaController();

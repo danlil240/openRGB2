@@ -1,6 +1,6 @@
 # P-12: Lian Li discovery polling costs 30–130 ms of link time per poll
 
-Status: proposed · Size: M · Source: audit 2026-11-28 P-12
+Status: steps 1–2 implemented on `perf/p-12-lianli-poll-cost` (not merged); steps 3–4 wait for P-13, step 5 is a hardware measurement · Size: M · Source: audit 2026-11-28 P-12
 
 ## Goal
 
