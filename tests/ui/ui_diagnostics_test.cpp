@@ -36,6 +36,7 @@
 #include <cstdio>
 #include <fstream>
 #include <memory>
+#include <vector>
 
 using namespace openrgb2;
 using namespace openrgb2::ipc;
@@ -159,10 +160,54 @@ static nlohmann::json PlaybackBody()
     });
 }
 
+/* E-12c: the scripted engine's timing histograms. After the UI
+   sends OUTPUT_COMMAND reset_stats they come back empty. */
+static bool g_timing_reset = false;
+
+static nlohmann::json HistJson(std::vector<uint64_t> counts,
+                               nlohmann::json p50, nlohmann::json p95,
+                               nlohmann::json p99)
+{
+    counts.resize(17, 0);
+    uint64_t total = 0;
+    for(uint64_t c : counts) total += c;
+    if(g_timing_reset)
+    {
+        counts.assign(17, 0);
+        total = 0;
+        p50 = p95 = p99 = nullptr;
+    }
+    return nlohmann::json::object({
+        { "edges_ms", nlohmann::json::array(
+            {0.5,1,2,4,8,12,16,17,20,25,33,40,50,75,100,250}) },
+        { "counts", counts }, { "total", total },
+        { "p50", p50 }, { "p95", p95 }, { "p99", p99 },
+        { "provenance", "transport_measured" },
+    });
+}
+
+static nlohmann::json TickHistJson()
+{
+    /* 90 x (16,17], 9 x (25,33], 1 overflow: p99 in the
+       overflow bucket is null on the wire. */
+    std::vector<uint64_t> c(17, 0);
+    c[7] = 90; c[10] = 9; c[16] = 1;
+    nlohmann::json h = HistJson(c, 17.0, 33.0, 33.0);
+    h["p99"] = g_timing_reset ? nlohmann::json(nullptr)
+                              : nlohmann::json(33.0);
+    h.erase("provenance");
+    return h;
+}
+
 static nlohmann::json StatsJson(uint64_t submitted,
                                 double mean_iv, uint64_t icount)
 {
+    std::vector<uint64_t> q(17, 0), sd(17, 0);
+    q[10]  = 5;                 /* queue: 5 x (25,33]  */
+    sd[2]  = 4; sd[16] = 1;     /* send: 4 x (1,2], 1 overflow */
     return nlohmann::json::object({
+        { "queue_hist", HistJson(q, 33.0, 33.0, 33.0) },
+        { "send_hist",  HistJson(sd, 2.0, nullptr, nullptr) },
         { "submitted", submitted }, { "replaced_pending", 12 },
         { "rejected", 0 }, { "transport_completed", submitted },
         { "suppressed", 0 }, { "transport_rejected", 2 },
@@ -239,7 +284,9 @@ static nlohmann::json StateBody()
         { "engine", nlohmann::json::object(
             {{"running",true},{"scene_clock_hz",60},
              {"scene_sequence",12345}}) },
-        { "scene",    SceneBody() },
+        { "scene",    [] { nlohmann::json sc = SceneBody();
+                           sc["tick_hist"] = TickHistJson();
+                           return sc; }() },
         { "sdk",      SnapshotsBody()["connection"] },
         { "playback", PlaybackBody() },
         { "ownership",OwnershipBody() },
@@ -286,6 +333,8 @@ static bool ServeOnce(Server& s, uint32_t wait_ms = 15)
                 { "engine",             "openrgb2-engine" },
                 { "running",            true },
                 { "state",              StateBody() },
+                { "capabilities", nlohmann::json::array(
+                    { "output_control_v1" }) },
             }));
         break;
     case MsgType::Subscribe:
@@ -317,6 +366,23 @@ static bool ServeOnce(Server& s, uint32_t wait_ms = 15)
         break;
     case MsgType::GetState:
         s.srv.SendMsg(MsgType::State, m.request_id, StateBody());
+        break;
+    case MsgType::OutputCommand:
+        /* E-12c: the only output verb this page sends. */
+        if(m.Body().is_object() &&
+           m.Body().value("verb", std::string()) == "reset_stats")
+        {
+            g_timing_reset = true;
+            s.srv.SendMsg(MsgType::Ok, m.request_id,
+                nlohmann::json::object({{ "reset", true }}));
+            break;
+        }
+        s.srv.SendMsg(MsgType::Error, m.request_id,
+            nlohmann::json::object({
+                { "code",    (uint32_t)ErrCode::BadRequest },
+                { "error",   "bad_request" },
+                { "message", "unexpected output verb" },
+            }));
         break;
     case MsgType::DiagGet:
         s.srv.SendMsg(MsgType::Diagnostics, m.request_id,
@@ -965,6 +1031,99 @@ int main(int argc, char** argv)
                   std::string::npos);
         }
         CHECK(text2.find("<profile>") != std::string::npos);
+    }
+
+    /*---- E-12c timing card: tick + per-lane queue/send ---------*/
+    std::printf("-- timing histograms\n");
+    {
+        diag.refresh();
+        CHECK(PumpBoth(s, [&] {
+            return diag.timing().value(QStringLiteral("tick")).toMap()
+                       .value(QStringLiteral("measured")).toBool();
+        }));
+        const QVariantMap t = diag.timing();
+        CHECK(t.value(QStringLiteral("can_reset")).toBool());
+
+        const QVariantMap tick = t.value(QStringLiteral("tick")).toMap();
+        CHECK(tick.value(QStringLiteral("available")).toBool());
+        CHECK(tick.value(QStringLiteral("total")).toULongLong() == 100);
+        CHECK(tick.value(QStringLiteral("p50_text")).toString()
+              == QStringLiteral("17 ms"));
+        CHECK(tick.value(QStringLiteral("p95_text")).toString()
+              == QStringLiteral("33 ms"));
+        const QVariantList bars =
+            tick.value(QStringLiteral("bars")).toList();
+        CHECK(bars.size() == 17);
+        if(bars.size() == 17)
+        {
+            const QVariantMap b17 = bars[7].toMap();
+            CHECK(b17.value(QStringLiteral("label")).toString()
+                  == QStringLiteral("17"));
+            CHECK(b17.value(QStringLiteral("count")).toULongLong() == 90);
+            CHECK(b17.value(QStringLiteral("frac")).toDouble() == 1.0);
+            const QVariantMap b33 = bars[10].toMap();
+            CHECK(b33.value(QStringLiteral("frac")).toDouble() == 0.1);
+            CHECK(bars[16].toMap().value(QStringLiteral("label"))
+                      .toString() == QStringLiteral(">250"));
+            CHECK(bars[0].toMap().value(QStringLiteral("frac"))
+                      .toDouble() == 0.0);
+        }
+
+        /* Per lane, joined to the topology name. */
+        const QVariantList lanes =
+            t.value(QStringLiteral("lanes")).toList();
+        CHECK(lanes.size() == 2);
+        if(lanes.size() == 2)
+        {
+            const QVariantMap l0 = lanes[0].toMap();
+            CHECK(l0.value(QStringLiteral("name")).toString()
+                  == QStringLiteral("Lian Li SL Wireless"));
+            const QVariantMap q =
+                l0.value(QStringLiteral("queue")).toMap();
+            CHECK(q.value(QStringLiteral("measured")).toBool());
+            CHECK(q.value(QStringLiteral("p50_text")).toString()
+                  == QStringLiteral("33 ms"));
+            CHECK(q.value(QStringLiteral("provenance")).toString()
+                  == QStringLiteral("transport_measured"));
+            const QVariantMap sd =
+                l0.value(QStringLiteral("send")).toMap();
+            CHECK(sd.value(QStringLiteral("p50_text")).toString()
+                  == QStringLiteral("2 ms"));
+            /* A percentile in the overflow bucket is null on the
+               wire — shown as "> 250 ms", never as 0. */
+            CHECK(sd.value(QStringLiteral("p99_text")).toString()
+                  == QStringLiteral("> 250 ms"));
+            CHECK(lanes[1].toMap().value(QStringLiteral("name"))
+                      .toString()
+                  == QStringLiteral("X870E AORUS ELITE WiFi7 ICE"));
+        }
+        const QVariantMap agg =
+            t.value(QStringLiteral("aggregate")).toMap();
+        CHECK(agg.value(QStringLiteral("queue")).toMap()
+                  .value(QStringLiteral("total")).toULongLong() == 5);
+
+        /* Reset: one OUTPUT_COMMAND reset_stats, then a re-pull —
+           everything reads unmeasured, never zero-as-a-value. */
+        CHECK(diag.resetTiming());
+        CHECK(PumpBoth(s, [&] {
+            return g_timing_reset &&
+                   !diag.timing().value(QStringLiteral("tick")).toMap()
+                        .value(QStringLiteral("measured")).toBool() &&
+                   !diag.timing().value(QStringLiteral("aggregate"))
+                        .toMap().value(QStringLiteral("queue")).toMap()
+                        .value(QStringLiteral("measured")).toBool();
+        }));
+        const QVariantMap tick2 =
+            diag.timing().value(QStringLiteral("tick")).toMap();
+        CHECK(tick2.value(QStringLiteral("p50_text")).toString()
+              == QStringLiteral("—"));
+        CHECK(tick2.value(QStringLiteral("available")).toBool());
+
+        /* An engine without the fields: unavailable, not empty. */
+        const QVariantMap none =
+            ui::DiagnosticsController::HistogramView(QVariantMap());
+        CHECK(!none.value(QStringLiteral("available")).toBool());
+        CHECK(!none.value(QStringLiteral("measured")).toBool());
     }
 
     bridge.stop();

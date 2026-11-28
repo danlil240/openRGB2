@@ -31,6 +31,9 @@ Item {
         root.hasCtl ? diagCtl.rates : ({})
     readonly property var ownership:
         root.hasCtl ? diagCtl.ownership : ({})
+    /* E-12c timing card (DiagnosticsController::timing). */
+    readonly property var timing:
+        root.hasCtl ? diagCtl.timing : ({})
     /* Newest-first tail of the bounded UI-side journal. */
     readonly property var logTail:
         (root.hasCtl ? diagCtl.eventLog : []).slice(-24).reverse()
@@ -248,6 +251,82 @@ Item {
                             color: Theme.textDisabled
                             font.pixelSize: Theme.fontSizeSmall
                             wrapMode: Text.WordWrap
+                        }
+                    }
+                }
+            }
+
+            /*---- Timing (audit E-12c) ---------------------------
+               Cumulative distributions of the scene clock's tick
+               interval and each lane's queue (scene sample ->
+               send start) and send (send start -> transport
+               accepted) times. Transport-measured — never
+               "displayed"; percentiles are bucket upper edges. */
+            Card {
+                objectName: "timingCard"
+                title: qsTr("TIMING — TICK CADENCE · QUEUE · SEND")
+                width: parent.width - 2 * col.padding
+                Column {
+                    width: parent.width
+                    spacing: Theme.spaceS
+                    Text {
+                        width: parent.width
+                        text: qsTr("Cumulative since engine start or the last reset. Percentiles are bucket upper edges, not interpolated. Queue = scene sample → send start (including the lane's budget wait); send = send start → accepted by the transport. Neither is a displayed-on-device time.")
+                        color: Theme.textDisabled
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                    }
+                    TimingHistogram {
+                        objectName: "timingTick"
+                        width: parent.width
+                        label: qsTr("scene clock tick interval")
+                        hist: root.timing.tick || ({})
+                    }
+                    TimingHistogram {
+                        objectName: "timingQueueAll"
+                        width: parent.width
+                        label: qsTr("all lanes · queue")
+                        hist: root.timing.aggregate
+                              ? root.timing.aggregate.queue : ({})
+                    }
+                    TimingHistogram {
+                        objectName: "timingSendAll"
+                        width: parent.width
+                        label: qsTr("all lanes · send")
+                        hist: root.timing.aggregate
+                              ? root.timing.aggregate.send : ({})
+                    }
+                    Repeater {
+                        model: root.timing.lanes || []
+                        Column {
+                            width: parent.width
+                            spacing: Theme.spaceS
+                            TimingHistogram {
+                                width: parent.width
+                                label: qsTr("%1 · queue").arg(modelData.name || qsTr("controller"))
+                                hist: modelData.queue || ({})
+                            }
+                            TimingHistogram {
+                                width: parent.width
+                                label: qsTr("%1 · send").arg(modelData.name || qsTr("controller"))
+                                hist: modelData.send || ({})
+                            }
+                        }
+                    }
+                    Row {
+                        spacing: Theme.spaceM
+                        AppButton {
+                            objectName: "timingResetButton"
+                            text: qsTr("Reset histograms")
+                            enabled: root.engineUp && !!root.timing.can_reset
+                            onClicked:
+                                if(root.hasCtl) { diagCtl.resetTiming(); }
+                        }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: qsTr("clears these measurements only — no effect on lighting output")
+                            color: Theme.textDisabled
+                            font.pixelSize: Theme.fontSizeSmall
                         }
                     }
                 }

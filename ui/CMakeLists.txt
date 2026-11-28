@@ -81,6 +81,7 @@ qt_add_qml_module(openrgb2_ui
         components/PageHeader.qml
         components/PaletteSwatch.qml
         components/StatusPill.qml
+        components/TimingHistogram.qml
         pages/DashboardPage.qml
         pages/DevicesPage.qml
         pages/LayoutPage.qml
