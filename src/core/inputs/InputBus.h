@@ -36,28 +36,36 @@ public:
 
     /* Providers: stamp + enqueue an event. `code` carries the raw
        source code (e.g. a VK) for the bridge to resolve into pos.
-       Bounded: the queue never exceeds the cap and stale events are
-       pruned on snapshot — bursts cannot grow memory. */
+       Bounded: the queue never exceeds the cap and expired events
+       are pruned here, on Snapshot and on Idle — bursts cannot
+       grow memory. */
     void PushEvent(const std::string& source, float strength, int code = 0);
 
     void SetScreenGrid(int cols, int rows, const std::vector<ColorF>& cells);
     void ClearScreenGrid();
     void SetAudioLevel(float level);
 
-    /* Copy current state for the engine; events older than max_age
-       (seconds) are dropped. */
-    InputState Snapshot(double max_age) const;
+    /* Copy current state for the engine. Events older than max_age
+       (seconds), or stamped after now() (the clock was reset), are
+       dropped from the queue for good — not just filtered out of
+       this copy (audit C-8). max_age is remembered as the window
+       PushEvent and Idle prune by. */
+    InputState Snapshot(double max_age);
 
     /* True when Snapshot() would return an all-default state
        (no events, no screen grid, zero audio level) — lets a
-       60 Hz caller skip building one. */
-    bool Idle() const;
+       60 Hz caller skip building one. Prunes expired events
+       first (by the last Snapshot window), so the bus goes idle
+       again once the last event ages out. */
+    bool Idle();
 
     void ClearEvents();
     void ClearAll();
 
 private:
     double Now() const;
+    /* Drop events outside [now - window, now]. Caller holds mutex. */
+    void   PruneLocked(double now);
 
     mutable std::mutex        mutex;
     std::function<double()>   now_fn;
@@ -67,6 +75,10 @@ private:
     int                       rows     = 0;
     float                     level    = 0.0f;
     size_t                    cap      = 96;
+    /* Event retention window: the max_age of the last Snapshot.
+       Until a Snapshot has run nothing is known about the
+       consumer's window, so only negative ages are pruned. */
+    double                    window   = -1.0;
 };
 
 } /* namespace studio */

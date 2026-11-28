@@ -1361,12 +1361,43 @@ static void TestInputBus()
     CHECK(Near(s.audio_level, 0.6f), "bus: audio level snapshot");
 
     /* Events older than max_age are dropped. */
-    now = 20.0;
-    s = bus.Snapshot(6.0);
-    CHECK(s.events.empty(), "bus: stale event pruned");
     now = 14.0;
     s = bus.Snapshot(6.0);
     CHECK(s.events.size() == 1, "bus: event inside window kept");
+    now = 20.0;
+    s = bus.Snapshot(6.0);
+    CHECK(s.events.empty(), "bus: stale event pruned");
+
+    /* Audit C-8: expired events are PRUNED, not just filtered —
+       once the last event ages out (and the continuous signals
+       are back at rest) the bus reports Idle again, so the 60 Hz
+       ReactiveInputs::Snapshot stops copying state forever after
+       the first key press. */
+    bus.SetAudioLevel(0.0f);
+    CHECK(bus.Idle(), "bus: idle again after the event expired");
+    now = 30.0;
+    bus.PushEvent("key", 1.0f, 0x52);
+    CHECK(!bus.Idle(), "bus: a fresh event is not idle");
+    now = 36.5;     /* past the 6 s window the last snapshot used */
+    CHECK(bus.Idle(), "bus: Idle prunes by the snapshot window");
+    s = bus.Snapshot(6.0);
+    CHECK(s.events.empty(), "bus: pruned event stays gone");
+    now = 31.0;     /* the clock stepped back (worker restart) */
+    s = bus.Snapshot(6.0);
+    CHECK(s.events.empty(), "bus: a pruned event never comes back");
+    /* An event stamped before a clock reset has a negative age —
+       it is dropped for good, not held until the clock catches up
+       and then replayed as a fresh ripple. */
+    now = 50.0;
+    bus.PushEvent("key", 1.0f, 0x53);
+    now = 2.0;
+    s = bus.Snapshot(6.0);
+    CHECK(s.events.empty() && bus.Idle(),
+          "bus: pre-reset event pruned");
+    now = 50.5;
+    s = bus.Snapshot(6.0);
+    CHECK(s.events.empty(), "bus: pre-reset event not replayed");
+    bus.SetAudioLevel(0.6f);
 
     /* The queue is bounded — a burst can't grow memory, newest win. */
     bus.ClearEvents();
