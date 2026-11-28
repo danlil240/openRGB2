@@ -40,6 +40,7 @@
 #include "DeviceMapper.h"
 #include "Engine.h"
 #include "OpenRgbClient.h"
+#include "OutputControl.h"
 #include "PlaybackController.h"
 #include "PowerLifecycle.h"
 #include "ReactiveInputs.h"
@@ -151,6 +152,14 @@ public:
            reports available=false honestly rather than
            fabricating toggles. */
         ReactiveInputs*     reactive = nullptr;
+
+        /* R-1: the runtime output control — the OUTPUT_COMMAND
+           verb space (get / set_master / set_blackout /
+           set_hold), the "output" event and the
+           "output_control_v1" WELCOME capability. Nullptr ->
+           Unavailable and no capability (clients hide the
+           controls). */
+        OutputControl*      output = nullptr;
 
         /* IPC-side queue/counter source (IpcServer::Stats) —
            diagnostics exposes queue depths, not guesses. */
@@ -328,6 +337,10 @@ public:
        a conflict on any page (and in the tray), not only
        while Diagnostics polls. */
     void EmitOwnership();
+    /* R-1: emits the "output" event with the current OUTPUT
+       body — the engine's OutputControl changed hook calls
+       this after applying a change. */
+    void EmitOutput();
 
     /*---- IIpcService ---------------------------------------*/
     nlohmann::json OnWelcome() override;
@@ -423,6 +436,12 @@ private:
     std::string         last_topology_sig_;
     std::string         last_playback_sig_;
     std::string         last_reactive_sig_;
+    /* R-1: the "output" signature is written from IPC threads
+       (the host's changed hook) AND the owner loop — guarded,
+       and held across the emit so two writers can never push
+       an older body after a newer one. */
+    std::mutex          output_sig_mutex_;
+    std::string         last_output_sig_;
     std::string         last_stats_sig_;
     TimePoint           last_frame_status_{};
 
@@ -451,6 +470,22 @@ private:
        the client lands on real state, never an assumed one. */
     IpcReply       HandleReactiveCommand(const std::string& verb,
                                          const nlohmann::json& body);
+    /* R-1 OUTPUT_COMMAND surface: a verb table (OutputVerbs)
+       dispatches to one handler per verb; every reply is the
+       full OUTPUT body. Add a verb = add a table row. */
+    using OutputVerbFn = IpcReply (EngineService::*)(const nlohmann::json&);
+    struct OutputVerb
+    {
+        const char*  name;
+        OutputVerbFn fn;
+    };
+    static const std::vector<OutputVerb>& OutputVerbs();
+    IpcReply       HandleOutputCommand(const std::string& verb,
+                                       const nlohmann::json& body);
+    IpcReply       OutputGet(const nlohmann::json& body);
+    IpcReply       OutputSetMaster(const nlohmann::json& body);
+    IpcReply       OutputSetBlackout(const nlohmann::json& body);
+    IpcReply       OutputSetHold(const nlohmann::json& body);
     IpcReply       HandleIdentify(const nlohmann::json& body);
     /* studio-import Task 3 gate: HandleLayoutMutate refuses
        lossy legacy edits while a managed workspace is active
@@ -474,6 +509,13 @@ private:
     nlohmann::json PowerJson() const;
     nlohmann::json StateJson() const;
     nlohmann::json ReactiveJson() const;
+    /* R-1: the OUTPUT body (null when no OutputControl is
+       wired). */
+    nlohmann::json OutputJson() const;
+    /* R-1: emit "output" when `force` or the body moved since
+       the last emit — the host hook and PollEvents share one
+       signature, so a change is pushed once, not twice. */
+    void           EmitOutputIfChanged(bool force);
     nlohmann::json SnapshotsJson(bool include_colors = true) const;
     /* F12: DIAGNOSTICS and GET_DELIVERY_STATS share ONE
        topology capture per call — `snaps` is the caller's

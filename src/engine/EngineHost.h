@@ -331,6 +331,10 @@ private:
     /* ReactiveInputs changed hook: emit the IPC event +
        persist the selection through the profile store. */
     void OnReactiveChanged();
+    /* R-1 OutputControl changed hook: worker hold, uploaded-
+       playback routing, persistence, the "output" event. */
+    void OnOutputChanged();
+    std::mutex output_apply_mutex_;
 
     /* Task 5.3: re-arms the SDK reconnect schedule after the
        client's bounded backoff latches to Disconnected. */

@@ -633,6 +633,60 @@ int main()
         CHECK(host3.GetService()->Scene() == nullptr);
         host3.RequestStop();
         host3.Stop();
+
+        /* R-1: the tray's output control through the real host
+           wiring — master + blackout persist across a restart,
+           hold does not (a restart resumes). */
+        {
+            EngineHost host4(make_opts(
+                ("Local\\openrgb2-engine-e2e-test-4-" +
+                 std::to_string(_getpid())).c_str(), true));
+            CHECK(host4.Start(err));
+            ipc::EngineService* svc = host4.GetService();
+            CHECK(svc != nullptr);
+            if(svc)
+            {
+                using ipc::MsgType;
+                ipc::IpcReply r = svc->Dispatch(MsgType::OutputCommand,
+                    nlohmann::json::object({{ "verb", "set_master" },
+                                            { "value", 0.4 }}));
+                CHECK(r.code == ipc::ErrCode::Ok);
+                r = svc->Dispatch(MsgType::OutputCommand,
+                    nlohmann::json::object({{ "verb", "set_blackout" },
+                                            { "on", true }}));
+                CHECK(r.code == ipc::ErrCode::Ok);
+                r = svc->Dispatch(MsgType::OutputCommand,
+                    nlohmann::json::object({{ "verb", "set_hold" },
+                                            { "on", true }}));
+                CHECK(r.code == ipc::ErrCode::Ok);
+                CHECK(host4.GetEngine().Worker().Held());
+                CHECK(host4.GetOutput().EffectiveScale() == 0.0f);
+            }
+            host4.RequestStop();
+            host4.Stop();
+        }
+        {
+            EngineHost host5(make_opts(
+                ("Local\\openrgb2-engine-e2e-test-5-" +
+                 std::to_string(_getpid())).c_str(), true));
+            CHECK(host5.Start(err));
+            const OutputState os = host5.GetOutput().State();
+            CHECK(os.master == 0.4f);
+            CHECK(os.blackout);
+            CHECK(!os.hold);
+            CHECK(!host5.GetEngine().Worker().Held());
+            /* Releasing Off restores the persisted master. */
+            ipc::EngineService* svc = host5.GetService();
+            if(svc)
+            {
+                svc->Dispatch(ipc::MsgType::OutputCommand,
+                    nlohmann::json::object({{ "verb", "set_blackout" },
+                                            { "on", false }}));
+            }
+            CHECK(host5.GetOutput().EffectiveScale() == 0.4f);
+            host5.RequestStop();
+            host5.Stop();
+        }
     }
 
     TestPartialStartTeardown(tmp);
