@@ -1923,7 +1923,30 @@ const OrderlyShutdown::Result& EngineHost::Stop()
                      [this] { SignalPendingBackend(); });
     }
 
+    /* E-10: the bounds above are enforced, not only measured.
+       A step that throws is caught inside Run() (later owners
+       still stop); a step that never returns trips the
+       watchdog once the whole sequence outlives its total
+       bound. */
+    if(opts_.shutdown_watchdog)
+    {
+        shutdown.SetWatchdog(opts_.shutdown_watchdog_grace,
+            [this](const std::string& step)
+            {
+                Log("shutdown watchdog: step '" + step +
+                    "' still running past the total bound");
+                opts_.shutdown_watchdog(step);
+            });
+    }
     shutdown_result_ = shutdown.Run();
+    for(const OrderlyShutdown::StepResult& s : shutdown_result_.steps)
+    {
+        if(s.failed)
+        {
+            Log("shutdown step '" + s.name + "' threw: " + s.error +
+                " (later steps still ran)");
+        }
+    }
     return shutdown_result_;
 }
 
