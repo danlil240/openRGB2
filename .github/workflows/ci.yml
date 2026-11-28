@@ -99,7 +99,7 @@ jobs:
 
       - name: Build (Release)
         id: build
-        run: cmake --build build --config Release -- -m -v:minimal
+        run: cmake --build build --config Release -- -m /v:minimal
 
       # Plan step 3: the Quick3D viewport suite must be registered, not
       # silently dropped by the optional-Quick3D fallback.
@@ -203,7 +203,7 @@ jobs:
           "-DCMAKE_PREFIX_PATH=${{ env.QT_PREFIX }}"
 
       - name: Build (Release)
-        run: cmake --build build --config Release -- -m -v:minimal
+        run: cmake --build build --config Release -- -m /v:minimal
 
       - name: Restore the qmake backend build
         id: backend_cache
