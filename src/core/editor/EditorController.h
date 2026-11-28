@@ -351,7 +351,9 @@ public:
        same way. Unset fields are left alone.
          direction  — non-zero, finite; normalized onto each layer
                       (wave bands travel along +direction)
-         colors     — 2..5 stops on the FIRST flow layer in stack
+         colors     — 1..EFFECT_MAX_STOPS stops (any count the
+                      card can show; its +/- keep new edits in
+                      2..5) on the FIRST flow layer in stack
                       order; the same count recolours the stops
                       in place (positions and alpha kept), a new
                       count is rewritten as evenly spaced stops

@@ -1855,11 +1855,21 @@ static void TestFlowEdit()
     CHECK(w.effect.layers[1].palette.stops.size() == 1,
           "flow: swell keeps its own palette");
 
+    /* Any count the card can show (a palette's stops) is accepted
+       back — 1 and 6+ included (audit U-12); only the schema cap
+       refuses. */
     EditorController::FlowEdit bad;
-    bad.colors = { ColorF{ 1, 0, 0, 1 } };
-    CHECK(!ctl.SetFlow(bad).has_value(), "flow: one color refused");
     bad.colors.assign(6, ColorF{ 1, 0, 0, 1 });
-    CHECK(!ctl.SetFlow(bad).has_value(), "flow: six colors refused");
+    CHECK(ctl.SetFlow(bad).has_value()
+          && w.effect.layers[0].palette.stops.size() == 6,
+          "flow: six colors accepted");
+    bad.colors = { ColorF{ 0, 1, 0, 1 } };
+    CHECK(ctl.SetFlow(bad).has_value()
+          && w.effect.layers[0].palette.stops.size() == 1,
+          "flow: one color accepted");
+    bad.colors.assign(EFFECT_MAX_STOPS + 1, ColorF{ 1, 0, 0, 1 });
+    CHECK(!ctl.SetFlow(bad).has_value() && !ctl.LastError().empty(),
+          "flow: colors over the stop cap refused");
     EditorController::FlowEdit zero;
     zero.direction = Vec3{ 0, 0, 0 };
     CHECK(!ctl.SetFlow(zero).has_value(), "flow: zero direction refused");

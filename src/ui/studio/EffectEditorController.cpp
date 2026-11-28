@@ -1325,8 +1325,16 @@ QVariantMap EffectEditorController::flowState() const
 bool EffectEditorController::ApplyFlow(
     const studio::EditorController::FlowEdit& f)
 {
-    if(!ready() || gestureActive())
+    if(!ready())
     {
+        return false;
+    }
+    if(gestureActive())
+    {
+        /* A slider or drag elsewhere is still open; say why the
+           card did nothing instead of dropping the edit. */
+        emit statusMessage(QStringLiteral(
+            "finish the current edit before changing the wave"));
         return false;
     }
     auto e = Editor()->SetFlow(f);
@@ -1357,9 +1365,12 @@ bool EffectEditorController::setFlowColors(const QStringList& colors)
         }
         f.colors.push_back(ColorOf(c));
     }
-    if(f.colors.size() < 2 || f.colors.size() > 5)
+    /* Same range as the core SetFlow: every count flowState() can
+       show (one stop, six) is accepted back. */
+    if(f.colors.empty() || f.colors.size() > studio::EFFECT_MAX_STOPS)
     {
-        emit statusMessage(QStringLiteral("wave needs 2 to 5 colors"));
+        emit statusMessage(QStringLiteral("wave needs 1 to %1 colors")
+                               .arg(studio::EFFECT_MAX_STOPS));
         return false;
     }
     return ApplyFlow(f);
