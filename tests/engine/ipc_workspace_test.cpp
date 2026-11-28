@@ -1926,6 +1926,17 @@ int main()
             { "verb", "calibration_show" },
             { "token", tok }, { "led", 6 },
         }), ErrCode::Unavailable, "out_of_range");
+        /* Audit I-13: a 64-bit led must not narrow into range —
+           2^32 + 2 truncated to int is 2, a valid LED; -2^32 + 1
+           truncates to 1. Both are out of range, not a show. */
+        WsCallErr(c, seq, json::object({
+            { "verb", "calibration_show" },
+            { "token", tok }, { "led", 4294967298ll },
+        }), ErrCode::Unavailable, "out_of_range");
+        WsCallErr(c, seq, json::object({
+            { "verb", "calibration_show" },
+            { "token", tok }, { "led", -4294967295ll },
+        }), ErrCode::Unavailable, "out_of_range");
         const size_t writes = submits.size();
         std::this_thread::sleep_for(
             std::chrono::milliseconds(30));
