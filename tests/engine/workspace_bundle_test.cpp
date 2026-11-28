@@ -1122,6 +1122,151 @@ static void TestPackedServiceFlow()
     }
 }
 
+/*---------------------------------------------------------*\
+|| T4 (audit I-2): staged, bundled and imported documents  ||
+|| nested far past the wire cap are refused cleanly — the  ||
+|| parse is bounded like wire bodies, so nlohmann's        ||
+|| recursive copy (StudioConfig `extensions`) and dump     ||
+|| never see the deep part. Unbounded, each case is a      ||
+|| stack overflow on the job / caller thread.              ||
+\*---------------------------------------------------------*/
+static std::string DeepArray(int depth)
+{
+    return std::string(depth, '[') + std::string(depth, ']');
+}
+
+/* A valid workspace document whose `extensions` (retained
+   verbatim, deep-copied by StudioConfig) holds `depth` nested
+   arrays. Built by string surgery: nlohmann cannot build it
+   without recursing. */
+static std::string DeepWorkspaceJson(int depth)
+{
+    std::string s = WorkspaceJson("deep", "mini-fan");
+    const size_t close = s.rfind('}');
+    s.erase(close);
+    s += ",\"extensions\":{\"deep\":" + DeepArray(depth) + "}}";
+    return s;
+}
+
+static void TestDeepNestingRefused()
+{
+    std::printf("-- I-2: deep nesting refused, no stack overflow\n");
+    constexpr int kDeep = 200000;   /* ~400 KB, far past any stack */
+
+    const fs::path base_types = g_tmp / "t4-base";
+    fs::create_directories(base_types);
+    Write(base_types / "mini-fan.device.json",
+          TypeJson("mini-fan", 8, "base"));
+    studio::PresetRegistry reg;
+    CHECK(reg.LoadDirectory(base_types.string(), nullptr));
+    studio::EffectRegistry fx;
+
+    Svc s(P("t4-svc"), reg, fx);
+
+    /* Shallow control: the same surgery at depth 4 is fine. */
+    s.uploads["shallow"] = DeepWorkspaceJson(4);
+    {
+        const auto st = s.Run(json::object({
+            { "verb",   "validate" },
+            { "id",     "deep"     },
+            { "staged", "shallow"  },
+            { "base_revision",     0ull },
+            { "resource_revision", 0ull },
+        }));
+        CHECK(st.state == WorkspaceService::JobState::Succeeded);
+        if(st.state != WorkspaceService::JobState::Succeeded)
+        {
+            std::printf("  (shallow: %s / %s)\n", st.error.c_str(),
+                        st.detail.c_str());
+        }
+    }
+
+    /* Staged workspace document (validate / commit). */
+    s.uploads["deep-doc"] = DeepWorkspaceJson(kDeep);
+    for(const char* verb : { "validate", "commit" })
+    {
+        const auto st = s.Run(json::object({
+            { "verb",              verb       },
+            { "id",                "deep"     },
+            { "staged",            "deep-doc" },
+            { "base_revision",     0ull       },
+            { "resource_revision", 0ull       },
+        }));
+        CHECK(st.state == WorkspaceService::JobState::Failed);
+        CHECK(st.detail == "invalid_document");
+    }
+    CHECK(s.svc.WorkspaceRevision() == 0);
+
+    /* Staged packed bundle whose outer form is itself deep. */
+    s.uploads["deep-outer"] =
+        "{\"format\":\"openrgb2-bundle-files\",\"files\":" +
+        DeepArray(kDeep) + "}";
+    {
+        const auto st = s.Run(json::object({
+            { "verb",   "import_inspect" },
+            { "staged", "deep-outer"     },
+        }));
+        CHECK(st.state == WorkspaceService::JobState::Failed);
+    }
+
+    /* Packed bundle: shallow wire form, deep files inside
+       (studio.json, a device type) — parsed by InspectBundle
+       from the unpacked stage. */
+    auto inspect_files = [&](const std::string& tok,
+                             const json& files)
+    {
+        s.uploads[tok] = json::object({
+            { "format",  "openrgb2-bundle-files" },
+            { "version", 1                       },
+            { "files",   files                   },
+        }).dump();
+        const auto st = s.Run(json::object({
+            { "verb",   "import_inspect" },
+            { "staged", tok              },
+        }));
+        CHECK(st.state == WorkspaceService::JobState::Failed ||
+              !st.result.value("valid", true));
+    };
+    inspect_files("deep-studio", json::object({
+        { "studio.json", json::object({
+              { "encoding", "utf8" },
+              { "data",     DeepWorkspaceJson(kDeep) } }) } }));
+    inspect_files("deep-type", json::object({
+        { "studio.json", json::object({
+              { "encoding", "utf8" },
+              { "data",     WorkspaceJson("x", "deep-fan") } }) },
+        { "presets/devices/deep-fan.device.json", json::object({
+              { "encoding", "utf8" },
+              { "data",     "{\"id\":\"deep-fan\",\"x\":" +
+                            DeepArray(kDeep) + "}" } }) } }));
+
+    /* import_file from disk, with a deep sibling preset next
+       to it (the folder-of-files import loads presets/). */
+    const fs::path idir = g_tmp / "t4-import";
+    Write(idir / "deep.studio.json", DeepWorkspaceJson(kDeep));
+    {
+        const WorkspaceService::Result r = s.svc.ImportFile(
+            "deep-import", (idir / "deep.studio.json").string(), 0);
+        CHECK(!r.ok);
+        CHECK(!r.error.empty());
+    }
+    const fs::path sdir = g_tmp / "t4-sibling";
+    Write(sdir / "ws.studio.json", WorkspaceJson("sib", "mini-fan"));
+    Write(sdir / "presets" / "devices" / "deep-fan.device.json",
+          "{\"id\":\"deep-fan\",\"x\":" + DeepArray(kDeep) + "}");
+    Write(sdir / "presets" / "effects" / "deep.effect.json",
+          "{\"id\":\"deep\",\"x\":" + DeepArray(kDeep) + "}");
+    {
+        const WorkspaceService::Result r = s.svc.ImportFile(
+            "sib", (sdir / "ws.studio.json").string(), 0);
+        CHECK(r.ok);       /* bad siblings are warnings only */
+        if(!r.ok)
+        {
+            std::printf("  (sibling import: %s)\n", r.error.c_str());
+        }
+    }
+}
+
 int main()
 {
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -1136,6 +1281,7 @@ int main()
     TestBundleRoundTrip();
     TestStoreResourceOps();
     TestPackedServiceFlow();
+    TestDeepNestingRefused();
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     fs::remove_all(g_tmp, ec);

@@ -6,6 +6,7 @@
 
 #include "PresetBundle.h"
 #include "../config/ConfigMigration.h"
+#include "../config/JsonBounded.h"
 #include "../scene/SceneJson.h"
 #include "../scene/SceneResolver.h"
 
@@ -589,15 +590,14 @@ bool InspectBundle(const std::string& src_dir,
     }
     total += bytes.size();
 
-    nlohmann::json j;
-    try
+    /* Depth-capped (audit I-2): a bundle is untrusted and
+       nlohmann's copy/dump recurse per nesting level. */
+    const nlohmann::json j = ParseJsonBounded(bytes);
+    if(j.is_discarded())
     {
-        j = nlohmann::json::parse(bytes);
-    }
-    catch(const std::exception& e)
-    {
-        Err(errors, doc_path.string() + ": invalid JSON ("
-                    + std::string(e.what()) + ")");
+        Err(errors, doc_path.string() + ": invalid JSON (or nested "
+                    "deeper than " + std::to_string(kMaxJsonDepth) +
+                    " levels)");
         return false;
     }
 
@@ -688,15 +688,13 @@ bool InspectBundle(const std::string& src_dir,
                 continue;
             }
             total += tbytes.size();
-            nlohmann::json tj;
-            try
+            const nlohmann::json tj = ParseJsonBounded(tbytes);
+            if(tj.is_discarded())
             {
-                tj = nlohmann::json::parse(tbytes);
-            }
-            catch(const std::exception& e)
-            {
-                Err(errors, path.string() + ": invalid JSON ("
-                            + std::string(e.what()) + ")");
+                Err(errors, path.string() + ": invalid JSON (or "
+                            "nested deeper than " +
+                            std::to_string(kMaxJsonDepth) +
+                            " levels)");
                 continue;
             }
             DevicePreset p;

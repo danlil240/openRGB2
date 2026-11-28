@@ -17,6 +17,11 @@ add_library(openrgb2_ipc_wire STATIC
 target_include_directories(openrgb2_ipc_wire PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies/json)
+# Header-only: the bounded JSON parse the wire codec shares with
+# the engine's file/staged/bundle parses (config/JsonBounded.h) —
+# an include path only, never a link to the studio core.
+target_include_directories(openrgb2_ipc_wire PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core)
 target_link_libraries(openrgb2_ipc_wire PUBLIC Threads::Threads)
 if(WIN32)
     # advapi32: the client's server verification (token user SID,
