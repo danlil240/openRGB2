@@ -3,6 +3,11 @@
 // Lighting — plan section 5, the main flow end to end:
 //   choose scene -> select devices -> adjust color/speed -> save.
 //
+// Layout (UX audit 2026-11-28): tabbed controls on the left (Look /
+// Colors / Motion / Reactive / Library) beside a sticky, resizable
+// preview (Draft / Applied) — every edit shows its result without
+// scrolling; the scene name and Save stay pinned.
+//
 // Everything below is real wire traffic: edits accumulate in the
 // SceneEditController's working document (sceneEdit), Save sends
 // SET_SCENE through EngineBridge, and playback mode/params go
@@ -194,1922 +199,2182 @@ Item {
         return key.device || "controller";
     }
 
+
+    /*---- workspace state (UX audit 2026-11-28) ----------------*/
+    /* Controls tab: 0 Look, 1 Colors, 2 Motion, 3 Reactive,
+       4 Library — session-only, Look first. */
+    property int controlsTab: 0
+    /* Preview: "auto" follows the draft feed (Draft while a draft
+       preview runs, else Applied); a click pins the user's pick. */
+    property string previewPick: "auto"
+    /* The preview pane can be hidden to give the controls the
+       full width (narrow windows) — session-only. */
+    property bool previewOpen: true
+    readonly property bool draftLive:
+        typeof viewport !== "undefined" && viewport.previewActive
+    readonly property bool showDraft:
+        previewPick === "draft" || (previewPick === "auto" && draftLive)
+    readonly property int previewDefaultWidth:
+        Math.round(Math.max(340, Math.min(560, root.width * 0.4)))
+
+    /* One selectable group row of the Colors list. */
+    component GroupRow: Rectangle {
+        id: gr
+        property string label: ""
+        property string detail: ""
+        property color  swatch: "black"
+        property bool   showSwatch: true
+        property bool   selected: false
+        property bool   sub: false
+        property bool   dim: false
+        signal activated()
+        width: parent ? parent.width : 0
+        height: 34
+        radius: Theme.radiusS
+        color: gr.selected
+               ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.12)
+               : grMouse.containsMouse ? Theme.surfaceHover : "transparent"
+        border.width: gr.activeFocus ? 2 : 0
+        border.color: Theme.accent
+        activeFocusOnTab: gr.enabled
+        Accessible.role: Accessible.CheckBox
+        Accessible.name: gr.label
+        Accessible.checkable: true
+        Accessible.checked: gr.selected
+        Keys.onPressed: e => {
+            if(e.key === Qt.Key_Space || e.key === Qt.Key_Return
+               || e.key === Qt.Key_Enter) {
+                if(gr.enabled) gr.activated();
+                e.accepted = true;
+            }
+        }
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: Theme.spaceS + (gr.sub ? Theme.spaceXL : 0)
+            anchors.rightMargin: Theme.spaceS
+            spacing: Theme.spaceM
+            Rectangle {
+                Layout.preferredWidth: 16
+                Layout.preferredHeight: 16
+                radius: 3
+                color: gr.selected ? Theme.accent : "transparent"
+                border.width: 1
+                border.color: gr.selected ? Theme.accent : Theme.borderStrong
+                Text {
+                    anchors.centerIn: parent
+                    visible: gr.selected
+                    text: "✓"
+                    color: Theme.accentText
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.bold: true
+                }
+            }
+            Rectangle {
+                visible: gr.showSwatch
+                Layout.preferredWidth: 20
+                Layout.preferredHeight: 20
+                radius: Theme.radiusS
+                color: gr.swatch
+                border.width: 1
+                border.color: Theme.borderStrong
+            }
+            Text {
+                text: gr.label
+                color: gr.dim || !gr.enabled ? Theme.textDisabled
+                                             : Theme.textPrimary
+                font.pixelSize: Theme.fontSizeBody
+                elide: Text.ElideRight
+                Layout.maximumWidth: gr.width * 0.45
+            }
+            Text {
+                text: gr.detail
+                color: Theme.textDisabled
+                font.pixelSize: Theme.fontSizeSmall
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+            }
+        }
+        MouseArea {
+            id: grMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            enabled: gr.enabled
+            cursorShape: Qt.PointingHandCursor
+            onClicked: gr.activated()
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
 
-        PageFlickable {     /* scroll bar + focus-follow (audit Q-12) */
-            objectName: "lightingScroll"
+        /*---- header: title + the scene name, always visible ---*/
+        RowLayout {
+            objectName: "lightingHeader"
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.spaceXL
+            Layout.rightMargin: Theme.spaceXL
+            Layout.topMargin: Theme.spaceXL
+            Layout.bottomMargin: Theme.spaceM
+            spacing: Theme.spaceM
+
+            PageHeader {
+                Layout.fillWidth: true
+                title: qsTr("Lighting")
+            }
+            Text {
+                Layout.alignment: Qt.AlignVCenter
+                text: qsTr("Scene")
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSizeBody
+            }
+                TextField {
+                    id: nameField
+                    objectName: "nameField"
+                    Accessible.name: qsTr("Scene name")
+                    Layout.preferredWidth: 300
+                    Layout.alignment: Qt.AlignVCenter
+                    enabled: root.editorUp
+                    placeholderText: qsTr("name this scene")
+                    /* No text: binding — an imperative
+                       assignment would kill it forever
+                       (Task 4.8 minor). Instead the page
+                       tracks syncedSceneName: the last
+                       model name this field was shown.
+                       When the model's name moves OFF
+                       that value (discard, reload,
+                       remote apply) the field follows
+                       it — focused or not — while edits
+                       the model never saw (uncommitted
+                       typing) survive unrelated
+                       workingChanged churn. The paths
+                       that revert to the SAME name the
+                       sentinel already holds — a
+                       refused commit, Discard, Reload —
+                       resync explicitly instead
+                       (BUG-4). */
+                    onEditingFinished: {
+                        /* A refused commit reverts —
+                           the model never took the
+                           text, so the field must not
+                           keep showing it (BUG-4). */
+                        if(root.editorUp
+                           && !sceneEdit
+                                  .setSceneName(text)) {
+                            root.resyncNameField();
+                        }
+                    }
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSizeBody
+                    background: Rectangle {
+                        radius: Theme.radiusS
+                        color: Theme.surfaceAlt
+                        border.width: nameField.activeFocus ? 2 : 1
+                        border.color: nameField.activeFocus
+                                      ? Theme.accent : Theme.border
+                    }
+                    Connections {
+                        target: root.editorUp ? sceneEdit : null
+                        function onWorkingChanged() {
+                            const want = root.editorUp
+                                ? sceneEdit.sceneName : "";
+                            if(want !== root.syncedSceneName
+                               || root.nameResyncPending) {
+                                root.nameResyncPending = false;
+                                root.syncedSceneName = want;
+                                if(nameField.text !== want)
+                                    nameField.text = want;
+                            }
+                        }
+                    }
+                    Component.onCompleted: {
+                        const want = root.editorUp
+                            ? sceneEdit.sceneName : "";
+                        root.syncedSceneName = want;
+                        text = want;
+                    }
+                }
+        }
+
+        SplitView {
+            id: lightingSplit
+            objectName: "lightingSplit"
             Layout.fillWidth: true
             Layout.fillHeight: true
-            contentHeight: col.implicitHeight
-            clip: true
-            boundsBehavior: Flickable.StopAtBounds
-
-            Column {
-                id: col
-                width: root.width
-                padding: Theme.spaceXL
-                spacing: Theme.spaceL
-
-                PageHeader {
-                    title: qsTr("Lighting")
-                    subtitle: qsTr("Choose a scene, pick devices, tune, then save")
+            Layout.leftMargin: Theme.spaceXL
+            Layout.rightMargin: Theme.spaceXL
+            Layout.bottomMargin: Theme.spaceL
+            orientation: Qt.Horizontal
+            handle: Rectangle {
+                implicitWidth: Theme.spaceS
+                color: SplitHandle.pressed ? Theme.accentMuted
+                       : SplitHandle.hovered ? Theme.surfaceHover
+                       : "transparent"
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 2; height: 32; radius: 1
+                    color: Theme.borderStrong
                 }
+            }
+            onResizingChanged: {
+                if(!resizing && root.prefsUp)
+                    uiPrefs.lightingPreviewWidth =
+                        Math.round(previewPane.width);
+            }
 
-                /*---- Preset cards ------------------------------
-                   Uploaded presets first (they can run on the
-                   fans themselves), then the registry looks.
-                   A `needs` badge is honest about reactive
-                   inputs that aren't ported yet (4.6).    */
-                Text {
-                    text: qsTr("PRESETS")
-                    color: Theme.textSecondary
-                    font.pixelSize: Theme.fontSizeSmall
-                    font.weight: Font.DemiBold
-                    font.letterSpacing: 1.1
-                }
+            /*---- controls: one tab visible at a time ----------*/
+            Rectangle {
+                id: controlsPane
+                objectName: "controlsPane"
+                SplitView.fillWidth: true
+                SplitView.minimumWidth: 380
+                color: "transparent"
 
-                Flow {
-                    objectName: "presetFlow"
-                    width: parent.width - 2 * col.padding
-                    spacing: Theme.spaceL
+                ColumnLayout {
+                    anchors.fill: parent
+                    spacing: Theme.spaceM
 
-                    Repeater {
-                        model: root.editorUp ? sceneEdit.playbackPresets : []
-                        delegate: presetCard
+                    Flow {
+                        objectName: "controlsTabs"
+                        Layout.fillWidth: true
+                        spacing: Theme.spaceXS
+                        Repeater {
+                            model: [
+                                { key: "Look",     label: qsTr("Look") },
+                                { key: "Colors",   label: qsTr("Colors") },
+                                { key: "Motion",   label: qsTr("Motion") },
+                                { key: "Reactive", label: qsTr("Reactive") },
+                                { key: "Library",  label: qsTr("Library") }
+                            ]
+                            AppButton {
+                                objectName: "lightingTab" + modelData.key
+                                text: modelData.label
+                                checked: root.controlsTab === index
+                                Accessible.checkable: true
+                                Accessible.checked: checked
+                                onClicked: root.controlsTab = index
+                            }
+                        }
+                        AppButton {
+                            objectName: "previewToggle"
+                            Accessible.name: root.previewOpen
+                                             ? qsTr("Hide the preview pane")
+                                             : qsTr("Show the preview pane")
+                            text: root.previewOpen ? qsTr("Hide preview")
+                                                   : qsTr("Show preview")
+                            onClicked: root.previewOpen = !root.previewOpen
+                        }
                     }
-                    Repeater {
-                        model: root.engineUp ? bridge.presets : []
-                        delegate: presetCard
-                    }
-                }
 
-                Component {
-                    id: presetCard
-                    Rectangle {
-                        objectName: "preset_" + pid
-                        width: 260
-                        implicitHeight: cardCol.implicitHeight + 2 * Theme.spaceL
-                        radius: Theme.radiusM
-                        color: Theme.surface
-                        border.width: selected ? 2 : (activeFocus ? 2 : 1)
-                        border.color: selected ? Theme.accent
-                                    : activeFocus ? Theme.accent
-                                    : Theme.border
+                    StackLayout {
+                        objectName: "controlsStack"
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        currentIndex: root.controlsTab
 
-                        readonly property string pid:
-                            modelData.id || ""
-                        readonly property bool selected:
-                            root.editorUp && sceneEdit.presetId === pid
-                        readonly property bool isPlayback:
-                            modelData.direction !== undefined
-                        readonly property string needs:
-                            modelData.needs || ""
+                    PageFlickable {
+                        id: lookFlick
+                        objectName: "lightingScroll"
+                        contentHeight: lookFlickCol.implicitHeight
+                        Column {
+                            id: lookFlickCol
+                            width: lookFlick.width - Theme.spaceM
+                            spacing: Theme.spaceL
+                        /*---- Preset cards ------------------------------
+                           Uploaded presets first (they can run on the
+                           fans themselves), then the registry looks.
+                           A `needs` badge is honest about reactive
+                           inputs that aren't ported yet (4.6).    */
+                        Text {
+                            text: qsTr("PRESETS")
+                            color: Theme.textSecondary
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.weight: Font.DemiBold
+                            font.letterSpacing: 1.1
+                        }
 
-                        activeFocusOnTab: true
-                        Accessible.name: qsTr("Preset %1")
-                            .arg(modelData.name || pid || "")
-                        Accessible.role: Accessible.Button
-                        /* !selected like the MouseArea: re-picking
-                           the already-selected preset is a no-op
-                           that must not disarm the pending
-                           Animation-playback default (setPreset
-                           sees picked == prev and clears it). */
-                        Keys.onPressed: e => {
-                            /* Space/Return/Enter like the mode
-                               cards — Key_Enter is the numpad. */
-                            if(e.key === Qt.Key_Space
-                               || e.key === Qt.Key_Return
-                               || e.key === Qt.Key_Enter) {
-                                if(root.editorUp && root.engineUp && !selected)
-                                    sceneEdit.setPreset(pid);
-                                e.accepted = true;
+                        Flow {
+                            id: presetFlow
+                            objectName: "presetFlow"
+                            width: parent.width
+                            spacing: Theme.spaceL
+                            /* Tiles fill the row instead of a fixed 260 px that left a
+                               ragged band on the right (UX audit P3). */
+                            readonly property int cols:
+                                Math.max(1, Math.floor((width + spacing) / (230 + spacing)))
+                            readonly property real cardWidth:
+                                (width - (cols - 1) * spacing) / cols
+
+                            Repeater {
+                                model: root.editorUp ? sceneEdit.playbackPresets : []
+                                delegate: presetCard
+                            }
+                            Repeater {
+                                model: root.engineUp ? bridge.presets : []
+                                delegate: presetCard
                             }
                         }
 
-                        Column {
-                            id: cardCol
-                            anchors { fill: parent; margins: Theme.spaceL }
-                            spacing: Theme.spaceXS
+                        Component {
+                            id: presetCard
+                            Rectangle {
+                                objectName: "preset_" + pid
+                                width: presetFlow.cardWidth
+                                implicitHeight: cardCol.implicitHeight + 2 * Theme.spaceL
+                                radius: Theme.radiusM
+                                color: Theme.surface
+                                border.width: selected ? 2 : (activeFocus ? 2 : 1)
+                                border.color: selected ? Theme.accent
+                                            : activeFocus ? Theme.accent
+                                            : Theme.border
 
-                            Text {
-                                text: modelData.name || pid || qsTr("preset")
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSizeBody
-                                font.weight: Font.DemiBold
-                            }
-                            Text {
-                                visible: modelData.description !== undefined
-                                         && modelData.description !== ""
-                                text: modelData.description || ""
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeSmall
-                                wrapMode: Text.WordWrap
-                                width: parent.width
-                            }
-                            Row {
-                                spacing: Theme.spaceS
-                                StatusPill {
-                                    visible: text !== ""
-                                    text: selected ? qsTr("selected")
-                                        : isPlayback ? qsTr("uploaded playback")
-                                        : needs === "audio" ? qsTr("needs audio input")
-                                        : needs === "screen" ? qsTr("needs screen input")
-                                        : needs === "key" ? qsTr("needs key input")
-                                        : ""
-                                    tone: selected ? "accent"
-                                        : isPlayback ? "ok" : "warn"
+                                readonly property string pid:
+                                    modelData.id || ""
+                                readonly property bool selected:
+                                    root.editorUp && sceneEdit.presetId === pid
+                                readonly property bool isPlayback:
+                                    modelData.direction !== undefined
+                                readonly property string needs:
+                                    modelData.needs || ""
+
+                                activeFocusOnTab: true
+                                Accessible.name: qsTr("Preset %1")
+                                    .arg(modelData.name || pid || "")
+                                Accessible.role: Accessible.Button
+                                /* !selected like the MouseArea: re-picking
+                                   the already-selected preset is a no-op
+                                   that must not disarm the pending
+                                   Animation-playback default (setPreset
+                                   sees picked == prev and clears it). */
+                                Keys.onPressed: e => {
+                                    /* Space/Return/Enter like the mode
+                                       cards — Key_Enter is the numpad. */
+                                    if(e.key === Qt.Key_Space
+                                       || e.key === Qt.Key_Return
+                                       || e.key === Qt.Key_Enter) {
+                                        if(root.editorUp && root.engineUp && !selected)
+                                            sceneEdit.setPreset(pid);
+                                        e.accepted = true;
+                                    }
+                                }
+
+                                Column {
+                                    id: cardCol
+                                    anchors { fill: parent; margins: Theme.spaceL }
+                                    spacing: Theme.spaceXS
+
+                                    Text {
+                                        text: modelData.name || pid || qsTr("preset")
+                                        color: Theme.textPrimary
+                                        font.pixelSize: Theme.fontSizeBody
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Text {
+                                        visible: modelData.description !== undefined
+                                                 && modelData.description !== ""
+                                        text: modelData.description || ""
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        wrapMode: Text.WordWrap
+                                        width: parent.width
+                                    }
+                                    Row {
+                                        spacing: Theme.spaceS
+                                        StatusPill {
+                                            visible: text !== ""
+                                            text: selected ? qsTr("selected")
+                                                : isPlayback ? qsTr("uploaded playback")
+                                                : needs === "audio" ? qsTr("needs audio input")
+                                                : needs === "screen" ? qsTr("needs screen input")
+                                                : needs === "key" ? qsTr("needs key input")
+                                                : ""
+                                            tone: selected ? "accent"
+                                                : isPlayback ? "ok" : "warn"
+                                        }
+                                    }
+                                    Text {
+                                        visible: needs !== "" && !isPlayback
+                                        text: qsTr("reactive input required — enable it on the Reactive tab")
+                                        color: Theme.textDisabled
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        wrapMode: Text.WordWrap
+                                        width: parent.width
+                                    }
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    enabled: root.editorUp && root.engineUp && !selected
+                                    cursorShape: enabled ? Qt.PointingHandCursor
+                                                         : Qt.ArrowCursor
+                                    onClicked: sceneEdit.setPreset(pid)
                                 }
                             }
-                            Text {
-                                visible: needs !== "" && !isPlayback
-                                text: qsTr("reactive input required — enable it in REACTIVE INPUTS below")
-                                color: Theme.textDisabled
-                                font.pixelSize: Theme.fontSizeSmall
-                                wrapMode: Text.WordWrap
-                                width: parent.width
+                        }
+
+                        EmptyState {
+                            objectName: "presetsEmpty"
+                            visible: !root.engineUp
+                            title: qsTr("Engine not connected")
+                            detail: qsTr("Preset cards and scene data arrive with the connection.")
+                        }
+
+                        /*---- Playback mode selector --------------------
+                           Spec wording verbatim, beside the selected
+                           effect. Capability-gated — the border marks
+                           the REQUESTED selection and the pill marks
+                           what the device actually runs, so a pending
+                           transition never reports applied before the
+                           engine confirms it.                      */
+                        /* A plain Row, not RowLayout: the card's implicit
+                           width is circular through body.childrenRect (the
+                           inner column binds parent.width), which corrupts
+                           the layout engine's free-space distribution — one
+                           card collapsed to a sliver while the other took
+                           the row (ui-first-look-2026-09-28, UI-02). An
+                           explicit half-width binding is deterministic. */
+                        Row {
+                            id: modeRow
+                            objectName: "modeSelector"
+                            width: parent.width
+                            spacing: Theme.spaceL
+
+                            Repeater {
+                                model: [
+                                    {
+                                        key: "animation_playback",
+                                        title: qsTr("Animation playback"),
+                                        blurb: qsTr("Smooth repeating effects played by the fans")
+                                    },
+                                    {
+                                        key: "live_effects",
+                                        title: qsTr("Live effects"),
+                                        blurb: qsTr("Responds to music, screen, and live changes")
+                                    }
+                                ]
+
+                                Card {
+                                    objectName: "mode_" + modelData.key
+                                    width: (modeRow.width - modeRow.spacing) / 2
+                                    readonly property string modeKey: modelData.key
+                                    readonly property bool requested:
+                                        root.requestedMode === modeKey
+                                    readonly property bool applied:
+                                        root.appliedMode === modeKey
+                                    readonly property bool usable:
+                                        root.engineUp
+                                        && (modeKey === "animation_playback"
+                                            ? root.pv.animation_available !== false
+                                            : root.pv.live_available !== false)
+                                    /* Keyboard parity with the MouseArea:
+                                       Tab reaches usable cards, Space/Enter
+                                       requests the mode, the focus ring is
+                                       visible. */
+                                    activeFocusOnTab: usable
+                                    Accessible.name: qsTr("Playback mode: %1")
+                                        .arg(modelData.title)
+                                    Accessible.role: Accessible.Button
+                                    Keys.onPressed: e => {
+                                        if(e.key === Qt.Key_Space
+                                           || e.key === Qt.Key_Return
+                                           || e.key === Qt.Key_Enter) {
+                                            if(usable && root.editorUp
+                                               && !requested)
+                                                sceneEdit.requestMode(modeKey);
+                                            e.accepted = true;
+                                        }
+                                    }
+                                    border.color: requested ? Theme.accent
+                                                  : activeFocus ? Theme.accent
+                                                  : Theme.border
+                                    border.width: requested || activeFocus ? 2 : 1
+
+                                    Column {
+                                        width: parent.width
+                                        spacing: Theme.spaceXS
+                                        Text {
+                                            text: modelData.title
+                                            color: usable ? Theme.textPrimary
+                                                          : Theme.textDisabled
+                                            font.pixelSize: Theme.fontSizeBody
+                                            font.weight: Font.DemiBold
+                                        }
+                                        Text {
+                                            text: modelData.blurb
+                                            color: Theme.textSecondary
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            wrapMode: Text.WordWrap
+                                            width: parent.width
+                                        }
+                                        Text {
+                                            visible: root.engineUp && !usable
+                                            text: root.pv.unavailable_reason
+                                                  || qsTr("not available for this scene")
+                                            color: Theme.warn
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            wrapMode: Text.WordWrap
+                                            width: parent.width
+                                        }
+                                        /* The applied truth — "on device"
+                                           only where the engine confirmed
+                                           it; a requested-but-unconfirmed
+                                           pick reads "applying…", never
+                                           "selected". */
+                                        StatusPill {
+                                            visible: requested || applied
+                                            text: applied ? qsTr("on device")
+                                                          : qsTr("applying…")
+                                            tone: applied ? "ok" : "warn"
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        enabled: usable && root.editorUp
+                                                 && !requested
+                                        cursorShape: enabled ? Qt.PointingHandCursor
+                                                             : Qt.ArrowCursor
+                                        onClicked: sceneEdit.requestMode(modeKey)
+                                    }
+                                }
                             }
                         }
 
-                        MouseArea {
-                            anchors.fill: parent
-                            enabled: root.editorUp && root.engineUp && !selected
-                            cursorShape: enabled ? Qt.PointingHandCursor
-                                                 : Qt.ArrowCursor
-                            onClicked: sceneEdit.setPreset(pid)
+                        /* Transition honesty — a mode switch visibly
+                           interrupts output while the engine confirms it. */
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            font.pixelSize: Theme.fontSizeSmall
+                            color: Theme.warn
+                            visible: root.engineUp && text !== ""
+                            text: {
+                                if(!root.engineUp)
+                                    return "";
+                                if(root.pv.phase === "failed")
+                                    return root.pv.phase_detail
+                                           || qsTr("the last mode transition failed");
+                                if(root.pv.phase === "reconnecting")
+                                    return qsTr("The engine's link to the backend is down — playback output may be stale while it reconnects.");
+                                if(root.pv.phase === "applying" && root.animationRequested)
+                                    return qsTr("Switching to Animation playback — live output on the fan group is suppressed until the uploaded loop is confirmed on device.");
+                                if(root.pv.phase === "applying")
+                                    return qsTr("Returning to Live effects — the uploaded loop is replaced with a freshly evaluated frame when the engine confirms.");
+                                return "";
+                            }
+                        }
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            font.pixelSize: Theme.fontSizeSmall
+                            color: Theme.textSecondary
+                            visible: root.engineUp && root.animationApplied
+                                     && root.pv.phase !== "applying"
+                            text: qsTr("The uploaded loop owns the fan group — the Colors and Motion controls are disabled while it runs. Other devices play the matching effect.")
+                        }
                         }
                     }
-                }
-
-                EmptyState {
-                    objectName: "presetsEmpty"
-                    visible: !root.engineUp
-                    title: qsTr("Engine not connected")
-                    detail: qsTr("Preset cards and scene data arrive with the connection.")
-                }
-
-                /*---- Playback mode selector --------------------
-                   Spec wording verbatim, beside the selected
-                   effect. Capability-gated — the border marks
-                   the REQUESTED selection and the pill marks
-                   what the device actually runs, so a pending
-                   transition never reports applied before the
-                   engine confirms it.                      */
-                /* A plain Row, not RowLayout: the card's implicit
-                   width is circular through body.childrenRect (the
-                   inner column binds parent.width), which corrupts
-                   the layout engine's free-space distribution — one
-                   card collapsed to a sliver while the other took
-                   the row (ui-first-look-2026-09-28, UI-02). An
-                   explicit half-width binding is deterministic. */
-                Row {
-                    id: modeRow
-                    objectName: "modeSelector"
-                    width: parent.width - 2 * col.padding
-                    spacing: Theme.spaceL
-
-                    Repeater {
-                        model: [
-                            {
-                                key: "animation_playback",
-                                title: qsTr("Animation playback"),
-                                blurb: qsTr("Smooth repeating effects played by the fans")
-                            },
-                            {
-                                key: "live_effects",
-                                title: qsTr("Live effects"),
-                                blurb: qsTr("Responds to music, screen, and live changes")
-                            }
-                        ]
+                    /* Colors: the picker stays pinned while the
+                       group list scrolls under it — Apply is never
+                       screens away from the groups it colors. */
+                    ColumnLayout {
+                        objectName: "colorsTab"
+                        spacing: Theme.spaceM
 
                         Card {
-                            objectName: "mode_" + modelData.key
-                            width: (modeRow.width - modeRow.spacing) / 2
-                            readonly property string modeKey: modelData.key
-                            readonly property bool requested:
-                                root.requestedMode === modeKey
-                            readonly property bool applied:
-                                root.appliedMode === modeKey
-                            readonly property bool usable:
-                                root.engineUp
-                                && (modeKey === "animation_playback"
-                                    ? root.pv.animation_available !== false
-                                    : root.pv.live_available !== false)
-                            /* Keyboard parity with the MouseArea:
-                               Tab reaches usable cards, Space/Enter
-                               requests the mode, the focus ring is
-                               visible. */
-                            activeFocusOnTab: usable
-                            Accessible.name: qsTr("Playback mode: %1")
-                                .arg(modelData.title)
-                            Accessible.role: Accessible.Button
-                            Keys.onPressed: e => {
-                                if(e.key === Qt.Key_Space
-                                   || e.key === Qt.Key_Return
-                                   || e.key === Qt.Key_Enter) {
-                                    if(usable && root.editorUp
-                                       && !requested)
-                                        sceneEdit.requestMode(modeKey);
-                                    e.accepted = true;
-                                }
-                            }
-                            border.color: requested ? Theme.accent
-                                          : activeFocus ? Theme.accent
-                                          : Theme.border
-                            border.width: requested || activeFocus ? 2 : 1
+                            title: qsTr("COLORS")
+                            objectName: "paletteCard"
+                            Layout.fillWidth: true
+                            Layout.preferredWidth: 1
 
                             Column {
                                 width: parent.width
-                                spacing: Theme.spaceXS
+                                spacing: Theme.spaceM
                                 Text {
-                                    text: modelData.title
-                                    color: usable ? Theme.textPrimary
-                                                  : Theme.textDisabled
-                                    font.pixelSize: Theme.fontSizeBody
-                                    font.weight: Font.DemiBold
-                                }
-                                Text {
-                                    text: modelData.blurb
-                                    color: Theme.textSecondary
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    wrapMode: Text.WordWrap
-                                    width: parent.width
-                                }
-                                Text {
-                                    visible: root.engineUp && !usable
-                                    text: root.pv.unavailable_reason
-                                          || qsTr("not available for this scene")
+                                    visible: root.animationRequested
+                                    text: qsTr("Disabled while Animation playback is selected — the uploaded preset's own controls (Motion tab) are all it supports; colors apply to Live effects scenes.")
                                     color: Theme.warn
                                     font.pixelSize: Theme.fontSizeSmall
                                     wrapMode: Text.WordWrap
                                     width: parent.width
                                 }
-                                /* The applied truth — "on device"
-                                   only where the engine confirmed
-                                   it; a requested-but-unconfirmed
-                                   pick reads "applying…", never
-                                   "selected". */
-                                StatusPill {
-                                    visible: requested || applied
-                                    text: applied ? qsTr("on device")
-                                                  : qsTr("applying…")
-                                    tone: applied ? "ok" : "warn"
-                                }
-                            }
+                                /* HSV picker — computed color, no
+                                   literals; the hex is what SET_SCENE
+                                   carries. */
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: Theme.spaceL
 
-                            MouseArea {
-                                anchors.fill: parent
-                                enabled: usable && root.editorUp
-                                         && !requested
-                                cursorShape: enabled ? Qt.PointingHandCursor
-                                                     : Qt.ArrowCursor
-                                onClicked: sceneEdit.requestMode(modeKey)
+                                    Rectangle {
+                                        width: 44; height: 44; radius: Theme.radiusS
+                                        color: Qt.hsva(palH.value, palS.value, palV.value, 1)
+                                        border.color: Theme.borderStrong
+                                        border.width: 1
+                                    }
+                                    Column {
+                                        Layout.fillWidth: true
+                                        spacing: Theme.spaceS
+                                        /* Palette position is a UI-owned
+                                           preference (Task 4.8): seeded
+                                           once from uiPrefs, written back
+                                           on each move. Each slider carries
+                                           a visible label + live value —
+                                           accessibility names alone don't
+                                           tell the eye what a bare track
+                                           adjusts. */
+                                        RowLayout {
+                                            width: parent.width
+                                            spacing: Theme.spaceS
+                                            Text {
+                                                text: qsTr("Hue")
+                                                color: Theme.textSecondary
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                Layout.preferredWidth: 44
+                                            }
+                                            AppSlider {
+                                                id: palH
+                                                objectName: "paletteHue"
+                                                Layout.fillWidth: true
+                                                from: 0; to: 1; stepSize: 0.001
+                                                value: 0.55
+                                                enabled: root.liveControlsEnabled
+                                                Accessible.name: qsTr("palette hue")
+                                                onMoved: if(root.prefsUp)
+                                                    uiPrefs.paletteHue = value;
+                                            }
+                                            Text {
+                                                text: Math.round(palH.value * 360) + "°"
+                                                color: Theme.textSecondary
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                horizontalAlignment: Text.AlignRight
+                                                Layout.preferredWidth: 38
+                                            }
+                                        }
+                                        RowLayout {
+                                            width: parent.width
+                                            spacing: Theme.spaceS
+                                            Text {
+                                                text: qsTr("Sat")
+                                                color: Theme.textSecondary
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                Layout.preferredWidth: 44
+                                            }
+                                            AppSlider {
+                                                id: palS
+                                                objectName: "paletteSat"
+                                                Layout.fillWidth: true
+                                                from: 0; to: 1; stepSize: 0.001
+                                                value: 0.6
+                                                enabled: root.liveControlsEnabled
+                                                Accessible.name: qsTr("palette saturation")
+                                                onMoved: if(root.prefsUp)
+                                                    uiPrefs.paletteSat = value;
+                                            }
+                                            Text {
+                                                text: Math.round(palS.value * 100) + "%"
+                                                color: Theme.textSecondary
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                horizontalAlignment: Text.AlignRight
+                                                Layout.preferredWidth: 38
+                                            }
+                                        }
+                                        RowLayout {
+                                            width: parent.width
+                                            spacing: Theme.spaceS
+                                            Text {
+                                                text: qsTr("Bright")
+                                                color: Theme.textSecondary
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                Layout.preferredWidth: 44
+                                            }
+                                            AppSlider {
+                                                id: palV
+                                                objectName: "paletteVal"
+                                                Layout.fillWidth: true
+                                                from: 0; to: 1; stepSize: 0.001
+                                                value: 1.0
+                                                enabled: root.liveControlsEnabled
+                                                Accessible.name: qsTr("palette brightness")
+                                                onMoved: if(root.prefsUp)
+                                                    uiPrefs.paletteVal = value;
+                                            }
+                                            Text {
+                                                text: Math.round(palV.value * 100) + "%"
+                                                color: Theme.textSecondary
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                horizontalAlignment: Text.AlignRight
+                                                Layout.preferredWidth: 38
+                                            }
+                                        }
+                                    }
+                                    AppButton {
+                                        objectName: "paletteApply"
+                                        text: qsTr("Apply to selected")
+                                        primary: true
+                                        enabled: root.liveControlsEnabled
+                                        onClicked: sceneEdit.setGroupColor(
+                                            Qt.hsva(palH.value, palS.value,
+                                                    palV.value, 1).toString())
+                                    }
+                                }
+                                /* Quick picks — design-token swatches. */
+                                Row {
+                                    spacing: Theme.spaceS
+                                    Text {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: qsTr("Quick")
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                    }
+                                    Repeater {
+                                        model: Theme.paletteSwatches
+                                        PaletteSwatch {
+                                            objectName: "quickSwatch" + index
+                                            swatch: modelData
+                                            enabled: root.liveControlsEnabled
+                                            onPicked: hex => sceneEdit.setGroupColor(hex)
+                                        }
+                                    }
+                                }
                             }
                         }
-                    }
-                }
 
-                /* Transition honesty — a mode switch visibly
-                   interrupts output while the engine confirms it. */
-                Text {
-                    width: parent.width - 2 * col.padding
-                    wrapMode: Text.WordWrap
-                    font.pixelSize: Theme.fontSizeSmall
-                    color: Theme.warn
-                    visible: root.engineUp && text !== ""
-                    text: {
-                        if(!root.engineUp)
-                            return "";
-                        if(root.pv.phase === "failed")
-                            return root.pv.phase_detail
-                                   || qsTr("the last mode transition failed");
-                        if(root.pv.phase === "reconnecting")
-                            return qsTr("The engine's link to the backend is down — playback output may be stale while it reconnects.");
-                        if(root.pv.phase === "applying" && root.animationRequested)
-                            return qsTr("Switching to Animation playback — live output on the fan group is suppressed until the uploaded loop is confirmed on device.");
-                        if(root.pv.phase === "applying")
-                            return qsTr("Returning to Live effects — the uploaded loop is replaced with a freshly evaluated frame when the engine confirms.");
-                        return "";
-                    }
-                }
-                Text {
-                    width: parent.width - 2 * col.padding
-                    wrapMode: Text.WordWrap
-                    font.pixelSize: Theme.fontSizeSmall
-                    color: Theme.textSecondary
-                    visible: root.engineUp && root.animationApplied
-                             && root.pv.phase !== "applying"
-                    text: qsTr("The uploaded loop owns the fan group — palette, layer, and scene-multiplier controls below are disabled while it runs. Other devices play the matching effect.")
-                }
-
-                /* Upload / transport state — Uploading, Active,
-                   Reconnecting, or Failed (plan section 5) plus
-                   the honest requested-vs-applied split. */
-                Card {
-                    title: qsTr("PLAYBACK STATE")
-                    objectName: "playbackStateCard"
-                    width: parent.width - 2 * col.padding
-                    visible: root.engineUp
-
-                    Column {
-                        width: parent.width
-                        spacing: Theme.spaceM
-
-                        RowLayout {
-                            width: parent.width
-                            spacing: Theme.spaceL
-
-                            StatusPill {
-                                objectName: "playbackPhasePill"
-                                text: {
-                                    switch(root.pv.phase) {
-                                    case "reconnecting": return qsTr("Reconnecting");
-                                    case "applying":     return qsTr("Applying…");
-                                    case "failed":       return qsTr("Failed");
-                                    case "uploading":    return qsTr("Uploading");
-                                    case "active":       return qsTr("Active");
-                                    case "live":         return qsTr("Live");
-                                    default:             return qsTr("unknown");
-                                    }
-                                }
-                                tone: {
-                                    switch(root.pv.phase) {
-                                    case "reconnecting": return "warn";
-                                    case "applying":     return "warn";
-                                    case "failed":       return "bad";
-                                    case "uploading":    return "accent";
-                                    case "active":       return "ok";
-                                    case "live":         return "ok";
-                                    default:             return "neutral";
-                                    }
-                                }
-                            }
+                        PageFlickable {
+                            id: colorsFlick
+                            objectName: "colorsScroll"
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            contentHeight: colorsFlickCol.implicitHeight
                             Column {
-                                Layout.fillWidth: true
-                                spacing: Theme.spaceXS
+                                id: colorsFlickCol
+                                width: colorsFlick.width - Theme.spaceM
+                                spacing: Theme.spaceM
                                 Text {
-                                    wrapMode: Text.WordWrap
-                                    width: parent.width
-                                    font.pixelSize: Theme.fontSizeSmall
+                                    text: qsTr("Tick the groups to color, then press Apply above. With nothing ticked, the color applies to every group.")
                                     color: Theme.textSecondary
-                                    text: {
-                                        const label = m =>
-                                            m === "animation_playback"
-                                                ? qsTr("Animation playback")
-                                                : qsTr("Live effects");
-                                        if(root.requestedMode && root.appliedMode
-                                           && root.requestedMode !== root.appliedMode)
-                                            return qsTr("requested: %1 · on device: %2 — waiting for the engine to confirm")
-                                                .arg(label(root.requestedMode))
-                                                .arg(label(root.appliedMode));
-                                        if(!root.appliedMode)
-                                            return qsTr("on device: unknown — no playback status reported yet");
-                                        const app = label(root.appliedMode);
-                                        if(!root.animationApplied)
-                                            return qsTr("on device: %1").arg(app);
-                                        const c = root.pv.control;
-                                        if(c === "paused")
-                                            return qsTr("on device: %1 · paused — a sampled frame is held").arg(app);
-                                        if(c === "stopped")
-                                            return qsTr("on device: %1 · stopped — output replaced with black").arg(app);
-                                        return qsTr("on device: %1").arg(app);
-                                    }
-                                }
-                                Text {
-                                    visible: !!root.pv.phase_detail
-                                    text: root.pv.phase_detail || ""
-                                    color: Theme.bad
                                     font.pixelSize: Theme.fontSizeSmall
                                     wrapMode: Text.WordWrap
                                     width: parent.width
                                 }
-                            }
-                            Repeater {
-                                model: [
-                                    { key: "playing", label: qsTr("Play") },
-                                    { key: "paused",  label: qsTr("Pause") },
-                                    { key: "stopped", label: qsTr("Stop") }
-                                ]
-                                AppButton {
-                                    /* Transport control only exists
-                                       for an uploaded loop — the
-                                       engine forces Playing in live
-                                       mode, so offering pause there
-                                       would fake a dead button. */
-                                    objectName: "transport_" + modelData.key
-                                    visible: root.animationRequested
-                                             || root.animationApplied
-                                    text: modelData.label
-                                    enabled: root.editorUp && root.engineUp
-                                             && root.animationApplied
-                                             && root.pv.phase !== "applying"
-                                             && root.pv.control !== modelData.key
-                                    onClicked: sceneEdit.setPlaybackControl(modelData.key)
+                                /* Devices and Palette were two lists of
+                                   the same groups (UX audit P2-1): one
+                                   list now — tick to select, the swatch
+                                   is the group's current document color,
+                                   sub-parts (`x/body`) indent under
+                                   their parent. */
+                                Column {
+                                    id: groupList
+                                    objectName: "groupList"
+                                    width: parent.width
+                                    spacing: 2
+
+                                    GroupRow {
+                                        objectName: "groupAll"
+                                        label: qsTr("All devices")
+                                        detail: qsTr("every bound zone")
+                                        showSwatch: false
+                                        selected: root.editorUp
+                                                  && sceneEdit.selectedGroups.length === 0
+                                        enabled: root.editorUp
+                                        onActivated: sceneEdit.selectAllGroups()
+                                    }
+                                    Repeater {
+                                        objectName: "groupRows"
+                                        model: root.editorUp ? sceneEdit.deviceGroups : []
+                                        GroupRow {
+                                            readonly property string full:
+                                                modelData.label || modelData.id || ""
+                                            readonly property int slash:
+                                                full.lastIndexOf("/")
+                                            sub: slash > 0
+                                            label: sub ? full.substring(slash + 1) : full
+                                            detail: {
+                                                let d = modelData.controller || "";
+                                                if(modelData.zone)
+                                                    d += (d ? " · " : "") + modelData.zone;
+                                                const leds = modelData.led_count || modelData.zone_leds
+                                                             || modelData.emitters;
+                                                if(leds > 0)
+                                                    d += (d ? " · " : "")
+                                                         + (leds === 1 ? qsTr("1 LED")
+                                                                       : qsTr("%1 LEDs").arg(leds));
+                                                if(!modelData.verified)
+                                                    d += (d ? " · " : "") + qsTr("unverified");
+                                                if(modelData.state === "absent")
+                                                    d += (d ? " · " : "") + qsTr("not connected");
+                                                else if(modelData.state === "ambiguous")
+                                                    d += (d ? " · " : "") + qsTr("ambiguous");
+                                                return d;
+                                            }
+                                            dim: modelData.state === "absent"
+                                            swatch: {
+                                                const doc = sceneEdit.workingDocument;
+                                                const oc = doc && doc.object_colors
+                                                           ? doc.object_colors : {};
+                                                return oc[modelData.id] || "black";
+                                            }
+                                            selected: root.editorUp
+                                                      && sceneEdit.selectedGroups.indexOf(modelData.id) >= 0
+                                            enabled: root.editorUp
+                                            onActivated: sceneEdit.toggleGroup(modelData.id)
+                                        }
+                                    }
+                                }
+                                Text {
+                                    visible: root.editorUp && sceneEdit.hasWorking
+                                             && !sceneEdit.groupsTargetable
+                                    text: qsTr("Named presets cover every device — group selection sets which devices take palette colors. Layer targeting needs an inline layer stack.")
+                                    color: Theme.textDisabled
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
+                                }
+                                Text {
+                                    visible: root.editorUp && sceneEdit.groupsTargetable
+                                    text: qsTr("This scene's inline layers are also scoped to the selection.")
+                                    color: Theme.textSecondary
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
+                                }
+                                EmptyState {
+                                    objectName: "groupsEmpty"
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    visible: !root.editorUp || sceneEdit.deviceGroups.length === 0
+                                    title: qsTr("No device groups")
+                                    detail: root.engineUp
+                                            ? qsTr("The loaded scene binds no devices yet — the Layout view authors bindings.")
+                                            : qsTr("Device groups arrive with the engine scene.")
                                 }
                             }
                         }
-
-                        Text {
-                            visible: root.animationRequested || root.animationApplied
-                            text: qsTr("Pause holds a sampled frame · Stop replaces playback with black · closing the UI does not interrupt the loop.")
-                            color: Theme.textDisabled
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        /* Wire cadence + sync — exactly what
-                           PLAYBACK reports, labelled for what it
-                           is: configured geometry, a validated-
-                           clock sync state, a separately recorded
-                           physical measurement, and (in live
-                           mode) the transport-accepted interval.
-                           Never a presentation-FPS claim. */
+                    }
+                    PageFlickable {
+                        id: motionFlick
+                        objectName: "motionScroll"
+                        contentHeight: motionFlickCol.implicitHeight
                         Column {
-                            width: parent.width
-                            spacing: Theme.spaceXS
-                            visible: root.animationApplied
-                                     || root.appliedMode === "live_effects"
-
-                            Text {
-                                visible: root.animationApplied && root.pv.frame_count > 0
-                                text: qsTr("configured loop: %1 frames · %2 ms/frame · ≈%3 s cycle — configured rate, not a measured display rate")
-                                    .arg(root.pv.frame_count)
-                                    .arg((root.pv.frame_interval_s * 1000).toFixed(3))
-                                    .arg(root.pv.cycle_s.toFixed(2))
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeSmall
-                                wrapMode: Text.WordWrap
-                                width: parent.width
-                            }
-                            Text {
-                                visible: root.animationApplied
-                                text: {
-                                    const s = root.pv.sync || "unknown";
-                                    if(s === "unknown")
-                                        return qsTr("synchronization: unavailable — no validated clock source");
-                                    const u = root.pv.clock_uncertainty_s || 0;
-                                    return u > 0
-                                        ? qsTr("synchronization: %1 · clock uncertainty ±%2 ms")
-                                            .arg(s).arg((u * 1000).toFixed(1))
-                                        : qsTr("synchronization: %1").arg(s);
-                                }
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeSmall
-                                wrapMode: Text.WordWrap
-                                width: parent.width
-                            }
-                            Text {
-                                visible: root.animationApplied
-                                text: root.pv.physical_measured
-                                      ? qsTr("physical playback: %1 ms/frame · %2 s cycle · %3")
-                                        .arg((root.pv.physical_frame_interval_s * 1000).toFixed(2))
-                                        .arg((root.pv.physical_cycle_s || 0).toFixed(2))
-                                        .arg(root.pv.physical_provenance)
-                                      : qsTr("physical playback: not measured")
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeSmall
-                                wrapMode: Text.WordWrap
-                                width: parent.width
-                            }
-                            Text {
-                                visible: root.appliedMode === "live_effects"
-                                text: {
-                                    const ag = root.engineUp
-                                               ? bridge.frameAggregate
-                                               : undefined;
-                                    if(ag && ag.mean_interval_s > 0)
-                                        return qsTr("live delivery ≈ %1 updates/s — transport-accepted interval (%2), not display FPS")
-                                            .arg((1 / ag.mean_interval_s).toFixed(1))
-                                            .arg(ag.provenance || "unknown");
-                                    return qsTr("live delivery: no transport counters yet");
-                                }
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeSmall
-                                wrapMode: Text.WordWrap
-                                width: parent.width
-                            }
-                        }
-                    }
-                }
-
-                /*---- Device groups ------------------------------
-                   Derived from the scene document's objects +
-                   bindings joined with live snapshots — the
-                   engine's real mapping data.             */
-                Card {
-                    title: qsTr("DEVICES")
-                    width: parent.width - 2 * col.padding
-
-                    Column {
-                        width: parent.width
-                        spacing: Theme.spaceM
-
-                        Text {
-                            text: qsTr("Palette colors apply to the selected groups. Leave all selected to light everything.")
-                            color: Theme.textSecondary
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        Flow {
-                            objectName: "groupFlow"
-                            width: parent.width
-                            spacing: Theme.spaceS
-
-                            GroupChip {
-                                label: qsTr("All devices")
-                                detail: qsTr("every bound zone")
-                                state: "resolved"
-                                verified: true
-                                connected: true
-                                selected: root.editorUp
-                                          && sceneEdit.selectedGroups.length === 0
-                                enabled: root.editorUp
-                                onClicked: sceneEdit.selectAllGroups()
-                            }
-
-                            Repeater {
-                                model: root.editorUp ? sceneEdit.deviceGroups : []
-                                GroupChip {
-                                    label: modelData.label
-                                    detail: {
-                                        let d = modelData.controller || "";
-                                        if(modelData.zone)
-                                            d += (d ? " · " : "") + modelData.zone;
-                                        const leds = modelData.led_count || modelData.zone_leds
-                                                     || modelData.emitters;
-                                        if(leds > 0)
-                                            d += (d ? " · " : "") + leds + qsTr(" LEDs");
-                                        if(!modelData.verified)
-                                            d += (d ? " · " : "") + qsTr("unverified");
-                                        if(modelData.state === "absent")
-                                            d += (d ? " · " : "") + qsTr("not connected");
-                                        else if(modelData.state === "ambiguous")
-                                            d += (d ? " · " : "") + qsTr("ambiguous");
-                                        return d;
-                                    }
-                                    state: modelData.state || "resolved"
-                                    verified: modelData.verified === true
-                                    connected: modelData.connected === true
-                                    selected: root.editorUp
-                                              && sceneEdit.selectedGroups.indexOf(modelData.id) >= 0
-                                    enabled: root.editorUp
-                                    onClicked: sceneEdit.toggleGroup(modelData.id)
-                                }
-                            }
-                        }
-
-                        Text {
-                            visible: root.editorUp && sceneEdit.hasWorking
-                                     && !sceneEdit.groupsTargetable
-                            text: qsTr("Named presets cover every device — group selection sets which devices take palette colors. Layer targeting needs an inline layer stack.")
-                            color: Theme.textDisabled
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-                        Text {
-                            visible: root.editorUp && sceneEdit.groupsTargetable
-                            text: qsTr("This scene's inline layers are also scoped to the selection.")
-                            color: Theme.textSecondary
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        EmptyState {
-                            objectName: "groupsEmpty"
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            visible: !root.editorUp || sceneEdit.deviceGroups.length === 0
-                            title: qsTr("No device groups")
-                            detail: root.engineUp
-                                    ? qsTr("The loaded scene binds no devices yet — the Layout view authors bindings.")
-                                    : qsTr("Device groups arrive with the engine scene.")
-                        }
-                    }
-                }
-
-                /*---- Palette ------------------------------------
-                   Per-group base colors (object_colors) + an
-                   HSV picker + quick swatches. Writes are
-                   pending edits — Save sends them.        */
-                Card {
-                    title: qsTr("PALETTE")
-                    objectName: "paletteCard"
-                    width: parent.width - 2 * col.padding
-
-                    Column {
-                        width: parent.width
-                        spacing: Theme.spaceM
-
-                        /* Supported-control filtering (plan
-                           §3.4): while Animation playback is
-                           selected the uploaded loop owns
-                           output — arbitrary palettes/layers
-                           are live-effects only this release. */
-                        Text {
-                            visible: root.animationRequested
-                            text: qsTr("Disabled while Animation playback is selected — the uploaded preset's own controls above are all it supports; palette colors apply to Live effects scenes.")
-                            color: Theme.warn
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        /* Current group colors — real document
-                           values, not placeholders. */
-                        Flow {
-                            width: parent.width
-                            spacing: Theme.spaceM
-                            Repeater {
-                                model: {
-                                    if(!root.editorUp)
-                                        return [];
-                                    const sel = sceneEdit.selectedGroups;
-                                    const groups = sceneEdit.deviceGroups;
-                                    const out = [];
-                                    for(let i = 0; i < groups.length; ++i) {
-                                        if(sel.length === 0
-                                           || sel.indexOf(groups[i].id) >= 0)
-                                            out.push(groups[i]);
-                                    }
-                                    return out;
-                                }
-                                ColorWell {
-                                    swatch: {
-                                        const doc = sceneEdit.workingDocument;
-                                        const oc = doc && doc.object_colors
-                                                   ? doc.object_colors : {};
-                                        return oc[modelData.id] || "black";
-                                    }
-                                    label: modelData.label
-                                }
-                            }
-                        }
-
-                        /* HSV picker — computed color, no
-                           literals; the hex is what SET_SCENE
-                           carries. */
-                        RowLayout {
-                            width: parent.width
+                            id: motionFlickCol
+                            width: motionFlick.width - Theme.spaceM
                             spacing: Theme.spaceL
+                        /*---- Scene controls -----------------------------
+                           Brightness round-trips through SET_SCENE
+                           (document.brightness — the wire has no
+                           dedicated brightness verb; this is the
+                           scene-level path the document carries).
+                           Speed/intensity multiply the resolved look. */
+                        Card {
+                            title: qsTr("SCENE CONTROLS")
+                            objectName: "sceneControlsCard"
+                            width: parent.width
 
-                            Rectangle {
-                                width: 44; height: 44; radius: Theme.radiusS
-                                color: Qt.hsva(palH.value, palS.value, palV.value, 1)
-                                border.color: Theme.borderStrong
-                                border.width: 1
-                            }
                             Column {
-                                Layout.fillWidth: true
-                                spacing: Theme.spaceS
-                                /* Palette position is a UI-owned
-                                   preference (Task 4.8): seeded
-                                   once from uiPrefs, written back
-                                   on each move. Each slider carries
-                                   a visible label + live value —
-                                   accessibility names alone don't
-                                   tell the eye what a bare track
-                                   adjusts. */
-                                RowLayout {
-                                    width: parent.width
-                                    spacing: Theme.spaceS
-                                    Text {
-                                        text: qsTr("Hue")
-                                        color: Theme.textSecondary
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        Layout.preferredWidth: 44
-                                    }
-                                    AppSlider {
-                                        id: palH
-                                        objectName: "paletteHue"
-                                        Layout.fillWidth: true
-                                        from: 0; to: 1; stepSize: 0.001
-                                        value: 0.55
-                                        enabled: root.liveControlsEnabled
-                                        Accessible.name: qsTr("palette hue")
-                                        onMoved: if(root.prefsUp)
-                                            uiPrefs.paletteHue = value;
-                                    }
-                                    Text {
-                                        text: Math.round(palH.value * 360) + "°"
-                                        color: Theme.textSecondary
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        horizontalAlignment: Text.AlignRight
-                                        Layout.preferredWidth: 38
-                                    }
-                                }
-                                RowLayout {
-                                    width: parent.width
-                                    spacing: Theme.spaceS
-                                    Text {
-                                        text: qsTr("Sat")
-                                        color: Theme.textSecondary
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        Layout.preferredWidth: 44
-                                    }
-                                    AppSlider {
-                                        id: palS
-                                        objectName: "paletteSat"
-                                        Layout.fillWidth: true
-                                        from: 0; to: 1; stepSize: 0.001
-                                        value: 0.6
-                                        enabled: root.liveControlsEnabled
-                                        Accessible.name: qsTr("palette saturation")
-                                        onMoved: if(root.prefsUp)
-                                            uiPrefs.paletteSat = value;
-                                    }
-                                    Text {
-                                        text: Math.round(palS.value * 100) + "%"
-                                        color: Theme.textSecondary
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        horizontalAlignment: Text.AlignRight
-                                        Layout.preferredWidth: 38
-                                    }
-                                }
-                                RowLayout {
-                                    width: parent.width
-                                    spacing: Theme.spaceS
-                                    Text {
-                                        text: qsTr("Bright")
-                                        color: Theme.textSecondary
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        Layout.preferredWidth: 44
-                                    }
-                                    AppSlider {
-                                        id: palV
-                                        objectName: "paletteVal"
-                                        Layout.fillWidth: true
-                                        from: 0; to: 1; stepSize: 0.001
-                                        value: 1.0
-                                        enabled: root.liveControlsEnabled
-                                        Accessible.name: qsTr("palette brightness")
-                                        onMoved: if(root.prefsUp)
-                                            uiPrefs.paletteVal = value;
-                                    }
-                                    Text {
-                                        text: Math.round(palV.value * 100) + "%"
-                                        color: Theme.textSecondary
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        horizontalAlignment: Text.AlignRight
-                                        Layout.preferredWidth: 38
-                                    }
-                                }
-                            }
-                            AppButton {
-                                objectName: "paletteApply"
-                                text: qsTr("Apply to selected")
-                                primary: true
-                                enabled: root.liveControlsEnabled
-                                onClicked: sceneEdit.setGroupColor(
-                                    Qt.hsva(palH.value, palS.value,
-                                            palV.value, 1).toString())
-                            }
-                        }
-
-                        /* Quick picks — design-token swatches. */
-                        Row {
-                            spacing: Theme.spaceS
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: qsTr("Quick")
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeSmall
-                            }
-                            Repeater {
-                                model: Theme.paletteSwatches
-                                PaletteSwatch {
-                                    objectName: "quickSwatch" + index
-                                    swatch: modelData
-                                    enabled: root.liveControlsEnabled
-                                    onPicked: hex => sceneEdit.setGroupColor(hex)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                /*---- Scene controls -----------------------------
-                   Brightness round-trips through SET_SCENE
-                   (document.brightness — the wire has no
-                   dedicated brightness verb; this is the
-                   scene-level path the document carries).
-                   Speed/intensity multiply the resolved look. */
-                Card {
-                    title: qsTr("SCENE CONTROLS")
-                    objectName: "sceneControlsCard"
-                    width: parent.width - 2 * col.padding
-
-                    Column {
-                        width: parent.width
-                        spacing: Theme.spaceM
-
-                        Text {
-                            visible: root.animationRequested
-                            text: qsTr("Disabled while Animation playback is selected — these multipliers drive the live scene evaluation the uploaded loop replaces.")
-                            color: Theme.warn
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        RowLayout {
-                            width: parent.width
-                            spacing: Theme.spaceL
-                            Text {
-                                text: qsTr("Brightness")
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeBody
-                                Layout.preferredWidth: 110
-                            }
-                            AppSlider {
-                                id: brightSlider
-                                objectName: "sceneBrightness"
-                                Accessible.name: qsTr("scene brightness")
-                                Layout.fillWidth: true
-                                enabled: root.liveControlsEnabled && sceneEdit.hasWorking
-                                from: 0; to: 100; stepSize: 1
-                                /* One commit per gesture, not one undo
-                                   record per pixel of drag. A gesture
-                                   is a pointer drag OR a step-key
-                                   press (Slider sets `pressed` while
-                                   the key is down), so both commit on
-                                   RELEASE - and only a real release
-                                   while enabled (AppSlider
-                                   gestureCommitted); disabling it
-                                   mid-drag cancels and the handle
-                                   snaps back to modelValue. The %
-                                   label tracks the handle live. No
-                                   live engine preview during the
-                                   drag: every SceneEditController
-                                   setter is an undo-history commit. */
-                                function commitValue(v) {
-                                    if(root.editorUp)
-                                        sceneEdit.setBrightness(v / 100)
-                                }
-                                onGestureCommitted: v => commitValue(v)
-                                /* moved without a gesture (e.g. an
-                                   accessibility action) commits at
-                                   once. */
-                                onMoved: if(!pressed) commitValue(value)
-                                /* The model value: the Binding re-syncs the
-                                   handle to it, and a cancelled gesture
-                                   (AppSlider) snaps back to it. */
-                                modelValue: root.editorUp
-                                       ? sceneEdit.brightness * 100 : 0
-                                /* Not while the user holds it: a
-                                   model change mid-drag must not
-                                   yank the handle away. */
-                                Binding {
-                                    target: brightSlider
-                                    property: "value"
-                                    when: !brightSlider.pressed
-                                    restoreMode: Binding.RestoreNone
-                                    value: brightSlider.modelValue
-                                }
-                            }
-                            Text {
-                                text: Math.round(brightSlider.value) + "%"
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSizeBody
-                                Layout.preferredWidth: 44
-                            }
-                        }
-
-                        RowLayout {
-                            width: parent.width
-                            spacing: Theme.spaceL
-                            Text {
-                                text: qsTr("Effect speed")
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeBody
-                                Layout.preferredWidth: 110
-                            }
-                            AppSlider {
-                                id: fxSpeedSlider
-                                objectName: "sceneSpeed"
-                                Accessible.name: qsTr("effect speed")
-                                Layout.fillWidth: true
-                                enabled: root.liveControlsEnabled && sceneEdit.hasWorking
-                                from: 0.05; to: 4.0; stepSize: 0.05
-                                /* Commit on release (see brightness). */
-                                function commitValue(v) {
-                                    if(root.editorUp)
-                                        sceneEdit.setEffectSpeed(v)
-                                }
-                                onGestureCommitted: v => commitValue(v)
-                                onMoved: if(!pressed) commitValue(value)
-                                /* The model value: the Binding re-syncs the
-                                   handle to it, and a cancelled gesture
-                                   (AppSlider) snaps back to it. */
-                                modelValue: root.editorUp
-                                       ? sceneEdit.effectSpeed : 1.0
-                                Binding {
-                                    target: fxSpeedSlider
-                                    property: "value"
-                                    when: !fxSpeedSlider.pressed
-                                    restoreMode: Binding.RestoreNone
-                                    value: fxSpeedSlider.modelValue
-                                }
-                            }
-                            Text {
-                                text: fxSpeedSlider.value.toFixed(2) + "×"
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSizeBody
-                                Layout.preferredWidth: 44
-                            }
-                        }
-
-                        RowLayout {
-                            width: parent.width
-                            spacing: Theme.spaceL
-                            Text {
-                                text: qsTr("Intensity")
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeBody
-                                Layout.preferredWidth: 110
-                            }
-                            AppSlider {
-                                id: fxIntSlider
-                                objectName: "sceneIntensity"
-                                Accessible.name: qsTr("effect intensity")
-                                Layout.fillWidth: true
-                                enabled: root.liveControlsEnabled && sceneEdit.hasWorking
-                                from: 0; to: 1.0; stepSize: 0.01
-                                /* Commit on release (see brightness). */
-                                function commitValue(v) {
-                                    if(root.editorUp)
-                                        sceneEdit.setEffectIntensity(v)
-                                }
-                                onGestureCommitted: v => commitValue(v)
-                                onMoved: if(!pressed) commitValue(value)
-                                /* The model value: the Binding re-syncs the
-                                   handle to it, and a cancelled gesture
-                                   (AppSlider) snaps back to it. */
-                                modelValue: root.editorUp
-                                       ? sceneEdit.effectIntensity : 1.0
-                                Binding {
-                                    target: fxIntSlider
-                                    property: "value"
-                                    when: !fxIntSlider.pressed
-                                    restoreMode: Binding.RestoreNone
-                                    value: fxIntSlider.modelValue
-                                }
-                            }
-                            Text {
-                                text: Math.round(fxIntSlider.value * 100) + "%"
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSizeBody
-                                Layout.preferredWidth: 44
-                            }
-                        }
-                    }
-                }
-
-                /*---- Uploaded preset parameters -----------------
-                   Only fields the selected preset supports are
-                   emitted (protocol §5): speed 10..200 always,
-                   direction for Rainbow Wave, color for
-                   Breathing — and only fields the user touched
-                   this session, so untouched fields keep the
-                   engine's recorded per-scene value instead of
-                   being clobbered by UI defaults. Sent through
-                   the controller so the current transport
-                   control is preserved — a speed drag can never
-                   silently resume a paused upload.           */
-                Card {
-                    title: qsTr("UPLOADED PRESET")
-                    objectName: "uploadedPresetCard"
-                    width: parent.width - 2 * col.padding
-                    visible: root.editorUp && sceneEdit.presetSupport.playback === true
-
-                    Column {
-                        width: parent.width
-                        spacing: Theme.spaceM
-
-                        Text {
-                            visible: root.requestedMode !== "animation_playback"
-                            text: qsTr("Switch to Animation playback to drive the uploaded preset.")
-                            color: Theme.textSecondary
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-                        Text {
-                            visible: root.animationRequested
-                                     && root.pv.phase === "applying"
-                            text: qsTr("The mode transition is in flight — parameter edits resume when the engine confirms.")
-                            color: Theme.textDisabled
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        RowLayout {
-                            width: parent.width
-                            spacing: Theme.spaceL
-                            enabled: root.engineUp
-                                     && root.animationRequested
-                                     && root.pv.phase !== "applying"
-                            Text {
-                                text: qsTr("Speed")
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeBody
-                                Layout.preferredWidth: 110
-                            }
-                            AppSlider {
-                                id: upSpeedSlider
-                                objectName: "upSpeedSlider"
-                                Accessible.name: qsTr("uploaded preset speed")
-                                Layout.fillWidth: true
-                                enabled: root.editorUp && parent.enabled
-                                         && sceneEdit.presetSupport.speed === true
-                                from: 10; to: 200; stepSize: 1
-                                onMoved: {
-                                    if(root.editorUp)
-                                        sceneEdit.noteParamTouched("speed");
-                                    paramTimer.restart();
-                                }
-                                Binding {
-                                    target: upSpeedSlider
-                                    property: "value"
-                                    value: root.upSpeed
-                                }
-                            }
-                            Text {
-                                text: Math.round(upSpeedSlider.value)
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSizeBody
-                                Layout.preferredWidth: 44
-                            }
-                        }
-
-                        /* Debounce: one SET_PLAYBACK_MODE per
-                           gesture, never a flood in flight. */
-                        Timer {
-                            id: paramTimer
-                            interval: 150
-                            onTriggered: {
-                                if(root.editorUp && root.engineUp)
-                                    sceneEdit.sendPlaybackParams(
-                                        Math.round(upSpeedSlider.value),
-                                        dirCheck.checked,
-                                        upColorWell.swatch.toString());
-                                /* Audit Q-11: re-assert the tracked
-                                   values — a send that was skipped
-                                   (engine down) or a field the preset
-                                   doesn't take leaves the model where
-                                   it was, and a Binding only rewrites
-                                   on a CHANGE. */
-                                if(!upSpeedSlider.pressed)
-                                    upSpeedSlider.value = root.upSpeed;
-                                dirCheck.checked = root.upReverse;
-                                root.syncUpColor();
-                            }
-                        }
-
-                        RowLayout {
-                            width: parent.width
-                            spacing: Theme.spaceL
-                            Text {
-                                text: qsTr("Direction")
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeBody
-                                Layout.preferredWidth: 110
-                            }
-                            AppCheckBox {
-                                id: dirCheck
-                                objectName: "directionReverse"
-                                enabled: root.editorUp && root.engineUp
-                                         && root.animationRequested
-                                         && root.pv.phase !== "applying"
-                                         && sceneEdit.presetSupport.direction === true
-                                text: qsTr("reverse")
-                                onToggled: if(enabled) {
-                                    if(root.editorUp)
-                                        sceneEdit.noteParamTouched("reverse");
-                                    paramTimer.restart();
-                                }
-                                Binding {
-                                    target: dirCheck
-                                    property: "checked"
-                                    value: root.upReverse
-                                }
-                            }
-                            Text {
-                                visible: root.editorUp
-                                         && sceneEdit.presetSupport.playback === true
-                                         && sceneEdit.presetSupport.direction !== true
-                                text: qsTr("not supported by this preset")
-                                color: Theme.textDisabled
-                                font.pixelSize: Theme.fontSizeSmall
-                            }
-                        }
-
-                        RowLayout {
-                            width: parent.width
-                            spacing: Theme.spaceL
-                            Text {
-                                text: qsTr("Color")
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeBody
-                                Layout.preferredWidth: 110
-                            }
-                            ColorWell {
-                                id: upColorWell
-                                swatch: Qt.hsva(upH.value, upS.value, upV.value, 1)
-                            }
-                            Column {
-                                spacing: Theme.spaceS
-                                Layout.fillWidth: true
-                                AppSlider {
-                                    id: upH
-                                    objectName: "upHue"
-                                    Accessible.name: qsTr("uploaded preset color hue")
-                                    width: parent.width
-                                    from: 0; to: 1; stepSize: 0.001; value: 0
-                                    enabled: root.editorUp && root.engineUp
-                                             && root.animationRequested
-                                             && root.pv.phase !== "applying"
-                                             && sceneEdit.presetSupport.color === true
-                                    onMoved: {
-                                        if(root.editorUp)
-                                            sceneEdit.noteParamTouched("color");
-                                        paramTimer.restart();
-                                    }
-                                }
-                                AppSlider {
-                                    id: upS
-                                    objectName: "upSat"
-                                    Accessible.name: qsTr("uploaded preset color saturation")
-                                    width: parent.width
-                                    from: 0; to: 1; stepSize: 0.001; value: 1
-                                    enabled: upH.enabled
-                                    onMoved: {
-                                        if(root.editorUp)
-                                            sceneEdit.noteParamTouched("color");
-                                        paramTimer.restart();
-                                    }
-                                }
-                                AppSlider {
-                                    id: upV
-                                    objectName: "upVal"
-                                    Accessible.name: qsTr("uploaded preset color brightness")
-                                    width: parent.width
-                                    from: 0; to: 1; stepSize: 0.001; value: 1
-                                    enabled: upH.enabled
-                                    onMoved: {
-                                        if(root.editorUp)
-                                            sceneEdit.noteParamTouched("color");
-                                        paramTimer.restart();
-                                    }
-                                }
-                            }
-                            Text {
-                                visible: root.editorUp
-                                         && sceneEdit.presetSupport.playback === true
-                                         && sceneEdit.presetSupport.color !== true
-                                text: qsTr("not supported by this preset")
-                                color: Theme.textDisabled
-                                font.pixelSize: Theme.fontSizeSmall
-                            }
-                        }
-                    }
-                }
-
-                /*---- Effect layers (studio-import Task 6) ------
-                   The advanced section: ordered layer stack,
-                   inspector, palette/gradient editing and the
-                   personal-look shelf — all edits land in the
-                   shared workspace draft as one undo record
-                   each. Workspace-mode only (a legacy engine
-                   has no draft); the card hides rather than
-                   fabricating controls. Live-effects only —
-                   an uploaded loop keeps its own controls. */
-                Card {
-                    id: effectCard
-                    title: qsTr("EFFECT LAYERS")
-                    objectName: "effectCard"
-                    width: parent.width - 2 * col.padding
-                    visible: typeof effectEdit !== "undefined"
-                             && effectEdit.ready
-
-                    EffectEditor {
-                        width: parent.width
-                        animationSelected: root.animationRequested
-                    }
-                }
-
-                /*---- Reactive inputs (Task 4.6) -----------------
-                   Enable/disable + honest status for each engine
-                   reactive input. Every toggle is real wire
-                   traffic: REACTIVE_COMMAND round-trips the
-                   engine and `checked` re-lands on the pushed
-                   "reactive" event — never on the click. A
-                   toggle is operable only when the engine
-                   reports the input available AND the working
-                   scene consumes it (sceneNeeds); a running
-                   input stays operable so capture can always
-                   be stopped. */
-                Card {
-                    id: reactiveCard
-                    title: qsTr("REACTIVE INPUTS")
-                    objectName: "reactiveCard"
-                    width: parent.width - 2 * col.padding
-
-                    readonly property var reactiveState:
-                        root.engineUp ? (bridge.reactive || {}) : ({})
-                    readonly property bool reactiveAvailable:
-                        reactiveState.available === true
-                    readonly property var reactiveInputs:
-                        reactiveState.inputs || []
-                    readonly property var reactiveDisplays:
-                        reactiveState.displays || []
-                    readonly property bool capturePaused:
-                        reactiveState.capture_paused === true
-
-                    function inputState(id) {
-                        for(let i = 0;
-                            i < reactiveCard.reactiveInputs.length;
-                            ++i) {
-                            const it = reactiveCard.reactiveInputs[i];
-                            if(it.id === id)
-                                return it;
-                        }
-                        return null;
-                    }
-
-                    Column {
-                        width: parent.width
-                        spacing: Theme.spaceM
-
-                        /* Engine surface absent — the honest
-                           reason, never a fabricated set of
-                           toggles. */
-                        Text {
-                            objectName: "reactiveUnavailableNote"
-                            visible: root.engineUp
-                                     && !reactiveCard.reactiveAvailable
-                            text: reactiveCard.reactiveState.reason
-                                  || qsTr("reactive inputs are not wired on this engine")
-                            color: Theme.warn
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        /* capture_paused — the power gate the
-                           engine applies while displays are
-                           off or the system is suspended. */
-                        Text {
-                            objectName: "reactivePausedNote"
-                            visible: reactiveCard.capturePaused
-                            text: qsTr("Capture paused — displays are off or the system is suspended; nothing is captured.")
-                            color: Theme.warn
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        Repeater {
-                            objectName: "reactiveInputList"
-                            model: reactiveCard.reactiveAvailable
-                                   ? [ { "inputId": "audio",
-                                         "label": qsTr("Audio reactive") },
-                                       { "inputId": "screen",
-                                         "label": qsTr("Screen mirror") },
-                                       { "inputId": "key",
-                                         "label": qsTr("Keyboard reactive") } ]
-                                   : []
-
-                            delegate: Column {
-                                id: inputRow
-                                required property var modelData
-                                readonly property string inputId:
-                                    modelData.inputId
-                                readonly property var st:
-                                    reactiveCard.inputState(inputId)
-                                readonly property bool present:
-                                    st !== null
-                                readonly property bool avail:
-                                    present && st.available === true
-                                readonly property bool on:
-                                    present && st.enabled === true
-                                    && st.running === true
-                                /* Operable only when the scene
-                                   consumes this input — or the
-                                   input is running (it must
-                                   always be stoppable). */
-                                readonly property bool usable:
-                                    root.engineUp && avail
-                                    && (on || root.sceneNeeds(inputId))
                                 width: parent.width
-                                spacing: Theme.spaceXS
+                                spacing: Theme.spaceM
+
+                                Text {
+                                    visible: root.animationRequested
+                                    text: qsTr("Disabled while Animation playback is selected — these multipliers drive the live scene evaluation the uploaded loop replaces.")
+                                    color: Theme.warn
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
+                                }
 
                                 RowLayout {
                                     width: parent.width
                                     spacing: Theme.spaceL
-                                    AppCheckBox {
-                                        id: inputCheck
-                                        objectName: inputId + "Check"
-                                        text: modelData.label
-                                        enabled: inputRow.usable
-                                        onClicked: {
-                                            const want = inputCheck.checked;
-                                            /* Audit Q-11: the box shows
-                                               ENGINE truth — the click
-                                               only requests; the Binding
-                                               below flips it when the
-                                               engine reports the input
-                                               running (it rewrites only
-                                               on a change, so a refused
-                                               or pending request would
-                                               otherwise stick). */
-                                            inputCheck.checked = inputRow.on;
-                                            bridge.reactiveCommand(
-                                                "set_enabled",
-                                                { "input": inputId,
-                                                  "enabled": want })
-                                            /* Persist the authored
-                                               source choice into the
-                                               draft (Task 6 parity —
-                                               the workspace restores
-                                               it on commit). */
-                                            if(typeof effectEdit !== "undefined"
-                                               && effectEdit.ready)
-                                                effectEdit.setInputEnabled(
-                                                    inputId, want)
-                                        }
-                                        Binding {
-                                            target: inputCheck
-                                            property: "checked"
-                                            value: inputRow.on
-                                        }
-                                    }
-                                    StatusPill {
-                                        objectName: inputId + "Pill"
-                                        visible: inputRow.present
-                                        text: !inputRow.avail
-                                              ? qsTr("unavailable")
-                                              : inputRow.on
-                                              ? (reactiveCard.capturePaused
-                                                 ? qsTr("paused") : qsTr("on"))
-                                              : qsTr("off")
-                                        tone: !inputRow.avail ? "warn"
-                                              : inputRow.on
-                                              ? (reactiveCard.capturePaused
-                                                 ? "warn" : "ok")
-                                              : "neutral"
-                                    }
                                     Text {
-                                        objectName: inputId + "Status"
-                                        Layout.fillWidth: true
-                                        text: {
-                                            if(!inputRow.present)
-                                                return qsTr("not reported by the engine");
-                                            if(!inputRow.avail)
-                                                return inputRow.st.status
-                                                    || qsTr("not available on this system");
-                                            if(!root.sceneNeeds(inputId)
-                                               && !inputRow.on)
-                                                return qsTr("the current scene doesn't use this input");
-                                            return inputRow.st.status || "";
-                                        }
-                                        color: Theme.textDisabled
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        wrapMode: Text.WordWrap
-                                    }
-                                }
-
-                                /* Audio: sensitivity (the
-                                   engine's 0.25..2.0 domain,
-                                   shown as percent; debounced
-                                   like playback params). */
-                                RowLayout {
-                                    visible: inputRow.inputId === "audio"
-                                             && inputRow.avail
-                                    width: parent.width
-                                    spacing: Theme.spaceL
-                                    Text {
-                                        text: qsTr("Sensitivity")
+                                        text: qsTr("Brightness")
                                         color: Theme.textSecondary
                                         font.pixelSize: Theme.fontSizeBody
                                         Layout.preferredWidth: 110
                                     }
                                     AppSlider {
-                                        id: sensSlider
-                                        objectName: "audioSensitivity"
-                                        Accessible.name: qsTr("audio sensitivity")
+                                        id: brightSlider
+                                        objectName: "sceneBrightness"
+                                        Accessible.name: qsTr("scene brightness")
                                         Layout.fillWidth: true
-                                        from: 25; to: 200; stepSize: 1
-                                        enabled: inputRow.usable
-                                        onMoved: sensTimer.restart()
-                                        /* Cancelled drag: the Binding
-                                           re-syncs the handle; push
-                                           that value to the live
-                                           wire too. */
-                                        onGestureCancelled: sensTimer.restart()
-                                        /* Persist the authored
-                                           value into the draft on
-                                           RELEASE only — one undo
-                                           record per drag, not one
-                                           per 150 ms timer tick. */
+                                        enabled: root.liveControlsEnabled && sceneEdit.hasWorking
+                                        from: 0; to: 100; stepSize: 1
+                                        /* One commit per gesture, not one undo
+                                           record per pixel of drag. A gesture
+                                           is a pointer drag OR a step-key
+                                           press (Slider sets `pressed` while
+                                           the key is down), so both commit on
+                                           RELEASE - and only a real release
+                                           while enabled (AppSlider
+                                           gestureCommitted); disabling it
+                                           mid-drag cancels and the handle
+                                           snaps back to modelValue. The %
+                                           label tracks the handle live. No
+                                           live engine preview during the
+                                           drag: every SceneEditController
+                                           setter is an undo-history commit. */
+                                        function commitValue(v) {
+                                            if(root.editorUp)
+                                                sceneEdit.setBrightness(v / 100)
+                                        }
+                                        onGestureCommitted: v => commitValue(v)
+                                        /* moved without a gesture (e.g. an
+                                           accessibility action) commits at
+                                           once. */
+                                        onMoved: if(!pressed) commitValue(value)
+                                        /* The model value: the Binding re-syncs the
+                                           handle to it, and a cancelled gesture
+                                           (AppSlider) snaps back to it. */
+                                        modelValue: root.editorUp
+                                               ? sceneEdit.brightness * 100 : 0
+                                        /* Not while the user holds it: a
+                                           model change mid-drag must not
+                                           yank the handle away. */
+                                        Binding {
+                                            target: brightSlider
+                                            property: "value"
+                                            when: !brightSlider.pressed
+                                            restoreMode: Binding.RestoreNone
+                                            value: brightSlider.modelValue
+                                        }
+                                    }
+                                    Text {
+                                        text: Math.round(brightSlider.value) + "%"
+                                        color: Theme.textPrimary
+                                        font.pixelSize: Theme.fontSizeBody
+                                        Layout.preferredWidth: 44
+                                    }
+                                }
+
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: Theme.spaceL
+                                    Text {
+                                        text: qsTr("Effect speed")
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeBody
+                                        Layout.preferredWidth: 110
+                                    }
+                                    AppSlider {
+                                        id: fxSpeedSlider
+                                        objectName: "sceneSpeed"
+                                        Accessible.name: qsTr("effect speed")
+                                        Layout.fillWidth: true
+                                        enabled: root.liveControlsEnabled && sceneEdit.hasWorking
+                                        from: 0.05; to: 4.0; stepSize: 0.05
+                                        /* Commit on release (see brightness). */
+                                        function commitValue(v) {
+                                            if(root.editorUp)
+                                                sceneEdit.setEffectSpeed(v)
+                                        }
+                                        onGestureCommitted: v => commitValue(v)
+                                        onMoved: if(!pressed) commitValue(value)
+                                        /* The model value: the Binding re-syncs the
+                                           handle to it, and a cancelled gesture
+                                           (AppSlider) snaps back to it. */
+                                        modelValue: root.editorUp
+                                               ? sceneEdit.effectSpeed : 1.0
+                                        Binding {
+                                            target: fxSpeedSlider
+                                            property: "value"
+                                            when: !fxSpeedSlider.pressed
+                                            restoreMode: Binding.RestoreNone
+                                            value: fxSpeedSlider.modelValue
+                                        }
+                                    }
+                                    Text {
+                                        text: fxSpeedSlider.value.toFixed(2) + "×"
+                                        color: Theme.textPrimary
+                                        font.pixelSize: Theme.fontSizeBody
+                                        Layout.preferredWidth: 44
+                                    }
+                                }
+
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: Theme.spaceL
+                                    Text {
+                                        text: qsTr("Intensity")
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeBody
+                                        Layout.preferredWidth: 110
+                                    }
+                                    AppSlider {
+                                        id: fxIntSlider
+                                        objectName: "sceneIntensity"
+                                        Accessible.name: qsTr("effect intensity")
+                                        Layout.fillWidth: true
+                                        enabled: root.liveControlsEnabled && sceneEdit.hasWorking
+                                        from: 0; to: 1.0; stepSize: 0.01
+                                        /* Commit on release (see brightness). */
+                                        function commitValue(v) {
+                                            if(root.editorUp)
+                                                sceneEdit.setEffectIntensity(v)
+                                        }
+                                        onGestureCommitted: v => commitValue(v)
+                                        onMoved: if(!pressed) commitValue(value)
+                                        /* The model value: the Binding re-syncs the
+                                           handle to it, and a cancelled gesture
+                                           (AppSlider) snaps back to it. */
+                                        modelValue: root.editorUp
+                                               ? sceneEdit.effectIntensity : 1.0
+                                        Binding {
+                                            target: fxIntSlider
+                                            property: "value"
+                                            when: !fxIntSlider.pressed
+                                            restoreMode: Binding.RestoreNone
+                                            value: fxIntSlider.modelValue
+                                        }
+                                    }
+                                    Text {
+                                        text: Math.round(fxIntSlider.value * 100) + "%"
+                                        color: Theme.textPrimary
+                                        font.pixelSize: Theme.fontSizeBody
+                                        Layout.preferredWidth: 44
+                                    }
+                                }
+                            }
+                        }
+
+                        /*---- Uploaded preset parameters -----------------
+                           Only fields the selected preset supports are
+                           emitted (protocol §5): speed 10..200 always,
+                           direction for Rainbow Wave, color for
+                           Breathing — and only fields the user touched
+                           this session, so untouched fields keep the
+                           engine's recorded per-scene value instead of
+                           being clobbered by UI defaults. Sent through
+                           the controller so the current transport
+                           control is preserved — a speed drag can never
+                           silently resume a paused upload.           */
+                        Card {
+                            title: qsTr("UPLOADED PRESET")
+                            objectName: "uploadedPresetCard"
+                            width: parent.width
+                            visible: root.editorUp && sceneEdit.presetSupport.playback === true
+
+                            Column {
+                                width: parent.width
+                                spacing: Theme.spaceM
+
+                                Text {
+                                    visible: root.requestedMode !== "animation_playback"
+                                    text: qsTr("Switch to Animation playback to drive the uploaded preset.")
+                                    color: Theme.textSecondary
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
+                                }
+                                Text {
+                                    visible: root.animationRequested
+                                             && root.pv.phase === "applying"
+                                    text: qsTr("The mode transition is in flight — parameter edits resume when the engine confirms.")
+                                    color: Theme.textDisabled
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
+                                }
+
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: Theme.spaceL
+                                    enabled: root.engineUp
+                                             && root.animationRequested
+                                             && root.pv.phase !== "applying"
+                                    Text {
+                                        text: qsTr("Speed")
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeBody
+                                        Layout.preferredWidth: 110
+                                    }
+                                    AppSlider {
+                                        id: upSpeedSlider
+                                        objectName: "upSpeedSlider"
+                                        Accessible.name: qsTr("uploaded preset speed")
+                                        Layout.fillWidth: true
+                                        enabled: root.editorUp && parent.enabled
+                                                 && sceneEdit.presetSupport.speed === true
+                                        from: 10; to: 200; stepSize: 1
+                                        onMoved: {
+                                            if(root.editorUp)
+                                                sceneEdit.noteParamTouched("speed");
+                                            paramTimer.restart();
+                                        }
+                                        Binding {
+                                            target: upSpeedSlider
+                                            property: "value"
+                                            value: root.upSpeed
+                                        }
+                                    }
+                                    Text {
+                                        text: Math.round(upSpeedSlider.value)
+                                        color: Theme.textPrimary
+                                        font.pixelSize: Theme.fontSizeBody
+                                        Layout.preferredWidth: 44
+                                    }
+                                }
+
+                                /* Debounce: one SET_PLAYBACK_MODE per
+                                   gesture, never a flood in flight. */
+                                Timer {
+                                    id: paramTimer
+                                    interval: 150
+                                    onTriggered: {
+                                        if(root.editorUp && root.engineUp)
+                                            sceneEdit.sendPlaybackParams(
+                                                Math.round(upSpeedSlider.value),
+                                                dirCheck.checked,
+                                                upColorWell.swatch.toString());
+                                        /* Audit Q-11: re-assert the tracked
+                                           values — a send that was skipped
+                                           (engine down) or a field the preset
+                                           doesn't take leaves the model where
+                                           it was, and a Binding only rewrites
+                                           on a CHANGE. */
+                                        if(!upSpeedSlider.pressed)
+                                            upSpeedSlider.value = root.upSpeed;
+                                        dirCheck.checked = root.upReverse;
+                                        root.syncUpColor();
+                                    }
+                                }
+
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: Theme.spaceL
+                                    Text {
+                                        text: qsTr("Direction")
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeBody
+                                        Layout.preferredWidth: 110
+                                    }
+                                    AppCheckBox {
+                                        id: dirCheck
+                                        objectName: "directionReverse"
+                                        enabled: root.editorUp && root.engineUp
+                                                 && root.animationRequested
+                                                 && root.pv.phase !== "applying"
+                                                 && sceneEdit.presetSupport.direction === true
+                                        text: qsTr("reverse")
+                                        onToggled: if(enabled) {
+                                            if(root.editorUp)
+                                                sceneEdit.noteParamTouched("reverse");
+                                            paramTimer.restart();
+                                        }
+                                        Binding {
+                                            target: dirCheck
+                                            property: "checked"
+                                            value: root.upReverse
+                                        }
+                                    }
+                                    Text {
+                                        visible: root.editorUp
+                                                 && sceneEdit.presetSupport.playback === true
+                                                 && sceneEdit.presetSupport.direction !== true
+                                        text: qsTr("not supported by this preset")
+                                        color: Theme.textDisabled
+                                        font.pixelSize: Theme.fontSizeSmall
+                                    }
+                                }
+
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: Theme.spaceL
+                                    Text {
+                                        text: qsTr("Color")
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeBody
+                                        Layout.preferredWidth: 110
+                                    }
+                                    ColorWell {
+                                        id: upColorWell
+                                        swatch: Qt.hsva(upH.value, upS.value, upV.value, 1)
+                                    }
+                                    Column {
+                                        spacing: Theme.spaceS
+                                        Layout.fillWidth: true
+                                        AppSlider {
+                                            id: upH
+                                            objectName: "upHue"
+                                            Accessible.name: qsTr("uploaded preset color hue")
+                                            width: parent.width
+                                            from: 0; to: 1; stepSize: 0.001; value: 0
+                                            enabled: root.editorUp && root.engineUp
+                                                     && root.animationRequested
+                                                     && root.pv.phase !== "applying"
+                                                     && sceneEdit.presetSupport.color === true
+                                            onMoved: {
+                                                if(root.editorUp)
+                                                    sceneEdit.noteParamTouched("color");
+                                                paramTimer.restart();
+                                            }
+                                        }
+                                        AppSlider {
+                                            id: upS
+                                            objectName: "upSat"
+                                            Accessible.name: qsTr("uploaded preset color saturation")
+                                            width: parent.width
+                                            from: 0; to: 1; stepSize: 0.001; value: 1
+                                            enabled: upH.enabled
+                                            onMoved: {
+                                                if(root.editorUp)
+                                                    sceneEdit.noteParamTouched("color");
+                                                paramTimer.restart();
+                                            }
+                                        }
+                                        AppSlider {
+                                            id: upV
+                                            objectName: "upVal"
+                                            Accessible.name: qsTr("uploaded preset color brightness")
+                                            width: parent.width
+                                            from: 0; to: 1; stepSize: 0.001; value: 1
+                                            enabled: upH.enabled
+                                            onMoved: {
+                                                if(root.editorUp)
+                                                    sceneEdit.noteParamTouched("color");
+                                                paramTimer.restart();
+                                            }
+                                        }
+                                    }
+                                    Text {
+                                        visible: root.editorUp
+                                                 && sceneEdit.presetSupport.playback === true
+                                                 && sceneEdit.presetSupport.color !== true
+                                        text: qsTr("not supported by this preset")
+                                        color: Theme.textDisabled
+                                        font.pixelSize: Theme.fontSizeSmall
+                                    }
+                                }
+                            }
+                        }
+
+                        /*---- Effect layers (studio-import Task 6) ------
+                           The advanced section: ordered layer stack,
+                           inspector, palette/gradient editing and the
+                           personal-look shelf — all edits land in the
+                           shared workspace draft as one undo record
+                           each. Workspace-mode only (a legacy engine
+                           has no draft); the card hides rather than
+                           fabricating controls. Live-effects only —
+                           an uploaded loop keeps its own controls. */
+                        Card {
+                            id: effectCard
+                            title: qsTr("EFFECT LAYERS")
+                            objectName: "effectCard"
+                            width: parent.width
+                            visible: typeof effectEdit !== "undefined"
+                                     && effectEdit.ready
+
+                            EffectEditor {
+                                width: parent.width
+                                animationSelected: root.animationRequested
+                            }
+                        }
+                        }
+                    }
+                    PageFlickable {
+                        id: reactiveFlick
+                        objectName: "reactiveScroll"
+                        contentHeight: reactiveFlickCol.implicitHeight
+                        Column {
+                            id: reactiveFlickCol
+                            width: reactiveFlick.width - Theme.spaceM
+                            spacing: Theme.spaceL
+                        /*---- Reactive inputs (Task 4.6) -----------------
+                           Enable/disable + honest status for each engine
+                           reactive input. Every toggle is real wire
+                           traffic: REACTIVE_COMMAND round-trips the
+                           engine and `checked` re-lands on the pushed
+                           "reactive" event — never on the click. A
+                           toggle is operable only when the engine
+                           reports the input available AND the working
+                           scene consumes it (sceneNeeds); a running
+                           input stays operable so capture can always
+                           be stopped. */
+                        Card {
+                            id: reactiveCard
+                            title: qsTr("REACTIVE INPUTS")
+                            objectName: "reactiveCard"
+                            width: parent.width
+
+                            readonly property var reactiveState:
+                                root.engineUp ? (bridge.reactive || {}) : ({})
+                            readonly property bool reactiveAvailable:
+                                reactiveState.available === true
+                            readonly property var reactiveInputs:
+                                reactiveState.inputs || []
+                            readonly property var reactiveDisplays:
+                                reactiveState.displays || []
+                            readonly property bool capturePaused:
+                                reactiveState.capture_paused === true
+
+                            function inputState(id) {
+                                for(let i = 0;
+                                    i < reactiveCard.reactiveInputs.length;
+                                    ++i) {
+                                    const it = reactiveCard.reactiveInputs[i];
+                                    if(it.id === id)
+                                        return it;
+                                }
+                                return null;
+                            }
+
+                            Column {
+                                width: parent.width
+                                spacing: Theme.spaceM
+
+                                /* Engine surface absent — the honest
+                                   reason, never a fabricated set of
+                                   toggles. */
+                                Text {
+                                    objectName: "reactiveUnavailableNote"
+                                    visible: root.engineUp
+                                             && !reactiveCard.reactiveAvailable
+                                    text: reactiveCard.reactiveState.reason
+                                          || qsTr("reactive inputs are not wired on this engine")
+                                    color: Theme.warn
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
+                                }
+
+                                /* capture_paused — the power gate the
+                                   engine applies while displays are
+                                   off or the system is suspended. */
+                                Text {
+                                    objectName: "reactivePausedNote"
+                                    visible: reactiveCard.capturePaused
+                                    text: qsTr("Capture paused — displays are off or the system is suspended; nothing is captured.")
+                                    color: Theme.warn
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
+                                }
+
+                                Repeater {
+                                    objectName: "reactiveInputList"
+                                    model: reactiveCard.reactiveAvailable
+                                           ? [ { "inputId": "audio",
+                                                 "label": qsTr("Audio reactive") },
+                                               { "inputId": "screen",
+                                                 "label": qsTr("Screen mirror") },
+                                               { "inputId": "key",
+                                                 "label": qsTr("Keyboard reactive") } ]
+                                           : []
+
+                                    delegate: Column {
+                                        id: inputRow
+                                        required property var modelData
+                                        readonly property string inputId:
+                                            modelData.inputId
+                                        readonly property var st:
+                                            reactiveCard.inputState(inputId)
+                                        readonly property bool present:
+                                            st !== null
+                                        readonly property bool avail:
+                                            present && st.available === true
+                                        readonly property bool on:
+                                            present && st.enabled === true
+                                            && st.running === true
+                                        /* Operable only when the scene
+                                           consumes this input — or the
+                                           input is running (it must
+                                           always be stoppable). */
+                                        readonly property bool usable:
+                                            root.engineUp && avail
+                                            && (on || root.sceneNeeds(inputId))
+                                        width: parent.width
+                                        spacing: Theme.spaceXS
+
+                                        RowLayout {
+                                            width: parent.width
+                                            spacing: Theme.spaceL
+                                            AppCheckBox {
+                                                id: inputCheck
+                                                objectName: inputId + "Check"
+                                                text: modelData.label
+                                                enabled: inputRow.usable
+                                                onClicked: {
+                                                    const want = inputCheck.checked;
+                                                    /* Audit Q-11: the box shows
+                                                       ENGINE truth — the click
+                                                       only requests; the Binding
+                                                       below flips it when the
+                                                       engine reports the input
+                                                       running (it rewrites only
+                                                       on a change, so a refused
+                                                       or pending request would
+                                                       otherwise stick). */
+                                                    inputCheck.checked = inputRow.on;
+                                                    bridge.reactiveCommand(
+                                                        "set_enabled",
+                                                        { "input": inputId,
+                                                          "enabled": want })
+                                                    /* Persist the authored
+                                                       source choice into the
+                                                       draft (Task 6 parity —
+                                                       the workspace restores
+                                                       it on commit). */
+                                                    if(typeof effectEdit !== "undefined"
+                                                       && effectEdit.ready)
+                                                        effectEdit.setInputEnabled(
+                                                            inputId, want)
+                                                }
+                                                Binding {
+                                                    target: inputCheck
+                                                    property: "checked"
+                                                    value: inputRow.on
+                                                }
+                                            }
+                                            StatusPill {
+                                                objectName: inputId + "Pill"
+                                                visible: inputRow.present
+                                                text: !inputRow.avail
+                                                      ? qsTr("unavailable")
+                                                      : inputRow.on
+                                                      ? (reactiveCard.capturePaused
+                                                         ? qsTr("paused") : qsTr("on"))
+                                                      : qsTr("off")
+                                                tone: !inputRow.avail ? "warn"
+                                                      : inputRow.on
+                                                      ? (reactiveCard.capturePaused
+                                                         ? "warn" : "ok")
+                                                      : "neutral"
+                                            }
+                                            Text {
+                                                objectName: inputId + "Status"
+                                                Layout.fillWidth: true
+                                                text: {
+                                                    if(!inputRow.present)
+                                                        return qsTr("not reported by the engine");
+                                                    if(!inputRow.avail)
+                                                        return inputRow.st.status
+                                                            || qsTr("not available on this system");
+                                                    if(!root.sceneNeeds(inputId)
+                                                       && !inputRow.on)
+                                                        return qsTr("the current scene doesn't use this input");
+                                                    return inputRow.st.status || "";
+                                                }
+                                                color: Theme.textDisabled
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                wrapMode: Text.WordWrap
+                                            }
+                                        }
+
+                                        /* Audio: sensitivity (the
+                                           engine's 0.25..2.0 domain,
+                                           shown as percent; debounced
+                                           like playback params). */
+                                        RowLayout {
+                                            visible: inputRow.inputId === "audio"
+                                                     && inputRow.avail
+                                            width: parent.width
+                                            spacing: Theme.spaceL
+                                            Text {
+                                                text: qsTr("Sensitivity")
+                                                color: Theme.textSecondary
+                                                font.pixelSize: Theme.fontSizeBody
+                                                Layout.preferredWidth: 110
+                                            }
+                                            AppSlider {
+                                                id: sensSlider
+                                                objectName: "audioSensitivity"
+                                                Accessible.name: qsTr("audio sensitivity")
+                                                Layout.fillWidth: true
+                                                from: 25; to: 200; stepSize: 1
+                                                enabled: inputRow.usable
+                                                onMoved: sensTimer.restart()
+                                                /* Cancelled drag: the Binding
+                                                   re-syncs the handle; push
+                                                   that value to the live
+                                                   wire too. */
+                                                onGestureCancelled: sensTimer.restart()
+                                                /* Persist the authored
+                                                   value into the draft on
+                                                   RELEASE only — one undo
+                                                   record per drag, not one
+                                                   per 150 ms timer tick. */
+                                                onGestureCommitted: v => {
+                                                    if(typeof effectEdit !== "undefined"
+                                                       && effectEdit.ready)
+                                                        effectEdit.setInputSensitivity(
+                                                            Math.round(v))
+                                                }
+                                                /* The model value: the Binding re-syncs the
+                                                   handle to it, and a cancelled gesture
+                                                   (AppSlider) snaps back to it. */
+                                                modelValue: inputRow.present
+                                                       ? Math.round(
+                                                           inputRow.st.sensitivity
+                                                           * 100)
+                                                       : 100
+                                                Binding {
+                                                    target: sensSlider
+                                                    property: "value"
+                                                    when: !sensSlider.pressed
+                                                    restoreMode: Binding.RestoreNone
+                                                    value: sensSlider.modelValue
+                                                }
+                                            }
+                                            Text {
+                                                text: Math.round(sensSlider.value) + "%"
+                                                color: Theme.textSecondary
+                                                font.pixelSize: Theme.fontSizeBody
+                                            }
+                                            Timer {
+                                                id: sensTimer
+                                                interval: 150
+                                                /* Live wire updates only —
+                                                   the draft persist lands
+                                                   once on slider release. */
+                                                onTriggered:
+                                                    bridge.reactiveCommand(
+                                                        "set_params",
+                                                        { "input": "audio",
+                                                          "sensitivity":
+                                                              sensSlider.value / 100.0 })
+                                            }
+                                        }
+
+                                        /* Screen: which display the
+                                           sampler mirrors. */
+                                        RowLayout {
+                                            visible: inputRow.inputId === "screen"
+                                                     && inputRow.avail
+                                            width: parent.width
+                                            spacing: Theme.spaceL
+                                            Text {
+                                                text: qsTr("Display")
+                                                color: Theme.textSecondary
+                                                font.pixelSize: Theme.fontSizeBody
+                                                Layout.preferredWidth: 110
+                                            }
+                                            AppComboBox {
+                                                id: dispCombo
+                                                objectName: "screenDisplay"
+                                                Accessible.name: qsTr("screen input display")
+                                                Layout.fillWidth: true
+                                                enabled: inputRow.usable && count > 0
+                                                model: reactiveCard.reactiveDisplays
+                                                textRole: "name"
+                                                onActivated: index => {
+                                                    bridge.reactiveCommand(
+                                                        "set_params",
+                                                        { "input": "screen",
+                                                          "screen_index": index })
+                                                    if(typeof effectEdit !== "undefined"
+                                                       && effectEdit.ready)
+                                                        effectEdit.setInputScreenIndex(index)
+                                                }
+                                                Binding {
+                                                    target: dispCombo
+                                                    property: "currentIndex"
+                                                    value: inputRow.present
+                                                           ? inputRow.st.screen_index
+                                                           : 0
+                                                }
+                                            }
+                                            Text {
+                                                visible: dispCombo.count === 0
+                                                text: qsTr("no displays reported")
+                                                color: Theme.textDisabled
+                                                font.pixelSize: Theme.fontSizeSmall
+                                            }
+                                        }
+                                    }
+                                }
+
+                                /* Ripple decay (Task 6): the AUTHORED
+                                   inputs.decay_pct — 50..300, default
+                                   100, applied engine-side to runtime
+                                   ripple-layer density copies only. A
+                                   workspace-draft field, so the control
+                                   exists only when the shared draft is
+                                   editable; the drag commits one record
+                                   on release. */
+                                RowLayout {
+                                    visible: typeof effectEdit !== "undefined"
+                                             && effectEdit.ready
+                                    width: parent.width
+                                    spacing: Theme.spaceL
+                                    Text {
+                                        text: qsTr("Ripple decay")
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeBody
+                                        Layout.preferredWidth: 110
+                                    }
+                                    AppSlider {
+                                        id: decaySlider
+                                        objectName: "rippleDecay"
+                                        Accessible.name: qsTr("ripple decay")
+                                        Layout.fillWidth: true
+                                        from: 50; to: 300; stepSize: 5
                                         onGestureCommitted: v => {
                                             if(typeof effectEdit !== "undefined"
                                                && effectEdit.ready)
-                                                effectEdit.setInputSensitivity(
+                                                effectEdit.setDecayPct(
                                                     Math.round(v))
                                         }
                                         /* The model value: the Binding re-syncs the
                                            handle to it, and a cancelled gesture
                                            (AppSlider) snaps back to it. */
-                                        modelValue: inputRow.present
-                                               ? Math.round(
-                                                   inputRow.st.sensitivity
-                                                   * 100)
-                                               : 100
+                                        modelValue: typeof effectEdit !== "undefined"
+                                               && effectEdit.ready
+                                               ? effectEdit.decayPct : 100
                                         Binding {
-                                            target: sensSlider
+                                            target: decaySlider
                                             property: "value"
-                                            when: !sensSlider.pressed
+                                            when: !decaySlider.pressed
                                             restoreMode: Binding.RestoreNone
-                                            value: sensSlider.modelValue
+                                            value: decaySlider.modelValue
                                         }
                                     }
                                     Text {
-                                        text: Math.round(sensSlider.value) + "%"
+                                        text: Math.round(decaySlider.value) + "%"
                                         color: Theme.textSecondary
                                         font.pixelSize: Theme.fontSizeBody
                                     }
-                                    Timer {
-                                        id: sensTimer
-                                        interval: 150
-                                        /* Live wire updates only —
-                                           the draft persist lands
-                                           once on slider release. */
-                                        onTriggered:
-                                            bridge.reactiveCommand(
-                                                "set_params",
-                                                { "input": "audio",
-                                                  "sensitivity":
-                                                      sensSlider.value / 100.0 })
-                                    }
                                 }
 
-                                /* Screen: which display the
-                                   sampler mirrors. */
-                                RowLayout {
-                                    visible: inputRow.inputId === "screen"
-                                             && inputRow.avail
+                                Text {
+                                    objectName: "reactiveLiveNote"
+                                    visible: root.engineUp
+                                             && reactiveCard.reactiveAvailable
+                                    text: root.animationRequested
+                                          ? qsTr("Animation playback is selected — reactive capture has no visible effect while an uploaded loop owns output. Reactive scenes stay Live effects.")
+                                          : qsTr("Reactive scenes stay Live effects — a scene using these inputs can't be uploaded as animation playback.")
+                                    color: Theme.textSecondary
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    wrapMode: Text.WordWrap
                                     width: parent.width
-                                    spacing: Theme.spaceL
-                                    Text {
-                                        text: qsTr("Display")
-                                        color: Theme.textSecondary
-                                        font.pixelSize: Theme.fontSizeBody
-                                        Layout.preferredWidth: 110
-                                    }
-                                    AppComboBox {
-                                        id: dispCombo
-                                        objectName: "screenDisplay"
-                                        Accessible.name: qsTr("screen input display")
-                                        Layout.fillWidth: true
-                                        enabled: inputRow.usable && count > 0
-                                        model: reactiveCard.reactiveDisplays
-                                        textRole: "name"
-                                        onActivated: index => {
-                                            bridge.reactiveCommand(
-                                                "set_params",
-                                                { "input": "screen",
-                                                  "screen_index": index })
-                                            if(typeof effectEdit !== "undefined"
-                                               && effectEdit.ready)
-                                                effectEdit.setInputScreenIndex(index)
-                                        }
-                                        Binding {
-                                            target: dispCombo
-                                            property: "currentIndex"
-                                            value: inputRow.present
-                                                   ? inputRow.st.screen_index
-                                                   : 0
-                                        }
-                                    }
-                                    Text {
-                                        visible: dispCombo.count === 0
-                                        text: qsTr("no displays reported")
-                                        color: Theme.textDisabled
-                                        font.pixelSize: Theme.fontSizeSmall
-                                    }
                                 }
-                            }
-                        }
 
-                        /* Ripple decay (Task 6): the AUTHORED
-                           inputs.decay_pct — 50..300, default
-                           100, applied engine-side to runtime
-                           ripple-layer density copies only. A
-                           workspace-draft field, so the control
-                           exists only when the shared draft is
-                           editable; the drag commits one record
-                           on release. */
-                        RowLayout {
-                            visible: typeof effectEdit !== "undefined"
-                                     && effectEdit.ready
-                            width: parent.width
-                            spacing: Theme.spaceL
-                            Text {
-                                text: qsTr("Ripple decay")
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeBody
-                                Layout.preferredWidth: 110
-                            }
-                            AppSlider {
-                                id: decaySlider
-                                objectName: "rippleDecay"
-                                Accessible.name: qsTr("ripple decay")
-                                Layout.fillWidth: true
-                                from: 50; to: 300; stepSize: 5
-                                onGestureCommitted: v => {
-                                    if(typeof effectEdit !== "undefined"
-                                       && effectEdit.ready)
-                                        effectEdit.setDecayPct(
-                                            Math.round(v))
-                                }
-                                /* The model value: the Binding re-syncs the
-                                   handle to it, and a cancelled gesture
-                                   (AppSlider) snaps back to it. */
-                                modelValue: typeof effectEdit !== "undefined"
-                                       && effectEdit.ready
-                                       ? effectEdit.decayPct : 100
-                                Binding {
-                                    target: decaySlider
-                                    property: "value"
-                                    when: !decaySlider.pressed
-                                    restoreMode: Binding.RestoreNone
-                                    value: decaySlider.modelValue
-                                }
-                            }
-                            Text {
-                                text: Math.round(decaySlider.value) + "%"
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeBody
-                            }
-                        }
-
-                        Text {
-                            objectName: "reactiveLiveNote"
-                            visible: root.engineUp
-                                     && reactiveCard.reactiveAvailable
-                            text: root.animationRequested
-                                  ? qsTr("Animation playback is selected — reactive capture has no visible effect while an uploaded loop owns output. Reactive scenes stay Live effects.")
-                                  : qsTr("Reactive scenes stay Live effects — a scene using these inputs can't be uploaded as animation playback.")
-                            color: Theme.textSecondary
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        /* Bounded, local capture — the privacy
-                           surface the plan requires next to the
-                           controls. */
-                        Text {
-                            visible: root.engineUp
-                                     && reactiveCard.reactiveAvailable
-                            text: qsTr("Capture stays inside the engine process — audio energies (~5 ms chunks), a 12×6 screen grid (≤ 25 Hz), and key edges only. No audio samples, pixels, or typed text are recorded.")
-                            color: Theme.textDisabled
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        EmptyState {
-                            objectName: "reactiveEmpty"
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            visible: !root.engineUp
-                            title: qsTr("Engine not connected")
-                            detail: qsTr("Reactive input controls report what the engine exposes.")
-                        }
-                    }
-                }
-
-                /*---- Draft preview (Task 7) ----------------------
-                   The UNSAVED workspace draft, evaluated
-                   engine-side and pushed back on the
-                   session-bound "preview" feed — distinct
-                   from the applied-output strip below:
-                   these colors were NEVER delivered to
-                   hardware. */
-                Card {
-                    title: qsTr("DRAFT PREVIEW — UNSAVED")
-                    objectName: "draftPreviewCard"
-                    width: parent.width - 2 * col.padding
-                    visible: typeof viewport !== "undefined"
-
-                    Column {
-                        width: parent.width
-                        spacing: Theme.spaceM
-
-                        /* Audit Q-5: the model is the colorless
-                           objectRows (notified only when the object
-                           set changes) behind an integer count, so a
-                           pushed frame never rebuilds these cards;
-                           each strip pulls its own colors by id
-                           (O(1) in C++), re-read per frame through
-                           the sequence dependency. */
-                        Repeater {
-                            id: draftRepeater
-                            objectName: "draftRepeater"
-                            readonly property var rows:
-                                (typeof viewport !== "undefined"
-                                 && viewport.previewActive)
-                                ? viewport.objectRows : []
-                            model: rows.length
-                            Column {
-                                id: draftRow
-                                required property int index
-                                readonly property var row:
-                                    draftRepeater.rows[index] || ({})
-                                spacing: Theme.spaceXS
+                                /* Bounded, local capture — the privacy
+                                   surface the plan requires next to the
+                                   controls. */
                                 Text {
-                                    text: draftRow.row.id +
-                                          (draftRow.row.kind === "linked"
-                                           ? " (linked)" :
-                                           (!draftRow.row.bound
-                                            ? " (unbound)" : ""))
-                                    color: Theme.textSecondary
-                                    font.pixelSize: Theme.fontSizeSmall
-                                }
-                                FrameStrip {
-                                    objectName: "draftStrip"
-                                    colors: viewport.sequence >= 0
-                                            ? (viewport.colorsFor(
-                                                   draftRow.row.id,
-                                                   draftRow.row.emitter_total
-                                                   || 0) || [])
-                                            : []
-                                }
-                            }
-                        }
-
-                        Text {
-                            visible: typeof viewport !== "undefined"
-                            text: (typeof viewport !== "undefined"
-                                   ? viewport.label : "")
-                                  + (typeof viewport !== "undefined"
-                                     && viewport.lastError !== ""
-                                     ? " — " + viewport.lastError : "")
-                            color: Theme.textDisabled
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        EmptyState {
-                            objectName: "draftPreviewEmpty"
-                            anchors.horizontalCenter:
-                                parent.horizontalCenter
-                            visible: typeof viewport === "undefined"
-                                     || !viewport.previewActive
-                            title: qsTr("No draft preview")
-                            detail: qsTr("Edits to the shared workspace draft preview here before Save applies them to lights.")
-                        }
-                    }
-                }
-
-                /*---- Applied output --------------------------------
-                   frame_status carries the last TRANSPORT-ACCEPTED
-                   frame per controller (protocol §7) — output that
-                   actually passed the writer, never draft colors.
-                   Rate labelled separately from measured output
-                   rates. */
-                Card {
-                    title: qsTr("APPLIED OUTPUT")
-                    width: parent.width - 2 * col.padding
-
-                    Column {
-                        width: parent.width
-                        spacing: Theme.spaceM
-
-                        /* Stable-row C++ model — no delegate
-                           churn per frame_status push. */
-                        Repeater {
-                            model: root.engineUp
-                                   ? bridge.frameControllers
-                                   : null
-                            Column {
-                                spacing: Theme.spaceXS
-                                Text {
-                                    text: root.deviceNameFor(model.key)
-                                    color: Theme.textSecondary
-                                    font.pixelSize: Theme.fontSizeSmall
-                                }
-                                FrameStrip {
-                                    objectName: "previewStrip"
-                                    colors: model.colors || []
-                                }
-                            }
-                        }
-
-                        Text {
-                            visible: root.engineUp
-                            text: qsTr("applied output ≈ %1 updates/s — engine frame_status event cadence (≤ ~30 Hz), not the output rate")
-                                .arg(root.previewFps.toFixed(1))
-                            color: Theme.textDisabled
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        EmptyState {
-                            objectName: "previewEmpty"
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            visible: !root.engineUp
-                                     || bridge.frameControllers.count === 0
-                            title: qsTr("No frame data")
-                            detail: root.engineUp
-                                    ? qsTr("The applied-output strip fills in when the engine delivers frames.")
-                                    : qsTr("Engine not connected — nothing is being driven.")
-                        }
-                    }
-                }
-
-                /*---- Profiles -----------------------------------
-                   Save/load named scenes. The engine has no
-                   profile-list verb — the library lives in
-                   the UI; loading stages the document and
-                   Save applies it through SET_SCENE (the
-                   engine validates/migrates). The engine's
-                   own profile remembers the playback mode
-                   per scene name automatically.           */
-                Card {
-                    title: qsTr("PROFILES")
-                    objectName: "profilesCard"
-                    width: parent.width - 2 * col.padding
-
-                    Column {
-                        width: parent.width
-                        spacing: Theme.spaceM
-
-                        RowLayout {
-                            width: parent.width
-                            spacing: Theme.spaceL
-                            Text {
-                                text: qsTr("Scene name")
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontSizeBody
-                                Layout.preferredWidth: 110
-                            }
-                            TextField {
-                                id: nameField
-                                objectName: "nameField"
-                                Accessible.name: qsTr("Scene name")
-                                Layout.fillWidth: true
-                                enabled: root.editorUp
-                                placeholderText: qsTr("name this scene")
-                                /* No text: binding — an imperative
-                                   assignment would kill it forever
-                                   (Task 4.8 minor). Instead the page
-                                   tracks syncedSceneName: the last
-                                   model name this field was shown.
-                                   When the model's name moves OFF
-                                   that value (discard, reload,
-                                   remote apply) the field follows
-                                   it — focused or not — while edits
-                                   the model never saw (uncommitted
-                                   typing) survive unrelated
-                                   workingChanged churn. The paths
-                                   that revert to the SAME name the
-                                   sentinel already holds — a
-                                   refused commit, Discard, Reload —
-                                   resync explicitly instead
-                                   (BUG-4). */
-                                onEditingFinished: {
-                                    /* A refused commit reverts —
-                                       the model never took the
-                                       text, so the field must not
-                                       keep showing it (BUG-4). */
-                                    if(root.editorUp
-                                       && !sceneEdit
-                                              .setSceneName(text)) {
-                                        root.resyncNameField();
-                                    }
-                                }
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSizeBody
-                                background: Rectangle {
-                                    radius: Theme.radiusS
-                                    color: Theme.surfaceAlt
-                                    border.width: nameField.activeFocus ? 2 : 1
-                                    border.color: nameField.activeFocus
-                                                  ? Theme.accent : Theme.border
-                                }
-                                Connections {
-                                    target: root.editorUp ? sceneEdit : null
-                                    function onWorkingChanged() {
-                                        const want = root.editorUp
-                                            ? sceneEdit.sceneName : "";
-                                        if(want !== root.syncedSceneName
-                                           || root.nameResyncPending) {
-                                            root.nameResyncPending = false;
-                                            root.syncedSceneName = want;
-                                            if(nameField.text !== want)
-                                                nameField.text = want;
-                                        }
-                                    }
-                                }
-                                Component.onCompleted: {
-                                    const want = root.editorUp
-                                        ? sceneEdit.sceneName : "";
-                                    root.syncedSceneName = want;
-                                    text = want;
-                                }
-                            }
-                            AppButton {
-                                objectName: "saveProfileButton"
-                                text: qsTr("Save to library")
-                                enabled: root.editorUp && sceneEdit.hasWorking
-                                onClicked: sceneEdit.saveProfile(
-                                    nameField.text || sceneEdit.sceneName
-                                    || qsTr("Untitled"))
-                            }
-                        }
-
-                        Text {
-                            text: qsTr("Profiles are stored by the UI and applied through the engine's normal scene validation — loading stages the scene, Save sends it. The engine remembers the playback mode per scene name.")
-                            color: Theme.textDisabled
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        /* studio-import Task 4: with a managed
-                           workspace, the stored entries migrate
-                           ONLY on this explicit click — each
-                           becomes its own workspace through the
-                           engine's bounded import path.
-                           Originals and names are retained;
-                           nothing is auto-applied. */
-                        AppButton {
-                            objectName: "importProfiles"
-                            width: parent.width
-                            visible: root.editorUp
-                                     && typeof workspace !== "undefined"
-                                     && workspace.managed
-                                     && sceneEdit.profiles.length > 0
-                            text: qsTr("Import all profiles into workspaces")
-                            onClicked: sceneEdit.importProfilesToWorkspaces()
-                        }
-
-                        Text {
-                            visible: root.editorUp && sceneEdit.libraryError !== ""
-                            text: root.editorUp ? sceneEdit.libraryError : ""
-                            color: Theme.bad
-                            font.pixelSize: Theme.fontSizeSmall
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        Repeater {
-                            objectName: "profilesList"
-                            model: root.editorUp ? sceneEdit.profiles : []
-                            RowLayout {
-                                width: parent.width
-                                spacing: Theme.spaceL
-                                Text {
-                                    text: modelData.name
-                                    color: Theme.textPrimary
-                                    font.pixelSize: Theme.fontSizeBody
-                                    Layout.fillWidth: true
-                                }
-                                Text {
-                                    text: modelData.saved_at || ""
+                                    visible: root.engineUp
+                                             && reactiveCard.reactiveAvailable
+                                    text: qsTr("Capture stays inside the engine process — audio energies (~5 ms chunks), a 12×6 screen grid (≤ 25 Hz), and key edges only. No audio samples, pixels, or typed text are recorded.")
                                     color: Theme.textDisabled
                                     font.pixelSize: Theme.fontSizeSmall
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
                                 }
-                                AppButton {
-                                    objectName: "profileLoad_" + index
-                                    text: qsTr("Load")
-                                    enabled: root.editorUp
-                                    onClicked: sceneEdit.loadProfile(modelData.name)
-                                }
-                                AppButton {
-                                    objectName: "profileDelete_" + index
-                                    text: qsTr("Delete")
-                                    enabled: root.editorUp
-                                    onClicked: sceneEdit.deleteProfile(modelData.name)
+
+                                EmptyState {
+                                    objectName: "reactiveEmpty"
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    visible: !root.engineUp
+                                    title: qsTr("Engine not connected")
+                                    detail: qsTr("Reactive input controls report what the engine exposes.")
                                 }
                             }
                         }
+                        }
+                    }
+                    PageFlickable {
+                        id: libraryFlick
+                        objectName: "libraryScroll"
+                        contentHeight: libraryFlickCol.implicitHeight
+                        Column {
+                            id: libraryFlickCol
+                            width: libraryFlick.width - Theme.spaceM
+                            spacing: Theme.spaceL
+                        Card {
+                            title: qsTr("LIBRARY")
+                            objectName: "profilesCard"
+                            width: parent.width
 
-                        EmptyState {
-                            objectName: "profilesEmpty"
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            visible: !root.editorUp || sceneEdit.profiles.length === 0
-                            title: qsTr("No saved profiles")
-                            detail: qsTr("Name the scene and save it to the library.")
+                            Column {
+                                width: parent.width
+                                spacing: Theme.spaceM
+                                AppButton {
+                                    objectName: "saveProfileButton"
+                                    text: nameField.text !== ""
+                                          ? qsTr("Save “%1” to library").arg(nameField.text)
+                                          : qsTr("Save to library")
+                                    enabled: root.editorUp && sceneEdit.hasWorking
+                                    onClicked: sceneEdit.saveProfile(
+                                        nameField.text || sceneEdit.sceneName
+                                        || qsTr("Untitled"))
+                                }
+                                Text {
+                                    text: qsTr("Profiles are stored by the UI and applied through the engine's normal scene validation — loading stages the scene, Save sends it. The engine remembers the playback mode per scene name.")
+                                    color: Theme.textDisabled
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
+                                }
+
+                                /* studio-import Task 4: with a managed
+                                   workspace, the stored entries migrate
+                                   ONLY on this explicit click — each
+                                   becomes its own workspace through the
+                                   engine's bounded import path.
+                                   Originals and names are retained;
+                                   nothing is auto-applied. */
+                                AppButton {
+                                    objectName: "importProfiles"
+                                    width: parent.width
+                                    visible: root.editorUp
+                                             && typeof workspace !== "undefined"
+                                             && workspace.managed
+                                             && sceneEdit.profiles.length > 0
+                                    text: qsTr("Import all profiles into workspaces")
+                                    onClicked: sceneEdit.importProfilesToWorkspaces()
+                                }
+
+                                Text {
+                                    visible: root.editorUp && sceneEdit.libraryError !== ""
+                                    text: root.editorUp ? sceneEdit.libraryError : ""
+                                    color: Theme.bad
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
+                                }
+
+                                Repeater {
+                                    objectName: "profilesList"
+                                    model: root.editorUp ? sceneEdit.profiles : []
+                                    RowLayout {
+                                        width: parent.width
+                                        spacing: Theme.spaceL
+                                        Text {
+                                            text: modelData.name
+                                            color: Theme.textPrimary
+                                            font.pixelSize: Theme.fontSizeBody
+                                            Layout.fillWidth: true
+                                        }
+                                        Text {
+                                            text: modelData.saved_at || ""
+                                            color: Theme.textDisabled
+                                            font.pixelSize: Theme.fontSizeSmall
+                                        }
+                                        AppButton {
+                                            objectName: "profileLoad_" + index
+                                            text: qsTr("Load")
+                                            enabled: root.editorUp
+                                            onClicked: sceneEdit.loadProfile(modelData.name)
+                                        }
+                                        AppButton {
+                                            objectName: "profileDelete_" + index
+                                            text: qsTr("Delete")
+                                            enabled: root.editorUp
+                                            onClicked: sceneEdit.deleteProfile(modelData.name)
+                                        }
+                                    }
+                                }
+
+                                EmptyState {
+                                    objectName: "profilesEmpty"
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    visible: !root.editorUp || sceneEdit.profiles.length === 0
+                                    title: qsTr("No saved profiles")
+                                    detail: qsTr("Name the scene and save it to the library.")
+                                }
+                            }
+                        }
+                        }
+                    }
+                    }
+                }
+            }
+
+            /*---- preview: sticky beside every tab -------------*/
+            Rectangle {
+                id: previewPane
+                objectName: "previewPane"
+                visible: root.previewOpen
+                SplitView.preferredWidth: root.prefsUp
+                                          && uiPrefs.lightingPreviewWidth > 0
+                                          ? uiPrefs.lightingPreviewWidth
+                                          : root.previewDefaultWidth
+                SplitView.minimumWidth: 300
+                SplitView.maximumWidth:
+                    Math.max(300, lightingSplit.width - 400)
+                color: Theme.surface
+                radius: Theme.radiusM
+                border.color: Theme.border
+                border.width: 1
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: Theme.spaceL
+                    spacing: Theme.spaceM
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spaceS
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.showDraft ? qsTr("PREVIEW — DRAFT, UNSAVED")
+                                                 : qsTr("PREVIEW — APPLIED OUTPUT")
+                            color: Theme.textSecondary
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.weight: Font.DemiBold
+                            font.letterSpacing: 1.1
+                            elide: Text.ElideRight
+                        }
+                        AppButton {
+                            objectName: "previewDraft"
+                            text: qsTr("Draft")
+                            checked: root.showDraft
+                            Accessible.checkable: true
+                            Accessible.checked: checked
+                            onClicked: root.previewPick = "draft"
+                        }
+                        AppButton {
+                            objectName: "previewApplied"
+                            text: qsTr("Applied")
+                            checked: !root.showDraft
+                            Accessible.checkable: true
+                            Accessible.checked: checked
+                            onClicked: root.previewPick = "applied"
+                        }
+                    }
+
+                    PageFlickable {
+                        id: previewFlick
+                        objectName: "previewScroll"
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        contentHeight: previewCol.implicitHeight
+                        Column {
+                            id: previewCol
+                            width: previewFlick.width - Theme.spaceM
+                            spacing: Theme.spaceL
+
+                            /* Draft — the UNSAVED workspace draft,
+                               evaluated engine-side, never delivered
+                               to hardware (Task 7). */
+                            Item {
+                                objectName: "draftPreviewCard"
+                                width: parent.width
+                                visible: root.showDraft
+                                         && typeof viewport !== "undefined"
+                                implicitHeight: visible ? draftBox.implicitHeight : 0
+                                Item {
+                                    id: draftBox
+                                    width: parent.width
+                                    implicitHeight: childrenRect.height
+                                Column {
+                                    width: parent.width
+                                    spacing: Theme.spaceM
+
+                                    /* Audit Q-5: the model is the colorless
+                                       objectRows (notified only when the object
+                                       set changes) behind an integer count, so a
+                                       pushed frame never rebuilds these cards;
+                                       each strip pulls its own colors by id
+                                       (O(1) in C++), re-read per frame through
+                                       the sequence dependency. */
+                                    Repeater {
+                                        id: draftRepeater
+                                        objectName: "draftRepeater"
+                                        readonly property var rows:
+                                            (typeof viewport !== "undefined"
+                                             && viewport.previewActive)
+                                            ? viewport.objectRows : []
+                                        model: rows.length
+                                        Column {
+                                            id: draftRow
+                                            required property int index
+                                            readonly property var row:
+                                                draftRepeater.rows[index] || ({})
+                                            spacing: Theme.spaceXS
+                                            Text {
+                                                text: draftRow.row.id +
+                                                      (draftRow.row.kind === "linked"
+                                                       ? " (linked)" :
+                                                       (!draftRow.row.bound
+                                                        ? " (unbound)" : ""))
+                                                color: Theme.textSecondary
+                                                font.pixelSize: Theme.fontSizeSmall
+                                            }
+                                            FrameStrip {
+                                                objectName: "draftStrip"
+                                                colors: viewport.sequence >= 0
+                                                        ? (viewport.colorsFor(
+                                                               draftRow.row.id,
+                                                               draftRow.row.emitter_total
+                                                               || 0) || [])
+                                                        : []
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        visible: typeof viewport !== "undefined"
+                                        text: (typeof viewport !== "undefined"
+                                               ? viewport.label : "")
+                                              + (typeof viewport !== "undefined"
+                                                 && viewport.lastError !== ""
+                                                 ? " — " + viewport.lastError : "")
+                                        color: Theme.textDisabled
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        wrapMode: Text.WordWrap
+                                        width: parent.width
+                                    }
+
+                                    EmptyState {
+                                        objectName: "draftPreviewEmpty"
+                                        anchors.horizontalCenter:
+                                            parent.horizontalCenter
+                                        visible: typeof viewport === "undefined"
+                                                 || !viewport.previewActive
+                                        title: qsTr("No draft preview")
+                                        detail: qsTr("Edits to the shared workspace draft preview here before Save applies them to lights.")
+                                    }
+                                }
+                                }
+                            }
+                            /* Applied — the last TRANSPORT-ACCEPTED
+                               frame per controller (protocol §7). */
+                            Item {
+                                objectName: "appliedOutputCard"
+                                width: parent.width
+                                visible: !root.showDraft
+                                implicitHeight: visible ? appliedBox.implicitHeight : 0
+                                Item {
+                                    id: appliedBox
+                                    width: parent.width
+                                    implicitHeight: childrenRect.height
+                                Column {
+                                    width: parent.width
+                                    spacing: Theme.spaceM
+
+                                    /* Stable-row C++ model — no delegate
+                                       churn per frame_status push. */
+                                    Repeater {
+                                        model: root.engineUp
+                                               ? bridge.frameControllers
+                                               : null
+                                        Column {
+                                            spacing: Theme.spaceXS
+                                            Text {
+                                                text: root.deviceNameFor(model.key)
+                                                color: Theme.textSecondary
+                                                font.pixelSize: Theme.fontSizeSmall
+                                            }
+                                            FrameStrip {
+                                                objectName: "previewStrip"
+                                                colors: model.colors || []
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        visible: root.engineUp
+                                        text: qsTr("applied output ≈ %1 updates/s — engine frame_status event cadence (≤ ~30 Hz), not the output rate")
+                                            .arg(root.previewFps.toFixed(1))
+                                        color: Theme.textDisabled
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        wrapMode: Text.WordWrap
+                                        width: parent.width
+                                    }
+
+                                    EmptyState {
+                                        objectName: "previewEmpty"
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        visible: !root.engineUp
+                                                 || bridge.frameControllers.count === 0
+                                        title: qsTr("No frame data")
+                                        detail: root.engineUp
+                                                ? qsTr("The applied-output strip fills in when the engine delivers frames.")
+                                                : qsTr("Engine not connected — nothing is being driven.")
+                                    }
+                                }
+                                }
+                            }
+
+                        /* Upload / transport state — Uploading, Active,
+                           Reconnecting, or Failed (plan section 5) plus
+                           the honest requested-vs-applied split. */
+                        Card {
+                            title: qsTr("PLAYBACK STATE")
+                            objectName: "playbackStateCard"
+                            width: parent.width
+                            visible: root.engineUp
+
+                            Column {
+                                width: parent.width
+                                spacing: Theme.spaceM
+
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: Theme.spaceL
+
+                                    StatusPill {
+                                        objectName: "playbackPhasePill"
+                                        text: {
+                                            switch(root.pv.phase) {
+                                            case "reconnecting": return qsTr("Reconnecting");
+                                            case "applying":     return qsTr("Applying…");
+                                            case "failed":       return qsTr("Failed");
+                                            case "uploading":    return qsTr("Uploading");
+                                            case "active":       return qsTr("Active");
+                                            case "live":         return qsTr("Live");
+                                            default:             return qsTr("unknown");
+                                            }
+                                        }
+                                        tone: {
+                                            switch(root.pv.phase) {
+                                            case "reconnecting": return "warn";
+                                            case "applying":     return "warn";
+                                            case "failed":       return "bad";
+                                            case "uploading":    return "accent";
+                                            case "active":       return "ok";
+                                            case "live":         return "ok";
+                                            default:             return "neutral";
+                                            }
+                                        }
+                                    }
+                                    Column {
+                                        Layout.fillWidth: true
+                                        spacing: Theme.spaceXS
+                                        Text {
+                                            wrapMode: Text.WordWrap
+                                            width: parent.width
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            color: Theme.textSecondary
+                                            text: {
+                                                const label = m =>
+                                                    m === "animation_playback"
+                                                        ? qsTr("Animation playback")
+                                                        : qsTr("Live effects");
+                                                if(root.requestedMode && root.appliedMode
+                                                   && root.requestedMode !== root.appliedMode)
+                                                    return qsTr("requested: %1 · on device: %2 — waiting for the engine to confirm")
+                                                        .arg(label(root.requestedMode))
+                                                        .arg(label(root.appliedMode));
+                                                if(!root.appliedMode)
+                                                    return qsTr("on device: unknown — no playback status reported yet");
+                                                const app = label(root.appliedMode);
+                                                if(!root.animationApplied)
+                                                    return qsTr("on device: %1").arg(app);
+                                                const c = root.pv.control;
+                                                if(c === "paused")
+                                                    return qsTr("on device: %1 · paused — a sampled frame is held").arg(app);
+                                                if(c === "stopped")
+                                                    return qsTr("on device: %1 · stopped — output replaced with black").arg(app);
+                                                return qsTr("on device: %1").arg(app);
+                                            }
+                                        }
+                                        Text {
+                                            visible: !!root.pv.phase_detail
+                                            text: root.pv.phase_detail || ""
+                                            color: Theme.bad
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            wrapMode: Text.WordWrap
+                                            width: parent.width
+                                        }
+                                    }
+                                    Repeater {
+                                        model: [
+                                            { key: "playing", label: qsTr("Play") },
+                                            { key: "paused",  label: qsTr("Pause") },
+                                            { key: "stopped", label: qsTr("Stop") }
+                                        ]
+                                        AppButton {
+                                            /* Transport control only exists
+                                               for an uploaded loop — the
+                                               engine forces Playing in live
+                                               mode, so offering pause there
+                                               would fake a dead button. */
+                                            objectName: "transport_" + modelData.key
+                                            visible: root.animationRequested
+                                                     || root.animationApplied
+                                            text: modelData.label
+                                            enabled: root.editorUp && root.engineUp
+                                                     && root.animationApplied
+                                                     && root.pv.phase !== "applying"
+                                                     && root.pv.control !== modelData.key
+                                            onClicked: sceneEdit.setPlaybackControl(modelData.key)
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    visible: root.animationRequested || root.animationApplied
+                                    text: qsTr("Pause holds a sampled frame · Stop replaces playback with black · closing the UI does not interrupt the loop.")
+                                    color: Theme.textDisabled
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
+                                }
+
+                                /* Wire cadence + sync — exactly what
+                                   PLAYBACK reports, labelled for what it
+                                   is: configured geometry, a validated-
+                                   clock sync state, a separately recorded
+                                   physical measurement, and (in live
+                                   mode) the transport-accepted interval.
+                                   Never a presentation-FPS claim. */
+                                Column {
+                                    width: parent.width
+                                    spacing: Theme.spaceXS
+                                    visible: root.animationApplied
+                                             || root.appliedMode === "live_effects"
+
+                                    Text {
+                                        visible: root.animationApplied && root.pv.frame_count > 0
+                                        text: qsTr("configured loop: %1 frames · %2 ms/frame · ≈%3 s cycle — configured rate, not a measured display rate")
+                                            .arg(root.pv.frame_count)
+                                            .arg((root.pv.frame_interval_s * 1000).toFixed(3))
+                                            .arg(root.pv.cycle_s.toFixed(2))
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        wrapMode: Text.WordWrap
+                                        width: parent.width
+                                    }
+                                    Text {
+                                        visible: root.animationApplied
+                                        text: {
+                                            const s = root.pv.sync || "unknown";
+                                            if(s === "unknown")
+                                                return qsTr("synchronization: unavailable — no validated clock source");
+                                            const u = root.pv.clock_uncertainty_s || 0;
+                                            return u > 0
+                                                ? qsTr("synchronization: %1 · clock uncertainty ±%2 ms")
+                                                    .arg(s).arg((u * 1000).toFixed(1))
+                                                : qsTr("synchronization: %1").arg(s);
+                                        }
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        wrapMode: Text.WordWrap
+                                        width: parent.width
+                                    }
+                                    Text {
+                                        visible: root.animationApplied
+                                        text: root.pv.physical_measured
+                                              ? qsTr("physical playback: %1 ms/frame · %2 s cycle · %3")
+                                                .arg((root.pv.physical_frame_interval_s * 1000).toFixed(2))
+                                                .arg((root.pv.physical_cycle_s || 0).toFixed(2))
+                                                .arg(root.pv.physical_provenance)
+                                              : qsTr("physical playback: not measured")
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        wrapMode: Text.WordWrap
+                                        width: parent.width
+                                    }
+                                    Text {
+                                        visible: root.appliedMode === "live_effects"
+                                        text: {
+                                            const ag = root.engineUp
+                                                       ? bridge.frameAggregate
+                                                       : undefined;
+                                            if(ag && ag.mean_interval_s > 0)
+                                                return qsTr("live delivery ≈ %1 updates/s — transport-accepted interval (%2), not display FPS")
+                                                    .arg((1 / ag.mean_interval_s).toFixed(1))
+                                                    .arg(ag.provenance || "unknown");
+                                            return qsTr("live delivery: no transport counters yet");
+                                        }
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        wrapMode: Text.WordWrap
+                                        width: parent.width
+                                    }
+                                }
+                            }
+                        }
                         }
                     }
                 }

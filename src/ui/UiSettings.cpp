@@ -350,6 +350,23 @@ void UiSettings::setLayoutInspectorHeight(int px)
     emit prefsChanged();
 }
 
+int UiSettings::lightingPreviewWidth() const
+{
+    return ClampSplit(const_cast<UiSettings*>(this)->Ensure()
+        ->value(QStringLiteral("ui/lightingPreviewWidth"), 0).toInt());
+}
+
+void UiSettings::setLightingPreviewWidth(int px)
+{
+    px = ClampSplit(px);
+    if(px == lightingPreviewWidth())
+    {
+        return;
+    }
+    Ensure()->setValue(QStringLiteral("ui/lightingPreviewWidth"), px);
+    emit prefsChanged();
+}
+
 /*---------------------------------------------------------*\
 |||| Per-scene uploaded-preset params                        ||
 \*---------------------------------------------------------*/
