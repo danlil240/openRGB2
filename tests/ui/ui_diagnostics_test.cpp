@@ -580,7 +580,13 @@ int main(int argc, char** argv)
                         {{ "frame", i }}) },
                 }));
         }
-        CHECK(PumpBoth(s, [&] { return frames >= flood; }));
+        /* The bridge's frame_status slot is latest-wins (audit
+           U-10): wait for the newest frame, not one signal per
+           push. */
+        CHECK(PumpBoth(s, [&] {
+            return frames >= 1 &&
+                   bridge.frameStatus().value(QStringLiteral("frame"))
+                       .toInt() == flood - 1; }));
 
         int fs_rows = 0;
         bool error_still = false;

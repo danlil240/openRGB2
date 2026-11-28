@@ -646,8 +646,12 @@ int main(int argc, char** argv)
         reply_id = bridge.getState();
         CHECK(reply_id > 0);
         long long control_ms = -1;
+        /* frame_status is latest-wins on the GUI side (audit
+           U-10): "drained" is the newest frame applied, not one
+           signal per push. */
         const bool drained = PumpUntil(e, [&] {
-            return replied && frames >= 400;
+            return replied &&
+                   bridge.frameStatus().value("frame").toInt() == 399;
         }, 4000);
         control_ms = std::chrono::duration_cast<
             std::chrono::milliseconds>(
@@ -655,7 +659,7 @@ int main(int argc, char** argv)
         std::printf("  flood drain + control round-trip: %lld ms\n",
                     control_ms);
         CHECK(drained);
-        CHECK(frames >= 400);
+        CHECK(frames >= 1 && frames <= 400);
         CHECK(control_ms < 2000);
         bridge.stop();
     }
