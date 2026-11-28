@@ -376,6 +376,17 @@ function Invoke-ManagedStop {
             Info "backend: not running"
             $backendGone = $true
         }
+    } elseif(-not $engineGone) {
+        # The backend is closed only AFTER the engine fully exits
+        # (audit B-2: this used to signal it anyway). An engine that
+        # outlived its bound, or one that is running but
+        # unverifiable, may still be mid-delivery -- leave the
+        # backend up; the kept run file drives the retry.
+        Fail ("backend (pid $backendPid) left running: the engine has " +
+            "not exited, and the backend only closes after it -- re-run " +
+            "once the engine is stopped (-Force, or -Elevated for an " +
+            "elevated stack)")
+        $exitCode = 1
     } else {
         Step "backend (pid $backendPid): shutdown event -- graceful handoff"
         $bkProc = Get-Process -Id $backendPid -ErrorAction SilentlyContinue
@@ -401,8 +412,16 @@ function Invoke-ManagedStop {
                 # pid owns -- graceful, and this pid is already verified
                 # ours. It errors harmlessly when the process owns no
                 # windows at all; the bounded wait below still applies.
+                # Under Windows PowerShell 5.1 + $ErrorActionPreference
+                # "Stop", the stderr line taskkill writes for a
+                # windowless process ("can only be terminated
+                # forcefully") becomes a TERMINATING error through
+                # 2>&1 -- it used to abort the whole stop here
+                # (audit B-2). Contain it: the bounded wait below
+                # decides what happens next.
                 Info "no shutdown event or main window -- posting WM_CLOSE to all its top-level windows"
-                $null = & taskkill.exe /PID $backendPid 2>&1
+                try { $null = & taskkill.exe /PID $backendPid 2>&1 }
+                catch { Info "taskkill could not post WM_CLOSE (the backend owns no windows)" }
             }
         }
         if($bkProc -and -not $bkProc.WaitForExit($TimeoutSeconds * 1000)) {

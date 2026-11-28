@@ -532,6 +532,82 @@ try {
 } finally { $lock.Dispose() }
 
 #====================================================================#
+Section "T8b stop: windowless backend fallback; backend waits for the engine"
+#====================================================================#
+# A headless backend owns NO window, so the taskkill (no /F) fallback
+# writes an error to stderr -- under Windows PowerShell 5.1 with
+# $ErrorActionPreference = "Stop" that "2>&1" line used to become a
+# terminating error and abort the whole stop (audit B-2).
+# The backend stand-in is a copy of PING.EXE: unlike a powershell.exe
+# stand-in (.NET keeps a hidden top-level window, so taskkill succeeds)
+# it owns no window at all, exactly like the headless --server backend.
+$instG = Join-Path $TestRoot "install-g"
+$psExe = Join-Path $Sys32 "WindowsPowerShell\v1.0\powershell.exe"
+New-FakeTree $instG "1.0.0" "G" (Join-Path $Sys32 "PING.EXE") $psExe
+New-Item -ItemType Directory -Force (Join-Path $instG "state") | Out-Null
+function Start-Windowless([string]$exe) {
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe
+    $psi.Arguments = if($exe -like "*OpenRGB.exe") { "-n 300 127.0.0.1" }
+                     else { '-NoProfile -Command "Start-Sleep 300"' }
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true          # no console window at all
+    $psi.RedirectStandardOutput = $true  # keep ping's lines out of the log
+    $p = [Diagnostics.Process]::Start($psi)
+    $script:Spawned += $p.Id
+    return $p
+}
+function Write-RunFile([string]$dir, [int]$enginePid, [int]$backendPid) {
+    [ordered]@{
+        install_dir = $dir; engine_pid = $enginePid; backend_pid = $backendPid
+        engine_exe  = Join-Path $dir "openrgb2-engine.exe"
+        backend_exe = Join-Path $dir "backend\OpenRGB.exe"
+    } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $dir "state\openrgb2.run.json")
+}
+
+$engG = Start-Windowless (Join-Path $instG "openrgb2-engine.exe")
+$bkG  = Start-Windowless (Join-Path $instG "backend\OpenRGB.exe")
+Start-Sleep -Milliseconds 400
+$env:OPENRGB2_TEST_ENGINE_PID  = "$($engG.Id)"
+$env:OPENRGB2_TEST_BACKEND_PID = "$($bkG.Id)"
+Write-RunFile $instG $engG.Id $bkG.Id
+$threw = $null
+try {
+    $rc = Invoke-ManagedStop -InstallDir $instG -TimeoutSeconds 2 `
+        -Force $true -CtlExe $ctlStub
+} catch { $threw = $_.Exception.Message }
+Check ($null -eq $threw) "windowless backend: the taskkill fallback never aborts the stop ($threw)"
+$bkAlive = $false
+try { $bkAlive = $null -ne (Get-Process -Id $bkG.Id -ErrorAction Stop) } catch {}
+Check (-not $bkAlive) "windowless backend still reached the -Force step after the graceful bound"
+Kill-Spawned
+
+# The engine did NOT exit (QUIT ignored, no -Force): the backend must
+# not be signaled -- closing it under a live engine breaks the
+# ordering the whole script exists for. The test owns the backend's
+# shutdown event, so a signal would be visible here.
+$noopCtl = Join-Path $TestRoot "noop-ctl.ps1"
+Set-Content -Encoding UTF8 $noopCtl "# ignores QUIT"
+$engG = Start-Windowless (Join-Path $instG "openrgb2-engine.exe")
+$bkG  = Start-Windowless (Join-Path $instG "backend\OpenRGB.exe")
+Start-Sleep -Milliseconds 400
+$evG = New-Object Threading.EventWaitHandle($false,
+           [Threading.EventResetMode]::ManualReset,
+           "Local\OpenRGB2-Backend-Shutdown-$($bkG.Id)")
+try {
+    Write-RunFile $instG $engG.Id $bkG.Id
+    $rc = Invoke-ManagedStop -InstallDir $instG -TimeoutSeconds 1 `
+        -Force $false -CtlExe $noopCtl
+    Check ($rc -eq 1) "engine outlived the bound -> stop exits 1"
+    Check (-not $evG.WaitOne(0)) "backend NOT signaled while the engine still runs"
+    $bkAlive = $false
+    try { $bkAlive = $null -ne (Get-Process -Id $bkG.Id -ErrorAction Stop) } catch {}
+    Check $bkAlive "backend left running for the retry"
+    Check (Test-Path (Join-Path $instG "state\openrgb2.run.json")) "run file kept for the retry"
+} finally { $evG.Dispose() }
+Kill-Spawned
+
+#====================================================================#
 Section "T9 backend guard: foreign OpenRGB.exe refuses the spawn"
 #====================================================================#
 # The pinned backend's own single-instance dialog can TerminateProcess
