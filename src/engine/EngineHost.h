@@ -52,6 +52,7 @@
 #include "DeviceMapper.h"
 #include "Engine.h"
 #include "OrderlyShutdown.h"
+#include "OutputPolicy.h"
 #include "OwnershipScan.h"
 #include "PlaybackController.h"
 #include "PowerLifecycle.h"
@@ -304,6 +305,12 @@ public:
     uint32_t                 PendingBackendPid() const
     { return pending_backend_pid_.load(); }
 
+    /*---- Audit E-12b: exit/idle output policy ----------------*    | Each bound controller's hardware mode as it was BEFORE the |
+    | upkeep's first SetCustomMode this run (first observation   |
+    | per key; memory only — a restart loses it).                |
+    \*---------------------------------------------------------*/
+    std::map<DeviceKey, PriorMode> PriorModes() const;
+
     void Log(const std::string& line) const;
 
 private:
@@ -443,6 +450,11 @@ private:
     bool                                     start_attempted_ = false;
     OrderlyShutdown::Result                  shutdown_result_;
     bool                                     stopped_ = false;
+
+    /* Audit E-12b: exit/idle output policy state. */
+    void RecordPriorMode(const DeviceKey& key);
+    mutable std::mutex                       output_mutex_;
+    std::map<DeviceKey, PriorMode>           prior_modes_;
 };
 
 } /* namespace openrgb2 */

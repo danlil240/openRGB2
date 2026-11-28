@@ -1737,6 +1737,10 @@ void EngineHost::PollOnce()
             uint64_t& done = custom_mode_done_[key];
             if(done != snap_it->topology_generation)
             {
+                /* E-12b: remember the hardware mode we are
+                   about to replace (first observation only) —
+                   the exit/idle "restore" policy returns to it. */
+                RecordPriorMode(key);
                 if(sdk_->SetCustomMode(key))
                 {
                     done = snap_it->topology_generation;
@@ -1744,6 +1748,43 @@ void EngineHost::PollOnce()
             }
         }
     }
+}
+
+/*---------------------------------------------------------*|| Audit E-12b: exit/idle output policy                      ||
+\*---------------------------------------------------------*/
+void EngineHost::RecordPriorMode(const DeviceKey& key)
+{
+    {
+        std::lock_guard<std::mutex> g(output_mutex_);
+        if(prior_modes_.count(key) != 0)
+        {
+            return;                  /* first observation wins */
+        }
+    }
+    int32_t      index = -1;
+    sdk::SdkMode mode;
+    if(!sdk_ || !sdk_->ActiveMode(key, index, &mode) ||
+       mode.name.empty())
+    {
+        return;                      /* try again next upkeep  */
+    }
+    PriorMode pm;
+    pm.name      = mode.name;
+    pm.speed     = mode.speed;
+    pm.direction = mode.direction;
+    pm.colors    = mode.colors;
+    {
+        std::lock_guard<std::mutex> g(output_mutex_);
+        prior_modes_.emplace(key, std::move(pm));
+    }
+    Log("output policy: " + key.device + " was in mode '" +
+        mode.name + "' before Direct");
+}
+
+std::map<DeviceKey, PriorMode> EngineHost::PriorModes() const
+{
+    std::lock_guard<std::mutex> g(output_mutex_);
+    return prior_modes_;
 }
 
 /* Zone-size reconciliation. The scene document's declared

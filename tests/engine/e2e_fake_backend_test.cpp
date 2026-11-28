@@ -19,6 +19,8 @@
 #include "OwnershipScan.h"
 #include "SdkWire.h"
 
+#include "scene/SceneJson.h"
+
 #include "../sdk/fake_sdk_server.h"
 
 #include <nlohmann/json.hpp>
@@ -31,6 +33,7 @@
 #include <filesystem>
 #include <process.h>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -225,6 +228,131 @@ static void TestPartialStartTeardown(const std::filesystem::path& tmp)
     CHECK(saw_ipc);
     CHECK(saw_cal);
     CHECK(sd.all_within_bound);
+}
+
+/*---------------------------------------------------------*\
+|| E-12b fixture: one wired controller sitting in a hardware |
+|| effect ("Rainbow") before the engine switches it to       |
+|| Direct, and a scene bound to its one 8-LED zone.          |
+\*---------------------------------------------------------*/
+static sdk_test::FakeController RainbowWired()
+{
+    sdk_test::FakeController c;
+    c.type     = 2;
+    c.name     = "E12B RAINBOW BOARD";
+    c.vendor   = "GIGABYTE";
+    c.serial   = "MB-E12B-1";
+    c.location = "smbus:0-e12b";
+    sdk_test::FakeMode direct;
+    direct.name = "Direct";
+    sdk_test::FakeMode rainbow;
+    rainbow.name       = "Rainbow";
+    rainbow.speed      = 77;
+    rainbow.direction  = 1;
+    rainbow.colors_max = 1;
+    rainbow.colors     = { 0x00FF0000u };
+    c.modes       = { direct, rainbow };
+    c.active_mode = 1;                    /* hardware effect on */
+    c.zones       = { { "ARGB", 0, 8, 8, 8 } };
+    c.colors.assign(8, 0x00010101u);
+    return c;
+}
+
+static nlohmann::json RainbowSceneDoc()
+{
+    nlohmann::json doc = SceneDoc();
+    doc["name"]     = "e12b-scene";
+    doc["bindings"] = nlohmann::json::array({ {
+        { "id",              "b-rb"       },
+        { "controller_name", "E12B RAINBOW" },
+        { "zone_name",       "ARGB"       },
+        { "zone_leds",       8            },
+    } });
+    doc["objects"] = nlohmann::json::array({ {
+        { "id", "o-rb" }, { "kind", "device" },
+        { "binding", "b-rb" }, { "verified", true },
+        { "visible", true },
+        { "emitters", EmitterArray(0, 8) },
+    } });
+    return doc;
+}
+
+static EngineHostOptions E12bOptions(sdk_test::FakeSdkServer& server,
+                                     const std::filesystem::path& dir,
+                                     const char* tag)
+{
+    EngineHostOptions o;
+    o.sdk_enabled       = true;
+    o.transport_factory =
+        [&server]() -> std::unique_ptr<sdk::IStreamTransport>
+        { return std::make_unique<sdk_test::FakeStream>(server); };
+    o.ipc_enabled     = false;
+    o.power_monitor   = false;
+    o.scan_owners     = false;
+    o.reactive_inputs = false;
+    o.single_instance = true;
+    o.instance_name   = std::string("Local\\openrgb2-engine-e12b-") +
+                        tag + "-" + std::to_string(_getpid());
+    o.scene_restore   = false;
+    o.state_path      = (dir / (std::string(tag) + "-state.json"))
+                            .string();
+    o.log             = [](const std::string&) {};
+    return o;
+}
+
+static bool ApplyDoc(EngineHost& host, const nlohmann::json& j)
+{
+    auto doc = std::make_shared<studio::SceneDocument>();
+    std::vector<std::string> errs;
+    if(!studio::FromJson(j, *doc, &errs))
+    {
+        return false;
+    }
+    std::string err;
+    return host.GetService()->ApplySceneDocument(doc, err);
+}
+
+/* E-12b step 2: the upkeep records each controller's active
+   hardware mode BEFORE its first SetCustomMode — and only the
+   first observation per run counts. */
+static void TestPriorModeRecording(const std::filesystem::path& tmp)
+{
+    sdk_test::FakeSdkServer server;
+    server.controllers = { RainbowWired() };
+    EngineHost host(E12bOptions(server, tmp, "prior"));
+    std::string err;
+    CHECK(host.Start(err));
+    CHECK(host.PriorModes().empty());       /* nothing bound yet */
+    CHECK(ApplyDoc(host, RainbowSceneDoc()));
+    for(int i = 0; i < 20 &&
+        server.CountEvents(sdk::kPktSetCustomMode) == 0; ++i)
+    {
+        host.PollOnce();
+    }
+    CHECK(server.CountEvents(sdk::kPktSetCustomMode) >= 1);
+    std::map<DeviceKey, PriorMode> pm = host.PriorModes();
+    CHECK(pm.size() == 1);
+    if(pm.size() == 1)
+    {
+        const PriorMode& p = pm.begin()->second;
+        CHECK(pm.begin()->first.serial == "MB-E12B-1");
+        CHECK(p.name == "Rainbow");
+        CHECK(p.speed == 77);
+        CHECK(p.direction == 1);
+        CHECK(p.colors.size() == 1 && p.colors[0] == 0x00FF0000u);
+    }
+    /* A re-enumeration bumps the generation, so the upkeep
+       re-asserts Direct — the controller now REPORTS Direct,
+       but the first observation stands. */
+    const size_t custom_before =
+        server.CountEvents(sdk::kPktSetCustomMode);
+    CHECK(host.GetSdk()->Enumerate());
+    host.PollOnce();
+    CHECK(server.CountEvents(sdk::kPktSetCustomMode) > custom_before);
+    pm = host.PriorModes();
+    CHECK(pm.size() == 1 && pm.begin()->second.name == "Rainbow");
+    host.RequestStop();
+    host.Stop();
 }
 
 int main()
@@ -636,6 +764,7 @@ int main()
     }
 
     TestPartialStartTeardown(tmp);
+    TestPriorModeRecording(tmp);
 
     std::printf("%d checks, %d failures\n", checks, failures);
     {
