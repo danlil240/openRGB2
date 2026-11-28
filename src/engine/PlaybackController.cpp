@@ -804,12 +804,33 @@ PlaybackController::Result PlaybackController::OnSceneApplied(
        re-apply (persisted preset no longer qualifies, the
        backend refuses the mode, a transition is in flight)
        reaches the caller and LastApplyResult(). */
-    const Result r = RequestImpl(choice.mode,
-                                 PlaybackControl::Playing,
+    /* R-1: an engaged tray hold/Off survives the re-apply (a
+       tray workspace switch must not silently resume a loop the
+       user turned off) — the selection lands with the
+       override's control, and its release resumes Playing. */
+    PlaybackControl control = PlaybackControl::Playing;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(ovr_engaged_ &&
+           choice.mode == PlaybackMode::AnimationPlayback)
+        {
+            control = ovr_blackout_ ? PlaybackControl::Stopped
+                                    : PlaybackControl::Paused;
+        }
+    }
+    const Result r = RequestImpl(choice.mode, control,
                                  choice.params, doc);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         last_apply_result_ = r;
+        if(ovr_engaged_)
+        {
+            ovr_prior_         = PlaybackControl::Playing;
+            ovr_applied_       = control;
+            ovr_applied_valid_ =
+                r.accepted &&
+                choice.mode == PlaybackMode::AnimationPlayback;
+        }
     }
     return r;
 }

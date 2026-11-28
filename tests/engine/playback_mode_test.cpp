@@ -807,6 +807,30 @@ static void TestUserOverride()
         CHECK(h.ctl->Status().control == PlaybackControl::Stopped);
     }
 
+    /* A scene apply (tray workspace switch) re-applies the
+       scene's persisted selection with control Playing — the
+       engaged Off must survive it, not be silently lifted. */
+    {
+        Harness h;
+        const DeviceSnapshot ws = WirelessSnap();
+        const DeviceSnapshot wd = WiredSnap();
+        StartActiveLoop(h, ws, wd, params);
+        CHECK(h.ctl->SetUserOverride(false, true).accepted);
+        CHECK(h.ctl->Status().control == PlaybackControl::Stopped);
+        h.ctl->OnSceneApplied(h.scene);
+        h.ReportPending();
+        h.Poll();
+        h.Poll();
+        CHECK(h.ctl->UserOverrideActive());
+        CHECK(h.ctl->Status().control == PlaybackControl::Stopped);
+        CHECK(AllBlack(h.backend.direct.back().colors));
+        /* Release after the re-apply still resumes playback. */
+        CHECK(h.ctl->SetUserOverride(false, false).accepted);
+        h.ReportPending();
+        h.Poll();
+        CHECK(h.ctl->Status().control == PlaybackControl::Playing);
+    }
+
     /* Busy: an override that lands while a transition is in
        flight is retried by the next Poll, never lost. */
     {
