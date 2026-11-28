@@ -54,6 +54,49 @@ Set-StrictMode -Version 2.0
 # Helpers are duplicated from update-openrgb2.ps1 on purpose: each
 # lifecycle script is standalone under scripts\ (dot-sourcing the
 # update script would rebind this script's own parameters).
+
+function Test-IsElevated {
+    try {
+        $p = New-Object Security.Principal.WindowsPrincipal(
+                 [Security.Principal.WindowsIdentity]::GetCurrent())
+        return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { return $false }
+}
+
+# R-9: the WER LocalDumps key update-openrgb2.ps1 sets for the backend
+# (see there). Rollback removes it only when it names THIS install;
+# the next elevated update sets it again. Same seam as the update.
+$script:WerLocalDumpsKey = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\OpenRGB.exe"
+$script:WerOwnerValue    = "OpenRGB2InstallDir"
+if(-not (Get-Variable -Name WerRegistry -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:WerRegistry = @{
+        KeyExists = { param($Key) Test-Path -LiteralPath $Key }
+        GetValue  = { param($Key, $Name)
+            try { (Get-ItemProperty -LiteralPath $Key -Name $Name -ErrorAction Stop).$Name }
+            catch { $null } }
+        SetValue  = { param($Key, $Name, $Kind, $Value)
+            if(-not (Test-Path -LiteralPath $Key)) { New-Item -Path $Key -Force | Out-Null }
+            New-ItemProperty -LiteralPath $Key -Name $Name -PropertyType $Kind `
+                -Value $Value -Force | Out-Null }
+        RemoveKey = { param($Key) Remove-Item -LiteralPath $Key -Recurse -Force }
+    }
+}
+
+# "removed" | "absent" | "foreign" | "other_install" | "failed: <why>"
+function Remove-WerLocalDumps([string]$InstallDir) {
+    $key = $script:WerLocalDumpsKey
+    try {
+        if(-not (& $script:WerRegistry.KeyExists $key)) { return "absent" }
+        $owner = [string](& $script:WerRegistry.GetValue $key $script:WerOwnerValue)
+        if(-not $owner) { return "foreign" }
+        $a = $owner.TrimEnd('\','/')
+        $b = $InstallDir.TrimEnd('\','/')
+        if(-not $a.Equals($b, [StringComparison]::OrdinalIgnoreCase)) { return "other_install" }
+        & $script:WerRegistry.RemoveKey $key
+        return "removed"
+    } catch { return "failed: $($_.Exception.Message)" }
+}
+
 $script:PreservedPrefixes = @("profiles/local", "state")
 
 function Test-PreservedPath([string]$rel) {
@@ -337,6 +380,16 @@ function Invoke-PackageRollback {
     # entry (piping would unroll it to a bare object -- shape drift).
     (ConvertTo-Json -InputObject $entries -Depth 4) |
         Set-Content -Encoding UTF8 $journal
+
+    #---- backend crash dumps (R-9): remove OUR WER key ----------------
+    if(Test-IsElevated) {
+        $wer = Remove-WerLocalDumps $InstallDir
+        if($wer -eq "removed") {
+            Write-Host "  backend crash dumps: WER LocalDumps key for OpenRGB.exe removed (the next elevated update sets it again)"
+        } elseif($wer -like "failed*") {
+            Write-Host "  note: WER LocalDumps key not removed ($wer)" -ForegroundColor Yellow
+        }
+    }
 
     Write-Host "ROLLBACK OK: restored $($bakManifest.version) binaries; user state preserved" -ForegroundColor Green
     return 0
