@@ -589,6 +589,12 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
     }
 
     const bool ws_changed  = id != ws_id_;
+    /* R-2: a switch this session asked for (openWorkspace ->
+       DoReload names pending_switch_id_) vs one the engine made
+       on its own (a hotkey, another client). */
+    const bool own_switch  = !pending_switch_id_.isEmpty() &&
+                             id == pending_switch_id_;
+    const QString left_id  = ws_id_;
     if(ws_changed || id == pending_switch_id_)
     {
         /* The open-target switch resolved — the ws_changed
@@ -731,6 +737,31 @@ void WorkspaceController::ApplySnapshot(const QVariantMap& snap)
             /* A different managed workspace is active — the
                old draft stays in its own durable record; the
                new document loads fresh. */
+            /* !force_adopt_: a switch whose fetch is already
+               pending (this one, seen again through a poll reply
+               that raced the event and still names the old id)
+               is the same switch — the draft was handled the
+               first time and the session still holds it. */
+            if(!own_switch && !force_adopt_ && session_.Dirty() &&
+               !left_id.isEmpty())
+            {
+                /* R-2: the engine switched without asking (a
+                   hotkey's reload, another client) — nobody
+                   confirmed, so make the draft durable NOW,
+                   release it from this session (as
+                   confirmReplace does — a released record is a
+                   recovery candidate, never dropped by the
+                   clean adoption that follows) and say where
+                   it went. */
+                drafts_.Flush();
+                staged_id_.clear();
+                SetSwitchedAway(left_id);
+                emit notice(QStringLiteral(
+                    "The engine switched to workspace '%2' — "
+                    "your unsaved edits to '%1' are kept in the "
+                    "draft store; open '%1' again to recover them")
+                        .arg(left_id, id));
+            }
             force_adopt_ = true;
         }
         FetchDocument();
@@ -989,6 +1020,10 @@ void WorkspaceController::recoverDraft()
        the user explicitly saves. */
     session_.LoadDraft(d);
     drafts_.Discard(offered_ws_id_);
+    if(offered_ws_id_ == switched_away_)
+    {
+        SetSwitchedAway(QString());
+    }
     recovery_offered_ = false;
     recovery_stale_   = false;
     emit recoveryChanged();
@@ -1003,11 +1038,25 @@ void WorkspaceController::recoverDraft()
     NoteDraftEdited();
 }
 
+void WorkspaceController::SetSwitchedAway(const QString& id)
+{
+    if(switched_away_ == id)
+    {
+        return;
+    }
+    switched_away_ = id;
+    emit switchedAwayChanged();
+}
+
 void WorkspaceController::discardDraft()
 {
     if(!offered_ws_id_.isEmpty())
     {
         drafts_.Discard(offered_ws_id_);
+        if(offered_ws_id_ == switched_away_)
+        {
+            SetSwitchedAway(QString());
+        }
     }
     recovery_offered_ = false;
     recovery_stale_   = false;

@@ -108,6 +108,13 @@ class WorkspaceController : public QObject
                    NOTIFY recoveryChanged)
     Q_PROPERTY(QString statusText READ statusText
                    NOTIFY statusTextChanged)
+    /* R-2: the workspace whose DIRTY draft an engine-initiated
+       switch (a hotkey's `reload {id}`) left behind — nobody
+       could confirm, so the draft was flushed to the draft
+       store and this names it until the user recovers or
+       discards it (or saves it). "" = nothing left behind. */
+    Q_PROPERTY(QString switchedAwayDraft READ switchedAwayDraft
+                   NOTIFY switchedAwayChanged)
 
     /*---- studio-import Task 10: external change + actions ----\
     |  The engine polls its own files (the get reply carries    |
@@ -281,6 +288,7 @@ public:
     QString     redoLabel() const;
     bool        recoveryOffered() const;
     bool        recoveryStale() const;
+    QString     switchedAwayDraft() const { return switched_away_; }
     QString     statusText() const;
     /* Task 10 state */
     QString     externalChange() const;
@@ -341,6 +349,7 @@ signals:
     void errorChanged();
     void historyChanged();
     void recoveryChanged();
+    void switchedAwayChanged();
     void statusTextChanged();
     /* The engine's copy moved under us (another client or a
        reopen); the banner text explains the resolution set. */
@@ -567,6 +576,8 @@ private:
     bool        recovery_offered_ = false;
     bool        recovery_stale_   = false;
     QString     offered_ws_id_;       /* record being offered   */
+    QString     switched_away_;       /* R-2: see the property  */
+    void        SetSwitchedAway(const QString& id);
     /* Cached values for NOTIFY discipline — Dirty() compares
        serialized trees, so transitions are computed once at
        mutation points. */
