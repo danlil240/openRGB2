@@ -31,6 +31,8 @@ dls_suite(studio_config_test)
 dls_suite(device_preset_test)
 dls_suite(studio_editor_test)
 dls_suite(effect_json_test)
+# R-11 step 1: look period analysis + speed snapping (pure).
+dls_suite(look_period_test)
 
 # The golden effect-fixture capture tool (not a test): regenerates
 # fixtures/effects/<id>.fixture.json for effect_json_test's parity

@@ -4,6 +4,7 @@
 #include "LianLiWirelessProtocol.h"
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace LianLiWireless
@@ -45,7 +46,21 @@ namespace LianLiWireless
         uint64_t compression_us = 0;
     };
 
-    // Builds a complete loop, reducing its frame count only when the actual
-    // tinyuz payload exceeds the firmware's 12 KiB upload limit.
+    // Renders `frame_count` frames of one seamless cycle, frame-major:
+    // frame f, LED i at [(f * led_count + i) * 3 .. +2]. Frame f shows
+    // t = f * cycle / frame_count. Must return exactly
+    // frame_count * led_count * 3 bytes.
+    using LoopRenderer = std::function<std::vector<uint8_t>(size_t frame_count)>;
+
+    // The shared loop builder (R-11 step 2): starts at 60 fps
+    // (lround(cycle_ms * 0.06) frames, 2..4096), quantizes the interval
+    // to 0.00625 ms protocol units, and reduces the frame count only
+    // when the actual tinyuz payload exceeds the firmware's 12 KiB
+    // upload limit; the cycle duration stays fixed. cycle_ms == 0 is a
+    // still look: one frame, held (1 s interval).
+    PlaybackLoop BuildLoopFromRenderer(double cycle_ms, size_t led_count,
+                                       const LoopRenderer& render);
+
+    // Builds a complete preset loop through BuildLoopFromRenderer.
     PlaybackLoop BuildPlaybackLoop(const PlaybackRequest& request);
 }

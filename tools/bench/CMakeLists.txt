@@ -36,3 +36,31 @@ target_link_libraries(skew_bench PRIVATE
     openrgb2_backend_openrgb
     ws2_32
     winmm)
+
+# R-11 step 3: offline loop-size measurement (no hardware, not a
+# test). Compiles every packaged look for the 120-LED SL Wireless
+# group through the shared BuildLoopFromRenderer and prints T, N,
+# fps and the tinyuz size, without and with speed snapping. Results:
+# docs/benchmarks/loop-size.md.
+set(LOOP_SIZE_CTRL ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/Controllers/LianLiWirelessController)
+set(LOOP_SIZE_DEPS ${CMAKE_SOURCE_DIR}/vendor/OpenRGB/dependencies)
+add_executable(loop_size
+    loop_size.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/playback/PlaybackLoop.cpp
+    ${LOOP_SIZE_CTRL}/LianLiWirelessEffects.cpp
+    ${LOOP_SIZE_CTRL}/LianLiWirelessCodec.cpp
+    ${LOOP_SIZE_DEPS}/tinyuz/compress/tuz_enc.cpp
+    ${LOOP_SIZE_DEPS}/tinyuz/compress/tuz_enc_private/tuz_enc_clip.cpp
+    ${LOOP_SIZE_DEPS}/tinyuz/compress/tuz_enc_private/tuz_enc_code.cpp
+    ${LOOP_SIZE_DEPS}/tinyuz/compress/tuz_enc_private/tuz_enc_match.cpp
+    ${LOOP_SIZE_DEPS}/tinyuz/compress/tuz_enc_private/tuz_sstring.cpp
+    ${LOOP_SIZE_DEPS}/tinyuz/decompress/tuz_dec.c
+    ${LOOP_SIZE_DEPS}/HDiffPatch/libHDiffPatch/HDiff/private_diff/libdivsufsort/divsufsort.cpp)
+target_include_directories(loop_size PRIVATE
+    ${LOOP_SIZE_CTRL}
+    ${LOOP_SIZE_DEPS}
+    ${LOOP_SIZE_DEPS}/tinyuz
+    ${LOOP_SIZE_DEPS}/HDiffPatch)
+target_link_libraries(loop_size PRIVATE openrgb2_studio_core)
+target_compile_definitions(loop_size PRIVATE NDEBUG _IS_USED_MULTITHREAD=0
+    OPENRGB2_EFFECT_DIR="${CMAKE_SOURCE_DIR}/src/core/presets/effects")
