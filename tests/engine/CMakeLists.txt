@@ -17,6 +17,10 @@ engine_suite(scene_worker_test)
 engine_suite(delivery_pipeline_test)
 engine_suite(device_mapping_test)
 
+# R-1 — tray quick controls: the runtime output overrides (master,
+# blackout, hold, contributor arbitration, persistence types).
+engine_suite(output_control_test)
+
 # Task 3.6 — playback mode integration + cross-device sync.
 engine_suite(playback_mode_test)
 set_tests_properties(playback_mode_test PROPERTIES

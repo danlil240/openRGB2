@@ -38,6 +38,7 @@ add_library(openrgb2_engine STATIC
     OrderlyShutdown.cpp
     ProfileStore.cpp
     ReactiveInputs.cpp
+    OutputControl.cpp
     SceneLoader.cpp
     StudioScenePreparation.cpp
     PreviewSession.cpp
