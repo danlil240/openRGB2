@@ -80,8 +80,151 @@ struct FreshnessLink : IWirelessLink
     }
 };
 
+/*---------------------------------------------------------*\
+| P-12 step 2: one discovery reply serves every group that  |
+| polls within the share window on the same USB connection. |
+| The query has no group or channel field, so the reply is  |
+| global. A generation bump (USB reopen) must force a fresh |
+| read.                                                     |
+\*---------------------------------------------------------*/
+struct SharedPollLink : IWirelessLink
+{
+    int polls = 0;
+    int master_reads = 0;
+    int bump_on_master_read = 0;   /* 1-based read that bumps the generation */
+    bool fail_next_poll = false;
+    uint64_t generation = 1;
+    std::vector<Mac> groups;
+
+    uint64_t ConnectionGeneration() const override { return generation; }
+    bool ReadMasterMac(Mac& out) override
+    {
+        if(++master_reads == bump_on_master_read)
+        {
+            ++generation;          /* a reopen between two groups' polls */
+        }
+        out = {7, 8, 9, 10, 11, 12};
+        return true;
+    }
+    bool PollDiscovery(std::vector<uint8_t>& out) override
+    {
+        ++polls;
+        if(fail_next_poll)
+        {
+            fail_next_poll = false;
+            return false;
+        }
+        out.assign(4 + RECORD_SIZE * groups.size(), 0);
+        out[0] = USB_CMD_SEND_RF;
+        out[1] = (uint8_t)groups.size();
+        const Mac master = {7, 8, 9, 10, 11, 12};
+        for(size_t g = 0; g < groups.size(); ++g)
+        {
+            uint8_t* record = out.data() + 4 + RECORD_SIZE * g;
+            for(size_t i = 0; i < 6; ++i)
+            {
+                record[i] = groups[g][i];
+                record[6 + i] = master[i];
+            }
+            record[12] = 8;
+            record[13] = (uint8_t)(1 + g);
+            record[19] = 3;
+            record[24] = record[25] = record[26] = 21;
+            record[41] = RECORD_MARKER;
+        }
+        return true;
+    }
+    bool SendChunks(const std::array<UsbChunk, USB_CHUNKS_PER_PACKET>&) override { return true; }
+};
+
+static int TestSharedDiscoveryReply()
+{
+    const std::vector<Mac> groups = {
+        {1, 2, 3, 4, 5, 6}, {2, 2, 3, 4, 5, 6}, {3, 2, 3, 4, 5, 6}};
+
+    /* three groups all due in one StepAll: one USB discovery read */
+    {
+        SharedPollLink link;
+        link.groups = groups;
+        TestClock clock;
+        LianLiWirelessService service(link, clock);
+        for(const Mac& m : groups)
+        {
+            service.AddGroup(m, 3);
+        }
+        service.StepAll();
+        if(link.polls != 1)
+        {
+            std::printf("FAIL: three due groups made %d discovery reads, want 1\n",
+                        link.polls);
+            return 1;
+        }
+        for(const Mac& m : groups)
+        {
+            LianLiWirelessService::GroupStatus st;
+            if(!service.GetStatus(m, st) || !st.have_sighting
+               || st.state != WirelessState::Holding)
+            {
+                std::puts("FAIL: a group served from the shared reply saw nothing");
+                return 1;
+            }
+        }
+        if(service.RecentSightings(1000).size() != groups.size())
+        {
+            std::puts("FAIL: shared reply lost rows from the accumulator");
+            return 1;
+        }
+
+        /* the next round is outside the share window: one fresh read */
+        clock.now += 300;
+        service.StepAll();
+        if(link.polls != 2)
+        {
+            std::printf("FAIL: next poll round made %d reads in total, want 2\n",
+                        link.polls);
+            return 1;
+        }
+
+        /* a failed read is never shared: the next group reads again */
+        clock.now += 400;
+        link.fail_next_poll = true;
+        service.StepAll();
+        if(link.polls != 4)
+        {
+            std::printf("FAIL: after a failed read, %d reads in total, want 4\n",
+                        link.polls);
+            return 1;
+        }
+    }
+
+    /* a generation bump between two groups' polls invalidates the reply */
+    {
+        SharedPollLink link;
+        link.groups = groups;
+        link.bump_on_master_read = 2;
+        TestClock clock;
+        LianLiWirelessService service(link, clock);
+        for(const Mac& m : groups)
+        {
+            service.AddGroup(m, 3);
+        }
+        service.StepAll();
+        if(link.polls != 2)
+        {
+            std::printf("FAIL: generation bump made %d reads, want 2 "
+                        "(one per connection)\n", link.polls);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main()
 {
+    if(TestSharedDiscoveryReply() != 0)
+    {
+        return 1;
+    }
     TestClock clock;
     BlockingLink link;
     LianLiWirelessService service(link, clock);

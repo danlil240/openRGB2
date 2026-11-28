@@ -147,37 +147,60 @@ namespace LianLiWireless
     private:
         /*---------------------------------------------------------*\
         | Forwards to the real link and records every discovery     |
-        | response into the accumulator. Used only on the worker.   |
+        | response into the accumulator. Used only on the worker    |
+        | (all calls are serialized under the service mutex).       |
+        |                                                           |
+        | P-12: the discovery query has no group or channel field,  |
+        | so one reply answers every group. A poll within           |
+        | share_window_ms of the last successful read, on the same  |
+        | connection generation, returns that reply without USB     |
+        | I/O (and is not re-added to the accumulator). A failed    |
+        | read, any other failed link operation, or a generation    |
+        | change drops the shared reply.                            |
         \*---------------------------------------------------------*/
         struct ObservingLink : IWirelessLink
         {
             ObservingLink(IWirelessLink& inner_in, IWirelessClock& clock_in,
-                          SightingAccumulator& sink_in)
-                : inner(inner_in), clock(clock_in), sink(sink_in) {}
+                          SightingAccumulator& sink_in, uint64_t share_window_ms_in)
+                : inner(inner_in), clock(clock_in), sink(sink_in),
+                  share_window_ms(share_window_ms_in) {}
 
-            bool ReadMasterMac(Mac& out) override { return inner.ReadMasterMac(out); }
-            bool PollDiscovery(std::vector<uint8_t>& out) override
+            bool ReadMasterMac(Mac& out) override
             {
-                const bool ok = inner.PollDiscovery(out);
-                if(ok)
-                {
-                    sink.AddResponse(out, clock.NowMs());
-                }
-                return ok;
+                return Forwarded(inner.ReadMasterMac(out));
             }
+            bool PollDiscovery(std::vector<uint8_t>& out) override;
             bool SendChunks(const std::array<UsbChunk, USB_CHUNKS_PER_PACKET>& chunks) override
             {
-                return inner.SendChunks(chunks);
+                return Forwarded(inner.SendChunks(chunks));
             }
             bool ReadRgbClock(const Mac& m, uint8_t ch, uint32_t& ticks) override
             {
-                return inner.ReadRgbClock(m, ch, ticks);
+                /* false also means "no answer", which is not a transport
+                   fault; dropping the shared reply then only costs one
+                   extra read */
+                return Forwarded(inner.ReadRgbClock(m, ch, ticks));
             }
             uint64_t ConnectionGeneration() const override { return inner.ConnectionGeneration(); }
+
+            bool Forwarded(bool ok)
+            {
+                if(!ok)
+                {
+                    shared_valid = false;
+                }
+                return ok;
+            }
 
             IWirelessLink&       inner;
             IWirelessClock&      clock;
             SightingAccumulator& sink;
+            uint64_t             share_window_ms;
+
+            bool                 shared_valid = false;
+            uint64_t             shared_ms = 0;
+            uint64_t             shared_generation = 0;
+            std::vector<uint8_t> shared_reply;
         };
 
         static GroupStatus BuildStatus(const WirelessRuntime& rt);

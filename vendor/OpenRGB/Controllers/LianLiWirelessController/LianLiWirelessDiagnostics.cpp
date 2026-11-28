@@ -239,6 +239,13 @@ void Diagnostics::RecordDiscoveryClamped()
     TraceLocked("poll_clamp", 0, 0, 0);
 }
 
+void Diagnostics::RecordDiscoveryShared()
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    counters.discovery_shared++;
+    TraceLocked("poll_shared", 0, 0, 0);
+}
+
 void Diagnostics::RecordKeepAlive(int64_t gap_ms, uint64_t duration_us)
 {
     std::lock_guard<std::mutex> lock(mutex);
@@ -440,6 +447,7 @@ void Diagnostics::WriteSummaryLocked() const
     DIAG_FIELD(discovery_records)
     DIAG_FIELD(discovery_deferred)
     DIAG_FIELD(discovery_clamped)
+    DIAG_FIELD(discovery_shared)
     DIAG_FIELD(discovery_us)
     DIAG_FIELD(discovery_us_max)
     DIAG_FIELD(discovery_age_ms)
@@ -600,6 +608,7 @@ nlohmann::json LianLiWireless::CountersToJson(const DiagCounters& c)
     DIAG_FIELD(discovery_records)
     DIAG_FIELD(discovery_deferred)
     DIAG_FIELD(discovery_clamped)
+    DIAG_FIELD(discovery_shared)
     DIAG_FIELD(discovery_us)
     DIAG_FIELD(discovery_us_max)
     DIAG_FIELD(discovery_age_ms)

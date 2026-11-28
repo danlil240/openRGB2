@@ -22,6 +22,7 @@
 ||     poll         duration_us   records      age_ms        ||
 ||     poll_defer   0             0             0             ||
 ||     poll_clamp   0             0             0             ||
+||     poll_shared  0             0             0             ||
 ||     keepalive    gap_ms        duration_us   0             ||
 ||     keepalive_fail 0           0             0             ||
 ||     usb_send     duration_us   chunks        0             ||
@@ -94,6 +95,7 @@ namespace LianLiWireless
         uint64_t discovery_records    = 0;
         uint64_t discovery_deferred   = 0;
         uint64_t discovery_clamped    = 0;  /* P-12 poll-gap floor applied */
+        uint64_t discovery_shared     = 0;  /* P-12 polls served without USB I/O */
         uint64_t discovery_us         = 0;
         uint64_t discovery_us_max     = 0;
         int64_t  discovery_age_ms     = -1;
@@ -140,6 +142,7 @@ namespace LianLiWireless
                             uint64_t records, int64_t sighting_age_ms);
         void RecordDiscoveryDeferred();
         void RecordDiscoveryClamped();
+        void RecordDiscoveryShared();
         void RecordKeepAlive(int64_t gap_ms, uint64_t duration_us);
         void RecordKeepAliveFailure();
         void RecordUsbSend(uint64_t chunks, uint64_t duration_us);

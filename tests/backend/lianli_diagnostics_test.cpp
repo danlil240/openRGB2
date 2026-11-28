@@ -343,6 +343,29 @@ static void TestDiscoveryClamp()
 }
 
 /*-------------------------------------------------------------*\
+|| 6c. Shared discovery reply (P-12): two groups due in one    ||
+||     step cost one read; the second poll is counted shared   ||
+\*-------------------------------------------------------------*/
+static void TestDiscoveryShared()
+{
+    DIAG.Reset();
+    FakeClock clk;
+    FakeLink  link;
+    int reads = 0;
+    link.poll_fn = [&] { reads++; return MakeDiscovery(); };
+    LianLiWirelessService svc(link, clk);
+    svc.AddGroup(MAC_TARGET, 3);
+    svc.AddGroup(MAC_FOREIGN, 3);
+    svc.StepAll();
+    DiagCounters c = DIAG.Snapshot();
+    CHECK(reads == 1, "two due groups share one discovery read");
+    CHECK(c.discovery_polls == 2 && c.discovery_shared == 1,
+          "every runtime poll counted; the second one as shared");
+    CHECK(CountersToJson(c).contains("discovery_shared"),
+          "shared counter serialized");
+}
+
+/*-------------------------------------------------------------*\
 || 7. Heartbeat: keep-alive count and gap                      ||
 \*-------------------------------------------------------------*/
 static void TestKeepaliveGap()
@@ -574,6 +597,7 @@ int main()
     TestDiscoveryCounters();
     TestDiscoveryDeferral();
     TestDiscoveryClamp();
+    TestDiscoveryShared();
     TestKeepaliveGap();
     TestUploadRetryAndFailure();
     TestCompressionViaController();
