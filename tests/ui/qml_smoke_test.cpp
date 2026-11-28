@@ -12,6 +12,7 @@
 
 #include "DiagnosticsController.h"
 #include "EngineBridge.h"
+#include "JsonVariant.h"
 #include "LayoutController.h"
 #include "SceneEditController.h"
 
@@ -346,8 +347,12 @@ int main(int argc, char** argv)
                 cfg.insert(QStringLiteral("schedule"), QVariantList{ win });
                 cfg.insert(QStringLiteral("lock"), lock);
                 cfg.insert(QStringLiteral("idle"), idle);
-                cfg.insert(QStringLiteral("ramp_ms"), 600);
-                cfg.insert(QStringLiteral("restore_ms"), 0);
+                /* qlonglong, as JsonToVariant hands the engine's
+                   integers to QML. */
+                cfg.insert(QStringLiteral("ramp_ms"),
+                           QVariant::fromValue<qlonglong>(600));
+                cfg.insert(QStringLiteral("restore_ms"),
+                           QVariant::fromValue<qlonglong>(0));
                 QVariantMap active;
                 active.insert(QStringLiteral("schedule"), 0.3);
                 active.insert(QStringLiteral("lock"), QVariant());
@@ -394,6 +399,20 @@ int main(int argc, char** argv)
                 CHECK(!bm.value("idle").toMap().value("enabled").toBool());
                 CHECK(bm.value("idle").toMap().value("after_s").toInt()
                       == 600);
+
+                /* The wire body: the engine takes ramp_ms,
+                   restore_ms and after_s only as JSON integers;
+                   the echoed ramp_ms comes back from QML as a
+                   double and must still go out as 600, not 600.0. */
+                const nlohmann::json wire = ui::VariantToJson(bm);
+                CHECK(wire["ramp_ms"].is_number_integer() &&
+                      wire["ramp_ms"].get<int>() == 600);
+                CHECK(wire["restore_ms"].is_number_integer() &&
+                      wire["restore_ms"].get<int>() == 0);
+                CHECK(wire["idle"]["after_s"].is_number_integer());
+                CHECK(wire["lock"]["level"].is_number());
+                CHECK(std::fabs(wire["schedule"][0]["level"]
+                                    .get<double>() - 0.3) < 1e-6);
 
                 /* Add a window: one more row, a valid default. */
                 CHECK(QMetaObject::invokeMethod(dim, "addWindow"));

@@ -18,6 +18,8 @@
 
 #include <QString>
 
+#include <cmath>
+
 namespace openrgb2
 {
 namespace ui
@@ -114,7 +116,20 @@ inline nlohmann::json VariantToJson(const QVariant& v)
         return v.toULongLong();
     case QMetaType::Float:
     case QMetaType::Double:
-        return v.toDouble();
+    {
+        /* QML hands every JS number over as a double, including an
+           integer the engine sent (qlonglong -> JS number -> double)
+           and echoes back. The engine's integer fields (ramp_ms,
+           after_s, ...) reject 600.0, so send a whole number in the
+           exactly-representable range as an integer. */
+        const double d = v.toDouble();
+        if(std::isfinite(d) && d == std::trunc(d) &&
+           std::fabs(d) <= 9007199254740992.0)   /* 2^53 */
+        {
+            return (long long)d;
+        }
+        return d;
+    }
     default:
         if(v.canConvert<QString>())
         {
