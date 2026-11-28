@@ -38,6 +38,7 @@
 #include <QQmlEngine>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QTest>
 #include <QTemporaryDir>
 #include <QVariantMap>
 
@@ -527,6 +528,76 @@ int main(int argc, char** argv)
                 CHECK(std::abs(scene_edit.brightness() - 0.71)
                       < 1e-5);
             }
+        }
+    }
+
+    /*---- audit Q-4: the Layout view saves too -------------
+       Layout edits in a managed workspace land in the SAME
+       unsaved draft as Lighting's — pre-fix the Layout page
+       had no Save and Ctrl+S was gated to the Lighting view,
+       so a layout-only edit could only be committed by
+       switching pages. Both the page's own Save button and
+       Ctrl+S on the Layout view must reach a commit job. */
+    {
+        auto* qwin = qobject_cast<QQuickWindow*>(win.get());
+        CHECK(qwin != nullptr);
+        win->setProperty("currentView", 2);
+        QCoreApplication::processEvents();
+
+        /* a layout-only draft edit */
+        CHECK(layout_ctl.moveObject(QStringLiteral("fan0"),
+                                    0.3, 0.25));
+        CHECK(PumpBoth(s, [&] { return ws_ctl.dirty(); }));
+
+        const int before = s.commits;
+        if(qwin != nullptr)
+        {
+            qwin->requestActivate();
+            (void)QTest::qWaitForWindowActive(qwin, 2000);
+            QTest::keyClick(qwin, Qt::Key_S, Qt::ControlModifier);
+        }
+        CHECK(PumpBoth(s, [&] { return s.commits > before; },
+                       4000));
+        CHECK(PumpBoth(s, [&] {
+            return !ws_ctl.saving() && !ws_ctl.dirty();
+        }));
+
+        /* the page's own Save button */
+        QObject* layoutSave =
+            win->findChild<QObject*>(
+                QStringLiteral("layoutSaveButton"));
+        CHECK(layoutSave != nullptr);
+        CHECK(layout_ctl.moveObject(QStringLiteral("fan0"),
+                                    0.35, 0.2));
+        CHECK(PumpBoth(s, [&] { return ws_ctl.dirty(); }));
+        if(layoutSave != nullptr)
+        {
+            CHECK(PumpBoth(s, [&] {
+                return layoutSave->property("visible").toBool()
+                       && layoutSave->property("enabled").toBool();
+            }));
+            const int before2 = s.commits;
+            QMetaObject::invokeMethod(layoutSave, "clicked",
+                                      Qt::DirectConnection);
+            CHECK(PumpBoth(s, [&] {
+                return s.commits > before2;
+            }));
+            CHECK(PumpBoth(s, [&] {
+                return !ws_ctl.saving() && !ws_ctl.dirty();
+            }));
+            /* nothing left to save -> disabled */
+            CHECK(!layoutSave->property("enabled").toBool());
+        }
+
+        /* the canvas hint no longer claims edits apply
+           immediately for a managed workspace */
+        QObject* hint = win->findChild<QObject*>(
+            QStringLiteral("canvasInstructions"));
+        CHECK(hint != nullptr);
+        if(hint != nullptr)
+        {
+            CHECK(!hint->property("text").toString()
+                       .contains(QStringLiteral("apply immediately")));
         }
     }
 

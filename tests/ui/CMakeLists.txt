@@ -195,7 +195,7 @@ target_link_libraries(qml_workspace_save_test PRIVATE
     openrgb2_ui
     openrgb2_uiplugin
     openrgb2_ipc_wire
-    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Test)
 target_include_directories(qml_workspace_save_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src/ui)

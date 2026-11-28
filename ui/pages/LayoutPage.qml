@@ -33,6 +33,13 @@ Item {
         typeof objectCtl !== "undefined" && objectCtl.ready
     readonly property bool engineUp:
         typeof bridge !== "undefined" && bridge.connected
+    /* Audit Q-4: in a managed workspace every edit here lands in
+       the shared UNSAVED draft (the same one Lighting edits) —
+       nothing reaches the engine until a commit, so the page
+       carries its own Save and the hint says so. Legacy
+       (unmanaged) layout ops still apply immediately. */
+    readonly property bool wsManaged:
+        typeof workspace !== "undefined" && workspace.managed
     /* A recovered local draft has no engine baseline
        (hasScene) and may exist with NO engine at all —
        workspace.ready is the honest "a draft is staged" gate
@@ -347,6 +354,25 @@ Item {
                              && workspace.available
                     onClicked: wsActionsDlg.open()
                 }
+                /* Commits the shared draft — the same workspace
+                   commit as Lighting's Save / Ctrl+S, through
+                   sceneEdit.save() so the deviceless-commit
+                   guard applies here too. */
+                AppButton {
+                    objectName: "layoutSaveButton"
+                    visible: root.wsManaged
+                    primary: true
+                    text: root.wsManaged && workspace.saving
+                          ? qsTr("Saving…") : qsTr("Save")
+                    enabled: root.wsManaged && root.engineUp
+                             && workspace.dirty && !workspace.saving
+                    onClicked: {
+                        if(typeof sceneEdit !== "undefined")
+                            sceneEdit.save();
+                        else
+                            workspace.save();
+                    }
+                }
                 Text {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignRight
@@ -355,6 +381,22 @@ Item {
                     font.pixelSize: Theme.fontSizeSmall
                     elide: Text.ElideRight
                 }
+            }
+            /* A Save refused before send (e.g. a deviceless
+               draft) is reported where the Save was pressed;
+               engine rejections already reach the row below. */
+            Text {
+                objectName: "layoutSaveError"
+                visible: root.wsManaged
+                         && typeof sceneEdit !== "undefined"
+                         && sceneEdit.saveError !== ""
+                         && sceneEdit.saveErrorSource === "input"
+                width: parent.width - 2 * col.padding
+                text: visible ? qsTr("Not saved: %1")
+                                    .arg(sceneEdit.saveError) : ""
+                color: Theme.warn
+                font.pixelSize: Theme.fontSizeSmall
+                wrapMode: Text.WordWrap
             }
             Row {
                 visible: root.ctlUp && layoutCtl.lastError !== ""
@@ -1023,6 +1065,8 @@ Item {
                             width: parent.width
                             text: root.show3d
                                   ? qsTr("3D view. Click selects · drag orbits · Ctrl+drag moves/rotates · Shift+drag marquee · MMB/Space pans · wheel zooms · W/E/P tools · F/Home frame · Esc cancels. Edits are undoable (Ctrl+Z / Ctrl+Shift+Z). Emitter dots show the unsaved draft preview — not delivered output.")
+                                  : root.wsManaged
+                                  ? qsTr("Top view, meters. Drag objects to arrange — or Tab to an object and nudge with the arrow keys (Shift for fine steps). Edits go to the unsaved workspace draft and are undoable (Ctrl+Z / Ctrl+Shift+Z); Save (Ctrl+S) commits them. Linked copies (LINK) share their source's output.")
                                   : qsTr("Top view, meters. Drag objects to arrange — or Tab to an object and nudge with the arrow keys (Shift for fine steps). Edits apply immediately and are undoable (Ctrl+Z / Ctrl+Shift+Z). Linked copies (LINK) share their source's output.")
                             color: Theme.textDisabled
                             font.pixelSize: Theme.fontSizeSmall
