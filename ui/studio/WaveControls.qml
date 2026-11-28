@@ -6,9 +6,10 @@
 // record per change). Shown whenever the effective stack has a
 // wave layer; the packaged "Wave" look is built for it.
 //
-//   Direction — presets plus x/y/z sliders (world axes: +x right,
-//               +y up, +z toward you / the front of the PC).
-//               Bands travel along the direction.
+//   Direction — presets plus heading/tilt sliders over the same
+//               stored unit vector (world axes: +x right, +y up,
+//               +z toward you / the front of the PC). Bands
+//               travel along the direction.
 //   Colors    — 2..5 colors, evenly spaced on the first wave
 //               layer's palette (it wraps, so the loop is seamless).
 //   Speed     — m/s; Wave length — meters per color cycle.
@@ -66,18 +67,54 @@ Rectangle {
             && Math.abs(dir.z - p.z) < 0.02
     }
 
+    /* Heading + tilt (audit Q-3). The stored direction is a unit
+       vector (SetFlow normalises it), so x/y/z sliders fought the
+       normalisation: on an axis-aligned direction a slider could
+       only flip the sign, and dragging X moved Z. Two angles span
+       the same vector independently. Heading turns the bands
+       around the vertical (0° front → back, 90° left → right,
+       ±180° back → front); tilt raises them toward up (+90°) or
+       down (−90°). The document still stores the vector. */
+    readonly property real tilt: {
+        const len = Math.hypot(dir.x || 0, dir.y || 0, dir.z || 0)
+        if(len < 1e-9)
+            return 0
+        return Math.asin(Math.max(-1, Math.min(1, (dir.y || 0) / len)))
+               * 180 / Math.PI
+    }
+    /* Undefined for a vertical direction — the last heading is
+       kept so tilting back out restores it. */
+    property real heldHeading: 0
+    readonly property real heading: {
+        const x = dir.x || 0, z = dir.z || 0
+        if(Math.hypot(x, z) < 1e-4)
+            return heldHeading
+        return Math.atan2(x, -z) * 180 / Math.PI
+    }
+    onHeadingChanged: heldHeading = heading
+    function setAngles(headingDeg, tiltDeg) {
+        const h = headingDeg * Math.PI / 180
+        const t = tiltDeg * Math.PI / 180
+        heldHeading = headingDeg
+        effectEdit.setFlowDirection(Math.cos(t) * Math.sin(h),
+                                    Math.sin(t),
+                                    -Math.cos(t) * Math.cos(h))
+    }
+
     function setColorAt(i, c) {
         const list = colors.slice()
-        list[i] = c
+        list[i] = c     /* i === length appends */
         effectEdit.setFlowColors(list)
     }
 
     ColorDialog {
         id: colorDialog
+        objectName: "waveColorDialog"
+        /* Index to set; colors.length means "append" ("+"). */
         property int target: -1
         title: qsTr("Wave color")
         onAccepted: {
-            if(target >= 0)
+            if(target >= 0 && target <= wave.colors.length)
                 wave.setColorAt(target, selectedColor.toString())
         }
     }
@@ -129,61 +166,59 @@ Rectangle {
             columns: 3
             columnSpacing: Theme.spaceS
             rowSpacing: 0
-            Repeater {
-                model: [
-                    { axis: "x", hint: qsTr("left ↔ right") },
-                    { axis: "y", hint: qsTr("down ↔ up") },
-                    { axis: "z", hint: qsTr("back ↔ front") }
-                ]
-                delegate: Item {
-                    id: axisRow
-                    required property var modelData
-                    Layout.columnSpan: 3
-                    Layout.fillWidth: true
-                    implicitHeight: Theme.controlHeight
-                    RowLayout {
-                        anchors.fill: parent
-                        spacing: Theme.spaceS
-                        Text {
-                            text: axisRow.modelData.axis.toUpperCase()
-                            color: Theme.textSecondary
-                            Layout.preferredWidth: 14
-                        }
-                        AppSlider {
-                            id: axisSlider
-                            objectName: "waveDirSlider_" + axisRow.modelData.axis
-                            Accessible.name: qsTr("wave direction %1")
-                                                 .arg(axisRow.modelData.axis)
-                            Layout.fillWidth: true
-                            from: -1; to: 1; stepSize: 0.05
-                            modelValue: Number(wave.dir[axisRow.modelData.axis]) || 0
-                            Binding on value {
-                                when: !axisSlider.pressed
-                                value: axisSlider.modelValue
-                                restoreMode: Binding.RestoreNone
-                            }
-                            onGestureCommitted: (v) => {
-                                const d = { x: Number(wave.dir.x) || 0,
-                                            y: Number(wave.dir.y) || 0,
-                                            z: Number(wave.dir.z) || 0 };
-                                d[axisRow.modelData.axis] = v;
-                                if(Math.abs(d.x) + Math.abs(d.y) + Math.abs(d.z) < 1e-3)
-                                    value = modelValue;   /* zero vector refused */
-                                else
-                                    effectEdit.setFlowDirection(d.x, d.y, d.z);
-                            }
-                        }
-                        Text {
-                            text: (axisSlider.pressed ? axisSlider.value
-                                   : Number(axisSlider.modelValue)).toFixed(2)
-                                  + "  " + axisRow.modelData.hint
-                            color: Theme.textSecondary
-                            font.pixelSize: Theme.fontSizeSmall
-                            Layout.preferredWidth: 120
-                        }
-                    }
+
+            Text { text: qsTr("Heading"); color: Theme.textSecondary }
+            AppSlider {
+                id: headingSlider
+                objectName: "waveHeading"
+                Accessible.name: qsTr("wave heading")
+                Layout.fillWidth: true
+                from: -180; to: 180; stepSize: 5
+                modelValue: wave.heading
+                Binding on value {
+                    when: !headingSlider.pressed
+                    value: headingSlider.modelValue
+                    restoreMode: Binding.RestoreNone
                 }
+                onGestureCommitted: (v) => wave.setAngles(v, wave.tilt)
             }
+            Text {
+                text: qsTr("%1°").arg(Math.round(headingSlider.pressed
+                        ? headingSlider.value : headingSlider.modelValue))
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSizeSmall
+                Layout.preferredWidth: 50
+            }
+
+            Text { text: qsTr("Tilt"); color: Theme.textSecondary }
+            AppSlider {
+                id: tiltSlider
+                objectName: "waveTilt"
+                Accessible.name: qsTr("wave tilt")
+                Layout.fillWidth: true
+                from: -90; to: 90; stepSize: 5
+                modelValue: wave.tilt
+                Binding on value {
+                    when: !tiltSlider.pressed
+                    value: tiltSlider.modelValue
+                    restoreMode: Binding.RestoreNone
+                }
+                onGestureCommitted: (v) => wave.setAngles(wave.heading, v)
+            }
+            Text {
+                text: qsTr("%1°").arg(Math.round(tiltSlider.pressed
+                        ? tiltSlider.value : tiltSlider.modelValue))
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSizeSmall
+                Layout.preferredWidth: 50
+            }
+        }
+        Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            font.pixelSize: Theme.fontSizeSmall
+            color: Theme.textDisabled
+            text: qsTr("Heading turns the bands around your desk: 0° front → back, 90° left → right, 180° back → front. Tilt sends them up (+90°) or down (−90°).")
         }
 
         /*---- Colors ----------------------------------------*/
@@ -225,12 +260,14 @@ Rectangle {
                 text: "+"
                 Accessible.name: qsTr("add wave color")
                 enabled: wave.colors.length < 5
+                /* Appends on accept only (audit Q-3): pushing the
+                   color first left a duplicate when the dialog was
+                   cancelled. */
                 onClicked: {
-                    const list = wave.colors.slice()
-                    list.push(list.length ? list[list.length - 1] : "#FFFFFF")
-                    effectEdit.setFlowColors(list)
-                    colorDialog.target = list.length - 1
-                    colorDialog.selectedColor = list[list.length - 1]
+                    const n = wave.colors.length
+                    colorDialog.target = n
+                    colorDialog.selectedColor =
+                        n ? wave.colors[n - 1] : "#FFFFFF"
                     colorDialog.open()
                 }
             }

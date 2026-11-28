@@ -1173,6 +1173,146 @@ int main(int argc, char** argv)
         }
     }
 
+    /*======================================================*\
+    || Q-3: Wave card direction + color add                  ||
+    \*======================================================*/
+    /* The stored direction is a unit vector (SetFlow
+       normalises), so per-axis x/y/z sliders fought the
+       normalisation. Heading + tilt span the same vector and
+       stay independent: heading never changes the tilt, tilt
+       never changes the heading (kept through vertical). */
+    std::printf("-- qml: wave heading/tilt drive the stored "
+                "direction (audit Q-3)\n");
+    {
+        auto findIn = [](QObject* root, const char* name)
+            -> QObject* {
+            const QString n = QString::fromLatin1(name);
+            if(QObject* c = root->findChild<QObject*>(n))
+                return c;
+            std::vector<QQuickItem*> stack;
+            if(auto* r = qobject_cast<QQuickItem*>(root))
+                stack.push_back(r);
+            while(!stack.empty())
+            {
+                QQuickItem* it = stack.back();
+                stack.pop_back();
+                if(it->objectName() == n)
+                    return it;
+                for(QQuickItem* ch : it->childItems())
+                    stack.push_back(ch);
+            }
+            return nullptr;
+        };
+        Rig rig;
+        rig.LoadDoc(CompactDoc("wave"));
+        CHECK(rig.ctl.flowState().value("available").toBool());
+        auto dirNear = [&](double x, double y, double z) {
+            const QVariantMap d = rig.ctl.flowState()
+                .value("direction").toMap();
+            const bool ok =
+                std::fabs(d.value("x").toDouble() - x) < 1e-3
+                && std::fabs(d.value("y").toDouble() - y) < 1e-3
+                && std::fabs(d.value("z").toDouble() - z) < 1e-3;
+            if(!ok)
+                std::printf("  direction is (%.4f, %.4f, %.4f)\n",
+                            d.value("x").toDouble(),
+                            d.value("y").toDouble(),
+                            d.value("z").toDouble());
+            return ok;
+        };
+
+        QQmlEngine eng;
+        eng.rootContext()->setContextProperty(
+            QStringLiteral("effectEdit"), &rig.ctl);
+        QQmlComponent c(&eng, QUrl(QStringLiteral(
+            "qrc:/qt/qml/OpenRGB2/UI/studio/WaveControls.qml")));
+        CHECK(!c.isError());
+        std::unique_ptr<QObject> o(c.create(eng.rootContext()));
+        CHECK(o != nullptr);
+        QObject* heading = o ? findIn(o.get(), "waveHeading")
+                             : nullptr;
+        QObject* tilt = o ? findIn(o.get(), "waveTilt") : nullptr;
+        CHECK(heading != nullptr);
+        CHECK(tilt != nullptr);
+        auto commit = [](QObject* s, double v) {
+            QMetaObject::invokeMethod(s, "gestureCommitted",
+                                      Q_ARG(double, v));
+        };
+        auto model = [](QObject* s) {
+            return s->property("modelValue").toDouble();
+        };
+        if(heading != nullptr && tilt != nullptr)
+        {
+            const double c30 = std::cos(30.0 * 3.14159265358979 / 180);
+            CHECK(dirNear(0, 0, -1));        /* the look's default */
+            CHECK(std::fabs(model(heading)) < 1e-6);
+            CHECK(std::fabs(model(tilt)) < 1e-6);
+
+            /* Heading alone turns the bands around the vertical. */
+            commit(heading, 90);
+            CHECK(dirNear(1, 0, 0));
+            /* Tilt alone keeps the heading. */
+            commit(tilt, 30);
+            CHECK(dirNear(c30, 0.5, 0));
+            CHECK(std::fabs(model(heading) - 90) < 1e-3);
+            /* Heading keeps the tilt. */
+            commit(heading, -90);
+            CHECK(dirNear(-c30, 0.5, 0));
+            CHECK(std::fabs(model(tilt) - 30) < 1e-3);
+            /* Straight up: heading is undefined but kept, so
+               tilting back restores it. */
+            commit(tilt, 90);
+            CHECK(dirNear(0, 1, 0));
+            CHECK(std::fabs(model(heading) + 90) < 1e-3);
+            commit(tilt, 0);
+            CHECK(dirNear(-1, 0, 0));
+
+            /* An axis-aligned direction can be tilted (the old
+               z slider could only flip its sign). */
+            CHECK(rig.ctl.setFlowDirection(0, 0, -1));
+            commit(tilt, -45);
+            CHECK(dirNear(0, -0.7071, -0.7071));
+        }
+
+        /* "+" appends a color only when the dialog is accepted —
+           a cancelled pick used to leave a duplicate stop. */
+        std::printf("-- qml: wave '+' adds a color only on accept "
+                    "(audit Q-3)\n");
+        auto colorCount = [&] {
+            return (int)rig.ctl.flowState().value("colors")
+                .toList().size();
+        };
+        const int n0 = colorCount();
+        CHECK(n0 >= 2 && n0 < 5);
+        QObject* add = o ? findIn(o.get(), "waveColorAdd") : nullptr;
+        QObject* dlg = o ? findIn(o.get(), "waveColorDialog")
+                         : nullptr;
+        CHECK(add != nullptr);
+        if(add != nullptr)
+        {
+            QMetaObject::invokeMethod(add, "clicked");
+            CHECK(colorCount() == n0);
+        }
+        CHECK(dlg != nullptr);
+        if(add != nullptr && dlg != nullptr)
+        {
+            /* A headless dialog never opens, so its accept()/
+               reject() don't emit — emit the outcome signals the
+               card handles directly. */
+            QMetaObject::invokeMethod(dlg, "rejected");
+            CHECK(colorCount() == n0);
+            QMetaObject::invokeMethod(add, "clicked");
+            dlg->setProperty("selectedColor", QColor("#123456"));
+            QMetaObject::invokeMethod(dlg, "accepted");
+            const QVariantList cols =
+                rig.ctl.flowState().value("colors").toList();
+            CHECK((int)cols.size() == n0 + 1);
+            CHECK(!cols.isEmpty()
+                  && QColor(cols.last().toString())
+                         == QColor("#123456"));
+        }
+    }
+
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
