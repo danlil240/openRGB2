@@ -7,6 +7,7 @@
 #include "LaunchHardening.h"
 
 #include <QDir>
+#include <QFileInfo>
 #include <QProcess>
 
 #ifdef Q_OS_WIN
@@ -171,6 +172,61 @@ QProcessEnvironment SanitizedChildEnvironment()
 {
     return SanitizedChildEnvironment(
         QProcessEnvironment::systemEnvironment());
+}
+
+QString SystemExplorerPath()
+{
+#ifdef Q_OS_WIN
+    wchar_t buf[MAX_PATH] = {};
+    const UINT n = GetWindowsDirectoryW(buf, MAX_PATH);
+    const QString win = (n == 0 || n >= MAX_PATH)
+        ? QStringLiteral("C:\\Windows")
+        : QString::fromWCharArray(buf, (int)n);
+    return QDir::toNativeSeparators(win
+        + QStringLiteral("\\explorer.exe"));
+#else
+    return QString();
+#endif
+}
+
+bool ValidateShellFolder(const QString& reported, QString* native,
+                         QString* why)
+{
+    auto refuse = [why](const QString& reason)
+    {
+        if(why)
+            *why = reason;
+        return false;
+    };
+    /* Syntactic gate first — nothing below touches the
+       filesystem until the string is a plain local drive path
+       (a UNC path would make even isDir() reach out over SMB). */
+    const bool drive_path = reported.size() >= 3
+        && reported.at(0).isLetter() && reported.at(0).unicode() < 0x80
+        && reported.at(1) == QLatin1Char(':')
+        && (reported.at(2) == QLatin1Char('\\')
+            || reported.at(2) == QLatin1Char('/'));
+    if(!drive_path)
+        return refuse(QStringLiteral(
+            "not an absolute local drive path"));
+    for(int i = 0; i < reported.size(); ++i)
+    {
+        const QChar c = reported.at(i);
+        if(c.unicode() < 0x20
+           || (i > 1 && c == QLatin1Char(':'))
+           || QStringLiteral("*?\"<>|").contains(c))
+            return refuse(QStringLiteral(
+                "path contains a reserved character"));
+    }
+    const QString clean = QDir::cleanPath(reported);
+    const QFileInfo info(clean);
+    if(!info.isDir())
+        return refuse(QStringLiteral("not an existing folder"));
+    if(native)
+        *native = QDir::toNativeSeparators(clean);
+    if(why)
+        why->clear();
+    return true;
 }
 
 void PrepareHiddenPowerShell(QProcess& process)
