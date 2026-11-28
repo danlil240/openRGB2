@@ -174,6 +174,39 @@ static void TestConflictNotice()
           "notice: a keyless finding is keyed by its label");
 }
 
+/* R-10: the startup takeover dialog lists each writer once and
+   adds one short "how to turn it off" line per key — the engine is
+   not running yet, so the Devices page cannot show the steps. */
+static void TestTakeoverText()
+{
+    using openrgb2::ui::TakeoverConflictText;
+    const QStringList lines = {
+        QStringLiteral("ownership CONFLICT: LampArray service (Dynamic "
+                       "Lighting) (pid 55, logi_lamparray_service.AMD64"
+                       ".exe) -- bridge [key: lamparray]"),
+        QStringLiteral("ownership CONFLICT: Logitech G Hub / Options "
+                       "(pid 70, lghub_agent.exe) -- owner [key: logitech]"),
+        QStringLiteral("ownership CONFLICT: Logitech G Hub / Options "
+                       "(pid 71, lghub_system_tray.exe) -- owner "
+                       "[key: logitech]"),
+        /* an older script: no key */
+        QStringLiteral("ownership CONFLICT: iCUE (pid 7, service) -- close it"),
+    };
+    const QString t = TakeoverConflictText(lines);
+    CHECK(!t.contains(QStringLiteral("[key:")),
+          "takeover: the key tag is not shown to the user");
+    CHECK(t.contains(QStringLiteral("lghub_agent.exe")) &&
+              t.contains(QStringLiteral("lghub_system_tray.exe")) &&
+              t.contains(QStringLiteral("iCUE (pid 7")),
+          "takeover: every conflict line is still listed");
+    CHECK(t.count(QStringLiteral("sc stop logi_lamparray_service")) == 1,
+          "takeover: the LampArray hint names the service command once");
+    CHECK(t.count(QStringLiteral("Start G HUB on system startup")) == 1,
+          "takeover: one G HUB hint for two G HUB processes");
+    CHECK(t.contains(QStringLiteral("Devices")),
+          "takeover: points at the Devices page for the full steps");
+}
+
 static void TestShellFolder()
 {
 #ifdef Q_OS_WIN
@@ -240,6 +273,7 @@ int main(int argc, char** argv)
 #endif
     TestOwnershipParse();
     TestConflictNotice();
+    TestTakeoverText();
     TestShellFolder();
     if(g_fail)
     {

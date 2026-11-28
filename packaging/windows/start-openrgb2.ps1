@@ -257,8 +257,13 @@ function Find-ListenerPid {
 function Write-Findings([object[]]$Findings) {
     foreach($f in $Findings) {
         $tag = if($f.conflict) { "CONFLICT" } else { "notice  " }
-        Write-Host ("  ownership {0}: {1} (pid {2}, {3}) -- {4}" -f `
-            $tag, $f.owner, $f.pid, $f.exe, $f.detail)
+        # R-10: the trailing key lets the UI's takeover dialog add the
+        # matching hint without re-classifying the label. A finding
+        # built elsewhere without a key prints no tag.
+        $key = if($f.PSObject.Properties['key']) { [string]$f.key } else { "" }
+        $tagKey = if($key) { " [key: $key]" } else { "" }
+        Write-Host ("  ownership {0}: {1} (pid {2}, {3}) -- {4}{5}" -f `
+            $tag, $f.owner, $f.pid, $f.exe, $f.detail, $tagKey)
     }
 }
 
@@ -472,6 +477,7 @@ function Invoke-ManagedStart {
             $findings += [pscustomobject][ordered]@{
                 conflict = $true
                 owner    = "foreign listener on :$ManagedPort"
+                key      = "foreign_listener"
                 exe      = $imgDesc
                 pid      = $backendPid
                 detail   = "the managed SDK port is held by a process that is not the pinned backend -- report only, never killed"

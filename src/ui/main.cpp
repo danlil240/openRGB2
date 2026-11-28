@@ -715,10 +715,10 @@ int main(int argc, char** argv)
             /* Shown once the window can host it (now, or on the first
                show after a background start). */
             auto ask_takeover = [&takeover_conflicts, run_start, window] {
-                QString list;
-                for(const QString& c : takeover_conflicts)
-                    list += QStringLiteral("  ") + c.trimmed()
-                            + QLatin1Char('\n');
+                /* R-10: each writer once, plus a short hint per
+                   finding key. */
+                const QString list =
+                    openrgb2::ui::TakeoverConflictText(takeover_conflicts);
                 QMessageBox box(QMessageBox::Warning,
                     QObject::tr("OpenRGB2 - competing RGB software"),
                     QObject::tr("Other RGB software is running and controls "

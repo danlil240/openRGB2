@@ -12,6 +12,7 @@
 ||| label. No UI-side re-classification.                     ||
 \*---------------------------------------------------------*/
 
+#include <QObject>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -31,5 +32,14 @@ public:
 private:
     QSet<QString> seen_;
 };
+
+/* The startup takeover dialog's conflict block. `lines` are the
+   script's "ownership CONFLICT: <owner> (...) -- <detail>
+   [key: <key>]" lines (ParseOwnershipConflict). Lists every line
+   without its key tag, then one short "how to turn it off" hint
+   per distinct key — the engine is not running yet, so the
+   Devices page cannot show its steps. Lines from an older script
+   (no key tag) are listed with no hint. */
+QString TakeoverConflictText(const QStringList& lines);
 
 } /* namespace openrgb2::ui */

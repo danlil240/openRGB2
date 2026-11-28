@@ -244,6 +244,11 @@ Check (@($f | Where-Object { [string]::IsNullOrEmpty($_.key) }).Count -eq 0) `
       "every script finding carries a key"
 Check (@($f | Where-Object { $_.exe -ieq "logi_lamparray_service.AMD64.exe" -and $_.key -eq "lamparray" }).Count -eq 1) `
       "LampArray finding keyed lamparray"
+# R-10: the refusal output carries each finding's key, so the UI's
+# takeover dialog can add the matching hint without re-classifying.
+$findingText = Write-Findings -Findings $f 6>&1 | Out-String -Width 4096
+Check ($findingText -match 'ownership CONFLICT: LampArray service .*\[key: lamparray\]') `
+      "CONFLICT lines end with the finding key"
 $ownDiff = @(Compare-Object $cppOwners $psOwners)
 Check ($ownDiff.Count -eq 0) "owner-label parity with OwnershipScan.cpp"
 foreach($d in $ownDiff) {
