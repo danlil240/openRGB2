@@ -267,32 +267,97 @@ static bool ReadPipeLabel(const std::string& pipe, DWORD& rid,
    (this suite on a GitHub-hosted runner) owns its objects as
    Administrators; a medium creator (a dev PC) owns them as the
    user. The pipe server's trust rules read that owner as a High
-   lower bound, so a few expectations depend on it. */
-static bool PipeOwnerIsPrivileged(const std::string& pipe)
+   lower bound, so a few expectations depend on it.
+
+   The listener's SDDL names no owner, so the pipe's owner IS this
+   process token's default owner (TokenOwner). That is read first:
+   it needs no connection. Opening the pipe as a client to read the
+   owner (the first version of this helper) can fail on a hosted
+   runner, and a failed open silently read as "not privileged" while
+   the product, reading its real connection, saw Administrators
+   (CI run 46137615402, FAIL line 1381). The pipe read is kept as a
+   cross-check and reported when it disagrees. */
+static bool SidIsPrivileged(PSID sid)
 {
+    return sid && (IsWellKnownSid(sid, WinBuiltinAdministratorsSid) ||
+                   IsWellKnownSid(sid, WinLocalSystemSid));
+}
+
+static bool TokenDefaultOwnerIsPrivileged(bool& known)
+{
+    known = false;
+    HANDLE tok = nullptr;
+    if(!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok))
+    {
+        return false;
+    }
+    DWORD need = 0;
+    GetTokenInformation(tok, TokenOwner, nullptr, 0, &need);
+    std::vector<uint8_t> buf(need ? need : 1);
+    bool privileged = false;
+    if(need && GetTokenInformation(tok, TokenOwner, buf.data(), need,
+                                   &need))
+    {
+        known      = true;
+        privileged = SidIsPrivileged(
+            reinterpret_cast<TOKEN_OWNER*>(buf.data())->Owner);
+    }
+    CloseHandle(tok);
+    return privileged;
+}
+
+/* -1 = the pipe could not be opened/read (error in `err`). */
+static int PipeObjectOwnerIsPrivileged(const std::string& pipe,
+                                       DWORD& err)
+{
+    err = 0;
     HANDLE h = CreateFileA(pipe.c_str(), GENERIC_READ | GENERIC_WRITE,
                            0, nullptr, OPEN_EXISTING,
                            FILE_FLAG_OVERLAPPED, nullptr);
     if(h == INVALID_HANDLE_VALUE)
     {
-        return false;
+        err = GetLastError();
+        return -1;
     }
     PSID owner = nullptr;
     PSECURITY_DESCRIPTOR sd = nullptr;
-    bool privileged = false;
-    if(GetSecurityInfo(h, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
-                       &owner, nullptr, nullptr, nullptr, &sd)
-           == ERROR_SUCCESS && owner)
+    int result = -1;
+    const DWORD rc = GetSecurityInfo(h, SE_KERNEL_OBJECT,
+                                     OWNER_SECURITY_INFORMATION, &owner,
+                                     nullptr, nullptr, nullptr, &sd);
+    if(rc == ERROR_SUCCESS && owner)
     {
-        privileged = IsWellKnownSid(owner, WinBuiltinAdministratorsSid) ||
-                     IsWellKnownSid(owner, WinLocalSystemSid);
+        result = SidIsPrivileged(owner) ? 1 : 0;
+    }
+    else
+    {
+        err = rc;
     }
     if(sd)
     {
         LocalFree(sd);
     }
     CloseHandle(h);
-    return privileged;
+    return result;
+}
+
+static bool PipeOwnerIsPrivileged(const std::string& pipe)
+{
+    bool token_known = false;
+    const bool by_token = TokenDefaultOwnerIsPrivileged(token_known);
+    DWORD perr = 0;
+    const int by_pipe = PipeObjectOwnerIsPrivileged(pipe, perr);
+    std::printf("integrity: owner by token %s, by pipe %s (err %lu)\n",
+                token_known ? (by_token ? "privileged" : "user")
+                            : "unknown",
+                by_pipe < 0 ? "unreadable"
+                            : (by_pipe ? "privileged" : "user"),
+                (unsigned long)perr);
+    if(token_known)
+    {
+        return by_token;
+    }
+    return by_pipe == 1;
 }
 
 int main()
