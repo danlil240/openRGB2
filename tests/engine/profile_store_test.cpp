@@ -1041,6 +1041,62 @@ static void TestOutputPolicyPersistence()
     }
 }
 
+/*---------------------------------------------------------*\
+||| R-2: EngineState.automation — absent stays absent, a     ||
+|||     round trip keeps the bindings, unknown members      ||
+|||     (R-3/R-4 sections) survive, malformed never fails   ||
+\*---------------------------------------------------------*/
+static void TestAutomationPersistence()
+{
+    const std::string p = Path("no-automation.json");
+    WriteText(p, "{ \"schema_version\": 1, \"scenes\": [], "
+                 "\"bindings\": {} }");
+    ProfileStore            store(p);
+    ProfileStore::LoadResult lr = store.Load();
+    CHECK(lr.status == ProfileStore::LoadStatus::Loaded);
+    CHECK(!lr.state.automation.has_value());
+    CHECK(EngineStateToJson(lr.state).count("automation") == 0);
+
+    AutomationConfig ac;
+    ac.hotkeys = { { "next_workspace", "Ctrl+Alt+Shift+PgDn" } };
+    ac.cycle   = { "alpha" };
+    lr.state.automation = ac;
+    std::string err;
+    CHECK(store.Save(lr.state, err));
+    lr = store.Load();
+    CHECK(lr.status == ProfileStore::LoadStatus::Loaded);
+    CHECK(lr.state.automation.has_value() &&
+          *lr.state.automation == ac);
+    CHECK(lr.state.extensions.count("automation") == 0);
+
+    /* A newer build's section inside `automation` and an
+       unknown top-level key both survive a save. */
+    WriteText(Path("automation-extra.json"),
+              "{ \"schema_version\": 1, \"scenes\": [], "
+              "\"bindings\": {}, \"future_key\": 42, "
+              "\"automation\": { \"hotkeys\": [], "
+              "\"profiles\": [ { \"exe\": \"game.exe\" } ] } }");
+    ProfileStore            ext(Path("automation-extra.json"));
+    ProfileStore::LoadResult el = ext.Load();
+    CHECK(el.status == ProfileStore::LoadStatus::Loaded);
+    CHECK(el.state.automation.has_value());
+    CHECK(ext.Save(el.state, err));
+    el = ext.Load();
+    const nlohmann::json saved = EngineStateToJson(el.state);
+    CHECK(saved["automation"]["profiles"][0]["exe"] == "game.exe");
+    CHECK(saved["future_key"] == 42);
+
+    /* Malformed: dropped with a warning, the document loads. */
+    WriteText(Path("automation-bad.json"),
+              "{ \"schema_version\": 1, \"scenes\": [], "
+              "\"bindings\": {}, \"automation\": \"loud\" }");
+    ProfileStore            bad(Path("automation-bad.json"));
+    ProfileStore::LoadResult bl = bad.Load();
+    CHECK(bl.status == ProfileStore::LoadStatus::Loaded);
+    CHECK(!bl.state.automation.has_value());
+    CHECK(!bl.warnings.empty());
+}
+
 int main()
 {
     g_tmp = fs::temp_directory_path() /
@@ -1060,6 +1116,7 @@ int main()
     TestWriteCache();
     TestSceneLoader();
     TestOutputPolicyPersistence();
+    TestAutomationPersistence();
 
     /* Opt-in manual check: point OPENRGB2_SCENE_FILE at a real
        scene/workspace file (e.g. a studio.v2.backup.json) to

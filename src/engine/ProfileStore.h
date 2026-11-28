@@ -55,6 +55,7 @@
 #include "PlaybackPresets.h"   /* PersistedSceneMode, PlaybackParams */
 #include "ReactiveInputs.h"    /* ReactiveInputs::PersistedInput     */
 #include "OutputControl.h"     /* PersistedOutput (R-1)              */
+#include "Automation.h"        /* AutomationConfig (R-2/R-4)         */
 
 #include "scene/SceneTypes.h"  /* studio::DeviceBinding           */
 
@@ -113,6 +114,12 @@ struct EngineState
        idle (hold/black/restore + per-controller overrides).
        Absent in older profiles -> hold/hold (no change). */
     OutputPolicy                             output_policy;
+    /* R-2/R-4: engine-side automation (hotkeys, dimming; R-3
+       adds its section). Absent = nothing configured; written
+       only once something set it. Unknown members inside ride
+       AutomationConfig::extensions. Read leniently — a
+       malformed member is dropped with a warning. */
+    std::optional<AutomationConfig>          automation;
     nlohmann::json                           extensions;
 };
 
