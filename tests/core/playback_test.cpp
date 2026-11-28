@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "playback/PlaybackLoop.h"
+#include "LianLiWirelessEffects.h"
 #include "LianLiWirelessFanType.h"
 #include <chrono>
 #include <cmath>
@@ -221,6 +222,90 @@ static void CheckBytePin(bool print)
     }
 }
 
+/*---------------------------------------------------------*\
+| BuildLoopFromRenderer (R-11 step 2): the frame-count      |
+| search and compression shared by presets and compiled     |
+| looks.                                                    |
+\*---------------------------------------------------------*/
+static void TestBuildLoopFromRenderer()
+{
+    /* A preset routed by hand gives the preset's exact bytes. */
+    PlaybackRequest r;
+    r.preset = PlaybackPreset::RainbowWave;
+    r.led_count = 120;
+    r.leds_per_fan = 40;
+    r.speed = 37;
+    r.led_order = FanLedOrder(WirelessFanType::Slv3Led);
+    const PlaybackLoop preset = BuildPlaybackLoop(r);
+    const PlaybackLoop routed = BuildLoopFromRenderer(240000.0 / 37, 120,
+        [&](size_t frames) {
+            return RenderRainbowWave(120, frames, false, 40, r.led_order);
+        });
+    CHECK(LoopHash(preset) == LoopHash(routed));
+
+    /* A generic renderer: 4 s at 60 fps is 240 frames. */
+    size_t asked = 0;
+    const PlaybackLoop ramp = BuildLoopFromRenderer(4000.0, 120, [&](size_t frames) {
+        asked = frames;
+        std::vector<uint8_t> rgb(frames * 120 * 3);
+        for(size_t f = 0; f < frames; f++)
+        {
+            for(size_t i = 0; i < 120 * 3; i++)
+            {
+                rgb[f * 360 + i] = uint8_t((f * 255) / frames);
+            }
+        }
+        return rgb;
+    });
+    CHECK(asked == 240 && ramp.frame_count == 240);
+    CHECK(ramp.rgb.size() == 240u * 360u);
+    CHECK(std::abs(ramp.effective_cycle_ms - 4000.0) < 1.0);
+    CHECK(std::abs(ramp.nominal_fps - 60.0) < 0.1);
+
+    /* Incompressible content shrinks the frame count, not the
+       cycle: 10 s of noise cannot fit 600 frames in 12 KiB. */
+    const PlaybackLoop noisy = BuildLoopFromRenderer(10000.0, 120, [](size_t frames) {
+        std::vector<uint8_t> rgb(frames * 360);
+        uint32_t x = 12345;
+        for(uint8_t& b : rgb)
+        {
+            x = x * 1664525u + 1013904223u;
+            b = uint8_t(x >> 24);
+        }
+        return rgb;
+    });
+    CHECK(noisy.compressed.size() <= MAX_COMPRESSED_BYTES);
+    CHECK(noisy.frame_count >= 2 && noisy.frame_count < 600);
+    CHECK(std::abs(noisy.effective_cycle_ms - 10000.0) < 10.0);
+
+    /* A cycle of 0 is a still look: one frame. */
+    const PlaybackLoop still = BuildLoopFromRenderer(0.0, 120, [&](size_t frames) {
+        asked = frames;
+        return std::vector<uint8_t>(frames * 360, 7);
+    });
+    CHECK(asked == 1 && still.frame_count == 1);
+    CHECK(still.rgb.size() == 360u);
+    CHECK(!still.compressed.empty() && still.compressed.size() <= MAX_COMPRESSED_BYTES);
+
+    /* A renderer that returns the wrong size is refused. */
+    bool threw = false;
+    try
+    {
+        (void)BuildLoopFromRenderer(1000.0, 120, [](size_t frames) {
+            return std::vector<uint8_t>(frames * 3);
+        });
+    }
+    catch(const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try
+    {
+        (void)BuildLoopFromRenderer(1000.0, 0, [](size_t) { return std::vector<uint8_t>(); });
+    }
+    catch(const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+}
+
 int main(int argc, char** argv)
 {
     if(argc > 1 && std::strcmp(argv[1], "--print-golden") == 0)
@@ -229,6 +314,7 @@ int main(int argc, char** argv)
         return 0;
     }
     CheckBytePin(false);
+    TestBuildLoopFromRenderer();
     for(unsigned speed : {10u, 37u, 100u, 200u})
     {
         PlaybackRequest r;
