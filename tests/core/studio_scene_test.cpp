@@ -1387,6 +1387,40 @@ static void TestOnsetDetect()
         hi.Feed(0.02f, 0.05);
     }
     CHECK(hi.Feed(0.06f, 0.05) > 0.0f, "onset: max sensitivity catches small spike");
+
+    /* Audit C-15: the strength scale divided by (3 - factor), which
+       is 0 at sensitivity 0, and the +1e-6 bias in `over` lets a
+       barely-over-threshold onset land below the factor. Sweep
+       step sizes across the threshold on a near-floor baseline
+       (where the bias matters) at every sensitivity: each
+       returned strength must be finite and in 0..1. */
+    bool sane = true;
+    for(int si = 0; si <= 4 && sane; si++)
+    {
+        for(int k = 0; k < 400 && sane; k++)
+        {
+            OnsetDetect od;
+            od.SetSensitivity((float)si * 0.25f);
+            for(int i = 0; i < 400; i++)
+            {
+                od.Feed(1e-5f, 0.005);      /* settle; refract ends */
+            }
+            const float step = 1e-5f + (float)k * 1e-6f;
+            for(int i = 0; i < 4; i++)
+            {
+                const float s = od.Feed(step, 0.005);
+                if(!std::isfinite(s) || s < 0.0f || s > 1.0f)
+                {
+                    std::printf("  onset strength %g at sens %.2f"
+                                " step %g\n", (double)s,
+                                (double)si * 0.25, (double)step);
+                    sane = false;
+                    break;
+                }
+            }
+        }
+    }
+    CHECK(sane, "onset: strength finite and in 0..1 at any sensitivity");
 }
 
 static void TestKeyMap()

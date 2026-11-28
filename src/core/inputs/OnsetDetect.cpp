@@ -48,8 +48,20 @@ float OnsetDetect::Feed(float energy, double dt)
        && refract <= 0.0f)
     {
         refract = REFRACT;
+        /* Strength maps over in [factor, 3] onto 0..1. Audit C-15:
+           at sensitivity 0 the factor IS 3, so the old unguarded
+           (over - factor) / (3 - factor) divided by zero (-inf or
+           NaN onset strength) whenever the +1e-6 bias kept `over`
+           at or under 3; the same bias can also put `over` just
+           under the factor at any sensitivity (a negative
+           strength). Guard the zero-width range and clamp. */
         const float over = env_fast / (env_slow + 1e-6f);
-        return over > 3.0f ? 1.0f : (over - factor) / (3.0f - factor);
+        if(over > 3.0f || 3.0f - factor <= 1e-6f)
+        {
+            return 1.0f;
+        }
+        const float s = (over - factor) / (3.0f - factor);
+        return s < 0.0f ? 0.0f : s;
     }
     return 0.0f;
 }
