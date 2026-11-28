@@ -723,6 +723,109 @@ int main(int argc, char** argv)
         bridge.stop();
     }
 
+    /*---- R-1 runtime output control --------------------------
+      WELCOME's capability gates the surface; the WELCOME state,
+      the OUTPUT reply and the "output" EVENT all land in the
+      output store; outputCommand puts OUTPUT_COMMAND
+      {verb, ...args} on the wire. */
+    std::printf("-- output control store + verb\n");
+    for(const bool with_cap : { true, false })
+    {
+        ui::EngineBridge bridge;
+        auto pipe = std::make_shared<TestPipe>();
+        bridge.setChannelFactoryForTesting(
+            [&](std::string&) -> std::unique_ptr<IIpcChannel>
+            { return pipe->ClientChannel(); });
+        ui::EngineWireClient::Options wopts;
+        wopts.keepalive_ms = 0;
+        bridge.setWireOptionsForTesting(wopts);
+        int output_signals = 0;
+        QObject::connect(&bridge, &ui::EngineBridge::outputChanged,
+                         [&] { ++output_signals; });
+        bridge.start();
+        ServerPeer srv = pipe->Peer();
+        Message m;
+        CHECK(srv.RecvMsg(m, 4000) && m.type == MsgType::Hello);
+        const nlohmann::json out0 = nlohmann::json::object({
+            { "master", 0.75 }, { "blackout", false },
+            { "hold", false },  { "effective", 0.75 },
+            { "contributors", nlohmann::json::object() },
+            { "uploaded_unscaled", false } });
+        nlohmann::json welcome = nlohmann::json::object({
+            { "server_version", 1 }, { "negotiated_version", 1 },
+            { "channel", "command" }, { "engine", "openrgb2-engine" },
+            { "running", true },
+            { "capabilities", with_cap
+                  ? nlohmann::json::array({ "output_control_v1" })
+                  : nlohmann::json::array() },
+            { "state", nlohmann::json::object({
+                { "output", with_cap ? out0 : nlohmann::json() } }) },
+        });
+        srv.SendMsg(MsgType::Welcome, 0, welcome);
+        CHECK(srv.RecvMsg(m, 4000) && m.type == MsgType::Subscribe);
+        srv.SendMsg(MsgType::Ok, m.request_id,
+                    nlohmann::json::object({
+                        { "subscribed", nlohmann::json::array() } }));
+        CHECK(PumpUntil([&] {
+            return bridge.connectionState() == "connected";
+        }));
+        CHECK(AnswerAutoPulls(srv));
+        CHECK(bridge.hasOutputControl() == with_cap);
+        if(!with_cap)
+        {
+            /* No capability: nothing painted, no verb sent. */
+            CHECK(bridge.output().isEmpty());
+            CHECK(bridge.outputCommand("get", {}) == 0);
+            bridge.stop();
+            continue;
+        }
+        CHECK(bridge.output().value("master").toDouble() == 0.75);
+        CHECK(output_signals >= 1);
+
+        const int id = bridge.outputCommand("set_master",
+            QVariantMap({{ "value", 0.25 }}));
+        CHECK(id > 0);
+        CHECK(srv.RecvMsg(m, 4000));
+        CHECK(m.type == MsgType::OutputCommand);
+        CHECK(m.request_id == (uint32_t)id);
+        CHECK(m.Body().value("verb", std::string()) == "set_master");
+        CHECK(m.Body().value("value", -1.0) == 0.25);
+        nlohmann::json out1 = out0;
+        out1["master"]    = 0.25;
+        out1["effective"] = 0.25;
+        srv.SendMsg(MsgType::Output, m.request_id, out1);
+        CHECK(PumpUntil([&] {
+            return bridge.output().value("master").toDouble() == 0.25;
+        }));
+
+        /* Another client's change arrives as the "output" event. */
+        nlohmann::json out2 = out1;
+        out2["blackout"]  = true;
+        out2["effective"] = 0.0;
+        srv.SendMsg(MsgType::Event, 0, nlohmann::json::object({
+            { "kind", "output" }, { "data", out2 } }));
+        CHECK(PumpUntil([&] {
+            return bridge.output().value("blackout").toBool();
+        }));
+        /* An identical push does not re-notify. */
+        const int before = output_signals;
+        srv.SendMsg(MsgType::Event, 0, nlohmann::json::object({
+            { "kind", "output" }, { "data", out2 } }));
+        PumpUntil([] { return false; }, 200);
+        CHECK(output_signals == before);
+        /* A null body ("not wired") keeps the store. */
+        srv.SendMsg(MsgType::Event, 0, nlohmann::json::object({
+            { "kind", "output" }, { "data", nullptr } }));
+        PumpUntil([] { return false; }, 200);
+        CHECK(bridge.output().value("blackout").toBool());
+
+        /* The test hook feeds a body the way the event does. */
+        bridge.setOutputForTesting(QVariantMap({
+            { "master", 1.0 }, { "hold", true } }));
+        CHECK(bridge.output().value("hold").toBool());
+        bridge.stop();
+    }
+
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

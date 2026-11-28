@@ -134,6 +134,17 @@ class EngineBridge : public QObject
        without polling. Empty = no report published yet. */
     Q_PROPERTY(QVariantMap ownership READ ownership
                    NOTIFY ownershipChanged)
+    /* R-1: the engine's runtime output control (OUTPUT body:
+       {master, blackout, hold, effective, contributors,
+       uploaded_unscaled}) — freshest-wins across WELCOME state,
+       STATE replies, OUTPUT replies and the "output" event.
+       Engine-side state, never a document field: nothing here
+       dirties a draft. Empty = not published / no capability. */
+    Q_PROPERTY(QVariantMap output READ output NOTIFY outputChanged)
+    /* True exactly when WELCOME advertised "output_control_v1";
+       the tray hides its quick controls otherwise. */
+    Q_PROPERTY(bool hasOutputControl READ hasOutputControl
+                   NOTIFY hasOutputControlChanged)
     /* studio-import Task 3: true exactly when WELCOME advertised
        "studio_workspace_v1". A false bridge falls back to the
        legacy scene verbs — workspaceCommand still sends (the
@@ -182,6 +193,13 @@ public:
        reactive body; the "reactive" event updates the store. */
     Q_INVOKABLE int reactiveCommand(const QString& verb,
                                     const QVariantMap& args);
+    /* R-1 OUTPUT_COMMAND {verb,...args} — "get", "set_master"
+       {value}, "set_blackout" {on}, "set_hold" {on}. The OUTPUT
+       reply lands in the output store. Returns 0 (nothing
+       sent) when the engine did not advertise
+       output_control_v1. */
+    Q_INVOKABLE int outputCommand(const QString& verb,
+                                  const QVariantMap& args);
     /* WORKSPACE_COMMAND {verb,...args} — section 3.3 verbs
        (get/list/catalog/validate/commit/save_copy, the
        transfer_* trio, job_status/job_cancel, preview_*). The
@@ -221,6 +239,8 @@ public:
     QVariantMap stateReport() const;
     QVariantMap reactive() const;
     QVariantMap ownership() const;
+    QVariantMap output() const;
+    bool        hasOutputControl() const;
     bool        hasWorkspace() const;
     QVariantMap workspace() const;
 
@@ -240,6 +260,13 @@ public:
        event does. */
     void setOwnershipForTesting(const QVariantMap& m)
         { AdoptOwnership(m); }
+    /* R-1: feed an OUTPUT body the way the "output" event does;
+       setOutputControlForTesting fakes the WELCOME capability
+       (offline tray tests). */
+    void setOutputForTesting(const QVariantMap& m)
+        { AdoptOutput(m); }
+    void setOutputControlForTesting(bool on)
+        { setHasOutputControl(on); }
 
     void setPipeName(const QString& name);
 
@@ -264,6 +291,8 @@ signals:
     void stateReportChanged();
     void reactiveChanged();
     void ownershipChanged();
+    void outputChanged();
+    void hasOutputControlChanged();
     void hasWorkspaceChanged();
     void workspaceChanged();
 
@@ -298,6 +327,9 @@ private:
     /* R-10: store an OWNERSHIP body when it is an object
        (null = nothing wired — keep what we have). */
     void AdoptOwnership(const QVariantMap& m);
+    /* R-1: store an OUTPUT body (empty = keep what we have). */
+    void AdoptOutput(const QVariantMap& m);
+    void setHasOutputControl(bool h);
 
     /* Audit I-4: a SCENE body (WELCOME state, scene EVENT,
        GET_SCENE reply) may announce a large document by
@@ -391,6 +423,8 @@ private:
     QVariantMap state_report_;
     QVariantMap reactive_;
     QVariantMap ownership_;
+    QVariantMap output_;
+    bool        has_output_control_ = false;
     bool        has_workspace_ = false;
     QVariantMap workspace_;
 };
