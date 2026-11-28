@@ -30,4 +30,5 @@ target_link_libraries(openrgb2_platform_windows PRIVATE
     user32
     gdi32
     ole32
-    winmm)
+    winmm
+    wtsapi32)

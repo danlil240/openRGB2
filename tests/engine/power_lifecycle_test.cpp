@@ -971,8 +971,53 @@ static void TestSuspendGatesAtPost()
     }
 }
 
+/*---------------------------------------------------------*\
+|| R-4: session lock/unlock are accepted and change nothing  ||
+||      here (the dimming rules read them) — and a lock storm||
+||      can never evict a queued power event                 ||
+\*---------------------------------------------------------*/
+
+static void TestSessionLockIgnored()
+{
+    Harness h;
+    const DeviceSnapshot wd = WiredSnap();
+    h.backend.snaps = { wd };
+    h.pipeline.RegisterDevice(wd);
+
+    h.life->PostEvent(PowerLifecycle::Event::SessionLock);
+    h.Step();
+    CHECK(!h.life->OutputPaused());
+    CHECK(!h.pipeline.OutputPaused());
+    CHECK(!h.capture_paused);
+    CHECK(!h.life->Suspended());
+    CHECK(h.pipeline.SubmitLatest(FrameFor(wd, 1, h.Red())).status
+          == SubmitStatus::Accepted);
+    h.life->PostEvent(PowerLifecycle::Event::SessionUnlock);
+    h.Step();
+    CHECK(!h.life->OutputPaused());
+
+    /* Display off queued, then far more lock/unlock events than
+       the bounded queue holds: the display-off still lands. */
+    h.life->PostEvent(PowerLifecycle::Event::DisplayOff);
+    for(int i = 0; i < 100; ++i)
+    {
+        h.life->PostEvent(i % 2 ? PowerLifecycle::Event::SessionUnlock
+                                : PowerLifecycle::Event::SessionLock);
+    }
+    h.Step();
+    CHECK(h.life->OutputPaused());
+    /* ...and lock events never release the gate either. */
+    h.life->PostEvent(PowerLifecycle::Event::SessionUnlock);
+    h.Step();
+    CHECK(h.life->OutputPaused());
+    h.life->PostEvent(PowerLifecycle::Event::DisplayOn);
+    h.Step();
+    CHECK(!h.life->OutputPaused());
+}
+
 int main()
 {
+    TestSessionLockIgnored();
     TestDisplayOffGate();
     TestFreezeOnce();
     TestSuspendResume();

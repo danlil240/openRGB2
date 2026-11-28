@@ -69,6 +69,14 @@ public:
         DisplayOn,
         Suspend,
         Resume,
+        /* R-4: interactive-session lock / unlock (WTS). Accepted
+           and ignored here — the gate is about display power,
+           not the lock screen; the dimming rules
+           (Automation::PostSessionLock) consume them. They never
+           enter the bounded queue, so a lock storm cannot evict
+           a pending Suspend/DisplayOff. */
+        SessionLock,
+        SessionUnlock,
     };
 
     struct Deps
