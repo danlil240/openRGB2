@@ -51,6 +51,7 @@
 #pragma once
 
 #include "EngineTypes.h"
+#include "OutputPolicy.h"     /* E-12b exit/idle output policy     */
 #include "PlaybackPresets.h"   /* PersistedSceneMode, PlaybackParams */
 #include "ReactiveInputs.h"    /* ReactiveInputs::PersistedInput     */
 
@@ -98,6 +99,10 @@ struct EngineState
        means "nothing managed" (fresh profile or a workspace
        that never adopted). */
     std::string                              active_workspace;
+    /* Audit E-12b: what the LEDs show at engine exit and while
+       idle (hold/black/restore + per-controller overrides).
+       Absent in older profiles -> hold/hold (no change). */
+    OutputPolicy                             output_policy;
     nlohmann::json                           extensions;
 };
 

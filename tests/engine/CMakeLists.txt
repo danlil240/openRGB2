@@ -30,6 +30,10 @@ engine_suite(shutdown_test)
 # bindings, last-known-good, durable PlaybackMode, scene loader.
 engine_suite(profile_store_test)
 
+# Audit E-12b — exit/idle output policy: model, matching, the
+# JSON validator, and the per-key executor's decision table.
+engine_suite(output_policy_test)
+
 # Studio-import Task 2 â€” managed workspace store: immutable
 # generations, atomic active-generation marker, last-valid
 # recovery, resource snapshots, revision-checked service.

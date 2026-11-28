@@ -337,6 +337,8 @@ nlohmann::json EngineStateToJson(const EngineState& state)
     /* The last managed workspace id — the engine re-adopts it
        at start (adoption only, never a scene re-apply). */
     j["active_workspace"] = state.active_workspace;
+    /* E-12b exit/idle output policy (OutputPolicy.h shape). */
+    j["output_policy"] = OutputPolicyToJson(state.output_policy);
     return j;
 }
 
@@ -783,6 +785,29 @@ bool EngineStateFromJson(const nlohmann::json& j,
         }
     }
 
+    /*---- E-12b exit/idle output policy --------------------*\
+    || A real field, validated by the same OutputPolicyFrom-  ||
+    || Json the set_policy verb uses. Absent -> hold/hold.    ||
+    \*---------------------------------------------------------*/
+    const auto pit = j.find("output_policy");
+    if(pit != j.end() && !pit->is_null())
+    {
+        std::string perr;
+        if(!OutputPolicyFromJson(*pit, candidate.output_policy, perr))
+        {
+            if(legacy)
+            {
+                warn.push_back("output_policy: " + perr +
+                               " — ignored (hold)");
+            }
+            else
+            {
+                AddErr(errs, "output_policy", perr);
+                return false;
+            }
+        }
+    }
+
     /* Unknown top-level members are retained verbatim — a
        migrated document never silently drops fields that
        still apply. */
@@ -791,7 +816,8 @@ bool EngineStateFromJson(const nlohmann::json& j,
         if(it.key() != "kind" && it.key() != "schema_version" &&
            it.key() != "scenes" && it.key() != "bindings" &&
            it.key() != "reactive" &&
-           it.key() != "active_workspace")
+           it.key() != "active_workspace" &&
+           it.key() != "output_policy")
         {
             candidate.extensions[it.key()] = it.value();
         }
