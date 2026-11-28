@@ -248,6 +248,8 @@ struct EngineHostOptions
     std::function<bool(uint32_t pid, std::string& err)>
                                  backend_closer;
     std::string                  stop_marker_path;
+    /* Action log; empty = <backend_config_dir>\..\supervisor.log. */
+    std::string                  supervisor_log_path;
 
     /* Log sink (default: stderr with the engine prefix). */
     std::function<void(const std::string&)> log;

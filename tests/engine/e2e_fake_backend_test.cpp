@@ -33,6 +33,7 @@
 #include <filesystem>
 #include <process.h>
 #include <fstream>
+#include <sstream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -672,6 +673,15 @@ static void TestBackendSupervisor(const std::filesystem::path& tmp)
                     "backend_closed_for_wedge";
         }
         CHECK(saw_close);
+    }
+    {
+        /* The managed engine's console is hidden: every action
+           is also in state\supervisor.log. */
+        std::ifstream lf(inst / "state" / "supervisor.log");
+        std::stringstream ss;
+        ss << lf.rdbuf();
+        CHECK(ss.str().find("backend_spawned") != std::string::npos);
+        CHECK(ss.str().find("backend_closed_for_wedge") != std::string::npos);
     }
     std::printf("supervisor: %zu launches, %zu events, status %s\n",
                 launch_count(), event_count(),

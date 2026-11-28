@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 
 #ifdef _WIN32
@@ -2815,9 +2816,33 @@ void EngineHost::RecordSupervisorAction(const std::string& action,
             supervisor_last_at_ = at;
         }
     }
-    Log("supervisor: " + action + " (" + d.reason + ")" +
+    const std::string line =
+        "supervisor: " + action + " (" + d.reason + ")" +
         (pid != 0 ? " pid " + std::to_string(pid) : std::string()) +
-        " -- " + d.detail);
+        " -- " + d.detail;
+    Log(line);
+    /* The engine's console is hidden in the managed layout:
+       the action also lands in state\supervisor.log (beside
+       the UI's engine-restart lines), rotated to .1 at 1 MB. */
+    {
+        std::filesystem::path lp =
+            !opts_.supervisor_log_path.empty()
+                ? std::filesystem::u8path(opts_.supervisor_log_path)
+                : std::filesystem::u8path(opts_.backend_config_dir)
+                      .parent_path() / "supervisor.log";
+        std::error_code ec;
+        if(std::filesystem::file_size(lp, ec) > 1024 * 1024 && !ec)
+        {
+            std::filesystem::path old = lp;
+            old += ".1";
+            std::filesystem::rename(lp, old, ec);
+        }
+        std::ofstream f(lp, std::ios::app | std::ios::binary);
+        if(f)
+        {
+            f << at << " engine " << line << "\r\n";
+        }
+    }
     if(service_)
     {
         service_->EmitSupervisor(nlohmann::json::object({
