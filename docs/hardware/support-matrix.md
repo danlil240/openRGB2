@@ -23,7 +23,7 @@ read the tier definitions before the table.
 | **Logitech G512 keyboard** | 108 (Keyboard 107 + Extras 1) | ✓ serial on file | ✓ ~58 Hz live lane | — | ✓ qualitative | **VERIFIED (transport)** — see ownership caveat |
 | **Razer Basilisk V3 Pro (Wired)** | 13 (wheel, logo, strip) | ✓ (serial space-padded — binding drops serial to resolve; profile hygiene note) | ✓ ~59 Hz live lane | — | ✓ qualitative | **VERIFIED (transport)** |
 | **X870E AORUS ELITE WIFI7 ICE — `LED_C` + `Chipset Accent`** | 2 | ✓ HID controller | ✓ frames accepted by backend | — | ✗ **zone identity unknown** — the two enumerated LEDs were never mapped to a physical location on the board | **OUTSIDE the verified matrix** |
-| **X870E ARGB headers `ARGB_V2_1/2/3`** (wired 8/16/8: case fans, AIO radiator+pump, top-GPU fan) | 0 enumerated | ✗ — zones enumerate with **0 LEDs** despite confirmed physical wiring | ✗ | — | ✗ | **NOT SUPPORTED in this build** — backend enumeration gap |
+| **X870E ARGB headers `ARGB_V2_1/2/3`** (wired 8/16/8: case fans, AIO radiator+pump, top-GPU fan) | 0 enumerated | ✗ — zones enumerate with **0 LEDs** despite confirmed physical wiring | ✗ | — | ✗ | **NOT SUPPORTED at qualification** — zones enumerated at 0 LEDs; the engine has resized such zones since `d9c710d`, not re-qualified (note 3) |
 | **Corsair Vengeance RGB DDR5 × 2** | — | ✗ — no SMBus DRAM controller enumerated; backend ran unelevated, PawnIO permission failure (all 5.x sessions) | ✗ | — | ✗ | **NOT SUPPORTED in this build** — needs elevated backend or signed-driver path |
 | AIO pump LCD / other cooling channels | — | — | — | — | — | **OUT OF SCOPE** — cooling/LCD excluded from this delivery |
 
@@ -46,7 +46,14 @@ read the tier definitions before the table.
    The 8/16/8 ARGB headers (the real case/AIO/top-fan lighting) do not
    enumerate LEDs at all in the vendored backend — this is the largest
    known coverage gap on this rig and predates the engine (recorded in
-   the M1 hardware profile).
+   the M1 hardware profile). **Since this matrix (2026-09-29, `d9c710d`):**
+   that commit names the managed headless `--localconfig` backend, which
+   never saves its zone sizes, as the reason resizable zones enumerate at
+   0 LEDs. The engine now RESIZEZONEs each bound zone to the scene's size
+   within the zone's reported `[leds_min, leds_max]` and re-enumerates
+   (`EngineHost::ReconcileZoneSizes`). No re-qualification of the headers
+   against the tiers above is recorded since, so they stay outside the
+   verified matrix.
 4. **DIMMs** were absent in every session (PawnIO needs elevation). They
    are a known absentee, not a regression; an elevated backend run would
    be needed to bring them into the matrix.

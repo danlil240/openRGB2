@@ -295,8 +295,9 @@ private:
        the new topology lands in `snaps` this same poll. */
     void ReconcileZoneSizes(std::vector<DeviceSnapshot>& snaps);
 
-    /* Event-interest gate for host-side event producers (stub:
-       true until IpcServer::HasSubscriber is merged). */
+    /* Event-interest gate for host-side event producers: true
+       only while an IPC client subscribes to `kind`
+       (IpcServer::HasSubscriber). */
     bool EventInterest(const char* kind) const;
 
     EngineHostOptions        opts_;
