@@ -173,7 +173,15 @@ if(-not $VcRedistDir) {
 #--------------------------------------------------------------------#
 # Small helpers                                                       #
 #--------------------------------------------------------------------#
-function Fail([string]$msg) { Write-Host "ERROR: $msg" -ForegroundColor Red; exit 1 }
+function Fail([string]$msg) {
+    Write-Host "ERROR: $msg" -ForegroundColor Red
+    if($script:UserStateHolding -and (Test-Path -LiteralPath $script:UserStateHolding)) {
+        Write-Host ("  the package's user state (state\, profiles\local\) is kept " +
+            "in $script:UserStateHolding -- the next successful staging run " +
+            "puts it back") -ForegroundColor Yellow
+    }
+    exit 1
+}
 function Info([string]$msg) { Write-Host "  $msg" }
 function Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 
@@ -223,6 +231,81 @@ function Get-BackendPin([string]$Root) {
 }
 
 #--------------------------------------------------------------------#
+# Re-staging over a package that was RUN IN PLACE (audit P-2)         #
+#--------------------------------------------------------------------#
+# Running a staged package (OpenRGB2.cmd straight from build\package)
+# writes user state INTO it: state\ (backend config, run file, logs)
+# and profiles\local\ (the engine profile, workspaces). Re-staging
+# used to Remove-Item the whole tree, deleting both. Now:
+#  * the wipe is refused unless the directory is recognisably a
+#    staged package -- manifest.json, or the marker of a staging run
+#    that did not finish -- or is empty: a mistyped -OutDir is never
+#    deleted;
+#  * the two user-state folders move to the sibling holding dir
+#    "<OutDir>.user-state" before the wipe and move back only after
+#    manifest.json is written, so they are never staged, hashed or
+#    verified as package content (the exclusion asserts below still
+#    hold). A failed run leaves them in the holding dir (Fail says
+#    where); the next run keeps them there and restores them.
+$UserStateDirs = @("state", "profiles\local")
+$StagingMarker = ".staging-incomplete"
+$script:UserStateHolding = $null
+
+# $null when $Dir may be wiped and re-staged, else why not.
+function Test-RestageableDir([string]$Dir) {
+    if(Test-Path -LiteralPath (Join-Path $Dir "manifest.json")) { return $null }
+    if(Test-Path -LiteralPath (Join-Path $Dir $StagingMarker)) { return $null }
+    if(-not (Get-ChildItem -LiteralPath $Dir -Force | Select-Object -First 1)) { return $null }
+    return "it has no manifest.json, so it is not a staged OpenRGB2 package"
+}
+
+# Moves the user-state folders of $Dir into $Holding. A folder already
+# held by an earlier failed run stays where it is; one present in BOTH
+# places is ambiguous and throws before anything moves.
+function Save-PackageUserState([string]$Dir, [string]$Holding) {
+    foreach($rel in $UserStateDirs) {
+        if((Test-Path -LiteralPath (Join-Path $Dir $rel)) -and
+           (Test-Path -LiteralPath (Join-Path $Holding $rel))) {
+            throw ("both $(Join-Path $Dir $rel) and $(Join-Path $Holding $rel) " +
+                   "exist -- keep one of them, then re-run")
+        }
+    }
+    $moved = @()
+    foreach($rel in $UserStateDirs) {
+        $src = Join-Path $Dir $rel
+        if(-not (Test-Path -LiteralPath $src)) { continue }
+        $dst = Join-Path $Holding $rel
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+        Move-Item -LiteralPath $src -Destination $dst
+        $moved += $rel
+    }
+    return ,$moved
+}
+
+# Moves held user-state folders back into $Dir, then drops the holding
+# dir once nothing is left in it.
+function Restore-PackageUserState([string]$Dir, [string]$Holding) {
+    $restored = @()
+    if(-not (Test-Path -LiteralPath $Holding)) { return ,$restored }
+    foreach($rel in $UserStateDirs) {
+        $src = Join-Path $Holding $rel
+        if(-not (Test-Path -LiteralPath $src)) { continue }
+        $dst = Join-Path $Dir $rel
+        if(Test-Path -LiteralPath $dst) {
+            throw "$dst exists in the freshly staged package -- $src was left in place"
+        }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+        Move-Item -LiteralPath $src -Destination $dst
+        $restored += $rel
+    }
+    if(-not (Get-ChildItem -LiteralPath $Holding -Recurse -File -Force |
+             Select-Object -First 1)) {
+        Remove-Item -LiteralPath $Holding -Recurse -Force
+    }
+    return ,$restored
+}
+
+#--------------------------------------------------------------------#
 # Input binaries                                                      #
 #--------------------------------------------------------------------#
 $uiExe     = Join-Path $BuildDir "src\ui\$Configuration\openrgb2-ui.exe"
@@ -255,7 +338,14 @@ if(-not $VerifyOnly) {
     catch { Fail "backend pin: $($_.Exception.Message)" }
 
     Step "Staging OpenRGB2 $version -> $OutDir"
+    $holding = "$OutDir.user-state"
+    if(Test-Path -LiteralPath $holding) { $script:UserStateHolding = $holding }
     if(Test-Path $OutDir) {
+        $notPackage = Test-RestageableDir $OutDir
+        if($notPackage) {
+            Fail ("refusing to delete ${OutDir}: $notPackage. Pass a new " +
+                  "or empty -OutDir, or remove that directory yourself.")
+        }
         # A running staged stack holds its payload DLLs locked -- refuse
         # the wipe with a pointer at the managed stop instead of dying
         # mid-delete on UnauthorizedAccess. Two signals, both scoped to
@@ -299,6 +389,15 @@ if(-not $VerifyOnly) {
                   ")$hint -- stop them first: scripts\stop-openrgb2.ps1 " +
                   "(elevated instances need an elevated shell)")
         }
+        # A package that was run in place holds user state: set it
+        # aside BEFORE the wipe (moves within the volume; refusal here
+        # deletes nothing).
+        try { $held = Save-PackageUserState $OutDir $holding }
+        catch { Fail "could not set the package's user state aside: $($_.Exception.Message) -- nothing was deleted" }
+        if($held.Count -gt 0) {
+            $script:UserStateHolding = $holding
+            Info "user state of the run-in-place package set aside ($($held -join ', ')) -> $holding"
+        }
         # Retry past transient locks (AV/indexer), then give up cleanly.
         $wiped = $false
         foreach($try_ in 1..3) {
@@ -310,6 +409,10 @@ if(-not $VerifyOnly) {
         }
     }
     New-Item -ItemType Directory -Force -Path $OutDir          | Out-Null
+    # Until manifest.json exists this marks the tree as a staging run
+    # in progress, so a failed run can still be re-staged.
+    Set-Content -Encoding ASCII -LiteralPath (Join-Path $OutDir $StagingMarker) `
+        "stage-release.ps1 run in progress (no manifest.json yet)"
     New-Item -ItemType Directory -Force -Path (Join-Path $OutDir "backend") | Out-Null
 
     #--------------------------------------------------------------#
@@ -525,7 +628,7 @@ if(-not $VerifyOnly) {
 
     $files = @()
     Get-ChildItem $OutDir -Recurse -File |
-        Where-Object { $_.Name -ne "manifest.json" } |
+        Where-Object { $_.Name -ne "manifest.json" -and $_.Name -ne $StagingMarker } |
         ForEach-Object {
             $rel = ($_.FullName.Substring($OutDir.Length).TrimStart('\','/') -replace '\\','/')
             $origin =
@@ -794,6 +897,14 @@ if(-not $VerifyOnly) {
         Fail "manifest.json was not written"
     }
     Info "manifest.json written ($($files.Count) files) after verification passed"
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath (Join-Path $OutDir $StagingMarker)
+    # Only now does the run-in-place user state go back (audit P-2):
+    # it was never part of what was verified and hashed above.
+    if(Test-Path -LiteralPath $holding) {
+        try { $back = Restore-PackageUserState $OutDir $holding }
+        catch { Fail "could not restore the package's user state: $($_.Exception.Message)" }
+        if($back.Count -gt 0) { Info "user state restored ($($back -join ', '))" }
+    }
 }
 
 Write-Host "PACKAGE OK: $OutDir" -ForegroundColor Green
