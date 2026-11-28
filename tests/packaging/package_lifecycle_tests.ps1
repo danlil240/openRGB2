@@ -143,6 +143,25 @@ function Sha([string]$path) {
 . (Join-Path $ScriptsDir "update-openrgb2.ps1")
 . (Join-Path $ScriptsDir "rollback-openrgb2.ps1")
 
+# R-9: the WER LocalDumps writer (update/rollback) is pointed at an
+# in-memory fake for the WHOLE suite, before any update runs -- an
+# elevated run of this suite must never touch the real HKLM key.
+$script:FakeReg      = @{}
+$script:FakeRegSets  = 0
+$script:WerRegistry  = @{
+    KeyExists = { param($Key)
+        @($script:FakeReg.Keys | Where-Object { $_.StartsWith("$Key|") }).Count -gt 0 }
+    GetValue  = { param($Key, $Name)
+        if($script:FakeReg.ContainsKey("$Key|$Name")) { $script:FakeReg["$Key|$Name"].Value }
+        else { $null } }
+    SetValue  = { param($Key, $Name, $Kind, $Value)
+        $script:FakeRegSets++
+        $script:FakeReg["$Key|$Name"] = @{ Kind = $Kind; Value = $Value } }
+    RemoveKey = { param($Key)
+        foreach($k in @($script:FakeReg.Keys)) {
+            if($k.StartsWith("$Key|")) { $script:FakeReg.Remove($k) } } }
+}
+
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $startSrc = Get-Content (Join-Path $ScriptsDir "start-openrgb2.ps1") -Raw
 
@@ -538,6 +557,66 @@ $uiAlive = $false
 try { $uiAlive = $null -ne (Get-Process -Id $uiProc.Id -ErrorAction Stop) } catch {}
 Check (-not $uiAlive) "stop -Force closes OUR UI (verified by image path)"
 Check ($rc -eq 0) "stop -Force with the UI exits 0"
+Kill-Spawned
+
+#====================================================================#
+Section "T7c R-9 stop marker; a respawned backend the run file never saw"
+#====================================================================#
+# The supervisors (UI -> engine, engine -> backend) never restart
+# while state\openrgb2.stopping exists: the stop must hold it for
+# its whole run (checked at QUIT time by the ctl stub) and remove it
+# on every exit path. The backend here stands for one the engine's
+# supervisor respawned: its pid is NOT the run file's (that one is
+# dead), so the stop must find it by image path and still close it.
+$instR = Join-Path $TestRoot "install-r9"
+New-FakeTree $instR "1.0.0" "R" `
+    (Join-Path $Sys32 "WindowsPowerShell\v1.0\powershell.exe") `
+    (Join-Path $Sys32 "WindowsPowerShell\v1.0\powershell.exe")
+New-Item -ItemType Directory -Force (Join-Path $instR "state") | Out-Null
+$stopMarkerR = Join-Path $instR "state\openrgb2.stopping"
+$engR = Start-Process -FilePath (Join-Path $instR "openrgb2-engine.exe") -PassThru `
+        -WindowStyle Hidden -ArgumentList "-NoProfile","-Command","Start-Sleep 300"
+$bkR  = Start-Process -FilePath (Join-Path $instR "backend\OpenRGB.exe") -PassThru `
+        -WindowStyle Hidden -ArgumentList "-NoProfile","-Command","Start-Sleep 300"
+$script:Spawned += @($engR.Id, $bkR.Id)
+$deadR = Start-Process -FilePath (Join-Path $Sys32 "cmd.exe") -PassThru `
+         -WindowStyle Hidden -ArgumentList "/c","exit"
+$deadR.WaitForExit()
+$ctlMarkR = Join-Path $TestRoot "ctl-r9.json"
+$ctlStubR = Join-Path $TestRoot "fake-ctl-r9.ps1"
+@"
+[ordered]@{ marker_at_quit = (Test-Path "$($stopMarkerR -replace '\\','\\')") } |
+    ConvertTo-Json | Set-Content -Encoding UTF8 "$($ctlMarkR -replace '\\','\\')"
+try { Stop-Process -Id $($engR.Id) -Force -ErrorAction Stop } catch {}
+"@ | Set-Content -Encoding UTF8 $ctlStubR
+[ordered]@{
+    install_dir = $instR; engine_pid = $engR.Id; backend_pid = $deadR.Id
+    engine_exe  = Join-Path $instR "openrgb2-engine.exe"
+    backend_exe = Join-Path $instR "backend\OpenRGB.exe"
+} | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $instR "state\openrgb2.run.json")
+Start-Sleep -Milliseconds 400
+$rc = Invoke-ManagedStop -InstallDir $instR -TimeoutSeconds 3 `
+    -Force $true -CtlExe $ctlStubR -ProcessList (Get-SpawnedTable)
+Check ($rc -eq 0) "R-9: stop with a respawned backend returns 0"
+if(Test-Path $ctlMarkR) {
+    $m = Get-Content $ctlMarkR -Raw | ConvertFrom-Json
+    Check ($m.marker_at_quit -eq $true) "R-9: state\openrgb2.stopping exists during the stop"
+} else { Check $false "R-9: ctl stub ran" }
+Check (-not (Test-Path $stopMarkerR)) "R-9: stop marker removed after a clean stop"
+$bkRAlive = $false
+try { $bkRAlive = $null -ne (Get-Process -Id $bkR.Id -ErrorAction Stop) } catch {}
+Check (-not $bkRAlive) "R-9: backend unknown to the run file still found by image path and closed"
+# A failing stop (QUIT ignored, no -Force -> exit 1) removes it too.
+$engR2 = Start-Process -FilePath (Join-Path $instR "openrgb2-engine.exe") -PassThru `
+         -WindowStyle Hidden -ArgumentList "-NoProfile","-Command","Start-Sleep 300"
+$script:Spawned += $engR2.Id
+$noopCtlR = Join-Path $TestRoot "noop-ctl-r9.ps1"
+Set-Content -Encoding UTF8 $noopCtlR "# ignores QUIT"
+Start-Sleep -Milliseconds 400
+$rc = Invoke-ManagedStop -InstallDir $instR -TimeoutSeconds 1 `
+    -Force $false -CtlExe $noopCtlR -ProcessList (Get-SpawnedTable)
+Check ($rc -eq 1) "R-9: engine outlived the bound -> exit 1"
+Check (-not (Test-Path $stopMarkerR)) "R-9: stop marker removed after a failed stop"
 Kill-Spawned
 
 #====================================================================#
@@ -994,6 +1073,70 @@ Check ($null -ne $script:ElevCall -and $script:ElevCall.Args -match '(^|\s)-Scan
       "-Elevated forwards -ScanOnly to the elevated copy"
 Check ($null -ne $script:ElevCall -and $script:ElevCall.Waited) "-Elevated waits for the elevated copy"
 Check (@($rcElev).Count -eq 1 -and $rcElev -eq 3) "-Elevated returns the elevated copy's exit code (3)"
+
+#====================================================================#
+Section "T17 R-9 backend crash dumps: WER LocalDumps (fake registry)"
+#====================================================================#
+$werKey = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\OpenRGB.exe"
+Check ($script:WerLocalDumpsKey -eq $werKey) "WER key: LocalDumps\OpenRGB.exe under HKLM"
+$spec = Get-WerLocalDumpsSpec "C:\X"
+Check ($spec.DumpFolder.Kind -eq "ExpandString" -and
+       $spec.DumpFolder.Value -eq "C:\X\state\crash") "DumpFolder = <install>\state\crash (REG_EXPAND_SZ)"
+Check ($spec.DumpCount.Kind -eq "DWord" -and $spec.DumpCount.Value -eq 5) "DumpCount = 5"
+Check ($spec.DumpType.Value -eq 0 -and $spec.CustomDumpFlags.Value -eq 0x1040) `
+      "custom dump: ThreadInfo | IndirectlyReferencedMemory (engine parity)"
+Check ($script:FakeRegSets -eq 0) "no update so far wrote WER keys (non-elevated runs never do)"
+
+$instW = Join-Path $TestRoot "install-wer"
+New-FakeTree $instW "1.0.0" "W1" (Join-Path $Sys32 "notepad.exe") (Join-Path $Sys32 "notepad.exe")
+$script:FakeReg.Clear()
+Check ((Set-WerLocalDumps $instW) -eq "set") "Set-WerLocalDumps on a clean machine -> set"
+Check ($script:FakeReg["$werKey|DumpFolder"].Value -eq (Join-Path $instW "state\crash")) "DumpFolder written"
+Check ($script:FakeReg["$werKey|OpenRGB2InstallDir"].Value -eq $instW) "owner value names this install"
+Check (Test-Path (Join-Path $instW "state\crash")) "state\crash created for WER"
+
+# Someone else's key (no owner value): never overwritten, never removed.
+$script:FakeReg.Clear()
+$script:FakeReg["$werKey|DumpFolder"] = @{ Kind = "ExpandString"; Value = "D:\theirs" }
+$before = $script:FakeRegSets
+Check ((Set-WerLocalDumps $instW) -eq "foreign") "foreign LocalDumps key -> left alone"
+Check ($script:FakeRegSets -eq $before -and
+       $script:FakeReg["$werKey|DumpFolder"].Value -eq "D:\theirs") "foreign key unchanged"
+Check ((Remove-WerLocalDumps $instW) -eq "foreign" -and
+       $script:FakeReg.ContainsKey("$werKey|DumpFolder")) "foreign key never removed"
+
+# Removal only for the install the key names.
+$script:FakeReg.Clear()
+Set-WerLocalDumps (Join-Path $TestRoot "other-install") | Out-Null
+Check ((Remove-WerLocalDumps $instW) -eq "other_install" -and
+       $script:FakeReg.Count -gt 0) "another OpenRGB2 install's key is kept"
+$script:FakeReg.Clear()
+Set-WerLocalDumps $instW | Out-Null
+Check ((Remove-WerLocalDumps ($instW.ToUpperInvariant() + "\")) -eq "removed" -and
+       $script:FakeReg.Count -eq 0) "own key removed (case/trailing separator insensitive)"
+Check ((Remove-WerLocalDumps $instW) -eq "absent") "nothing to remove -> absent"
+
+# The update/rollback integration: elevated update sets it,
+# non-elevated update does not, elevated rollback removes it.
+$pkgW2 = Join-Path $TestRoot "pkg-wer-v2"
+New-FakeTree $pkgW2 "2.0.0" "W2" (Join-Path $Sys32 "notepad.exe") (Join-Path $Sys32 "notepad.exe")
+$script:FakeReg.Clear()
+$before = $script:FakeRegSets
+$rc = & { function Test-IsElevated { $false }
+          Invoke-PackageUpdate -PackageDir $pkgW2 -InstallDir $instW -SkipVerify $true `
+              -SkipAclHardening $true -ProcessList $NoProcs }
+Check ($rc -eq 0 -and $script:FakeRegSets -eq $before) "non-elevated update: no WER write"
+$pkgW3 = Join-Path $TestRoot "pkg-wer-v3"
+New-FakeTree $pkgW3 "3.0.0" "W3" (Join-Path $Sys32 "notepad.exe") (Join-Path $Sys32 "notepad.exe")
+$rc = & { function Test-IsElevated { $true }
+          Invoke-PackageUpdate -PackageDir $pkgW3 -InstallDir $instW -SkipVerify $true `
+              -SkipAclHardening $true -ProcessList $NoProcs }
+Check ($rc -eq 0 -and
+       $script:FakeReg["$werKey|OpenRGB2InstallDir"].Value -eq $instW) "elevated update sets the WER key for this install"
+$rc = & { function Test-IsElevated { $true }
+          Invoke-PackageRollback -InstallDir $instW -SkipVerify $true -ProcessList $NoProcs }
+Check ($rc -eq 0 -and (Read-Tag $instW) -eq "W2") "rollback restored the previous binaries"
+Check ($script:FakeReg.Count -eq 0) "elevated rollback removes the WER key it names"
 
 } catch {
     $script:Fail++

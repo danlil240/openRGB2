@@ -319,6 +319,12 @@ void EngineBridge::ApplyWelcome(const nlohmann::json& welcome)
             AdoptOwnership(
                 JsonToVariant(state["ownership"]).toMap());
         }
+        if(state.contains("supervisor") &&
+           state["supervisor"].is_object())
+        {
+            AdoptSupervisor(
+                JsonToVariant(state["supervisor"]).toMap());
+        }
         if(has_output_control_ && state.contains("output") &&
            state["output"].is_object())
         {
@@ -434,6 +440,25 @@ void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
         if(data.is_object())
         {
             AdoptOwnership(data_map);
+        }
+    }
+    else if(kind == ipc::event_kind::kSupervisor)
+    {
+        /* R-9: status always; an "action" only on a live push
+           (the SUBSCRIBE snapshot carries none — a reconnect
+           never re-announces an old restart). */
+        if(data.is_object())
+        {
+            if(data.contains("status") && data["status"].is_object())
+            {
+                AdoptSupervisor(JsonToVariant(data["status"]).toMap());
+            }
+            if(data.contains("action") && data["action"].is_string())
+            {
+                QVariantMap ev = data_map;
+                ev.remove(QStringLiteral("status"));
+                emit supervisorAction(ev);
+            }
         }
     }
     else if(kind == ipc::event_kind::kOutput)
@@ -558,6 +583,12 @@ void EngineBridge::ApplyReply(uint32_t request_id, ipc::MsgType type,
         {
             AdoptOwnership(
                 body_map.value(QStringLiteral("ownership")).toMap());
+        }
+        if(body.contains("supervisor") &&
+           body["supervisor"].is_object())
+        {
+            AdoptSupervisor(
+                body_map.value(QStringLiteral("supervisor")).toMap());
         }
         if(has_output_control_ && body.contains("output") &&
            body["output"].is_object())
@@ -991,6 +1022,7 @@ int EngineBridge::ping()           { return Issue(ipc::MsgType::Ping, nlohmann::
 int EngineBridge::unsubscribe()    { return Issue(ipc::MsgType::Unsubscribe, nlohmann::json::object()); }
 int EngineBridge::quitEngine(bool stopBackend)
 {
+    emit quitRequested();
     return Issue(ipc::MsgType::Quit, nlohmann::json::object({
         { "stop_backend", stopBackend } }));
 }
@@ -1369,6 +1401,18 @@ void EngineBridge::setHasOutputControl(bool h)
     }
     emit hasOutputControlChanged();
 }
+
+void EngineBridge::AdoptSupervisor(const QVariantMap& m)
+{
+    if(m.isEmpty() || m == supervisor_)
+    {
+        return;
+    }
+    supervisor_ = m;
+    emit supervisorChanged();
+}
+
+QVariantMap EngineBridge::supervisor() const { return supervisor_; }
 
 void EngineBridge::AdoptOwnership(const QVariantMap& m)
 {

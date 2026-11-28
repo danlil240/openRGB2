@@ -230,6 +230,11 @@ public:
            can say "lights will turn off". Empty -> STATE null,
            QUIT omits the field. */
         std::function<nlohmann::json()> output_policy;
+        /* R-9: the backend supervisor's status (EngineHost::
+           SupervisorJson) — STATE "supervisor" and the
+           "supervisor" event's SUBSCRIBE snapshot. Empty ->
+           STATE null (no supervisor wired). */
+        std::function<nlohmann::json()> supervisor;
         /* E-12b x R-1: OUTPUT_COMMAND set_policy persists through
            this (EngineHost::SetOutputPolicy: false + err when the
            profile save fails, state unchanged). The service
@@ -368,6 +373,11 @@ public:
     /* R-2: emits the "automation" event with the current
        AUTOMATION body — Automation's changed hook calls it. */
     void EmitAutomation();
+    /* R-9: emits the "supervisor" event — the host calls this
+       once per supervisor action (spawn, wedge close, refusal
+       or exhausted budget) with {action, reason, detail, at,
+       seq, status}. */
+    void EmitSupervisor(const nlohmann::json& body);
 
     /*---- IIpcService ---------------------------------------*/
     nlohmann::json OnWelcome() override;
@@ -604,6 +614,7 @@ private:
     nlohmann::json IpcStatsJson() const;
     nlohmann::json OwnershipJson() const;
     nlohmann::json OutputPolicyJson() const;     /* E-12b */
+    nlohmann::json SupervisorJson() const;       /* R-9 */
     /* The backend's own read-only diagnostics pipe: the
        SDK client's cached LIANLI_WIRELESS_STATUS snapshot
        (state-lock read only — this never queues behind

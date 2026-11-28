@@ -48,6 +48,7 @@ add_library(openrgb2_engine STATIC
     WorkspaceService.cpp
     SingleInstance.cpp
     OwnershipScan.cpp
+    SupervisorPolicy.cpp
     Engine.cpp
     ${CORE_DIR}/playback/PlaybackLoop.cpp
     ${LLW_CTRL}/LianLiWirelessEffects.cpp
@@ -74,6 +75,7 @@ target_compile_definitions(openrgb2_engine PRIVATE
 # the studio::* model headers through this link.
 target_link_libraries(openrgb2_engine PUBLIC
     openrgb2_studio_core
+    openrgb2_supervise
     Threads::Threads)
 if(WIN32)
     # OwnershipScan: GetExtendedTcpTable for the backend-listener

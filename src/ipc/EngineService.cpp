@@ -1329,6 +1329,11 @@ void EngineService::EmitOutput()
     EmitOutputIfChanged(true);
 }
 
+void EngineService::EmitSupervisor(const nlohmann::json& body)
+{
+    Emit(event_kind::kSupervisor, body);
+}
+
 void EngineService::EmitOutputIfChanged(bool force)
 {
     if(!deps_.output)
@@ -1738,6 +1743,18 @@ nlohmann::json EngineService::OutputPolicyJson() const
     return j.is_object() ? j : nullptr;
 }
 
+/* R-9: no provider -> honest null; a non-object provider
+   result is an owner bug, still null. */
+nlohmann::json EngineService::SupervisorJson() const
+{
+    if(!deps_.supervisor)
+    {
+        return nullptr;
+    }
+    const nlohmann::json j = deps_.supervisor();
+    return j.is_object() ? j : nullptr;
+}
+
 /* QA F12: the IPC counters body on its own — STATE and
    DIAGNOSTICS both embed it; building it here keeps DIAG_GET
    from re-serializing an entire StateJson for one field. */
@@ -1793,6 +1810,7 @@ nlohmann::json EngineService::StateJson() const
         { "ipc",        IpcStatsJson()                       },
         { "output_policy", OutputPolicyJson()                },
         { "automation", AutomationJson()                     },
+        { "supervisor",    SupervisorJson()                  },
     });
 }
 
@@ -1977,6 +1995,16 @@ bool EngineService::SnapshotEvent(const std::string& kind,
     {
         /* R-2: the current AUTOMATION body (null when not wired). */
         out = AutomationJson();
+        return true;
+    }
+    if(kind == event_kind::kSupervisor)
+    {
+        /* R-9: status only — no "action", so a (re)subscribing
+           UI never re-announces an old restart. */
+        const nlohmann::json st = SupervisorJson();
+        out = nlohmann::json::object({
+            { "seq",    st.is_object() ? st.value("seq", 0) : 0 },
+            { "status", st } });
         return true;
     }
     if(kind == event_kind::kWorkspace)

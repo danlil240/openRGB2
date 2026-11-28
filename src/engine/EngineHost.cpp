@@ -25,7 +25,9 @@
 #include <chrono>
 #include <cctype>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 
 #ifdef _WIN32
@@ -294,7 +296,167 @@ size_t PostCloseToProcessWindows(uint32_t pid)
     return ctx.posted;
 }
 
+/*---------------------------------------------------------*\
+|| R-9 backend supervisor: the live probe, launcher and     ||
+|| closer. Same verified-own standard as above — a pid is  ||
+|| ours only when its image equals --backend-exe exactly.  ||
+\*---------------------------------------------------------*/
+BackendProbe LiveBackendProbe(const std::string& backend_exe,
+                              uint16_t port)
+{
+    BackendProbe p;
+    const std::string expected = NormalizeImagePath(backend_exe);
+    const uint32_t listener = FindTcpListenerPid(port);
+    if(listener != 0)
+    {
+        const std::string img = ProcessImagePath(listener);
+        if(img.empty())
+        {
+            p.port = PortHolder::Unverifiable;
+        }
+        else if(NormalizeImagePath(img) == expected)
+        {
+            p.port    = PortHolder::Own;
+            p.own_pid = listener;
+        }
+        else
+        {
+            p.port = PortHolder::Foreign;
+        }
+    }
+    /* Every process named like the backend: ours by image, or
+       "another OpenRGB.exe" (foreign or unreadable) — the
+       latter blocks a spawn. */
+    const std::string want_name = LowerAscii(
+        std::filesystem::path(backend_exe).filename().string());
+    for(const ProcessEntry& e : EnumerateProcesses())
+    {
+        if(e.pid == 0 || LowerAscii(e.exe) != want_name)
+        {
+            continue;
+        }
+        const std::string img = ProcessImagePath(e.pid);
+        if(!img.empty() && NormalizeImagePath(img) == expected)
+        {
+            if(p.own_pid == 0)
+            {
+                p.own_pid = e.pid;
+            }
+        }
+        else
+        {
+            p.other_backend_running = true;
+        }
+    }
+    return p;
+}
+
+std::wstring Widen(const std::string& s)
+{
+    return std::filesystem::u8path(s).wstring();
+}
+
+std::wstring QuoteArg(const std::wstring& a)
+{
+    if(!a.empty() && a.find_first_of(L" \t\"") == std::wstring::npos)
+    {
+        return a;
+    }
+    std::wstring out = L"\"";
+    for(wchar_t c : a)
+    {
+        if(c == L'"')
+        {
+            out += L'\\';
+        }
+        out += c;
+    }
+    out += L'"';
+    return out;
+}
+
+/* The script's Start-Process -WindowStyle Hidden, as
+   CreateProcess: hidden, no console, no inherited handles,
+   working dir = the private config dir. */
+bool LaunchBackendProcess(const BackendLaunch& l, uint32_t& pid,
+                          std::string& err)
+{
+    const std::wstring exe = Widen(l.exe);
+    std::wstring cmd = QuoteArg(exe);
+    for(const std::string& a : l.args)
+    {
+        cmd += L' ';
+        cmd += QuoteArg(Widen(a));
+    }
+    const std::wstring cwd = Widen(l.cwd);
+    STARTUPINFOW si{};
+    si.cb          = sizeof(si);
+    si.dwFlags     = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    if(!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE,
+                       CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+                       nullptr, cwd.empty() ? nullptr : cwd.c_str(),
+                       &si, &pi))
+    {
+        err = "CreateProcess failed (error " +
+              std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    pid = pi.dwProcessId;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+}
+
+/* Graceful close without the teardown's wait: re-verify the
+   image, signal the backend's PID-scoped shutdown event and
+   post WM_CLOSE (windowed builds). Never a kill — a backend
+   that ignores it stays up and the link-down rule never
+   doubles it (its pid still verifies as ours). */
+bool CloseOwnBackendNoWait(uint32_t pid, const std::string& backend_exe,
+                           std::string& err)
+{
+    if(pid == 0 || backend_exe.empty() ||
+       !IsManagedBackendImage(pid, NormalizeImagePath(backend_exe)))
+    {
+        err = "pid " + std::to_string(pid) + " no longer resolves to " +
+              backend_exe + " -- left alone";
+        return false;
+    }
+    const std::wstring ev_name =
+        L"Local\\OpenRGB2-Backend-Shutdown-" + std::to_wstring(pid);
+    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, ev_name.c_str());
+    if(ev != nullptr)
+    {
+        SetEvent(ev);
+        CloseHandle(ev);
+    }
+    const size_t posted = PostCloseToProcessWindows(pid);
+    if(ev == nullptr && posted == 0)
+    {
+        err = "backend (pid " + std::to_string(pid) + ") exposes no "
+              "shutdown event and owns no windows";
+        return false;
+    }
+    return true;
+}
+
 #endif /* _WIN32 */
+
+std::string UtcNowIso()
+{
+    const std::time_t t = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &t);
+#else
+    gmtime_r(&t, &tm);
+#endif
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return buf;
+}
 
 } /* anonymous namespace */
 
@@ -305,6 +467,15 @@ EngineHost::EngineHost(EngineHostOptions options)
     {
         opts_.log = [](const std::string& line)
         { std::fprintf(stderr, "openrgb2-engine: %s\n", line.c_str()); };
+    }
+    /* R-9: the backend supervisor runs only in the managed
+       layout (the launcher declares both the backend image and
+       its private config dir). */
+    if(opts_.backend_supervise && opts_.sdk_enabled &&
+       !opts_.backend_exe.empty() && !opts_.backend_config_dir.empty())
+    {
+        supervisor_ =
+            std::make_unique<SupervisorPolicy>(opts_.supervisor_policy);
     }
 }
 
@@ -1388,6 +1559,10 @@ bool EngineHost::Start(std::string& err)
            the QUIT reply's exit_policy. */
         ipc_deps.output_policy =
             [this] { return OutputPolicyJson(); };
+        /* R-9: the backend supervisor's status in STATE and the
+           "supervisor" event snapshot. */
+        ipc_deps.supervisor =
+            [this] { return SupervisorJson(); };
         ipc_deps.set_output_policy =
             [this](const OutputPolicy& p, std::string& e)
             { return SetOutputPolicy(p, e); };
@@ -1888,6 +2063,9 @@ void EngineHost::PollOnce()
            validation tracks the live backend state and new
            controllers get lanes without a restart. */
         SyncLanes(*pipeline_, *sdk_);
+        /* R-9: restart a dead backend / escalate a terminal
+           wireless wedge (bounded; see SupervisorPolicy.h). */
+        PollSupervisor();
     }
 
     /* Power lifecycle (Task 3.7): applies queued display/
@@ -2610,6 +2788,282 @@ const OrderlyShutdown::Result& EngineHost::Stop()
        (E-2). */
     timer_resolution_.Release();
     return shutdown_result_;
+}
+
+/*---------------------------------------------------------*\
+|| R-9 backend supervisor                                    ||
+\*---------------------------------------------------------*/
+TimePoint EngineHost::SupervisorNow() const
+{
+    return opts_.supervisor_clock ? opts_.supervisor_clock()
+                                  : Clock::now();
+}
+
+BackendProbe EngineHost::ProbeBackend() const
+{
+    if(opts_.backend_probe)
+    {
+        return opts_.backend_probe();
+    }
+#ifdef _WIN32
+    return LiveBackendProbe(opts_.backend_exe, opts_.sdk_port);
+#else
+    /* Nothing can be verified: report a foreign holder so the
+       policy never spawns. */
+    BackendProbe p;
+    p.port = PortHolder::Unverifiable;
+    return p;
+#endif
+}
+
+/* stop-openrgb2.ps1 writes state\openrgb2.stopping before it
+   touches anything and removes it in `finally`. A marker
+   older than 10 minutes is a stop that died mid-way — stale,
+   ignored, so a crash afterwards is still recovered. */
+bool EngineHost::StopMarkerFresh() const
+{
+    std::filesystem::path p;
+    if(!opts_.stop_marker_path.empty())
+    {
+        p = std::filesystem::u8path(opts_.stop_marker_path);
+    }
+    else if(!opts_.backend_config_dir.empty())
+    {
+        p = std::filesystem::u8path(opts_.backend_config_dir)
+                .parent_path() / "openrgb2.stopping";
+    }
+    else
+    {
+        return false;
+    }
+    std::error_code ec;
+    const auto when = std::filesystem::last_write_time(p, ec);
+    if(ec)
+    {
+        return false;
+    }
+    const auto age = std::filesystem::file_time_type::clock::now() - when;
+    return age < std::chrono::minutes(10);
+}
+
+void EngineHost::PollSupervisor()
+{
+    if(!supervisor_ || !sdk_)
+    {
+        return;
+    }
+    const TimePoint now = SupervisorNow();
+    SupervisorObservation obs;
+    obs.now            = now;
+    obs.link_connected = sdk_->State() == ConnectionState::Connected;
+    obs.stopping       = stop_.load() || StopMarkerFresh();
+    {
+        /* The wedge rule only trusts a live status: a reply
+           older than 30 s (wall clock of the SDK client) is
+           no evidence the group is STILL wedged. */
+        sdk::WirelessStatusSnapshot ws;
+        sdk_->WirelessStatus(ws);
+        obs.wireless_valid = ws.have_data && ws.supported &&
+            Clock::now() - ws.fetched_at < std::chrono::seconds(30);
+        if(obs.wireless_valid)
+        {
+            for(const sdk::SdkWirelessGroupStatus& g : ws.status.groups)
+            {
+                obs.groups.push_back({ g.mac, g.state, g.wedged });
+            }
+        }
+    }
+    SupervisorDecision d;
+    {
+        std::lock_guard<std::mutex> g(supervisor_mutex_);
+        d = supervisor_->Decide(obs, [this] { return ProbeBackend(); });
+    }
+    switch(d.action)
+    {
+    case SupervisorAction::None:
+        if(d.notice)
+        {
+            RecordSupervisorAction("notice", d, 0);
+        }
+        break;
+    case SupervisorAction::Spawn:
+    {
+        BackendLaunch l;
+        l.exe  = opts_.backend_exe;
+        l.args = BackendServerArgs(opts_.sdk_port);
+        l.cwd  = opts_.backend_config_dir;
+        std::error_code ec;
+        std::filesystem::create_directories(
+            std::filesystem::u8path(l.cwd), ec);
+        uint32_t    pid = 0;
+        std::string err;
+        bool ok = false;
+        if(opts_.backend_launcher)
+        {
+            ok = opts_.backend_launcher(l, pid, err);
+        }
+        else
+        {
+#ifdef _WIN32
+            ok = LaunchBackendProcess(l, pid, err);
+#else
+            err = "backend spawn is Windows-only";
+#endif
+        }
+        {
+            std::lock_guard<std::mutex> g(supervisor_mutex_);
+            supervisor_->RecordSpawn(now, ok);
+        }
+        if(ok)
+        {
+            RecordSupervisorAction("backend_spawned", d, pid);
+            /* Re-arm the SDK reconnect now instead of waiting out
+               the latched backoff / the 30 s re-probe. */
+            sdk_->ReconnectNow();
+        }
+        else
+        {
+            d.detail += " -- launch failed: " + err;
+            RecordSupervisorAction("backend_spawn_failed", d, 0);
+        }
+        break;
+    }
+    case SupervisorAction::CloseWedged:
+    {
+        std::string err;
+        bool ok = false;
+        if(opts_.backend_closer)
+        {
+            ok = opts_.backend_closer(d.pid, err);
+        }
+        else
+        {
+#ifdef _WIN32
+            ok = CloseOwnBackendNoWait(d.pid, opts_.backend_exe, err);
+#else
+            err = "backend close is Windows-only";
+#endif
+        }
+        /* Recorded either way: a close that keeps failing
+           spends the wedge budget instead of retrying every
+           tick. */
+        {
+            std::lock_guard<std::mutex> g(supervisor_mutex_);
+            supervisor_->RecordWedgeClose(now);
+        }
+        if(ok)
+        {
+            RecordSupervisorAction("backend_closed_for_wedge", d, d.pid);
+        }
+        else
+        {
+            d.detail += " -- close failed: " + err;
+            RecordSupervisorAction("backend_close_failed", d, d.pid);
+        }
+        break;
+    }
+    }
+}
+
+void EngineHost::RecordSupervisorAction(const std::string& action,
+                                        const SupervisorDecision& d,
+                                        uint32_t pid)
+{
+    const std::string at = UtcNowIso();
+    uint64_t seq = 0;
+    {
+        std::lock_guard<std::mutex> g(supervisor_mutex_);
+        seq = ++supervisor_seq_;
+        supervisor_history_.push_back({ at, action, d.reason, d.detail,
+                                        pid });
+        while(supervisor_history_.size() > 16)
+        {
+            supervisor_history_.pop_front();
+        }
+        if(action != "notice")
+        {
+            supervisor_last_at_ = at;
+        }
+    }
+    const std::string line =
+        "supervisor: " + action + " (" + d.reason + ")" +
+        (pid != 0 ? " pid " + std::to_string(pid) : std::string()) +
+        " -- " + d.detail;
+    Log(line);
+    /* The engine's console is hidden in the managed layout:
+       the action also lands in state\supervisor.log (beside
+       the UI's engine-restart lines), rotated to .1 at 1 MB. */
+    {
+        std::filesystem::path lp =
+            !opts_.supervisor_log_path.empty()
+                ? std::filesystem::u8path(opts_.supervisor_log_path)
+                : std::filesystem::u8path(opts_.backend_config_dir)
+                      .parent_path() / "supervisor.log";
+        std::error_code ec;
+        if(std::filesystem::file_size(lp, ec) > 1024 * 1024 && !ec)
+        {
+            std::filesystem::path old = lp;
+            old += ".1";
+            std::filesystem::rename(lp, old, ec);
+        }
+        std::ofstream f(lp, std::ios::app | std::ios::binary);
+        if(f)
+        {
+            f << at << " engine " << line << "\r\n";
+        }
+    }
+    if(service_)
+    {
+        service_->EmitSupervisor(nlohmann::json::object({
+            { "action", action   },
+            { "reason", d.reason },
+            { "detail", d.detail },
+            { "at",     at       },
+            { "seq",    seq      },
+            { "status", SupervisorJson() } }));
+    }
+}
+
+nlohmann::json EngineHost::SupervisorJson() const
+{
+    nlohmann::json j = nlohmann::json::object();
+    j["enabled"] = supervisor_ != nullptr;
+    if(!supervisor_)
+    {
+        j["backend_restarts"] = 0;
+        j["wedge_restarts"]   = 0;
+        j["last_reason"]      = nullptr;
+        j["last_at"]          = nullptr;
+        j["budget_exhausted"] = false;
+        j["seq"]              = 0;
+        j["history"]          = nlohmann::json::array();
+        return j;
+    }
+    const TimePoint now = SupervisorNow();
+    std::lock_guard<std::mutex> g(supervisor_mutex_);
+    const std::string reason = supervisor_->LastReason();
+    j["backend_restarts"] = supervisor_->BackendRestarts();
+    j["wedge_restarts"]   = supervisor_->WedgeRestarts();
+    j["last_reason"]      = reason.empty() ? nlohmann::json(nullptr)
+                                           : nlohmann::json(reason);
+    j["last_at"]          = supervisor_last_at_.empty()
+                                ? nlohmann::json(nullptr)
+                                : nlohmann::json(supervisor_last_at_);
+    j["budget_exhausted"] = supervisor_->SpawnBudgetExhausted(now) ||
+                            supervisor_->WedgeBudgetExhausted(now);
+    j["seq"]              = supervisor_seq_;
+    nlohmann::json hist = nlohmann::json::array();
+    for(const SupervisorEntry& e : supervisor_history_)
+    {
+        hist.push_back(nlohmann::json::object({
+            { "at",     e.at     },
+            { "action", e.action },
+            { "reason", e.reason },
+            { "detail", e.detail },
+            { "pid",    e.pid    } }));
+    }
+    j["history"] = std::move(hist);
+    return j;
 }
 
 nlohmann::json EngineHost::ArmBackendHandoff(bool stop_backend)

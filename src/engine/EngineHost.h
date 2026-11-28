@@ -61,6 +61,7 @@
 #include "ProfileStore.h"
 #include "ReactiveInputs.h"
 #include "SingleInstance.h"
+#include "SupervisorPolicy.h"
 #include "WorkspaceService.h"
 
 #include "EngineService.h"
@@ -76,6 +77,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -85,6 +87,14 @@
 
 namespace openrgb2
 {
+
+/* R-9: one backend launch the supervisor asks for. */
+struct BackendLaunch
+{
+    std::string              exe;     /* --backend-exe             */
+    std::vector<std::string> args;    /* BackendServerArgs(port)   */
+    std::string              cwd;     /* --backend-config dir      */
+};
 
 struct EngineHostOptions
 {
@@ -233,6 +243,32 @@ struct EngineHostOptions
     std::function<double()>    idle_seconds;
     std::function<bool()>      fullscreen;
     std::function<LocalTime()> wall_clock;
+    /*---- R-9 backend supervisor ----------------------------*\
+    | Active only in the managed layout: sdk_enabled AND both   |
+    | backend_exe and backend_config_dir set (the launcher      |
+    | passes them). Ticked from PollOnce. Decisions are         |
+    | SupervisorPolicy's; every action is logged, counted in    |
+    | STATE.supervisor and pushed as a "supervisor" event.      |
+    | Seams (empty = live): the policy clock, the probe         |
+    | (listener + process table, image-path verified), the      |
+    | launcher (CreateProcess, hidden, the script's exact       |
+    | arguments and working dir) and the closer (re-verified    |
+    | image, then the backend's shutdown event / WM_CLOSE —     |
+    | never a kill). The stop marker defaults to                |
+    | <backend_config_dir>\..\openrgb2.stopping, written by    |
+    | stop-openrgb2.ps1 for the length of a stop.               |
+    \*-------------------------------------------------------*/
+    bool                         backend_supervise = true;
+    SupervisorPolicyOptions      supervisor_policy;
+    std::function<TimePoint()>   supervisor_clock;
+    std::function<BackendProbe()> backend_probe;
+    std::function<bool(const BackendLaunch&, uint32_t& pid,
+                       std::string& err)> backend_launcher;
+    std::function<bool(uint32_t pid, std::string& err)>
+                                 backend_closer;
+    std::string                  stop_marker_path;
+    /* Action log; empty = <backend_config_dir>\..\supervisor.log. */
+    std::string                  supervisor_log_path;
 
     /* Log sink (default: stderr with the engine prefix). */
     std::function<void(const std::string&)> log;
@@ -369,6 +405,11 @@ public:
     { return output_idle_.load(); }
     std::vector<OutputPolicyOutcome> IdleReport() const;
 
+    /* R-9: STATE "supervisor" — {enabled, backend_restarts,
+       wedge_restarts, last_reason, last_at, budget_exhausted,
+       seq, history[]} (docs/ipc-protocol.md). Thread-safe. */
+    nlohmann::json SupervisorJson() const;
+
     void Log(const std::string& line) const;
 
 private:
@@ -413,6 +454,15 @@ private:
        bounded retries per observed count, then Enumerate so
        the new topology lands in `snaps` this same poll. */
     void ReconcileZoneSizes(std::vector<DeviceSnapshot>& snaps);
+
+    /* R-9: one supervisor tick (PollOnce). */
+    void PollSupervisor();
+    BackendProbe ProbeBackend() const;
+    bool StopMarkerFresh() const;
+    void RecordSupervisorAction(const std::string& action,
+                                const SupervisorDecision& d,
+                                uint32_t pid);
+    TimePoint SupervisorNow() const;
 
     /* Event-interest gate for host-side event producers: true
        only while an IPC client subscribes to `kind`
@@ -543,6 +593,21 @@ private:
     mutable std::mutex                       output_mutex_;
     std::map<DeviceKey, PriorMode>           prior_modes_;
     std::vector<OutputPolicyOutcome>         exit_outcomes_;
+
+    /* R-9 backend supervisor state (null = not managed). */
+    struct SupervisorEntry
+    {
+        std::string at;
+        std::string action;
+        std::string reason;
+        std::string detail;
+        uint32_t    pid = 0;
+    };
+    std::unique_ptr<SupervisorPolicy>        supervisor_;
+    mutable std::mutex                       supervisor_mutex_;
+    std::deque<SupervisorEntry>              supervisor_history_;
+    uint64_t                                 supervisor_seq_ = 0;
+    std::string                              supervisor_last_at_;
 };
 
 } /* namespace openrgb2 */

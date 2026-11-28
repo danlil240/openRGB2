@@ -95,6 +95,7 @@ const std::vector<std::string>& EventKinds()
         event_kind::kOwnership,
         event_kind::kOutput,
         event_kind::kAutomation,
+        event_kind::kSupervisor,
     };
     return kinds;
 }

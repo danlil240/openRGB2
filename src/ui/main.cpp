@@ -11,8 +11,10 @@
 |||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 |\*---------------------------------------------------------*/
 
+#include "CrashDump.h"
 #include "DiagnosticsController.h"
 #include "EngineBridge.h"
+#include "EngineSupervisor.h"
 #include "LaunchHardening.h"
 #include "OwnershipNotice.h"
 #include "LayoutController.h"
@@ -64,6 +66,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <memory>
 
 namespace
 {
@@ -144,6 +147,17 @@ void RenderTrayEntries(QMenu* menu, const QVariantList& entries,
 
 int main(int argc, char** argv)
 {
+    /* R-9: crash dumps first (<install>\state\crash, newest 5).
+       A failure only costs the dump. */
+    {
+        std::string cerr;
+        if(!openrgb2::supervise::InstallCrashDumpHandler(
+               std::string(), "openrgb2-ui", 5, &cerr))
+        {
+            std::fprintf(stderr, "crash dumps disabled: %s\n",
+                         cerr.c_str());
+        }
+    }
     /* An elevated UI must not load modules from locations a
        medium-integrity process controls: Qt's plugin / QML-import
        / style search vars are inherited from the (non-elevated)
@@ -376,6 +390,30 @@ int main(int argc, char** argv)
     {
         bridge.setPipeName(pipe);
     }
+    /* R-9: a managed session supervises the engine it started
+       (EngineSupervisor.h): crash -> the same managed start
+       again (run_start below, bound once it exists), bounded,
+       never after this UI's own Quit / stop script. */
+    std::function<void()> supervised_restart;
+    std::unique_ptr<openrgb2::ui::EngineSupervisor> engine_sup;
+    if(managed)
+    {
+        const QString inst = QCoreApplication::applicationDirPath();
+        openrgb2::ui::EngineSupervisor::Deps sd;
+        sd.state_dir  = QDir(inst).filePath(QStringLiteral("state"));
+        sd.engine_exe = QDir(inst).filePath(
+            QStringLiteral("openrgb2-engine.exe"));
+        sd.restart    = [&supervised_restart] {
+            if(supervised_restart)
+                supervised_restart();
+        };
+        engine_sup = std::make_unique<openrgb2::ui::EngineSupervisor>(
+            std::move(sd));
+        QObject::connect(&bridge,
+                         &openrgb2::ui::EngineBridge::quitRequested,
+                         engine_sup.get(),
+                         &openrgb2::ui::EngineSupervisor::noteIntendedStop);
+    }
     /* The shared workspace draft (studio-import Task 4): when
        the engine advertises studio_workspace_v1 and manages a
        workspace, both editing pages adapt to this ONE draft —
@@ -470,6 +508,10 @@ int main(int argc, char** argv)
                                              &ui_prefs);
     engine.rootContext()->setContextProperty(
         QStringLiteral("startupTask"), &startup_task);
+    /* R-9: the Diagnostics restarts card (absent = unmanaged). */
+    if(engine_sup)
+        engine.rootContext()->setContextProperty(
+            QStringLiteral("engineSupervisor"), engine_sup.get());
     /* studio-import Task 8: the Layout 3D viewport's capability
        gate — the Quick3D subtree is only compiled into the module
        in the full-Studio build; basic builds read false and keep
@@ -559,7 +601,8 @@ int main(int argc, char** argv)
         if(QFileInfo::exists(stop_script))
         {
             quit_action =
-                [&shutdown, install_dir, stop_script, exit_ui] {
+                [&shutdown, &engine_sup, install_dir, stop_script,
+                 exit_ui] {
                 if(shutdown.state() != QProcess::NotRunning)
                     return;
                 if(QMessageBox::question(nullptr,
@@ -583,6 +626,9 @@ int main(int argc, char** argv)
                 shutdown.setProcessChannelMode(QProcess::MergedChannels);
                 shutdown.setStandardOutputFile(QDir(state_dir).filePath(
                     QStringLiteral("shutdown.log")), QIODevice::Append);
+                /* R-9: the engine exit this causes is intended. */
+                if(engine_sup)
+                    engine_sup->noteIntendedStop();
                 shutdown.start();
             };
             QObject::connect(&shutdown,
@@ -707,6 +753,57 @@ int main(int argc, char** argv)
                 client->deleteLater();
             }
         });
+        /* R-9: every automatic restart is a tray message (and a
+           Diagnostics row, and a line in state\supervisor.log). */
+        if(engine_sup)
+        {
+            QObject::connect(engine_sup.get(),
+                &openrgb2::ui::EngineSupervisor::restarting, &app,
+                [&tray](const QString& reason, int delay_ms) {
+                tray.showMessage(
+                    QObject::tr("OpenRGB2 is restarting the lighting engine"),
+                    QObject::tr("%1. Restarting in %2 s - details in "
+                                "Devices & Diagnostics.")
+                        .arg(reason).arg(delay_ms / 1000),
+                    QSystemTrayIcon::Warning, 10000);
+            });
+            QObject::connect(engine_sup.get(),
+                &openrgb2::ui::EngineSupervisor::gaveUp, &app,
+                [&tray](const QString& detail) {
+                tray.showMessage(
+                    QObject::tr("OpenRGB2 stopped restarting the lighting engine"),
+                    detail, QSystemTrayIcon::Critical, 60000);
+            });
+        }
+        QObject::connect(&bridge,
+            &openrgb2::ui::EngineBridge::supervisorAction, &app,
+            [&tray](const QVariantMap& ev) {
+            const QString action =
+                ev.value(QStringLiteral("action")).toString();
+            QString title;
+            QSystemTrayIcon::MessageIcon icon =
+                QSystemTrayIcon::Information;
+            if(action == QLatin1String("backend_spawned"))
+                title = QObject::tr("OpenRGB2 restarted the lighting backend");
+            else if(action == QLatin1String("backend_closed_for_wedge"))
+                title = QObject::tr("OpenRGB2 is restarting the lighting "
+                                    "backend (wireless fans stuck)");
+            else if(action == QLatin1String("backend_spawn_failed")
+                    || action == QLatin1String("backend_close_failed"))
+            {
+                title = QObject::tr("OpenRGB2 could not restart the "
+                                    "lighting backend");
+                icon  = QSystemTrayIcon::Warning;
+            }
+            else
+            {
+                title = QObject::tr("OpenRGB2 lighting backend needs "
+                                    "attention");
+                icon  = QSystemTrayIcon::Warning;
+            }
+            tray.showMessage(title,
+                ev.value(QStringLiteral("detail")).toString(), icon, 10000);
+        });
         tray.show();
 #ifdef Q_OS_WIN
         if(background && !QSystemTrayIcon::isSystemTrayAvailable())
@@ -811,6 +908,10 @@ int main(int argc, char** argv)
                 startup_output.clear();
                 startup.start();
             };
+            /* R-9: the engine supervisor's restart is this same
+               start, never a takeover (a conflict that appeared
+               since asks again, through the paths below). */
+            supervised_restart = [run_start] { run_start(false); };
             /* Shown once the window can host it (now, or on the first
                show after a background start). */
             auto ask_takeover = [&takeover_conflicts, run_start, window] {
@@ -854,11 +955,17 @@ int main(int argc, char** argv)
                 &app, [log, window, &tray, tray_available,
                        &startup_takeover, &startup_output, drain_startup,
                        &takeover_conflicts, &takeover_ask_pending,
+                       &engine_sup,
                        ask_takeover](int code, QProcess::ExitStatus status) {
                 /* Pick up anything readyRead has not delivered yet. */
                 drain_startup();
                 if(status == QProcess::NormalExit && code == 0)
+                {
+                    /* R-9: watch the engine this start left running. */
+                    if(engine_sup)
+                        engine_sup->onStartSucceeded();
                     return;
+                }
                 if(status == QProcess::NormalExit && code == 4)
                 {
                     QMessageBox::warning(nullptr,

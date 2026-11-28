@@ -34,6 +34,30 @@ Item {
     /* E-12c timing card (DiagnosticsController::timing). */
     readonly property var timing:
         root.hasCtl ? diagCtl.timing : ({})
+    /* R-9: restarts. `engineSupervisor` (the UI's own engine
+       watch) exists only in a managed session; the backend
+       supervisor's status comes from the engine (STATE). */
+    readonly property bool hasSupervisor:
+        typeof engineSupervisor !== "undefined" && engineSupervisor !== null
+    readonly property var backendSup:
+        (typeof bridge !== "undefined" && bridge.supervisor)
+        ? bridge.supervisor : ({})
+    /* Both histories, newest first (ISO-8601 UTC sorts as text). */
+    readonly property var supervisorHistory: {
+        const out = [];
+        const e = root.hasSupervisor ? (engineSupervisor.history || []) : [];
+        for(let i = 0; i < e.length; ++i)
+            out.push({ at: e[i].at, source: qsTr("engine"),
+                       action: e[i].action, reason: e[i].reason,
+                       detail: e[i].detail });
+        const b = root.backendSup.history || [];
+        for(let j = 0; j < b.length; ++j)
+            out.push({ at: b[j].at, source: qsTr("backend"),
+                       action: b[j].action, reason: b[j].reason,
+                       detail: b[j].detail });
+        out.sort(function(x, y) { return x.at < y.at ? 1 : x.at > y.at ? -1 : 0; });
+        return out.slice(0, 8);
+    }
     /* Newest-first tail of the bounded UI-side journal. */
     readonly property var logTail:
         (root.hasCtl ? diagCtl.eventLog : []).slice(-24).reverse()
@@ -655,6 +679,93 @@ Item {
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            /*---- R-9: restarts & crash dumps ------------------
+               Every automatic restart is listed here (and was a
+               tray message): the UI's engine restarts and the
+               engine's backend restarts, with the budget state. */
+            Card {
+                id: supervisorCard
+                objectName: "supervisorCard"
+                title: qsTr("RESTARTS & CRASH DUMPS")
+                width: parent.width - 2 * col.padding
+                Column {
+                    width: parent.width
+                    spacing: Theme.spaceS
+
+                    Text {
+                        objectName: "supervisorEngineLine"
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        text: !root.hasSupervisor
+                              ? qsTr("engine: not supervised by this window (started outside the managed launcher)")
+                              : engineSupervisor.restarts === 0
+                                ? qsTr("engine: watched — no restarts this session")
+                                : qsTr("engine: restarted %1× · last: %2 (%3)")
+                                    .arg(engineSupervisor.restarts)
+                                    .arg(engineSupervisor.lastReason)
+                                    .arg(engineSupervisor.lastAt)
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+                    Text {
+                        objectName: "supervisorBackendLine"
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        text: {
+                            const s = root.backendSup;
+                            if(s.enabled === undefined)
+                                return qsTr("backend: no supervisor report from the engine");
+                            if(!s.enabled)
+                                return qsTr("backend: not supervised (engine not started by the managed launcher)");
+                            if(!s.backend_restarts && !s.wedge_restarts)
+                                return qsTr("backend: watched by the engine — no restarts");
+                            return qsTr("backend: restarted %1× (%2 closed for a wedged wireless group) · last: %3 at %4")
+                                .arg(s.backend_restarts || 0)
+                                .arg(s.wedge_restarts || 0)
+                                .arg(s.last_reason || "—")
+                                .arg(s.last_at || "—");
+                        }
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+                    Text {
+                        objectName: "supervisorExhausted"
+                        visible: (root.hasSupervisor && engineSupervisor.exhausted)
+                                 || !!root.backendSup.budget_exhausted
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        text: qsTr("Restart budget used up — OpenRGB2 stopped restarting automatically. Restart OpenRGB2; if it keeps crashing, restore a workspace backup and keep the crash dumps below.")
+                        color: Theme.warn
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+                    Repeater {
+                        model: root.supervisorHistory
+                        delegate: Text {
+                            objectName: "supervisorHistoryRow"
+                            required property var modelData
+                            width: parent ? parent.width : 0
+                            elide: Text.ElideRight
+                            text: "%1  %2 · %3 — %4%5"
+                                .arg(modelData.at || "—")
+                                .arg(modelData.source)
+                                .arg(modelData.action)
+                                .arg(modelData.reason || "")
+                                .arg(modelData.detail ? " (" + modelData.detail + ")" : "")
+                            color: Theme.textSecondary
+                            font.pixelSize: Theme.fontSizeSmall
+                        }
+                    }
+                    Text {
+                        objectName: "crashDumpNote"
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        text: qsTr("Crash dumps: state\\crash in the install folder (newest 5 per program). The backend's dumps land there through Windows Error Reporting once an elevated update has enabled it.")
+                        color: Theme.textDisabled
+                        font.pixelSize: Theme.fontSizeSmall
                     }
                 }
             }

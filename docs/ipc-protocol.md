@@ -398,7 +398,7 @@ sdk:{...}, playback:{...}, power:{...}, reactive:{...}, ownership:{...}|null,
 output:{...}|null, ipc:{sessions_active, sessions_total, messages_in, responses_out, events_sent,
 events_dropped, events_oversize, queued_events, resync_bytes, rejected_hellos,
 rate_limited, refused_busy}, output_policy:{...}|null,
-automation:{...}|null}` (`automation` is the R-2 AUTOMATION body; `sessions_total`
+automation:{...}|null, supervisor:{...}|null}` (`automation` is the R-2 AUTOMATION body, `supervisor` the R-9 SUPERVISOR body; `sessions_total`
 counts every accepted session since start; `events_oversize` counts events
 whose body exceeded the 1 MiB cap and were never sent — they are in
 `events_dropped` too).
@@ -410,6 +410,30 @@ engine's own clock, not a transport measurement. Every tick counts,
 including gated (display-off), held and no-scene ticks; the first tick
 after a worker start only seeds the baseline. The SCENE reply and the
 `scene` event do not carry it. Cleared by `reset_stats`.
+
+**SUPERVISOR** (STATE field, R-9; `null` when no supervisor is wired) —
+`{enabled, backend_restarts, wedge_restarts, last_reason, last_at,
+budget_exhausted, seq, history:[{at, action, reason, detail, pid}]}`.
+The engine's backend supervisor (`SupervisorPolicy.h`): `enabled` is
+true only in the managed layout (`--sdk` + `--backend-exe` +
+`--backend-config`). `backend_restarts` counts backend spawns (dead
+backend, and the respawn after a wedge close); `wedge_restarts`
+counts closes of the verified-own backend for a wireless group that
+stayed `wedged` + `state:"failed"` for 8 minutes (never
+`foreign_master`). `last_reason` is `backend_dead` or
+`wireless_wedge` (`null` before any action); `last_at` is the UTC
+ISO-8601 time of the last spawn/close. `budget_exhausted` is true
+while the spawn budget (5 per hour) or the wedge budget (2 per hour)
+is spent. `seq` counts actions (notices included) since engine start;
+`history` holds the last 16 actions. Actions: `backend_spawned`,
+`backend_spawn_failed`, `backend_closed_for_wedge`,
+`backend_close_failed`, `notice` (a refusal — `reason`
+`spawn_refused` when a foreign or unverifiable process holds :6744 or
+a foreign `OpenRGB.exe` runs, `budget_exhausted`,
+`wedge_unverifiable` — reported once per episode). The supervisor
+never acts while the engine stops or `state\openrgb2.stopping` (written
+by `stop-openrgb2.ps1`) is younger than 10 minutes. Each action is
+also one line in `state\supervisor.log`.
 
 **OUTPUT_POLICY** (STATE field, audit E-12b; `null` when no policy is
 wired) — what the LEDs show when the engine exits and while it has
@@ -1098,6 +1122,7 @@ matches the corresponding pull body:
 | `ownership` | OWNERSHIP body (§ STATE) | R-10: the periodic competitor re-scan (~5 s) found a writer appear or clear; SUBSCRIBE initial push carries the current report (`null` when none is wired) |
 | `output` | OUTPUT body (§5) | R-1: once per OUTPUT_COMMAND change (any session), and when `uploaded_unscaled` flips with the playback mode; SUBSCRIBE initial push carries the current body (`null` when no control is wired) |
 | `automation` | AUTOMATION body (§5) | R-2: once per AUTOMATION_COMMAND change (any session), at engine start when persisted bindings register, and (R-4) when a dimming rule starts or stops holding; SUBSCRIBE initial push carries the current body (`null` when not wired). A hotkey press itself is reported through the event of what it changed (`output`, `workspace`) |
+| `supervisor` | live: `{action, reason, detail, at, seq, status}`; SUBSCRIBE initial push: `{seq, status}` (no `action`) — `status` is the SUPERVISOR body (§5, `null` when unwired) | R-9: once per backend-supervisor action (spawn, wedge close, failure, or a once-per-episode notice). Clients announce only events that carry `action`, so a reconnect never re-announces an old restart |
 | `frame_status` | `{aggregate, wireless, controllers:[{key,delivered,lane,wireless,suppressed,owned,pending,sequence,colors,stats}]}` | ≤ ~30 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses. `wireless` is the wireless lane's own `{key,stats,suppressed,pending,owned}` summary (`null` when no wireless lane exists — the `aggregate` mixes wired lanes and is never a wireless measure). Every enumerated controller produces a `controllers` row: a lane that never delivered reports `delivered:false` + zeroed `stats` + empty `colors` (`lane:false` when the pipeline has no lane for it) — a "bound but never delivered" controller is a visible row, not an absent one |
 | `workspace` | `get` body (initial snapshot AND published-state change) / job status record (terminal job event) | SUBSCRIBE initial push; every published-state change (adopt, commit, restore, resource install/remove) — so a session whose snapshot raced boot re-adoption re-converges; a workspace job reaching a terminal state |
 | `preview` | `{type:"status"\|"frame", ...}` (below) | ≤ 30 Hz, **session-targeted** — delivered only to the session that owns the preview, never broadcast |

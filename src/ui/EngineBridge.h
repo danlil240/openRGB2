@@ -134,6 +134,13 @@ class EngineBridge : public QObject
        without polling. Empty = no report published yet. */
     Q_PROPERTY(QVariantMap ownership READ ownership
                    NOTIFY ownershipChanged)
+    /* R-9: the engine's backend-supervisor status (STATE
+       "supervisor" and every "supervisor" event's status) —
+       {enabled, backend_restarts, wedge_restarts, last_reason,
+       last_at, budget_exhausted, seq, history}. Empty = none
+       published. Live actions also arrive as supervisorAction. */
+    Q_PROPERTY(QVariantMap supervisor READ supervisor
+                   NOTIFY supervisorChanged)
     /* R-1: the engine's runtime output control (OUTPUT body:
        {master, blackout, hold, effective, contributors,
        uploaded_unscaled}) — freshest-wins across WELCOME state,
@@ -256,6 +263,7 @@ public:
     QVariantMap stateReport() const;
     QVariantMap reactive() const;
     QVariantMap ownership() const;
+    QVariantMap supervisor() const;
     QVariantMap output() const;
     bool        hasOutputControl() const;
     QVariantMap automation() const;
@@ -279,6 +287,9 @@ public:
        event does. */
     void setOwnershipForTesting(const QVariantMap& m)
         { AdoptOwnership(m); }
+    /* R-9: feed a supervisor status the way STATE does. */
+    void setSupervisorForTesting(const QVariantMap& m)
+        { AdoptSupervisor(m); }
     /* R-1: feed an OUTPUT body the way the "output" event does;
        setOutputControlForTesting fakes the WELCOME capability
        (offline tray tests). */
@@ -315,6 +326,13 @@ signals:
     void stateReportChanged();
     void reactiveChanged();
     void ownershipChanged();
+    void supervisorChanged();
+    /* R-9: one live supervisor action ({action, reason, detail,
+       at, seq}) — never emitted for a SUBSCRIBE snapshot. */
+    void supervisorAction(const QVariantMap& event);
+    /* quitEngine() was called: the engine exit that follows is
+       intended (the UI's engine supervisor must not restart). */
+    void quitRequested();
     void outputChanged();
     void hasOutputControlChanged();
     void automationChanged();
@@ -353,6 +371,8 @@ private:
     /* R-10: store an OWNERSHIP body when it is an object
        (null = nothing wired — keep what we have). */
     void AdoptOwnership(const QVariantMap& m);
+    /* R-9: store a supervisor status (empty = keep). */
+    void AdoptSupervisor(const QVariantMap& m);
     /* R-1: store an OUTPUT body (empty = keep what we have). */
     void AdoptOutput(const QVariantMap& m);
     void setHasOutputControl(bool h);
@@ -452,6 +472,7 @@ private:
     QVariantMap state_report_;
     QVariantMap reactive_;
     QVariantMap ownership_;
+    QVariantMap supervisor_;
     QVariantMap output_;
     bool        has_output_control_ = false;
     QVariantMap automation_;

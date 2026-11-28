@@ -257,6 +257,77 @@ function Test-IsElevated {
     } catch { return $false }
 }
 
+#--------------------------------------------------------------------#
+# R-9: backend crash dumps through Windows Error Reporting.            #
+# The vendored OpenRGB.exe gets no in-process handler (the engine and  #
+# the UI write their own minidumps), so an ELEVATED update sets WER    #
+# LocalDumps for OpenRGB.exe: dumps land in <install>\state\crash      #
+# (newest 5, the engine's MiniDumpWithThreadInfo |                     #
+# MiniDumpWithIndirectlyReferencedMemory flags). The key is per image  #
+# NAME, machine-wide (HKLM): a key someone else created is never       #
+# overwritten (no OpenRGB2InstallDir owner value), and rollback only   #
+# removes the key that names THIS install.                             #
+# $script:WerRegistry is the seam: the suite swaps in an in-memory     #
+# fake, so tests never touch the real registry.                        #
+#--------------------------------------------------------------------#
+$script:WerLocalDumpsKey = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\OpenRGB.exe"
+$script:WerOwnerValue    = "OpenRGB2InstallDir"
+if(-not (Get-Variable -Name WerRegistry -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:WerRegistry = @{
+        KeyExists = { param($Key) Test-Path -LiteralPath $Key }
+        GetValue  = { param($Key, $Name)
+            try { (Get-ItemProperty -LiteralPath $Key -Name $Name -ErrorAction Stop).$Name }
+            catch { $null } }
+        SetValue  = { param($Key, $Name, $Kind, $Value)
+            if(-not (Test-Path -LiteralPath $Key)) { New-Item -Path $Key -Force | Out-Null }
+            New-ItemProperty -LiteralPath $Key -Name $Name -PropertyType $Kind `
+                -Value $Value -Force | Out-Null }
+        RemoveKey = { param($Key) Remove-Item -LiteralPath $Key -Recurse -Force }
+    }
+}
+
+function Get-WerLocalDumpsSpec([string]$InstallDir) {
+    return [ordered]@{
+        DumpFolder         = @{ Kind = "ExpandString"; Value = (Join-Path $InstallDir "state\crash") }
+        DumpCount          = @{ Kind = "DWord";        Value = 5 }
+        DumpType           = @{ Kind = "DWord";        Value = 0 }        # custom
+        CustomDumpFlags    = @{ Kind = "DWord";        Value = 0x1040 }   # ThreadInfo | IndirectlyReferencedMemory
+        OpenRGB2InstallDir = @{ Kind = "String";       Value = $InstallDir }
+    }
+}
+
+# "set" | "foreign" (someone else's key, left alone) | "failed: <why>"
+function Set-WerLocalDumps([string]$InstallDir) {
+    $key = $script:WerLocalDumpsKey
+    try {
+        if(& $script:WerRegistry.KeyExists $key) {
+            $owner = & $script:WerRegistry.GetValue $key $script:WerOwnerValue
+            if(-not $owner) { return "foreign" }
+        }
+        New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir "state\crash") | Out-Null
+        $spec = Get-WerLocalDumpsSpec $InstallDir
+        foreach($name in $spec.Keys) {
+            & $script:WerRegistry.SetValue $key $name $spec[$name].Kind $spec[$name].Value
+        }
+        return "set"
+    } catch { return "failed: $($_.Exception.Message)" }
+}
+
+# "removed" | "absent" | "foreign" | "other_install" | "failed: <why>"
+function Remove-WerLocalDumps([string]$InstallDir) {
+    $key = $script:WerLocalDumpsKey
+    try {
+        if(-not (& $script:WerRegistry.KeyExists $key)) { return "absent" }
+        $owner = [string](& $script:WerRegistry.GetValue $key $script:WerOwnerValue)
+        if(-not $owner) { return "foreign" }
+        $a = $owner.TrimEnd('\','/')
+        $b = $InstallDir.TrimEnd('\','/')
+        if(-not $a.Equals($b, [StringComparison]::OrdinalIgnoreCase)) { return "other_install" }
+        & $script:WerRegistry.RemoveKey $key
+        return "removed"
+    } catch { return "failed: $($_.Exception.Message)" }
+}
+
 # True for a SID that can be "the installing user": a local, domain or
 # Entra ID account (S-1-5-21-* / S-1-12-1-*), excluding the built-in
 # Administrator account (RID 500) and the well-known domain admin
@@ -627,6 +698,25 @@ function Invoke-PackageUpdate {
             "managed stack runs elevated from this folder: re-run the update " +
             "from an elevated PowerShell to make it admin-only (the Windows " +
             "sign-in task requires that).") -ForegroundColor Yellow
+    }
+
+    #---- 8. backend crash dumps (R-9, WER LocalDumps) -----------------
+    # Best effort: the update itself already succeeded.
+    if(Test-IsElevated) {
+        $wer = Set-WerLocalDumps $InstallDir
+        if($wer -eq "set") {
+            Write-Host "==> backend crash dumps: WER LocalDumps for OpenRGB.exe -> state\crash (newest 5)" -ForegroundColor Cyan
+        } elseif($wer -eq "foreign") {
+            Write-Host ("  note: a WER LocalDumps key for OpenRGB.exe already exists " +
+                "and is not OpenRGB2's -- left unchanged (backend dumps go where " +
+                "it says)") -ForegroundColor Yellow
+        } else {
+            Write-Host "  note: backend crash dumps not configured ($wer)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host ("  note: not elevated -- backend crash dumps (WER LocalDumps, " +
+            "HKLM) not configured; the engine and UI still write their own " +
+            "dumps to state\crash") -ForegroundColor Yellow
     }
 
     Write-Host "UPDATE OK: $($newManifest.version) installed; rollback: scripts\rollback-openrgb2.ps1" -ForegroundColor Green

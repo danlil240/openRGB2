@@ -17,6 +17,7 @@
 
 #include "DiagnosticsController.h"
 #include "EngineBridge.h"
+#include "EngineSupervisor.h"
 
 #include <QElapsedTimer>
 #include <QGuiApplication>
@@ -26,6 +27,9 @@
 #include <QQuickItem>
 #include <QSet>
 #include <QQuickStyle>
+#include <QDir>
+#include <QFile>
+#include <QTemporaryDir>
 
 #include <cstdio>
 #include <cstring>
@@ -389,6 +393,93 @@ int main(int argc, char** argv)
         CHECK(card != nullptr);
         /* the banner's "How to fix" lands here */
         CHECK(QMetaObject::invokeMethod(page.get(), "showOwnership"));
+    }
+
+    /*---- R-9: the restarts & crash-dumps card ----------------
+       Honest absence first (no report, no UI supervisor), then
+       the engine's backend-supervisor status and the UI's own
+       engine-restart history render — exhausted budgets say
+       so, and the crash-dump location is named. */
+    {
+        auto text = [](QObject* root, const char* n) {
+            QObject* o = FindByName(root, n);
+            return o ? o->property("text").toString()
+                     : QStringLiteral("<missing>");
+        };
+        CHECK(FindByName(page.get(), "supervisorCard") != nullptr);
+        CHECK(text(page.get(), "supervisorBackendLine")
+                  .contains(QStringLiteral("no supervisor report")));
+        CHECK(text(page.get(), "supervisorEngineLine")
+                  .contains(QStringLiteral("not supervised")));
+        QObject* ex = FindByName(page.get(), "supervisorExhausted");
+        CHECK(ex && !ex->property("visible").toBool());
+        CHECK(text(page.get(), "crashDumpNote")
+                  .contains(QStringLiteral("state\\crash")));
+
+        QVariantList hist;
+        hist << QVariantMap{
+            { QStringLiteral("at"), QStringLiteral("2026-11-28T09:59:00Z") },
+            { QStringLiteral("action"), QStringLiteral("backend_spawned") },
+            { QStringLiteral("reason"), QStringLiteral("backend_dead") },
+            { QStringLiteral("detail"), QStringLiteral("link down") } };
+        hist << QVariantMap{
+            { QStringLiteral("at"), QStringLiteral("2026-11-28T10:00:00Z") },
+            { QStringLiteral("action"), QStringLiteral("backend_closed_for_wedge") },
+            { QStringLiteral("reason"), QStringLiteral("wireless_wedge") },
+            { QStringLiteral("detail"), QStringLiteral("group wedged") } };
+        bridge.setSupervisorForTesting(QVariantMap{
+            { QStringLiteral("enabled"),          true },
+            { QStringLiteral("backend_restarts"), 2 },
+            { QStringLiteral("wedge_restarts"),   1 },
+            { QStringLiteral("last_reason"),      QStringLiteral("wireless_wedge") },
+            { QStringLiteral("last_at"),          QStringLiteral("2026-11-28T10:00:00Z") },
+            { QStringLiteral("budget_exhausted"), true },
+            { QStringLiteral("seq"),              2 },
+            { QStringLiteral("history"),          hist } });
+        QCoreApplication::processEvents();
+        const QString bl = text(page.get(), "supervisorBackendLine");
+        CHECK(bl.contains(QStringLiteral("restarted 2")));
+        CHECK(bl.contains(QStringLiteral("wireless_wedge")));
+        CHECK(ex && ex->property("visible").toBool());
+        QSet<QObject*> rows;
+        CollectVisibleByName(page.get(), "supervisorHistoryRow", rows);
+        CHECK(rows.size() == 2);
+
+        /* The UI's own engine supervisor (managed mode) in a
+           child context: its restarts join the same card. */
+        QTemporaryDir tmp;
+        QDir().mkpath(tmp.path() + "/state");
+        {
+            QFile f(tmp.path() + "/state/openrgb2.run.json");
+            f.open(QIODevice::WriteOnly);
+            f.write("{\"engine_pid\": 4321}");
+        }
+        qint64 fake_now = 5000000;
+        ui::EngineSupervisor::Deps sd;
+        sd.state_dir = tmp.path() + "/state";
+        sd.watch     = [](quint32) { return true; };
+        sd.restart   = [] {};
+        sd.now_ms    = [&fake_now] { return fake_now; };
+        sd.schedule  = [](int, std::function<void()>) {};
+        ui::EngineSupervisor sup(std::move(sd));
+        QQmlContext child(engine.rootContext());
+        child.setContextProperty(QStringLiteral("engineSupervisor"), &sup);
+        std::unique_ptr<QObject> page2(comp.create(&child));
+        CHECK(page2 != nullptr);
+        if(page2)
+        {
+            CHECK(text(page2.get(), "supervisorEngineLine")
+                      .contains(QStringLiteral("no restarts")));
+            sup.onStartSucceeded();
+            sup.onEngineExited(4321, 0xC0000005u);
+            QCoreApplication::processEvents();
+            const QString el = text(page2.get(), "supervisorEngineLine");
+            CHECK(el.contains(QStringLiteral("restarted 1")));
+            CHECK(el.contains(QStringLiteral("0xC0000005")));
+            QSet<QObject*> rows2;
+            CollectVisibleByName(page2.get(), "supervisorHistoryRow", rows2);
+            CHECK(rows2.size() == 3);
+        }
     }
 
     /*---- R-10: the shell's conflict banner --------------------*/
