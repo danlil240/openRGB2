@@ -1738,7 +1738,7 @@ void EngineHost::PollOnce()
             if(done != snap_it->topology_generation)
             {
                 /* E-12b: remember the hardware mode we are
-                   about to replace (first observation only) �
+                   about to replace (first observation only) —
                    the exit/idle "restore" policy returns to it. */
                 RecordPriorMode(key);
                 if(sdk_->SetCustomMode(key))
@@ -1750,7 +1750,8 @@ void EngineHost::PollOnce()
     }
 }
 
-/*---------------------------------------------------------*|| Audit E-12b: exit/idle output policy                      ||
+/*---------------------------------------------------------*\
+|| Audit E-12b: exit/idle output policy                      ||
 \*---------------------------------------------------------*/
 void EngineHost::RecordPriorMode(const DeviceKey& key)
 {
@@ -1785,6 +1786,165 @@ std::map<DeviceKey, PriorMode> EngineHost::PriorModes() const
 {
     std::lock_guard<std::mutex> g(output_mutex_);
     return prior_modes_;
+}
+
+OutputPolicy EngineHost::GetOutputPolicy()
+{
+    std::lock_guard<std::mutex> g(state_mutex_);
+    return engine_state_.output_policy;
+}
+
+bool EngineHost::SetOutputPolicy(const OutputPolicy& policy,
+                                 std::string& err)
+{
+    std::lock_guard<std::mutex> g(state_mutex_);
+    if(engine_state_.output_policy == policy)
+    {
+        return true;
+    }
+    EngineState next   = engine_state_;
+    next.output_policy = policy;
+    if(profile_ && !profile_->Save(next, err))
+    {
+        return false;                  /* state stays as it was */
+    }
+    engine_state_ = std::move(next);
+    Log(std::string("output policy set: on_exit=") +
+        OutputActionName(policy.on_exit) + " on_idle=" +
+        OutputActionName(policy.on_idle) + " overrides=" +
+        std::to_string(policy.per_controller.size()));
+    return true;
+}
+
+std::vector<OutputPolicyOutcome> EngineHost::ExitPolicyReport() const
+{
+    std::lock_guard<std::mutex> g(output_mutex_);
+    return exit_outcomes_;
+}
+
+std::vector<DeviceSnapshot> EngineHost::OutputPolicyTargets()
+{
+    std::vector<DeviceSnapshot> out;
+    if(!sdk_)
+    {
+        return out;
+    }
+    const std::vector<DeviceKey> bound = mapper_.BoundControllers();
+    const std::map<DeviceKey, PriorMode> touched = PriorModes();
+    for(DeviceSnapshot& s : sdk_->Snapshots())
+    {
+        if(s.connection != ConnectionState::Connected)
+        {
+            continue;
+        }
+        if(std::find(bound.begin(), bound.end(), s.key) != bound.end() ||
+           touched.count(s.key) != 0)
+        {
+            out.push_back(std::move(s));
+        }
+    }
+    return out;
+}
+
+OutputPolicyDeps EngineHost::BuildOutputPolicyDeps()
+{
+    OutputPolicyDeps d;
+    d.output_paused = [this]
+    { return lifecycle_ && lifecycle_->OutputPaused(); };
+    d.calibration_owns = [this](const DeviceKey& k)
+    { return calibration_ && calibration_->OwnsGroup(k); };
+    d.playback_owns = [this](const DeviceKey& k)
+    { return playback_ && playback_->OwnsGroup(k); };
+    /* The existing owner write: playback's stop-black. The
+       power-control entry point is used so the per-scene
+       persisted selection is NOT rewritten to "stopped" — the
+       next start replays the user's choice. */
+    d.playback_stop_black = [this](std::string& err)
+    {
+        if(!playback_)
+        {
+            err = "no playback controller";
+            return false;
+        }
+        const PlaybackController::Result r =
+            playback_->RequestPowerControl(PlaybackControl::Stopped);
+        if(!r.accepted)
+        {
+            err = r.reason;
+        }
+        return r.accepted;
+    };
+    d.submit_black = [this](const DeviceSnapshot& s, std::string& err)
+    {
+        RgbFrame f;
+        f.controller          = s.key;
+        f.topology_generation = s.topology_generation;
+        f.sample_time         = Clock::now();
+        f.synthetic           = true;
+        f.colors.assign(s.LedCount(), RgbColor{ 0, 0, 0 });
+        const SubmitResult r = pipeline_->SubmitReliable(f);
+        if(r.status == SubmitStatus::Rejected)
+        {
+            err = r.reason;
+            return false;
+        }
+        return true;
+    };
+    d.wait_idle = [this](const DeviceKey& k, Clock::duration t)
+    { return pipeline_->WaitIdle(k, t); };
+    d.select_mode = [this](const DeviceKey& k, const PriorMode& m,
+                           std::string& err)
+    {
+        sdk::ModePatch patch;
+        patch.has_speed     = true;
+        patch.speed         = m.speed;
+        patch.has_direction = true;
+        patch.direction     = m.direction;
+        patch.has_colors    = !m.colors.empty();
+        patch.colors        = m.colors;
+        if(!sdk_->SelectMode(k, m.name, patch))
+        {
+            err = sdk_->LastError();
+            return false;
+        }
+        return true;
+    };
+    d.drop_pending = [this](const DeviceKey& k)
+    { pipeline_->DropPending(k); };
+    return d;
+}
+
+void EngineHost::LogOutcomes(const char* phase,
+                             const std::vector<OutputPolicyOutcome>& out)
+{
+    for(const OutputPolicyOutcome& o : out)
+    {
+        Log(std::string("output policy (") + phase + "): " +
+            o.key.device + " " + OutputActionName(o.policy) + " -> " +
+            o.outcome + (o.detail.empty() ? "" : " (" + o.detail + ")"));
+    }
+}
+
+/* The "output-policy" shutdown step: frame production is
+   stopped (scene worker + reactive inputs), the lanes and the
+   transport are still up. */
+void EngineHost::RunExitPolicy()
+{
+    if(!sdk_ || !pipeline_)
+    {
+        return;
+    }
+    const OutputPolicy policy = GetOutputPolicy();
+    const std::vector<DeviceSnapshot> targets = OutputPolicyTargets();
+    std::vector<OutputPolicyOutcome> out;
+    {
+        std::map<DeviceKey, PriorMode> priors = PriorModes();
+        out = RunOutputPolicy(targets, OutputPhase::Exit, policy,
+                              priors, BuildOutputPolicyDeps());
+    }
+    LogOutcomes("exit", out);
+    std::lock_guard<std::mutex> g(output_mutex_);
+    exit_outcomes_ = std::move(out);
 }
 
 /* Zone-size reconciliation. The scene document's declared
@@ -2042,6 +2202,16 @@ const OrderlyShutdown::Result& EngineHost::Stop()
     shutdown.Add("reactive-inputs",
                  std::chrono::milliseconds(3000),
                  [this] { if(reactive_) reactive_->Shutdown(); });
+    /* Audit E-12b: the exit output policy (hold / black /
+       restore per controller). Frame production is stopped;
+       the lanes and the transport are still up, so a black
+       frame rides the reliable lane slot and a restore goes
+       to the transport once its lane is idle. Skipped under
+       the power gate. 500 ms per lane wait, lanes draining in
+       parallel. */
+    shutdown.Add("output-policy",
+                 std::chrono::milliseconds(2000),
+                 [this] { RunExitPolicy(); });
     /* One in-flight transport send per lane plus join time —
        bounded by the transport's own send timeout (4 s
        default); lanes join sequentially. */

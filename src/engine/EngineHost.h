@@ -305,11 +305,27 @@ public:
     uint32_t                 PendingBackendPid() const
     { return pending_backend_pid_.load(); }
 
-    /*---- Audit E-12b: exit/idle output policy ----------------*    | Each bound controller's hardware mode as it was BEFORE the |
+    /*---- Audit E-12b: exit/idle output policy ----------------*\
+    | Each bound controller's hardware mode as it was BEFORE the |
     | upkeep's first SetCustomMode this run (first observation   |
-    | per key; memory only — a restart loses it).                |
+    | per key; memory only â€” a restart loses it).                |
     \*---------------------------------------------------------*/
     std::map<DeviceKey, PriorMode> PriorModes() const;
+
+    /* The engine API behind OUTPUT_COMMAND get_policy /
+       set_policy (verbs pending R-1): the caller validates a
+       wire body with OutputPolicyFromJson, then SetOutputPolicy
+       persists it in EngineState (profile save; false + err on
+       a failed save, state unchanged). Takes effect at the next
+       exit / idle entry. Thread-safe. */
+    OutputPolicy   GetOutputPolicy();
+    bool           SetOutputPolicy(const OutputPolicy& policy,
+                                   std::string& err);
+
+    /* What the "output-policy" shutdown step did, one entry
+       per controller ({key, policy, outcome, detail}); empty
+       before Stop() or when no controller was a target. */
+    std::vector<OutputPolicyOutcome> ExitPolicyReport() const;
 
     void Log(const std::string& line) const;
 
@@ -453,8 +469,16 @@ private:
 
     /* Audit E-12b: exit/idle output policy state. */
     void RecordPriorMode(const DeviceKey& key);
+    OutputPolicyDeps                 BuildOutputPolicyDeps();
+    /* Connected controllers the policy applies to: bound by
+       the scene, or switched to Direct by us this run. */
+    std::vector<DeviceSnapshot>      OutputPolicyTargets();
+    void                             RunExitPolicy();
+    void LogOutcomes(const char* phase,
+                     const std::vector<OutputPolicyOutcome>& out);
     mutable std::mutex                       output_mutex_;
     std::map<DeviceKey, PriorMode>           prior_modes_;
+    std::vector<OutputPolicyOutcome>         exit_outcomes_;
 };
 
 } /* namespace openrgb2 */

@@ -300,4 +300,226 @@ bool IsDirectModeName(const std::string& name)
     return lower == "direct" || lower == "custom";
 }
 
+/*---------------------------------------------------------*\
+||| Per-key executor                                        ||
+\*---------------------------------------------------------*/
+
+std::vector<OutputPolicyOutcome> RunOutputPolicy(
+    const std::vector<DeviceSnapshot>&    targets,
+    OutputPhase                           phase,
+    const OutputPolicy&                   policy,
+    const std::map<DeviceKey, PriorMode>& priors,
+    const OutputPolicyDeps&               deps)
+{
+    std::vector<OutputPolicyOutcome> out(targets.size());
+    for(size_t i = 0; i < targets.size(); ++i)
+    {
+        out[i].key    = targets[i].key;
+        out[i].policy = phase == OutputPhase::Exit
+            ? policy.ExitFor(targets[i].key)
+            : policy.IdleFor(targets[i].key);
+    }
+
+    /* 1. The power gate: a write would wake a sleeping display
+          or cross a suspend boundary — the upkeep's own rule. */
+    if(deps.output_paused && deps.output_paused())
+    {
+        for(OutputPolicyOutcome& o : out)
+        {
+            o.outcome = "skipped_power_gate";
+        }
+        return out;
+    }
+
+    const long long idle_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            deps.lane_idle_timeout).count();
+    std::vector<size_t> owned_black, hold_keys, black_keys,
+                        restore_keys;
+    std::vector<const PriorMode*> restore_modes;
+
+    /* 2. Classify. */
+    for(size_t i = 0; i < targets.size(); ++i)
+    {
+        const DeviceSnapshot& t = targets[i];
+        OutputPolicyOutcome&  o = out[i];
+        if(deps.calibration_owns && deps.calibration_owns(t.key))
+        {
+            o.outcome = "skipped_calibration";
+            continue;
+        }
+        if(deps.playback_owns && deps.playback_owns(t.key))
+        {
+            if(o.policy == OutputAction::Black)
+            {
+                owned_black.push_back(i);
+            }
+            else if(o.policy == OutputAction::Restore)
+            {
+                o.outcome = "loop_kept";
+                o.detail  = "the uploaded loop is the hardware mode";
+            }
+            else
+            {
+                o.outcome = "held";
+            }
+            continue;
+        }
+        if(o.policy == OutputAction::Hold)
+        {
+            o.outcome = "held";
+            hold_keys.push_back(i);
+            continue;
+        }
+        if(o.policy == OutputAction::Restore)
+        {
+            const auto pit = priors.find(t.key);
+            if(IsWirelessGroupController(t))
+            {
+                o.outcome = "black_fallback";
+                o.detail  = "wireless group: restoring a hardware "
+                            "mode is not verified there";
+            }
+            else if(pit == priors.end())
+            {
+                o.outcome = "black_fallback";
+                o.detail  = "no recorded hardware mode (the engine "
+                            "never switched it this run)";
+            }
+            else if(IsDirectModeName(pit->second.name))
+            {
+                o.outcome = "black_fallback";
+                o.detail  = "recorded mode '" + pit->second.name +
+                            "' was left by an earlier run";
+            }
+            else
+            {
+                restore_keys.push_back(i);
+                restore_modes.push_back(&pit->second);
+                continue;
+            }
+        }
+        else
+        {
+            o.outcome = "black";
+        }
+        black_keys.push_back(i);
+    }
+
+    /* 3. The loop owner's write (stop-black) — once. It also
+          queues black on the wired peers' lanes, so a hold key
+          drops that frame if it is still unsent. */
+    if(!owned_black.empty())
+    {
+        std::string err;
+        const bool ok = deps.playback_stop_black
+            ? deps.playback_stop_black(err) : false;
+        if(!ok && err.empty())
+        {
+            err = "playback stop-black unavailable";
+        }
+        for(size_t i : owned_black)
+        {
+            out[i].outcome = ok ? "loop_stopped" : "failed";
+            out[i].detail  = ok ? "" : err;
+        }
+        if(ok && deps.drop_pending)
+        {
+            for(size_t i : hold_keys)
+            {
+                deps.drop_pending(targets[i].key);
+            }
+        }
+    }
+
+    /* 4. Queue every black frame first: the lane workers then
+          deliver in parallel while we wait below. A pending
+          live frame is dropped so it cannot follow the black. */
+    std::vector<size_t> queued;
+    for(size_t i : black_keys)
+    {
+        if(deps.drop_pending)
+        {
+            deps.drop_pending(targets[i].key);
+        }
+        std::string err;
+        const bool ok = deps.submit_black
+            ? deps.submit_black(targets[i], err) : false;
+        if(!ok)
+        {
+            out[i].outcome = "failed";
+            out[i].detail  = err.empty() ? "black write unavailable"
+                                         : err;
+            continue;
+        }
+        queued.push_back(i);
+    }
+    for(size_t i : queued)
+    {
+        if(deps.wait_idle &&
+           !deps.wait_idle(targets[i].key, deps.lane_idle_timeout))
+        {
+            out[i].detail += (out[i].detail.empty() ? "" : "; ") +
+                std::string("not confirmed sent within ") +
+                std::to_string(idle_ms) + " ms";
+        }
+    }
+
+    /* 5. Restore: the lane goes quiet first (the mode change is
+          serialized behind the last live send), then UPDATEMODE
+          straight to the transport. */
+    for(size_t n = 0; n < restore_keys.size(); ++n)
+    {
+        const size_t     i = restore_keys[n];
+        const PriorMode& m = *restore_modes[n];
+        if(deps.drop_pending)
+        {
+            deps.drop_pending(targets[i].key);
+        }
+        std::string note;
+        if(deps.wait_idle &&
+           !deps.wait_idle(targets[i].key, deps.lane_idle_timeout))
+        {
+            note = "lane not idle within " + std::to_string(idle_ms) +
+                   " ms";
+        }
+        std::string err;
+        const bool ok = deps.select_mode
+            ? deps.select_mode(targets[i].key, m, err) : false;
+        if(ok)
+        {
+            out[i].outcome = "restored";
+            out[i].detail  = note.empty() ? m.name
+                                          : m.name + "; " + note;
+        }
+        else
+        {
+            out[i].outcome = "failed";
+            out[i].detail  = err.empty() ? "mode select unavailable"
+                                         : err;
+        }
+    }
+    return out;
+}
+
+nlohmann::json OutputPolicyOutcomesToJson(
+    const std::vector<OutputPolicyOutcome>& outcomes)
+{
+    nlohmann::json arr = nlohmann::json::array();
+    for(const OutputPolicyOutcome& o : outcomes)
+    {
+        arr.push_back(nlohmann::json::object({
+            { "key", nlohmann::json::object({
+                { "device",   o.key.device   },
+                { "serial",   o.key.serial   },
+                { "location", o.key.location },
+            }) },
+            { "policy",  OutputActionName(o.policy) },
+            { "outcome", o.outcome                  },
+            { "detail",  o.detail                   },
+        }));
+    }
+    return arr;
+}
+
 } /* namespace openrgb2 */

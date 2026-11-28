@@ -682,12 +682,15 @@ int main()
            no apply can arrive any more. */
         "scene-snapshot",
         "scene-worker", "reactive-inputs",
+        /* E-12b: the exit output policy writes while the
+           lanes and the transport are still up. */
+        "output-policy",
         "delivery-pipeline", "sdk-transport",
     };
-    CHECK(sd.steps.size() == 10);
-    if(sd.steps.size() == 10)
+    CHECK(sd.steps.size() == 11);
+    if(sd.steps.size() == 11)
     {
-        for(size_t i = 0; i < 10; ++i)
+        for(size_t i = 0; i < 11; ++i)
         {
             CHECK(sd.steps[i].name == want_order[i]);
             CHECK(sd.steps[i].within);
