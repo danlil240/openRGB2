@@ -1748,6 +1748,9 @@ void EngineHost::PollOnce()
             }
         }
     }
+
+    /* Audit E-12b: idle entry/exit (on_idle). */
+    PollIdle();
 }
 
 /*---------------------------------------------------------*\
@@ -1945,6 +1948,76 @@ void EngineHost::RunExitPolicy()
     LogOutcomes("exit", out);
     std::lock_guard<std::mutex> g(output_mutex_);
     exit_outcomes_ = std::move(out);
+}
+
+std::vector<OutputPolicyOutcome> EngineHost::IdleReport() const
+{
+    std::lock_guard<std::mutex> g(output_mutex_);
+    return idle_outcomes_;
+}
+
+/* Idle = no scene, or one with no objects, applied for
+   output_idle_after (boot with nothing to adopt, or a scene
+   replaced by an empty one — there is no workspace close
+   path). on_idle runs once per idle entry; the next applied
+   scene ends it. Display-off / suspend is not idle: under the
+   power gate the entry waits (PowerLifecycle owns that). */
+void EngineHost::PollIdle()
+{
+    if(!service_)
+    {
+        return;
+    }
+    const TimePoint now = opts_.output_clock ? opts_.output_clock()
+                                             : Clock::now();
+    const std::shared_ptr<const studio::SceneDocument> doc =
+        service_->Scene();
+    if(doc && !doc->objects.empty())
+    {
+        idle_tracking_ = false;
+        if(output_idle_.exchange(false))
+        {
+            Log("output policy: idle ended (scene applied)");
+        }
+        return;
+    }
+    if(!idle_tracking_)
+    {
+        idle_tracking_ = true;
+        idle_since_    = now;
+        return;
+    }
+    if(output_idle_.load() || now - idle_since_ < opts_.output_idle_after)
+    {
+        return;
+    }
+    if(lifecycle_ && lifecycle_->OutputPaused())
+    {
+        return;                        /* deferred, not consumed */
+    }
+    output_idle_.store(true);
+    std::vector<OutputPolicyOutcome> out;
+    if(sdk_ && pipeline_)
+    {
+        const OutputPolicy policy = GetOutputPolicy();
+        out = RunOutputPolicy(OutputPolicyTargets(), OutputPhase::Idle,
+                              policy, PriorModes(),
+                              BuildOutputPolicyDeps());
+    }
+    for(const OutputPolicyOutcome& o : out)
+    {
+        /* A restored device left Direct: the upkeep must
+           re-assert it when the next scene binds it. */
+        if(o.outcome == "restored")
+        {
+            custom_mode_done_.erase(o.key);
+        }
+    }
+    Log("output policy: idle entered (" + std::to_string(out.size()) +
+        " controller(s))");
+    LogOutcomes("idle", out);
+    std::lock_guard<std::mutex> g(output_mutex_);
+    idle_outcomes_ = std::move(out);
 }
 
 /* Zone-size reconciliation. The scene document's declared

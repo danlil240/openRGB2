@@ -355,6 +355,167 @@ static void TestPriorModeRecording(const std::filesystem::path& tmp)
     host.Stop();
 }
 
+/* E-12b step 4: idle = no scene (or an empty one) applied for
+   output_idle_after; on_idle runs ONCE per idle entry through
+   the exit executor, the next applied scene clears it, and the
+   power gate defers it. Clock injected — no 5 s sleeps. */
+static bool LastFrameBlack(const sdk_test::FakeSdkServer& server,
+                           uint32_t dev)
+{
+    bool black = false, seen = false;
+    for(const sdk_test::ServerEvent& e : server.SnapshotEvents())
+    {
+        if(e.pkt_id != sdk::kPktUpdateLEDs || e.dev_id != dev ||
+           e.body.size() < 6)
+        {
+            continue;
+        }
+        uint16_t count = 0;
+        memcpy(&count, e.body.data() + 4, 2);
+        if(e.body.size() < 6u + 4u * count)
+        {
+            continue;
+        }
+        seen  = true;
+        black = count > 0;
+        for(uint16_t i = 0; i < count; ++i)
+        {
+            uint32_t c = 0;
+            memcpy(&c, e.body.data() + 6 + 4 * i, 4);
+            black = black && (c & 0x00FFFFFFu) == 0;
+        }
+    }
+    return seen && black;
+}
+
+static size_t CountRestores(const sdk_test::FakeSdkServer& server)
+{
+    size_t n = 0;
+    for(const sdk_test::ServerEvent& e : server.SnapshotEvents())
+    {
+        if(e.pkt_id == sdk::kPktUpdateMode && e.dev_id == 0 &&
+           e.body.size() >= 8)
+        {
+            int32_t idx = -1;
+            memcpy(&idx, e.body.data() + 4, 4);
+            n += idx == 1 ? 1 : 0;              /* "Rainbow" */
+        }
+    }
+    return n;
+}
+
+static void TestIdlePolicy(const std::filesystem::path& tmp)
+{
+    sdk_test::FakeSdkServer server;
+    server.controllers = { RainbowWired() };
+    std::atomic<int64_t> now_ms{ 1000000 };
+    EngineHostOptions o = E12bOptions(server, tmp, "idle");
+    const TimePoint base = Clock::now();
+    o.output_clock = [&now_ms, base]
+    { return base + std::chrono::milliseconds(now_ms.load()); };
+    EngineHost host(std::move(o));
+    std::string err;
+    CHECK(host.Start(err));
+
+    OutputPolicy p;
+    p.on_idle = OutputAction::Restore;
+    CHECK(host.SetOutputPolicy(p, err));
+
+    const nlohmann::json empty_doc = {
+        { "version", 2 }, { "name", "empty" },
+        { "objects", nlohmann::json::array() },
+    };
+    auto advance = [&](int64_t ms)
+    {
+        now_ms += ms;
+        host.PollOnce();
+    };
+
+    /* Boot with nothing applied, but nothing was switched to
+       Direct by us either: idle is entered with no target. */
+    advance(0);
+    advance(6000);
+    CHECK(host.OutputIdle());
+    CHECK(host.IdleReport().empty());
+    CHECK(server.CountEvents(sdk::kPktUpdateMode) == 0);
+
+    /* A scene clears idle; the upkeep records Rainbow. */
+    CHECK(ApplyDoc(host, RainbowSceneDoc()));
+    advance(0);
+    CHECK(!host.OutputIdle());
+    for(int i = 0; i < 20 &&
+        server.CountEvents(sdk::kPktSetCustomMode) == 0; ++i)
+    {
+        advance(10);
+    }
+    CHECK(server.CountEvents(sdk::kPktSetCustomMode) >= 1);
+    advance(60000);                      /* a scene is never idle */
+    CHECK(!host.OutputIdle());
+
+    /* Empty scene: idle only after the full 5 s. */
+    CHECK(ApplyDoc(host, empty_doc));
+    advance(0);
+    advance(4900);
+    CHECK(!host.OutputIdle());
+    CHECK(CountRestores(server) == 0);
+    advance(200);
+    CHECK(host.OutputIdle());
+    CHECK(CountRestores(server) == 1);
+    {
+        const std::vector<OutputPolicyOutcome> rep = host.IdleReport();
+        CHECK(rep.size() == 1);
+        CHECK(rep.size() == 1 && rep[0].outcome == "restored" &&
+              rep[0].detail == "Rainbow");
+    }
+    advance(10000);                       /* once per idle entry */
+    CHECK(CountRestores(server) == 1);
+
+    /* The next scene clears idle and re-asserts Direct (the
+       restore handed the device back to its hardware mode). */
+    const size_t custom_before =
+        server.CountEvents(sdk::kPktSetCustomMode);
+    CHECK(ApplyDoc(host, RainbowSceneDoc()));
+    advance(0);
+    advance(10);
+    CHECK(!host.OutputIdle());
+    CHECK(server.CountEvents(sdk::kPktSetCustomMode) > custom_before);
+    /* Wait for a live frame so the black below is provably the
+       idle write, not an initial state. */
+    for(int i = 0; i < 200 && LastFrameBlack(server, 0); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    /* Second idle entry, now black — deferred while the power
+       gate (display off) holds: display-off is not idle. */
+    p.on_idle = OutputAction::Black;
+    CHECK(host.SetOutputPolicy(p, err));
+    CHECK(ApplyDoc(host, empty_doc));
+    advance(0);
+    host.GetLifecycle()->PostEvent(PowerLifecycle::Event::DisplayOff);
+    advance(0);
+    CHECK(host.GetLifecycle()->OutputPaused());
+    advance(6000);
+    CHECK(!host.OutputIdle());
+    host.GetLifecycle()->PostEvent(PowerLifecycle::Event::DisplayOn);
+    for(int i = 0; i < 200 && !host.OutputIdle(); ++i)
+    {
+        /* the lifecycle's wake path runs on the real clock */
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        advance(100);
+    }
+    CHECK(host.OutputIdle());
+    {
+        const std::vector<OutputPolicyOutcome> rep = host.IdleReport();
+        CHECK(rep.size() == 1 && rep[0].outcome == "black");
+    }
+    CHECK(LastFrameBlack(server, 0));
+    CHECK(CountRestores(server) == 1);
+
+    host.RequestStop();
+    host.Stop();
+}
+
 int main()
 {
     std::error_code ec;
@@ -768,6 +929,7 @@ int main()
 
     TestPartialStartTeardown(tmp);
     TestPriorModeRecording(tmp);
+    TestIdlePolicy(tmp);
 
     std::printf("%d checks, %d failures\n", checks, failures);
     {

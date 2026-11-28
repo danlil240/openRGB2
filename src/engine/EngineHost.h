@@ -206,6 +206,13 @@ struct EngineHostOptions
        timer. */
     platform::ScopedTimerResolution::Api timer_api;
 
+    /* Audit E-12b idle rule: with no (or an empty) scene
+       applied for output_idle_after, the output policy's
+       on_idle runs once per idle entry. output_clock is the
+       idle rule's clock (empty = Clock::now; tests inject). */
+    std::chrono::milliseconds   output_idle_after{ 5000 };
+    std::function<TimePoint()>  output_clock;
+
     /* Log sink (default: stderr with the engine prefix). */
     std::function<void(const std::string&)> log;
 };
@@ -326,6 +333,13 @@ public:
        per controller ({key, policy, outcome, detail}); empty
        before Stop() or when no controller was a target. */
     std::vector<OutputPolicyOutcome> ExitPolicyReport() const;
+
+    /* Idle rule state: true from the idle entry (on_idle ran)
+       until the next applied scene; the report is that entry's
+       outcomes. */
+    bool                             OutputIdle() const
+    { return output_idle_.load(); }
+    std::vector<OutputPolicyOutcome> IdleReport() const;
 
     void Log(const std::string& line) const;
 
@@ -474,6 +488,12 @@ private:
        the scene, or switched to Direct by us this run. */
     std::vector<DeviceSnapshot>      OutputPolicyTargets();
     void                             RunExitPolicy();
+    /* Owner loop: idle entry/exit (see output_idle_after). */
+    void                             PollIdle();
+    bool                                     idle_tracking_ = false;
+    TimePoint                                idle_since_{};
+    std::atomic<bool>                        output_idle_{ false };
+    std::vector<OutputPolicyOutcome>         idle_outcomes_;
     void LogOutcomes(const char* phase,
                      const std::vector<OutputPolicyOutcome>& out);
     mutable std::mutex                       output_mutex_;
