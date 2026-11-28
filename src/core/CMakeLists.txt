@@ -11,6 +11,8 @@
 # stays compiled into openrgb2_engine, playback_test, and the
 # backend harness alongside the LianLi codec/tinyuz sources) and the
 # platform capture backends (src/platform/windows).
+# playback/LookPeriod.cpp IS here: it is pure effect-model analysis
+# (R-11 step 1) with no codec or vendor dependency.
 
 add_library(openrgb2_studio_core STATIC
     scene/SceneTypes.cpp
@@ -27,6 +29,7 @@ add_library(openrgb2_studio_core STATIC
     effects/EffectEngine.cpp
     effects/EffectJson.cpp
     effects/Presets.cpp
+    playback/LookPeriod.cpp
     presets/DevicePreset.cpp
     presets/PresetRegistry.cpp
     presets/EffectRegistry.cpp
