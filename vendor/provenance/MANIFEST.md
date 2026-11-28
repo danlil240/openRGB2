@@ -116,11 +116,20 @@ itemized here yet (`git log -- vendor/OpenRGB` lists them).
 | `be1bb03` (2026-11-28, P-12 step 1, branch `perf/p-12-lianli-poll-cost`) | `Controllers/LianLiWirelessController/LianLiWirelessRuntime.{cpp,h}`, `LianLiWirelessDiagnostics.{cpp,h}` | `WirelessRuntime::SetDesired` floors the next discovery poll at `last_poll_ms + min_poll_gap_ms` (new config field, 0 = `poll_ms`); `last_poll_ms` is set when `PollAndMerge` calls `PollDiscovery`; new `discovery_clamped` counter and `poll_clamp` trace row | a group unseen for longer than `max_discovery_defer_ms` (1 s) but not yet Lost (8 s) made every live frame a blocking discovery poll (63 polls/s in the offline test, bound 5). Plan `docs/plans/P-12-lianli-discovery-poll-cost.md` |
 | `d8c79bf` (2026-11-28, P-12 step 2, branch `perf/p-12-lianli-poll-cost`) | `Controllers/LianLiWirelessController/LianLiWirelessService.{cpp,h}`, `LianLiWirelessRuntime.h`, `LianLiWirelessDiagnostics.{cpp,h}` | the service's `ObservingLink` answers `PollDiscovery` from the last successful reply when it is younger than `share_window_ms` (new config field, 50 ms; 0 disables) and on the same `ConnectionGeneration`; a failed read or any failed forwarded operation drops it; shared replies are not re-added to the `SightingAccumulator`; new `discovery_shared` counter and `poll_shared` trace row | every fan group ran its own discovery read on the one shared RX dongle, each costing 30-130 ms of link time; the query carries no group or channel field (`query[1] = 1`), so one reply answers every group |
 
+| `6a11027` (2026-11-28, P-7 step 2, branch `perf/p-7-logitech-8080-delta`) | `Controllers/LogitechController/LogitechHIDPP20Controller/LogitechPerKey8080Plan.{cpp,h}` (new), `LogitechHIDPP20Controller.{cpp,h}`, `RGBController_LogitechHIDPP20.cpp` | the 0x8080 grouping, (0,0) skip, dim scaling, G410 keyType-0x40 filter, 14-key chunking and fn3 payload encoding move into `LogitechPerKey8080Plan` (Qt-free, hidapi-free); `SetPerKey8080` takes planned frames; `HIDPP20_8080_KEYS_PER_FRAME` moves to the planner header. No wire change (byte-identical, test-pinned) | testability: `tests/backend/logitech_8080_plan_test.cpp`. Plan `docs/plans/P-7-logitech-8080-closed-loop-pacing.md` |
+| `477a2f4` (2026-11-28, P-7 step 3, same branch) | `LogitechPerKey8080Plan.{cpp,h}`, `LogitechHIDPP20Controller.{cpp,h}`, `RGBController_LogitechHIDPP20.{cpp,h}` | the 0x8080 path keeps `sent_colors` (dimmed wire colors) and sends only changed keys; full repaint on the first frame, after every `sent_colors.clear()` site, after a re-init, for `HIDPP20_UNCOMMITTED` keys and every `HIDPP20_8080_FULL_REFRESH_MS` (2000 ms placeholder); an unchanged frame sends nothing. `SetPerKey8080` returns per-frame write success, `PerKeyCommit8080` the FlushLEDS ACK; a failed write or unacked commit leaves its keys `HIDPP20_UNCOMMITTED`. The 2 ms frame gap is unchanged | every frame repainted every key behind a 2 ms sleep per 14-key frame, capping the G512 near 40-50 Hz (audit P-7). fn3 ACK pacing (plan step 4) waits for a G512 measurement |
+| `323c0a6` (2026-11-28, P-7 step 5, same branch) | `LogitechPerKey8080Plan.{cpp,h}`, `LogitechHIDPP20Controller.{cpp,h}`, `RGBController_LogitechHIDPP20.cpp` | one `LOG_DEBUG` line per `HIDPP20_8080_SUMMARY_S` (10 s): updates and rate, full / idle, frames and keys per frame, write and FlushLEDS failures, mean / max wall time per update | shows the achieved update rate in a hardware run |
+
 Deploying a change here needs a backend rebuild
-(`vendor\OpenRGB\scripts\build-windows.bat`):
-`packaging\windows\build-and-deploy.ps1 -BuildBackend` builds the backend
-only when no `OpenRGB.exe` exists yet, so an existing backend build does not
-pick the change up.
+(`vendor\OpenRGB\scripts\build-windows.bat`). Since P-7 step 6 (`39201f1`)
+the recipe step in `packaging\windows\build-and-deploy.ps1` and
+`scripts\build-all-and-install.ps1` writes `openrgb2-backend.stamp` next to
+`OpenRGB.exe` (a hash of `vendor/OpenRGB` + `src/core/playback`), and
+`build-and-deploy.ps1` refuses a backend whose stamp is missing or does not
+match ("backend is stale") unless `-BuildBackend` (rebuild) or
+`-AllowStaleBackend` (stage anyway, with a warning) is given. A backend built
+before the stamp existed has none, so the first run after this change needs
+`-BuildBackend`.
 
 ## Licenses
 
