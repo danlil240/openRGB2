@@ -1088,6 +1088,101 @@ int main()
         }));
     }
 
+    /*---- download kind must match the content (audit I-12) --*/
+    {
+        /* The download path only ever serves a workspace
+           DOCUMENT: a declared kind of bundle/asset/... would
+           stage it under the wrong cap and label. */
+        Rig& rig = *mainrig;
+        TestClient c;
+        Welcome(c, *rig.server);
+        for(const char* k : { "bundle", "asset", "type", "export" })
+        {
+            WsCallErr(c, seq, json::object({
+                { "verb", "transfer_begin" }, { "direction", "download" },
+                { "kind", k }, { "id", "w1" },
+            }), ErrCode::BadRequest, "bad_request");
+        }
+        /* kind omitted still means document */
+        const json r = WsCall(c, seq, json::object({
+            { "verb", "transfer_begin" }, { "direction", "download" },
+            { "id", "w1" },
+        }));
+        CHECK(!r.value("transfer_id", "").empty());
+        if(!r.value("transfer_id", "").empty())
+        {
+            WsCall(c, seq, json::object({
+                { "verb", "transfer_finish" },
+                { "transfer_id", r["transfer_id"] },
+            }));
+        }
+    }
+
+    /*---- resource_get never inlines past the cap (I-12) ------*/
+    {
+        /* A library type whose serialized document exceeds the
+           reply budget is served through a staged download
+           (document_omitted + transfer fields) instead of an
+           over-cap reply that fails as a generic too_large. */
+        Rig rig(g_tmp / "resget");
+        const fs::path lib = g_tmp / "resget" / "library" / "devices";
+        fs::create_directories(lib);
+        std::stringstream tss;
+        tss << std::ifstream(g_tmp / "types" /
+                             "test-fan.device.json").rdbuf();
+        json big = json::parse(tss.str(), nullptr, false);
+        CHECK(big.is_object());
+        big["id"]   = "big-fan";
+        big["name"] = std::string(1200 * 1024, 'n');
+        std::ofstream(lib / "big-fan.device.json") << big.dump();
+        rig.Start();
+        TestClient c;
+        Welcome(c, *rig.server);
+        const json small = WsCall(c, seq, json::object({
+            { "verb", "resource_get" }, { "kind", "device_type" },
+            { "id", "test-fan" },
+        }));
+        CHECK(small["document"].is_object());
+        CHECK(!small.value("document_omitted", false));
+
+        const json r = WsCall(c, seq, json::object({
+            { "verb", "resource_get" }, { "kind", "device_type" },
+            { "id", "big-fan" },
+        }));
+        CHECK(r.value("id", "") == "big-fan");
+        CHECK(!r.contains("document"));
+        CHECK(r.value("document_omitted", false));
+        const std::string tid = r.value("transfer_id", std::string());
+        CHECK(!tid.empty());
+        std::string got;
+        uint64_t off = 0;
+        bool eof = tid.empty();
+        for(int i = 0; i < 64 && !eof; ++i)
+        {
+            const json cr = WsCall(c, seq, json::object({
+                { "verb", "transfer_chunk" }, { "transfer_id", tid },
+                { "offset", off },
+            }));
+            std::vector<uint8_t> dec;
+            CHECK(Base64Decode(cr.value("data", ""), dec,
+                               200 * 1024));
+            got.append((const char*)dec.data(), dec.size());
+            off += dec.size();
+            eof = cr.value("eof", false);
+        }
+        CHECK(got.size() == r.value("length", 0ull));
+        CHECK(Sha256Hex(got) == r.value("sha256", std::string()));
+        const json doc = json::parse(got, nullptr, false);
+        CHECK(doc.is_object() &&
+              doc.value("name", "").size() == 1200 * 1024);
+        if(!tid.empty())
+        {
+            WsCall(c, seq, json::object({
+                { "verb", "transfer_finish" }, { "transfer_id", tid },
+            }));
+        }
+    }
+
     /*---- lost completion event: reconcile by job_status -----*/
     {
         Rig& rig = *mainrig;

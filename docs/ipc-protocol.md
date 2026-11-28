@@ -176,7 +176,7 @@ Request → reply. `request_id` echoes.
 | 0x0109 | UNSUBSCRIBE | `{}` | OK `{subscribed:[]}` |
 | 0x010A | PING | `{}` | PONG `{}` |
 | 0x010B | GET_PRESETS | `{}` | PRESETS |
-| 0x010C | QUIT | `{}` or `{stop_backend:true}` | OK `{shutting_down:true, ordered:true, stop_backend:bool, backend?}` / ERROR |
+| 0x010C | QUIT | `{}` or `{stop_backend:true}` | OK `{shutting_down:true, ordered:true, stop_backend:bool, backend?, backend_pid?}` / ERROR |
 | 0x010D | REACTIVE_COMMAND | `{verb, ...args}` | OK `<reactive body>` / ERROR |
 | 0x010E | WORKSPACE_COMMAND | `{verb, ...args}` | OK `<verb body>` / ERROR |
 | 0x0300 | DIAG_GET | `{}` | DIAGNOSTICS (valid on both pipes) |
@@ -204,9 +204,11 @@ the SDK link:
                  "protocol_version":4,"reconnect_attempt":0,"last_error":""} }
 ```
 
-**SCENE** — `{loaded, revision, applied_revision, playing, name, document}`
-where `document` is the core SceneDocument JSON (same schema `--scene`
-accepts) or `null`. SET_SCENE applies the same path as `--scene` (inline
+**SCENE** — `{loaded, revision, applied_revision, playing, name, document,
+workspace:{managed}}` where `document` is the core SceneDocument JSON
+(same schema `--scene` accepts) or `null`, and `workspace.managed` tells a
+client that predates `studio_workspace_v1` whether a managed workspace is
+active (SET_SCENE is then refused with `workspace_required`). SET_SCENE applies the same path as `--scene` (inline
 `effect.layers`, else the named `effect.preset` through the registry —
 unknown presets → `bad_request`), takes effect on the next 60 Hz tick, and
 emits a `scene` event.
@@ -313,8 +315,9 @@ counters alone cannot distinguish from "nothing submitted".
 
 **STATE** — `{engine:{running,scene_clock_hz,scene_sequence}, scene:{...},
 sdk:{...}, playback:{...}, power:{...}, reactive:{...}, ownership:{...}|null,
-ipc:{sessions_active, messages_in, responses_out, events_sent, events_dropped,
-queued_events, resync_bytes, rejected_hellos, rate_limited, refused_busy}}`.
+ipc:{sessions_active, sessions_total, messages_in, responses_out, events_sent,
+events_dropped, queued_events, resync_bytes, rejected_hellos, rate_limited,
+refused_busy}}` (`sessions_total` counts every accepted session since start).
 
 **OWNERSHIP** (STATE/DIAGNOSTICS field, `null` when no ownership
 report is wired) — the Task-3.9 startup scan's verbatim,
@@ -366,7 +369,9 @@ standard as `stop-openrgb2.ps1`). Only a process whose image path
 equals the declared `--backend-exe` EXACTLY is ever signaled; the OK
 reply reports the decision honestly in `backend` (`closing`,
 `not_configured`, `not_found`, `unverifiable`) — `closing` is a
-decision at request time, not a guarantee the process exited.
+decision at request time, not a guarantee the process exited — and,
+with `closing`, `backend_pid`: the verified process the handoff will
+signal.
 
 **POWER** (STATE/DIAGNOSTICS field, `null` when unwired) —
 `{display_on, suspended, output_paused, power_hold, restore_pending,
@@ -613,14 +618,14 @@ telemetry stay live — the plan only gates document mutation.
 
 | verb | body | reply |
 | --- | --- | --- |
-| `get` | `{id?}` | `{managed,id?,workspace_revision,resource_revision,generation?,name?,content_sha256?,source_form?,workspace_root,workspace_dir?,external_change,external_detail?}` — `id` reads the durable marker of a non-current workspace. For the CURRENT workspace the reply also carries the managed paths and the passive external-change compare (Task 10): `external_change` is `"none"` \| `"modified"` \| `"deleted"` — REPORT ONLY, the engine never reloads or applies on detection, and a byte-identical rewrite reproduces the same signature (same-content suppression, re-baselined at every adopt/commit) |
+| `get` | `{id?}` | `{managed,id?,workspace_revision,resource_revision,generation?,name?,content_sha256?,source_form?,workspace_root,workspace_dir?,external_change,external_detail?}` — `id` reads the durable marker of a non-current workspace (reply `{managed,id,workspace_revision,resource_revision,marker_error?}`; `marker_error` is a human note present when the primary marker is unreadable: the revisions are then the last-known-good backup marker's, or `0` with `managed:true` when no marker is readable). For the CURRENT workspace the reply also carries the managed paths and the passive external-change compare (Task 10): `external_change` is `"none"` \| `"modified"` \| `"deleted"` — REPORT ONLY, the engine never reloads or applies on detection, and a byte-identical rewrite reproduces the same signature (same-content suppression, re-baselined at every adopt/commit) |
 | `list` | `{offset?,limit?}` (limit ≤256) | `{workspaces:[id...],total,offset,limit,active}` |
 | `catalog` | `{kind:devices|effects|workspaces,offset?,limit?}` | `{kind,entries:[...],total,offset,limit,more,next_offset}` — pages are additionally byte-budgeted (~768 KiB serialized); `more:true` + `next_offset` continue the walk, and `next_offset` always advances so a malformed stream can't stall. `effects` entries carry `document_text` (authored field-order byte stream); an oversized lone entry degrades to `document_omitted:true` (document_text dropped) then `description_omitted:true` (bounded description) instead of failing the page |
 | `validate`/`commit`/`save_copy`/`import_inspect`/`import_commit`/`export`/`reload`/`restore_backup`/`resource_install`/`resource_remove` | `{staged?|document?, base_revision?, resource_revision?, id?, name?, ...}` | `OK {accepted:true,job_id}` or `OK {accepted:false,detail:"busy"}` (bounded queue full); `staged` is a finished upload token owned by this session |
-| `resource_get` | `{kind:device_type|effect, id:<preset id>}` | `{kind,id,found,document?,from_file?,packaged_default?}` — synchronous read of the effective resource (file-layer override over the packaged default); `found:false` when no layer resolves |
+| `resource_get` | `{kind:device_type|effect, id:<preset id>}` | `{kind,id,from_file,packaged_default,document}` — synchronous read of the effective resource (file-layer override over the packaged default); `ERROR unavailable` when no layer resolves. A document whose serialization exceeds 768 KiB is never inlined: the reply carries `document_omitted:true` plus a session-bound download `{transfer_id,length,sha256,max_chunk_bytes}` (kind `type`/`look`) read with `transfer_chunk`/`transfer_finish` |
 | `job_status` | `{job_id}` | job status record (below) |
 | `job_cancel` | `{job_id}` | `{cancelled:true,job_id}` / ERROR |
-| `transfer_begin` | `{direction:"upload",kind,length,sha256}` / `{direction:"download",kind,id}` | upload: `{transfer_id,max_chunk_bytes}`; download: `{transfer_id,length,sha256,max_chunk_bytes}` — client-supplied paths are never accepted; staging is server-named inside the managed root |
+| `transfer_begin` | `{direction:"upload",kind,length,sha256}` / `{direction:"download",kind?,id}` (download `kind` must be `document`, the default — any other kind is `bad_request`) | upload: `{transfer_id,max_chunk_bytes}`; download: `{transfer_id,length,sha256,max_chunk_bytes}` — client-supplied paths are never accepted; staging is server-named inside the managed root |
 | `transfer_chunk` | `{transfer_id,offset,data:<base64>}` (upload) / `{transfer_id,offset,max_bytes?}` (download) | upload: `{offset,received}`; download: `{offset,data:<base64>,eof}` — ordered, ≤192 KiB decoded per chunk |
 | `transfer_finish` | `{transfer_id}` | `{finished:true,staged?,bytes?}` — upload verifies declared length + SHA-256 before minting the `staged` token |
 | `transfer_cancel` | `{transfer_id}` | `{cancelled:true}` |

@@ -591,13 +591,42 @@ IpcReply WorkspaceCommands::HandleCatalog(const nlohmann::json& body)
     }));
 }
 
-IpcReply WorkspaceCommands::HandleResourceGet(const nlohmann::json& body)
+IpcReply WorkspaceCommands::HandleResourceGet(uint64_t session_id,
+                                              const nlohmann::json& body)
 {
     /* studio-import Task 9 — one library resource's full
        document for the type/look editors. The catalog row's
        metadata page stays lean; the document rides this
-       single-item read (a device type is far under the reply
-       cap). */
+       single-item read. A device type is normally far under
+       the reply cap, but nothing bounds a type/look below the
+       4 MiB file cap: a document past the inline budget is
+       staged as a session-bound download instead of an
+       over-cap reply (audit I-12) — the client reads it with
+       transfer_chunk/transfer_finish like any download. */
+    constexpr size_t kInlineDocumentBytes = 768u * 1024u;
+    auto reply_with = [&](nlohmann::json out, nlohmann::json doc,
+                          const char* transfer_kind) -> IpcReply
+    {
+        std::string text = doc.dump();
+        if(text.size() <= kInlineDocumentBytes)
+        {
+            out["document"] = std::move(doc);
+            return IpcReply::Success(MsgType::Ok, std::move(out));
+        }
+        const WorkspaceTransfer::BeginResult r =
+            transfers_.StageDownload(session_id, transfer_kind, text);
+        if(!r.ok)
+        {
+            return FailDetail(ErrCode::BadRequest, r.error, r.detail);
+        }
+        out["document_omitted"] = true;
+        out["transfer_id"]      = r.transfer_id;
+        out["length"]           = r.length;
+        out["sha256"]           = r.sha256;
+        out["max_chunk_bytes"]  =
+            transfers_.TransferOptions().max_chunk_decoded_bytes;
+        return IpcReply::Success(MsgType::Ok, std::move(out));
+    };
     const std::string kind = body.value("kind", std::string());
     const std::string rid  = body.value("id",   std::string());
     if(rid.empty() || !studio::IsPresetId(rid))
@@ -616,13 +645,12 @@ IpcReply WorkspaceCommands::HandleResourceGet(const nlohmann::json& body)
             return FailDetail(ErrCode::Unavailable,
                 "no device type '" + rid + "'", "unavailable");
         }
-        return IpcReply::Success(MsgType::Ok, nlohmann::json::object({
+        return reply_with(nlohmann::json::object({
             { "kind",             kind                      },
             { "id",               rid                       },
             { "from_file",        reg->HasFile(rid)         },
             { "packaged_default", reg->HasDefault(rid)      },
-            { "document",         studio::ToJson(*p)        },
-        }));
+        }), studio::ToJson(*p), "type");
     }
     if(kind == "effect")
     {
@@ -634,13 +662,12 @@ IpcReply WorkspaceCommands::HandleResourceGet(const nlohmann::json& body)
             return FailDetail(ErrCode::Unavailable,
                 "no effect look '" + rid + "'", "unavailable");
         }
-        return IpcReply::Success(MsgType::Ok, nlohmann::json::object({
+        return reply_with(nlohmann::json::object({
             { "kind",             kind                          },
             { "id",               rid                           },
             { "from_file",        reg->HasFile(rid)             },
             { "packaged_default", reg->HasDefault(rid)          },
-            { "document",         studio::EffectDocumentToJson(*d) },
-        }));
+        }), studio::EffectDocumentToJson(*d), "look");
     }
     return FailDetail(ErrCode::BadRequest,
         "resource_get kind must be device_type|effect",
@@ -786,7 +813,18 @@ IpcReply WorkspaceCommands::HandleTransferBegin(
            download — document/type/look content rides the
            transfer mechanism, not an inline body. Revisions
            are the cheap staleness key: repeat begins serve
-           the cached bytes; a commit invalidates honestly. */
+           the cached bytes; a commit invalidates honestly.
+           This path only ever serves a workspace DOCUMENT, so
+           the declared kind must say so — any other kind would
+           stage it under the wrong cap and label (audit I-12;
+           export bundles and oversized resources are staged by
+           their own verbs). */
+        if(kind != "document")
+        {
+            return FailDetail(ErrCode::BadRequest,
+                "download kind must be \"document\" — the only "
+                "content transfer_begin serves", "bad_request");
+        }
         const std::string id = body.value("id", std::string());
         if(id.empty() || !WorkspaceStore::IsWorkspaceId(id))
         {
@@ -979,7 +1017,7 @@ IpcReply WorkspaceCommands::Handle(uint64_t session_id,
     if(verb == "get")     return HandleGet(session_id, body);
     if(verb == "list")    return HandleList(body);
     if(verb == "catalog") return HandleCatalog(body);
-    if(verb == "resource_get") return HandleResourceGet(body);
+    if(verb == "resource_get") return HandleResourceGet(session_id, body);
 
     if(verb == "validate"       || verb == "commit"      ||
        verb == "save_copy"      || verb == "import_inspect" ||
