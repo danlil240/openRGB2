@@ -31,6 +31,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <timeapi.h>
 #endif
 
 using namespace openrgb_bench;
@@ -40,6 +41,18 @@ static void SleepMs(int ms)
 {
     std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
+
+#ifdef _WIN32
+/* Audit P-8 / E-2: SleepMs(1) in the pacing loop slept a whole
+   15.6 ms default timer tick, so send intervals came out bimodal
+   (15.5/31 ms at 60 fps). Hold a 1 ms timer resolution for the
+   run — the same one the engine now holds. */
+struct TimerResolution1ms
+{
+    bool held = timeBeginPeriod(1) == TIMERR_NOERROR;
+    ~TimerResolution1ms() { if(held) { timeEndPeriod(1); } }
+};
+#endif
 
 static volatile bool g_stop = false;
 
@@ -211,6 +224,9 @@ static std::string ToLower(std::string s)
 
 int main(int argc, char** argv)
 {
+#ifdef _WIN32
+    const TimerResolution1ms timer_resolution;
+#endif
     std::string host = "127.0.0.1";
     uint16_t    port = 6744;
     bool       list_only  = false;

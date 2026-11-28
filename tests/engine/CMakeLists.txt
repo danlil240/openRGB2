@@ -113,6 +113,19 @@ set_tests_properties(session_end_test PROPERTIES
     LABELS engine
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Audit E-2 / P-8 — timer resolution + owner-loop schedule: the
+# 1 ms resolution request held from Start() to Stop() (injected
+# API, no global timer change) and the fixed-grid wake
+# computation that replaced the relative 20 ms sleep.
+add_executable(owner_loop_timing_test owner_loop_timing_test.cpp)
+target_link_libraries(owner_loop_timing_test PRIVATE
+    openrgb2_host)
+target_compile_definitions(owner_loop_timing_test PRIVATE NDEBUG)
+add_test(NAME owner_loop_timing_test COMMAND owner_loop_timing_test)
+set_tests_properties(owner_loop_timing_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Task 5.2 — mode qualification: rapid mode/parameter storm
 # (no wedge, no lost requests, pending always resolves),
 # disconnect during an uploaded-playback apply (honest

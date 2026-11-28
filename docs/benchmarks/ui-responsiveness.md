@@ -30,7 +30,11 @@ The client session is shaped like the real UI's:
   events emitted by the mutation verbs (110 events were skipped while
   awaiting replies — the same drain discipline `openrgb2-ctl` and the
   UI wire client use).
-- 300 samples round-robin over the six-verb UI surface, ~5 ms apart:
+- 300 samples round-robin over the six-verb UI surface, ~5 ms apart
+  (10 ms since audit E-2: with the engine's 1 ms timer resolution a
+  5 ms sleep really is 5 ms and trips the server's 128 requests/s
+  per-session flood bound; in the run recorded below each 5 ms sleep
+  took a 15.6 ms timer tick):
 
 | Verb | IPC | What it stands for |
 | --- | --- | --- |

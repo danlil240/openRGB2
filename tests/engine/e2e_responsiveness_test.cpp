@@ -576,10 +576,15 @@ int main(int argc, char** argv)
         }
         lat_all.push_back(ms);
         lat_verb[i % kVerbs].push_back(ms);
-        /* ~5 ms spacing — a clicking user does not fire a
+        /* ~10 ms spacing — a clicking user does not fire a
            back-to-back request storm; keeps the window long
-           enough for frame_status pushes to interleave. */
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+           enough for frame_status pushes to interleave. It must
+           stay under the server's 128 requests/s per-session
+           flood bound: since the engine holds a 1 ms timer
+           resolution (audit E-2) a sleep is as long as asked,
+           and the old 5 ms (which used to take a 15.6 ms tick)
+           tripped it. */
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
     const double window_s =

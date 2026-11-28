@@ -805,6 +805,18 @@ bool EngineHost::Start(std::string& err)
     }
     start_attempted_ = true;
 
+    /* Audit E-2: a 1 ms timer resolution for the engine's
+       lifetime, before any worker starts — the 60 Hz scene
+       clock, the lanes' budget waits and the owner loop all
+       wake on the system timer tick (15.6 ms by default).
+       Released at the end of Stop(). A refusal is logged, not
+       fatal: the engine still runs, just coarser. */
+    if(!timer_resolution_.Acquire(1, opts_.timer_api))
+    {
+        Log("timer resolution: 1 ms request refused — frame "
+            "pacing stays on the default system tick");
+    }
+
     /* 1. Single instance (plan section 4): exactly one engine
        owns the managed configuration. Refusing to start is the
        honest answer to a double-own attempt — the holder is
@@ -1781,7 +1793,8 @@ void EngineHost::Run()
        feed, so it cannot wait for PollOnce's cadence. The
        push rate stays bounded by frame_status_min_interval_ms;
        the tick only decides how soon a due push is noticed. */
-    TimePoint next_maint = Clock::now();
+    const TimePoint anchor = Clock::now();
+    TimePoint next_maint = anchor;
     while(!stop_.load())
     {
         const TimePoint now = Clock::now();
@@ -1803,8 +1816,25 @@ void EngineHost::Run()
             }
             service_->PollPreviews(tick);
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        /* Sleep to the next due time, not a fixed relative
+           interval (audit E-2): a slow iteration no longer
+           pushes every later tick back. */
+        std::this_thread::sleep_until(
+            NextOwnerWake(anchor, Clock::now(), next_maint));
     }
+}
+
+TimePoint EngineHost::NextOwnerWake(TimePoint anchor, TimePoint now,
+                                    TimePoint next_maint)
+{
+    TimePoint slot = anchor + kOwnerTick;
+    if(now >= anchor)
+    {
+        /* First slot strictly after now; integer slot index, so
+           the grid never drifts. */
+        slot = anchor + ((now - anchor) / kOwnerTick + 1) * kOwnerTick;
+    }
+    return next_maint < slot ? next_maint : slot;
 }
 
 /*---------------------------------------------------------*\
@@ -1923,6 +1953,9 @@ const OrderlyShutdown::Result& EngineHost::Stop()
                 " (later steps still ran)");
         }
     }
+    /* Every worker is joined: give the timer resolution back
+       (E-2). */
+    timer_resolution_.Release();
     return shutdown_result_;
 }
 
