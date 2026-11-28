@@ -1504,6 +1504,67 @@ static void TestWrongTypedManifestNeverThrows()
     CHECK(lr.generation == 2);
 }
 
+/*---------------------------------------------------------*\n|||| I-13: a commit that fails AFTER its library install     ||
+|||| leaves no library files behind. Commit installs the     ||
+|||| candidate's extracted types into the shared managed     ||
+|||| library first; a later failure (here: the generations   ||
+|||| dir cannot be created) used to leave them installed,    ||
+|||| visible in every catalog though nothing committed.      ||
+\*---------------------------------------------------------*/
+static void TestFailedCommitLeavesNoLibraryFiles()
+{
+    const fs::path root = g_tmp / "ws-i13-lib";
+    const fs::path lib  = root / "library" / "devices";
+    const fs::path wsdir = root / "desk";
+
+    WorkspaceCandidate cand;
+    cand.document.meta.name = "gizmo-desk";
+    {
+        studio::DeviceInstance inst;
+        inst.type = "gizmo";
+        cand.document.devices["g"] = inst;
+    }
+    studio::DevicePreset gizmo;
+    {
+        std::vector<std::string> perrs;
+        const json tj = json::parse(TypeJson("gizmo", 4, "NEW"));
+        CHECK(studio::DevicePresetFromJson(tj, gizmo, &perrs));
+    }
+    cand.extracted_types.push_back(gizmo);
+    cand.device_registry.Add(gizmo, nullptr);
+    {
+        auto resolved = std::make_shared<studio::SceneDocument>();
+        std::vector<std::string> rerrs;
+        CHECK(studio::ResolveScene(cand.document, cand.device_registry,
+                                   *resolved, &rerrs));
+        cand.resolved = std::move(resolved);
+    }
+
+    WorkspaceStore::Deps deps;   /* base registry knows no 'gizmo' */
+    WorkspaceStore store(root.string(), deps);
+
+    /* Block the publish step: a FILE where the generations dir
+       must be created. */
+    fs::create_directories(wsdir);
+    WriteText((wsdir / "generations").string(), "not a dir");
+    WorkspaceStore::CommitResult cr =
+        store.Commit("desk", cand, std::string(), 0);
+    CHECK(!cr.ok);
+    CHECK(!fs::exists(lib / "gizmo.device.json"));
+    if(fs::exists(lib / "gizmo.device.json"))
+    {
+        std::printf("  (failed commit left library/devices/"
+                    "gizmo.device.json: %s)\n", cr.error.c_str());
+    }
+
+    /* Unblocked, the same commit lands the type normally. */
+    std::error_code ec;
+    fs::remove(wsdir / "generations", ec);
+    cr = store.Commit("desk", cand, std::string(), 0);
+    CHECK(cr.ok);
+    CHECK(fs::exists(lib / "gizmo.device.json"));
+}
+
 int main()
 {
     g_tmp = fs::temp_directory_path() /
@@ -1530,6 +1591,7 @@ int main()
     TestFutureSchemaRefusal();
     TestFailedCommitRetry();
     TestWrongTypedManifestNeverThrows();
+    TestFailedCommitLeavesNoLibraryFiles();
 
     fs::remove_all(g_tmp, ec);
     std::printf("%d checks, %d failures\n", checks, failures);
