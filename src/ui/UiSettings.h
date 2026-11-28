@@ -102,6 +102,12 @@ class UiSettings : public QObject
        left open. */
     Q_PROPERTY(bool layoutShow3d READ layoutShow3d
                    WRITE setLayoutShow3d NOTIFY prefsChanged)
+    /* Layout editor splitters — the side rail's width and the
+       inspector's height inside it, in px. 0 = never set. */
+    Q_PROPERTY(int layoutRailWidth READ layoutRailWidth
+                   WRITE setLayoutRailWidth NOTIFY prefsChanged)
+    Q_PROPERTY(int layoutInspectorHeight READ layoutInspectorHeight
+                   WRITE setLayoutInspectorHeight NOTIFY prefsChanged)
 
 public:
     explicit UiSettings(QObject* parent = nullptr);
@@ -141,6 +147,10 @@ public:
     void     setViewportCaseGhost(bool on);
     bool     layoutShow3d() const;
     void     setLayoutShow3d(bool on);
+    int      layoutRailWidth() const;
+    void     setLayoutRailWidth(int px);
+    int      layoutInspectorHeight() const;
+    void     setLayoutInspectorHeight(int px);
 
     /* Drop every stored preference — the next launch reads
        defaults. Engine state is untouched (it was never

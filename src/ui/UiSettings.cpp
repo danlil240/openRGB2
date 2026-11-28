@@ -302,6 +302,55 @@ void UiSettings::setLayoutShow3d(bool on)
 }
 
 /*---------------------------------------------------------*\
+|||| Layout editor splitter sizes                            ||
+||||   0 = never set (the page picks its default). Clamped   ||
+||||   so a corrupt store can't open a rail wider than any   ||
+||||   screen; the page re-clamps to the live window.        ||
+\*---------------------------------------------------------*/
+namespace
+{
+constexpr int kMaxSplitPx = 4000;
+int ClampSplit(int px)
+{
+    return px < 0 ? 0 : (px > kMaxSplitPx ? kMaxSplitPx : px);
+}
+}
+
+int UiSettings::layoutRailWidth() const
+{
+    return ClampSplit(const_cast<UiSettings*>(this)->Ensure()
+        ->value(QStringLiteral("ui/layoutRailWidth"), 0).toInt());
+}
+
+void UiSettings::setLayoutRailWidth(int px)
+{
+    px = ClampSplit(px);
+    if(px == layoutRailWidth())
+    {
+        return;
+    }
+    Ensure()->setValue(QStringLiteral("ui/layoutRailWidth"), px);
+    emit prefsChanged();
+}
+
+int UiSettings::layoutInspectorHeight() const
+{
+    return ClampSplit(const_cast<UiSettings*>(this)->Ensure()
+        ->value(QStringLiteral("ui/layoutInspectorHeight"), 0).toInt());
+}
+
+void UiSettings::setLayoutInspectorHeight(int px)
+{
+    px = ClampSplit(px);
+    if(px == layoutInspectorHeight())
+    {
+        return;
+    }
+    Ensure()->setValue(QStringLiteral("ui/layoutInspectorHeight"), px);
+    emit prefsChanged();
+}
+
+/*---------------------------------------------------------*\
 |||| Per-scene uploaded-preset params                        ||
 \*---------------------------------------------------------*/
 

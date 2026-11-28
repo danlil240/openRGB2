@@ -827,6 +827,14 @@ Rectangle {
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.margins: 10
+        /* Stops at the LIVE badge instead of painting under it
+           (UX audit 2026-11-28); a narrow viewport wraps the
+           hint onto a second line rather than clipping it. */
+        anchors.right: liveBadge.visible ? liveBadge.left
+                                         : parent.right
+        wrapMode: Text.WordWrap
+        maximumLineCount: 2
+        elide: Text.ElideRight
         color: "#d8d8e0"
         font.pixelSize: 13
         text: (root.objectCtl && root.objectCtl.selectedId !== "")
@@ -835,6 +843,7 @@ Rectangle {
     }
 
     Rectangle {
+        id: liveBadge
         objectName: "viewportLiveBadge"
         anchors.right: parent.right
         anchors.top: parent.top
