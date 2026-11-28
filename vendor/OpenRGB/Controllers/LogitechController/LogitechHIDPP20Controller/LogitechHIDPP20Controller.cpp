@@ -5500,94 +5500,46 @@ PerKeyFrameResult LogitechHIDPP20Controller::PerKeyFrameEnd()
 }
 
 /*---------------------------------------------------------*\
-| Feature 0x8080 set + commit: fn3 SetKeyColors on the      |
-| 0x12 very-long report via dev_perkey_vl, payload          |
-| [keyType u16 BE, count u16 BE, (keyId,R,G,B) x            |
-| count], <=14 tuples per packet (larger groups             |
-| split). Colors appear only after fn5 FlushLEDS.           |
+| Feature 0x8080 set: fn3 SetKeyColors on the 0x12          |
+| very-long report via dev_perkey_vl, one write per         |
+| planned frame. LogitechPerKey8080Plan does the            |
+| grouping, the G410 keyType 0x40 filter, the split into    |
+| <=14 keys and the payload encoding [keyType u16 BE,       |
+| count u16 BE, (keyId,R,G,B) x count]. Colors appear       |
+| only after fn5 FlushLEDS.                                 |
 \*---------------------------------------------------------*/
 void LogitechHIDPP20Controller::SetPerKey8080
     (
-    const std::vector<std::pair<uint16_t, std::vector<std::pair<uint8_t, RGBColor>>>>& by_type
+    const std::vector<LogitechPerKey8080Frame>& frames
     )
 {
+    static_assert(LOGITECH_8080_FRAME_PAYLOAD_LEN == LOGITECH_VERY_LONG_MESSAGE_LEN - 4,
+                  "a 0x8080 frame fills the very-long payload");
+
     if(caps.idx_perkey_8080 == 0 || dev_perkey_vl == nullptr)
     {
         return;
     }
 
-    bool kt40_id12_only = (caps.quirks & HIDPP20_QUIRK_8080_KEYTYPE40_ID12_ONLY) != 0;
-
-    for(size_t t = 0; t < by_type.size(); t++)
+    for(size_t f = 0; f < frames.size(); f++)
     {
-        uint16_t key_type = by_type[t].first;
-        const std::vector<std::pair<uint8_t, RGBColor>>& src_keys = by_type[t].second;
+        uint8_t payload[LOGITECH_8080_FRAME_PAYLOAD_LEN];
+        size_t  len = LogitechPerKey8080Plan::EncodeSetKeyColors(frames[f], payload);
+
+        SendVeryLongFrame(caps.idx_perkey_8080, FN_8080_SET_KEY_COLORS,
+                          payload, len);
 
         /*-------------------------------------------------*\
-        | G410 keyType 0x40 accepts only keyId 1            |
-        | and 2; drop any others before encoding.           |
+        | Pace back-to-back SetKeyColors frames. The        |
+        | writes are fire-and-forget; a G512 RGB            |
+        | (0xC33C, US) drops the tail keys of a frame       |
+        | when the next one lands too soon — F5-F12,        |
+        | PrtSc, 0 and - kept stale colors every time       |
+        | while the rest latched. A short gap lets the      |
+        | firmware finish parsing each frame.               |
         \*-------------------------------------------------*/
-        std::vector<std::pair<uint8_t, RGBColor>>          filtered;
-        const std::vector<std::pair<uint8_t, RGBColor>>*     keys = &src_keys;
-
-        if(kt40_id12_only && key_type == 0x40)
-        {
-            for(size_t k = 0; k < src_keys.size(); k++)
-            {
-                if(src_keys[k].first == 1 || src_keys[k].first == 2)
-                {
-                    filtered.push_back(src_keys[k]);
-                }
-            }
-            keys = &filtered;
-        }
-
-        for(size_t off = 0; off < keys->size(); off += HIDPP20_8080_KEYS_PER_FRAME)
-        {
-            size_t count = keys->size() - off;
-            if(count > HIDPP20_8080_KEYS_PER_FRAME)
-            {
-                count = HIDPP20_8080_KEYS_PER_FRAME;
-            }
-
-            /*---------------------------------------------*\
-            | Payload: keyType(u16 BE) + count(u16 BE) +    |
-            | count x (keyId, R, G, B). SendVeryLongFrame   |
-            | prepends the 4-byte HID++ header.             |
-            \*---------------------------------------------*/
-            uint8_t payload[LOGITECH_VERY_LONG_MESSAGE_LEN - 4];
-            memset(payload, 0, sizeof(payload));
-
-            payload[0] = (uint8_t)(key_type >> 8);
-            payload[1] = (uint8_t)(key_type & 0xFF);
-            payload[2] = (uint8_t)(count    >> 8);
-            payload[3] = (uint8_t)(count    & 0xFF);
-
-            size_t pos = 4;
-            for(size_t k = 0; k < count; k++)
-            {
-                RGBColor color = (*keys)[off + k].second;
-                payload[pos++] = (*keys)[off + k].first;     /* keyId (USB HID usage) */
-                payload[pos++] = RGBGetRValue(color);
-                payload[pos++] = RGBGetGValue(color);
-                payload[pos++] = RGBGetBValue(color);
-            }
-
-            SendVeryLongFrame(caps.idx_perkey_8080, FN_8080_SET_KEY_COLORS,
-                              payload, pos);
-
-            /*---------------------------------------------*\
-            | Pace back-to-back SetKeyColors frames. The    |
-            | writes are fire-and-forget; a G512 RGB        |
-            | (0xC33C, US) drops the tail keys of a frame   |
-            | when the next one lands too soon — F5-F12,    |
-            | PrtSc, 0 and - kept stale colors every time   |
-            | while the rest latched. A short gap lets the  |
-            | firmware finish parsing each frame.           |
-            \*---------------------------------------------*/
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(HIDPP20_8080_FRAME_GAP_MS));
-        }
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(HIDPP20_8080_FRAME_GAP_MS));
     }
 }
 

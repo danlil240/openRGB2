@@ -27,6 +27,7 @@
 #include <hidapi.h>
 #include "RGBController.h"
 #include "LogitechProtocolCommon.h"
+#include "LogitechPerKey8080Plan.h"
 
 /*---------------------------------------------------------*\
 | HID++ 2.0 Feature Page IDs                                |
@@ -113,9 +114,10 @@
 /*---------------------------------------------------------*\
 | 0x8080 carries up to 14 (keyId,R,G,B) tuples in one       |
 | very-long (report 0x12) frame, and GetKeyColors           |
-| paginates its readback by the same count.                 |
+| paginates its readback by the same count:                 |
+| HIDPP20_8080_KEYS_PER_FRAME, defined with the send        |
+| planner in LogitechPerKey8080Plan.h.                      |
 \*---------------------------------------------------------*/
-#define HIDPP20_8080_KEYS_PER_FRAME         14
 #define HIDPP20_8080_FRAME_GAP_MS           2   /* gap between SetKeyColors frames */
 
 /*---------------------------------------------------------*\
@@ -716,7 +718,7 @@ public:
     | fn5 FlushLEDS commits on dev. The key set comes       |
     | from DiscoverPerKey8080: never hardcoded.             |
     \*-----------------------------------------------------*/
-    void              SetPerKey8080(const std::vector<std::pair<uint16_t, std::vector<std::pair<uint8_t, RGBColor>>>>& by_type);
+    void              SetPerKey8080(const std::vector<LogitechPerKey8080Frame>& frames);
     void              PerKeyCommit8080();
 
     /*-----------------------------------------------------*\

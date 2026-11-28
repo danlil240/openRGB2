@@ -2281,52 +2281,40 @@ void RGBController_LogitechHIDPP20::DeviceUpdateLEDs()
     {
         std::vector<RGBColor> snapshot(colors.begin(), colors.end());
 
-        int brightness = controller->GetDimBrightness();
+        int  brightness     = controller->GetDimBrightness();
+        bool kt40_id12_only = (caps.quirks & HIDPP20_QUIRK_8080_KEYTYPE40_ID12_ONLY) != 0;
 
         /*-------------------------------------------------*\
-        | Group painted LEDs by keyType, preserving         |
-        | keyType order of first appearance. Skip           |
+        | LogitechPerKey8080Plan groups the painted LEDs    |
+        | by keyType (order of first appearance), skips     |
         | unaddressable LEDs (keyType 0 + keyId 0, present  |
-        | in the matrix but not enumerated on the device).  |
+        | in the matrix but not enumerated on the device),  |
+        | applies the dim brightness and the G410 filter,   |
+        | and chunks at 14 keys.                            |
         \*-------------------------------------------------*/
-        std::vector<std::pair<uint16_t, std::vector<std::pair<uint8_t, RGBColor>>>> by_type;
-        std::map<uint16_t, size_t> type_slot;
+        std::vector<LogitechPerKey8080Frame> frames =
+            LogitechPerKey8080Plan::PlanLeds(snapshot, led_to_keytype_keyid_8080,
+                                             brightness, kt40_id12_only);
+
+        /*-------------------------------------------------*\
+        | Commit whenever at least one LED is addressable,  |
+        | even when the G410 filter left no frame: the      |
+        | pre-extraction code did the same.                 |
+        \*-------------------------------------------------*/
+        bool any_addressable = false;
 
         for(size_t i = 0; i < snapshot.size() && i < led_to_keytype_keyid_8080.size(); i++)
         {
-            uint16_t key_type = led_to_keytype_keyid_8080[i].first;
-            uint8_t  key_id   = led_to_keytype_keyid_8080[i].second;
-
-            if(key_type == 0 && key_id == 0)
+            if(led_to_keytype_keyid_8080[i].first != 0 || led_to_keytype_keyid_8080[i].second != 0)
             {
-                continue;
+                any_addressable = true;
+                break;
             }
-
-            RGBColor color = snapshot[i];
-
-            if(brightness < 100)
-            {
-                uint8_t r = RGBGetRValue(color) * brightness / 100;
-                uint8_t g = RGBGetGValue(color) * brightness / 100;
-                uint8_t b = RGBGetBValue(color) * brightness / 100;
-                color = ToRGBColor(r, g, b);
-            }
-
-            std::map<uint16_t, size_t>::iterator slot = type_slot.find(key_type);
-
-            if(slot == type_slot.end())
-            {
-                type_slot[key_type] = by_type.size();
-                by_type.emplace_back(key_type, std::vector<std::pair<uint8_t, RGBColor>>());
-                slot = type_slot.find(key_type);
-            }
-
-            by_type[slot->second].second.emplace_back(key_id, color);
         }
 
-        if(!by_type.empty())
+        if(any_addressable)
         {
-            controller->SetPerKey8080(by_type);
+            controller->SetPerKey8080(frames);
             controller->PerKeyCommit8080();
         }
 
@@ -3012,7 +3000,9 @@ void RGBController_LogitechHIDPP20::DeviceUpdateMode()
 
             if(!by_type.empty())
             {
-                controller->SetPerKey8080(by_type);
+                bool kt40_id12_only = (caps.quirks & HIDPP20_QUIRK_8080_KEYTYPE40_ID12_ONLY) != 0;
+
+                controller->SetPerKey8080(LogitechPerKey8080Plan::ChunkGroups(by_type, kt40_id12_only));
                 controller->PerKeyCommit8080();
             }
 
