@@ -350,6 +350,18 @@ reproduced at runtime, cause **speculative**.
   after the gate is asserted, or the gate has a real one-frame gap.
   Decide which before changing anything.
 - **Test.** `ctest --preset asan -R ^e2e_lifecycle_test$` a dozen times.
+- **Resolved (2026-11-28, `fix/e-13-lifecycle-race`): a test race, not a
+  gate gap.** It also failed once on the hosted CI runner (run
+  46142428455) and in 1 of 24 parallel runs on Daniel's PC. The wired
+  peer streams sampled frames (~60 Hz) right up to the gate; the test
+  counted from before `PostEvent(DisplayOff)`, so ordinary frames sent
+  before the host loop engaged the gate counted as leaks. A 50 ms pause
+  before `PostEvent` made the old assertion fail 8 of 8. The fix
+  baselines the non-fan controllers after the gate has settled and keeps
+  the fan hold-frame check on its own index; it passes 8 of 8 with the
+  pause and 32 of 32 under parallel load. With the pipeline pause
+  disabled (a real leak) the old and the new test both fail, at the same
+  later suspend check, so the check is not weaker. No product change.
 
 ## IPC and persistence (`src/ipc/`, `src/engine/Workspace*`)
 

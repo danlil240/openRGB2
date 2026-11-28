@@ -899,8 +899,6 @@ static int TestBody(const std::filesystem::path& self_exe)
             server.CountEvents(sdk::kPktUpdateLEDs, (uint32_t)widx2);
         const uint64_t scm0 =
             server.CountEvents(sdk::kPktSetCustomMode, (uint32_t)widx2);
-        const uint64_t all_leds0 =
-            server.CountEvents(sdk::kPktUpdateLEDs);
         const uint64_t all_mode0 =
             server.CountEvents(sdk::kPktUpdateMode);
 
@@ -908,6 +906,23 @@ static int TestBody(const std::filesystem::path& self_exe)
         PumpFor(host, 700);
         CHECK(lifecycle->OutputPaused());
         CHECK(lifecycle->PowerHold());
+
+        /* Audit E-13: the wired peer streams sampled frames
+           (~60 Hz) right up to the gate. The gate engages when
+           the host loop handles DisplayOff, and a lane checks it
+           before it dequeues, so frames sent before that — or
+           one already in flight — are not leaks. Counting from
+           before PostEvent made this flaky on slow hosts (CI,
+           ASan). Baseline the OTHER controllers once the gate
+           has settled; the wireless hold frame is counted on
+           its own index. */
+        const auto other_leds = [&]
+        {
+            return server.CountEvents(sdk::kPktUpdateLEDs) -
+                   server.CountEvents(sdk::kPktUpdateLEDs,
+                                      (uint32_t)widx2);
+        };
+        const uint64_t others_gated = other_leds();
 
         /* The freeze: exactly ONE mode write (Direct) + ONE
            sampled-hold frame — then silence. The gate covers
@@ -921,8 +936,7 @@ static int TestBody(const std::filesystem::path& self_exe)
         CHECKV(server.CountEvents(sdk::kPktUpdateLEDs,
                                   (uint32_t)widx2) == upd0 + 1,
                "freeze wrote != 1 hold frame");
-        CHECKV(server.CountEvents(sdk::kPktUpdateLEDs) ==
-               all_leds0 + 1,
+        CHECKV(other_leds() == others_gated,
                "frames leaked to the wire while display off");
         CHECKV(server.CountEvents(sdk::kPktUpdateMode) ==
                all_mode0,
