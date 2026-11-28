@@ -156,7 +156,8 @@ public:
          "dynamic_lighting_settings" -> Settings > Personalization
                                         > Dynamic Lighting
          "services"                  -> the Services console
-       Launched by absolute explorer.exe with a sanitised
+       Settings opens via absolute explorer.exe (a URI needs the
+       shell), Services via absolute mmc.exe; both with a sanitised
        environment (the UI usually runs elevated — audit U-6).
        Returns false for any other target. The user takes the
        action there; OpenRGB2 changes nothing itself. */
@@ -164,7 +165,7 @@ public:
     /* Puts a guide command (e.g. `sc stop ...`) on the
        clipboard for the user to run themselves. */
     Q_INVOKABLE bool copyText(const QString& text);
-    /* Replaces the explorer.exe launch: (absolute program,
+    /* Replaces the process launch: (absolute program,
        args) -> started. */
     void setShellLauncherForTesting(
         std::function<bool(const QString&, const QStringList&)>

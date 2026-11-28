@@ -28,6 +28,12 @@ public:
        of conflicts whose key was not seen before in this session
        (one per key), and marks every current key seen. */
     QStringList NewConflicts(const QVariantMap& ownership);
+    /* The same list WITHOUT marking anything seen — for a caller
+       that may not be able to show the notice yet (the tray can be
+       missing at sign-in). */
+    QStringList Pending(const QVariantMap& ownership) const;
+    /* Marks every current conflict key seen. */
+    void        MarkSeen(const QVariantMap& ownership);
 
 private:
     QSet<QString> seen_;

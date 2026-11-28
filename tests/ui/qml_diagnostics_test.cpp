@@ -248,6 +248,13 @@ int main(int argc, char** argv)
                   launched_args[0].endsWith(
                       QStringLiteral("services.msc"),
                       Qt::CaseInsensitive));
+            /* R-10 review: mmc.exe by absolute path (no shell), so
+               the console keeps the UI's elevation and can stop
+               the service; explorer would hand it to the
+               de-elevated shell */
+            CHECK(launched_program.endsWith(
+                      QStringLiteral("\\System32\\mmc.exe"),
+                      Qt::CaseInsensitive));
         }
         /* only the whitelisted targets ever launch */
         launched_args.clear();
@@ -335,6 +342,7 @@ int main(int argc, char** argv)
             CHECK(!banner->property("shown").toBool());
             banner->setProperty("active", true);
             CHECK(banner->property("shown").toBool());
+            QCoreApplication::processEvents();   /* reconnect settled */
 
             /* cleared -> hidden (no hold) */
             banner->setProperty("ownership", report({}));
@@ -357,6 +365,25 @@ int main(int argc, char** argv)
                     QEventLoop::AllEvents, 20);
             }
             CHECK(!banner->property("shown").toBool());
+
+            /* R-10 review: across a disconnect the hold does not
+               apply — a reconnect whose first report is clean
+               hides the banner at once, even though the engine
+               went "connected" one moment before the report. */
+            banner->setProperty("holdMs", 5000);
+            banner->setProperty("ownership", report({
+                conflict("Logitech G Hub / Options", "logitech") }));
+            CHECK(banner->property("shown").toBool());
+            banner->setProperty("active", false);
+            banner->setProperty("active", true);     /* stale report */
+            banner->setProperty("ownership", report({})); /* WELCOME */
+            CHECK(!banner->property("shown").toBool());
+            /* once settled, a clear is held again */
+            banner->setProperty("ownership", report({
+                conflict("Logitech G Hub / Options", "logitech") }));
+            QCoreApplication::processEvents();
+            banner->setProperty("ownership", report({}));
+            CHECK(banner->property("shown").toBool());
 
             /* a conflict that returns inside the hold keeps it
                up without a gap */

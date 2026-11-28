@@ -486,13 +486,17 @@ int main(int argc, char** argv)
     if(startup_task.available())
         startup_task.refresh();
 
+    /* R-10: a competing writer that appears while the window is
+       hidden gets one tray message per writer key per session.
+       Declared before the tray and the Quit-script QProcess so
+       they outlive every handler that captures them (a still-
+       running `shutdown` can run its finished handler — and a
+       nested event loop — from ~QProcess). */
+    openrgb2::ui::ConflictNoticeTracker conflict_notices;
+    bool ownership_msg_pending = false;
     QMenu tray_menu;
     QSystemTrayIcon tray(app_icon);
     QProcess shutdown;
-    /* R-10: a competing writer that appears while the window is
-       hidden gets one tray message per writer key per session. */
-    openrgb2::ui::ConflictNoticeTracker conflict_notices;
-    bool ownership_msg_pending = false;
     if(tray_available)
     {
         auto show_ui = [window] { ShowRestored(window); };
@@ -584,14 +588,25 @@ int main(int argc, char** argv)
                          &app, [&bridge, &tray, window,
                                 &conflict_notices,
                                 &ownership_msg_pending] {
-            /* Keys are marked seen while the window is up too: the
-               banner already told the user about those. */
-            const QStringList fresh =
-                conflict_notices.NewConflicts(bridge.ownership());
+            const QVariantMap own = bridge.ownership();
+            const QStringList fresh = conflict_notices.Pending(own);
+            if(fresh.isEmpty())
+                return;
             const bool hidden = !window->isVisible()
                 || window->visibility() == QWindow::Minimized;
-            if(fresh.isEmpty() || !hidden)
+            if(!hidden)
+            {
+                /* The banner already told the user. */
+                conflict_notices.MarkSeen(own);
                 return;
+            }
+            /* At sign-in the tray may not exist yet: keep the keys
+               pending rather than spend them on a message nobody
+               can see. */
+            if(!QSystemTrayIcon::isSystemTrayAvailable()
+               || !tray.isVisible())
+                return;
+            conflict_notices.MarkSeen(own);
             ownership_msg_pending = true;
             tray.showMessage(
                 QObject::tr("Another app is controlling your lights"),

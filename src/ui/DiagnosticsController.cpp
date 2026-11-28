@@ -699,33 +699,41 @@ bool DiagnosticsController::openOwnershipTarget(const QString& target)
     /* The whole surface is two constants — no caller-supplied
        string ever reaches the shell. */
     const QString explorer = launch::SystemExplorerPath();
+    if(explorer.isEmpty())
+    {
+        return false;
+    }
+    const QString win = QFileInfo(explorer).absolutePath();
+    QString program;
     QString arg;
     if(target == QLatin1String("dynamic_lighting_settings"))
     {
         /* The Dynamic Lighting page id in the Settings catalog
-           (present on Windows 11 build 26300). */
-        arg = QStringLiteral("ms-settings:personalization-lighting");
+           (present on Windows 11 build 26300). A URI needs the
+           shell, so explorer.exe. */
+        program = explorer;
+        arg     = QStringLiteral("ms-settings:personalization-lighting");
     }
     else if(target == QLatin1String("services"))
     {
-        const QString win = QFileInfo(explorer).absolutePath();
-        arg = QDir::toNativeSeparators(
+        /* mmc.exe by absolute path, started directly (no shell):
+           the console keeps the UI's elevation and can stop the
+           service — through explorer it would open de-elevated. */
+        program = QDir::toNativeSeparators(
+            win + QStringLiteral("/System32/mmc.exe"));
+        arg     = QDir::toNativeSeparators(
             win + QStringLiteral("/System32/services.msc"));
     }
     else
     {
         return false;
     }
-    if(explorer.isEmpty())
-    {
-        return false;
-    }
     if(shell_launcher_)
     {
-        return shell_launcher_(explorer, QStringList{ arg });
+        return shell_launcher_(program, QStringList{ arg });
     }
     QProcess p;
-    p.setProgram(explorer);
+    p.setProgram(program);
     p.setArguments(QStringList{ arg });
     p.setProcessEnvironment(launch::SanitizedChildEnvironment());
     const bool started = p.startDetached();

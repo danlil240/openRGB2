@@ -172,6 +172,19 @@ static void TestConflictNotice()
     n = t.NewConflicts(report({ conflict("Mystery RGB", "") }));
     CHECK(n == QStringList{QStringLiteral("Mystery RGB")},
           "notice: a keyless finding is keyed by its label");
+
+    /* R-10 review: peeking does not consume a key — the tray may
+       not be ready at sign-in, and a notice that could not be
+       shown must still be shown later. */
+    ConflictNoticeTracker p;
+    const QVariantMap razer = report({ conflict("Razer Synapse", "razer") });
+    CHECK(p.Pending(razer) == QStringList{QStringLiteral("Razer Synapse")},
+          "notice: pending lists a new key");
+    CHECK(p.Pending(razer) == QStringList{QStringLiteral("Razer Synapse")},
+          "notice: pending again -> still pending (not consumed)");
+    p.MarkSeen(razer);
+    CHECK(p.Pending(razer).isEmpty(),
+          "notice: after MarkSeen -> nothing pending");
 }
 
 /* R-10: the startup takeover dialog lists each writer once and

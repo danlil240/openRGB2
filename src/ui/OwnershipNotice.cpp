@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "OwnershipNotice.h"
 
+#include <QList>
+#include <QPair>
 #include <QRegularExpression>
 #include <QVariantList>
 
 namespace openrgb2::ui
 {
 
-QStringList ConflictNoticeTracker::NewConflicts(const QVariantMap& ownership)
+namespace
 {
-    QStringList out;
+
+/* (key, owner) per conflict; a keyless finding is keyed by its
+   label. */
+QList<QPair<QString, QString>> ConflictKeys(const QVariantMap& ownership)
+{
+    QList<QPair<QString, QString>> out;
     const QVariantList conflicts =
         ownership.value(QStringLiteral("conflicts")).toList();
     for(const QVariant& v : conflicts)
@@ -21,13 +28,41 @@ QStringList ConflictNoticeTracker::NewConflicts(const QVariantMap& ownership)
         {
             key = QStringLiteral("label:") + owner;
         }
-        if(seen_.contains(key))
+        out.append(qMakePair(key, owner));
+    }
+    return out;
+}
+
+} /* anonymous namespace */
+
+QStringList ConflictNoticeTracker::Pending(const QVariantMap& ownership) const
+{
+    QStringList out;
+    QSet<QString> listed;
+    for(const auto& ko : ConflictKeys(ownership))
+    {
+        if(seen_.contains(ko.first) || listed.contains(ko.first))
         {
             continue;
         }
-        seen_.insert(key);
-        out << owner;
+        listed.insert(ko.first);
+        out << ko.second;
     }
+    return out;
+}
+
+void ConflictNoticeTracker::MarkSeen(const QVariantMap& ownership)
+{
+    for(const auto& ko : ConflictKeys(ownership))
+    {
+        seen_.insert(ko.first);
+    }
+}
+
+QStringList ConflictNoticeTracker::NewConflicts(const QVariantMap& ownership)
+{
+    const QStringList out = Pending(ownership);
+    MarkSeen(ownership);
     return out;
 }
 

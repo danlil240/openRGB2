@@ -48,7 +48,26 @@ Rectangle {
         return seen;
     }
 
+    /* True for the rest of the event-loop turn in which the banner
+       became active: the bridge goes "connected" one moment before
+       it applies the WELCOME report, so the first report after a
+       reconnect replaces the stale one without a hold. */
+    property bool settling: false
+    onActiveChanged: {
+        if(root.active) {
+            root.settling = true;
+            Qt.callLater(function() { root.settling = false; });
+        }
+        sync();
+    }
+
     function sync() {
+        if(!root.active || root.settling) {
+            /* No hold while hidden or right after a reconnect. */
+            holdTimer.stop();
+            root.heldConflicts = root.conflicts;
+            return;
+        }
         if(root.conflicts.length > 0) {
             holdTimer.stop();
             root.heldConflicts = root.conflicts;
