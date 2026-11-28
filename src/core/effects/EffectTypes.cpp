@@ -15,7 +15,12 @@ static constexpr float PI  = 3.14159265358979323846f;
 static constexpr float TAU = 6.28318530717958647692f;
 
 static float Frac(float v) { return v - std::floor(v); }
-static float Clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
+/* NaN-safe (audit C-12): written so NaN fails the first compare
+   and maps to 0 — the old `v < 0 ? 0 : v > 1 ? 1 : v` passed NaN
+   straight through, and ToSceneColor's (unsigned)(NaN * 255) is
+   undefined behaviour. Identical to the old form for every
+   non-NaN input (bar -0.0 -> +0.0, which packs the same). */
+static float Clamp01(float v) { return v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f; }
 
 /* Time-driven phase terms are reduced in DOUBLE before they are
    narrowed to float. `in.t` is seconds since the scene clock's

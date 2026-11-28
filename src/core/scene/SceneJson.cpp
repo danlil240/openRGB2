@@ -457,6 +457,13 @@ bool FromJson(const nlohmann::json& j, SceneDocument& doc,
                document unloadable. */
             out.effect.seed      = FieldU32(effect, "seed", 0, "effect", errs);
             out.effect.speed     = (float)FieldNum(effect, "speed", 1.0, "effect", errs);
+            /* Audit C-12: FieldNum rejects non-finite doubles, but
+               a finite one past float range narrows to inf here. */
+            if(!std::isfinite(out.effect.speed))
+            {
+                AddErr(errs, "effect.speed", "expected float-finite number");
+                out.effect.speed = 1.0f;
+            }
             out.effect.intensity = (float)FieldNum(effect, "intensity", 1.0, "effect", errs);
             out.effect.playing   = FieldBool(effect, "playing", false, "effect", errs);
             if(effect.contains("layers"))

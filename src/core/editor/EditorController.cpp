@@ -2101,6 +2101,14 @@ EditorController::SetLayerField(size_t i, LayerField f, double v)
             last_error = "scale overflows float";
             return UndoEffectOp(before);
         }
+        /* Audit C-12: the > 0 check above ran on the double; a
+           value under float's range (1e-50) narrows to 0 and
+           wave/pulse divide by it. */
+        if(l->scale <= 0.0f)
+        {
+            last_error = "scale underflows float";
+            return UndoEffectOp(before);
+        }
         break;
     case LayerField::Phase:
         name = "phase";
@@ -2558,6 +2566,17 @@ EditorController::SetFlow(const FlowEdit& f)
             l.scale = (scale0 > 0.0f)
                     ? l.scale * (*f.wavelength / scale0)
                     : *f.wavelength;
+        }
+        /* Audit C-12: the proportional rescale runs in float, so
+           a valid request can still push a sibling layer's speed
+           to inf or its scale to inf/0 (wave divides by it).
+           Refuse the whole edit rather than store either. */
+        if((f.speed && !std::isfinite(l.speed))
+           || (f.wavelength
+               && (!std::isfinite(l.scale) || l.scale <= 0.0f)))
+        {
+            last_error = "wave edit overflows a layer's speed or length";
+            return UndoEffectOp(before);
         }
     }
     if(!f.colors.empty())
