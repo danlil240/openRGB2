@@ -16,7 +16,8 @@ add_library(openrgb2_platform_windows STATIC
     WinScreenSampler.cpp
     WinKeyHook.cpp
     WinSessionEnd.cpp
-    WinTimerResolution.cpp)
+    WinTimerResolution.cpp
+    WinHotkeys.cpp)
 target_include_directories(openrgb2_platform_windows PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(openrgb2_platform_windows PUBLIC
