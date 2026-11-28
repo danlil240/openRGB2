@@ -11,6 +11,7 @@ CMakeUserPresets.json
 .idea/
 .clangd/
 .cache/
+.claude/worktrees/
 compile_commands.json
 
 # QA harness scratch output (tools/qa/qa.py, engine_ctl dumps).
