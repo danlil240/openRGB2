@@ -23,7 +23,9 @@
 
 #include "NamedPipeInternal.h"
 
+#include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -306,6 +308,12 @@ IpcIoResult NamedPipeChannel::SendAll(const void* data, size_t len,
 |    already trusted with the whole machine.                |
 |  - otherwise, best effort: the server PROCESS's token     |
 |    user equals ours (GetNamedPipeServerProcessId).        |
+|                                                           |
+| Integrity (audit I-9 / U-6): identity alone let an        |
+| ELEVATED UI trust a medium same-user squatter (and act on |
+| its replies — paths reach the shell). The server must     |
+| also run at no lower integrity than this client; the      |
+| matrix is in NamedPipe.h (EvaluatePipeServerTrust).       |
 \*---------------------------------------------------------*/
 
 namespace
@@ -336,10 +344,9 @@ bool CurrentUserSid(std::vector<uint8_t>& out)
     return ok;
 }
 
-bool ServerProcessIsUser(HANDLE pipe, PSID self)
+bool ServerProcessIsUser(ULONG pid, PSID self)
 {
-    ULONG pid = 0;
-    if(!GetNamedPipeServerProcessId(pipe, &pid) || pid == 0)
+    if(pid == 0)
     {
         return false;
     }
@@ -371,7 +378,242 @@ bool ServerProcessIsUser(HANDLE pipe, PSID self)
     return ok;
 }
 
+/* Owner of the pipe object (READ_CONTROL is part of the
+   GENERIC_READ the client opened with). */
+PipeOwnerKind ClassifyOwner(HANDLE h, PSID self)
+{
+    DWORD need = 0;
+    GetKernelObjectSecurity(h, OWNER_SECURITY_INFORMATION, nullptr, 0,
+                            &need);
+    if(need == 0)
+    {
+        return PipeOwnerKind::Unknown;
+    }
+    std::vector<uint8_t> sd(need);
+    PSID  owner     = nullptr;
+    BOOL  defaulted = FALSE;
+    if(!GetKernelObjectSecurity(h, OWNER_SECURITY_INFORMATION,
+                                (PSECURITY_DESCRIPTOR)sd.data(),
+                                need, &need) ||
+       !GetSecurityDescriptorOwner((PSECURITY_DESCRIPTOR)sd.data(),
+                                   &owner, &defaulted) ||
+       owner == nullptr)
+    {
+        return PipeOwnerKind::Unknown;
+    }
+    if(EqualSid(owner, self))
+    {
+        return PipeOwnerKind::Self;
+    }
+    if(IsWellKnownSid(owner, WinLocalSystemSid))
+    {
+        return PipeOwnerKind::LocalSystem;
+    }
+    if(IsWellKnownSid(owner, WinBuiltinAdministratorsSid))
+    {
+        return PipeOwnerKind::Administrators;
+    }
+    return PipeOwnerKind::Other;
+}
+
+/* Last sub-authority of a mandatory-label SID = its RID. */
+bool LabelSidRid(PSID sid, uint32_t& rid)
+{
+    const UCHAR n = *GetSidSubAuthorityCount(sid);
+    if(n == 0)
+    {
+        return false;
+    }
+    rid = (uint32_t)*GetSidSubAuthority(sid, n - 1);
+    return true;
+}
+
+/* The pipe OBJECT's mandatory label (LABEL_SECURITY_INFORMATION
+   reads with READ_CONTROL). No label ACE = implicit Medium. */
+bool PipeLabelRid(HANDLE h, uint32_t& rid)
+{
+    DWORD need = 0;
+    GetKernelObjectSecurity(h, LABEL_SECURITY_INFORMATION, nullptr, 0,
+                            &need);
+    if(need == 0)
+    {
+        return false;
+    }
+    std::vector<uint8_t> sd(need);
+    BOOL present   = FALSE;
+    BOOL defaulted = FALSE;
+    PACL sacl      = nullptr;
+    if(!GetKernelObjectSecurity(h, LABEL_SECURITY_INFORMATION,
+                                (PSECURITY_DESCRIPTOR)sd.data(),
+                                need, &need) ||
+       !GetSecurityDescriptorSacl((PSECURITY_DESCRIPTOR)sd.data(),
+                                  &present, &sacl, &defaulted))
+    {
+        return false;
+    }
+    rid = kIntegrityMedium;
+    if(!present || sacl == nullptr)
+    {
+        return true;
+    }
+    for(DWORD i = 0; i < sacl->AceCount; ++i)
+    {
+        void* ace = nullptr;
+        if(GetAce(sacl, i, &ace) &&
+           ((ACE_HEADER*)ace)->AceType ==
+               SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+        {
+            return LabelSidRid(
+                (PSID)&((SYSTEM_MANDATORY_LABEL_ACE*)ace)->SidStart,
+                rid);
+        }
+    }
+    return true;
+}
+
+/* The real token query behind QueryIntegrity. */
+bool TokenIntegrity(IntegritySubject subject, unsigned long pid,
+                    uint32_t& rid)
+{
+    HANDLE proc     = GetCurrentProcess();
+    bool   own_proc = false;
+    if(subject != IntegritySubject::Self)
+    {
+        if(pid == 0)
+        {
+            return false;
+        }
+        proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                           (DWORD)pid);
+        if(!proc)
+        {
+            return false;
+        }
+        own_proc = true;
+    }
+    bool   ok    = false;
+    HANDLE token = nullptr;
+    if(OpenProcessToken(proc, TOKEN_QUERY, &token))
+    {
+        DWORD len = 0;
+        GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0,
+                            &len);
+        if(len > 0)
+        {
+            std::vector<uint8_t> buf(len);
+            if(GetTokenInformation(token, TokenIntegrityLevel,
+                                   buf.data(), len, &len))
+            {
+                ok = LabelSidRid(
+                    ((const TOKEN_MANDATORY_LABEL*)buf.data())
+                        ->Label.Sid,
+                    rid);
+            }
+        }
+        CloseHandle(token);
+    }
+    if(own_proc)
+    {
+        CloseHandle(proc);
+    }
+    return ok;
+}
+
+std::string IntegrityText(uint32_t rid)
+{
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "0x%04x", (unsigned)rid);
+    return buf;
+}
+
+std::atomic<IntegrityProbe> g_integrity_probe{ nullptr };
+
 } /* anonymous namespace */
+
+void SetIntegrityProbeForTesting(IntegrityProbe probe)
+{
+    g_integrity_probe.store(probe);
+}
+
+bool QueryIntegrity(IntegritySubject subject, unsigned long pid,
+                    uint32_t& rid_out)
+{
+    const IntegrityProbe probe = g_integrity_probe.load();
+    return probe ? probe(subject, pid, rid_out)
+                 : TokenIntegrity(subject, pid, rid_out);
+}
+
+bool EvaluatePipeServerTrust(const PipeServerFacts& f, std::string& err)
+{
+    const bool privileged_owner =
+        f.owner == PipeOwnerKind::LocalSystem ||
+        f.owner == PipeOwnerKind::Administrators;
+
+    /* 1. Identity (the 2026-11-27 rule): this user, SYSTEM or
+          Administrators owns the object, or the server process
+          runs as this user. */
+    if(!(f.owner == PipeOwnerKind::Self || privileged_owner ||
+         f.server_user_is_self))
+    {
+        err = "pipe server is not owned by this user (refusing a "
+              "possibly squatted pipe name)";
+        return false;
+    }
+
+    /* 2. Server integrity: the token's level when readable
+          (exact); otherwise a lower bound — only an elevated or
+          SYSTEM process can own an object as Administrators /
+          LocalSystem, and a creator cannot label an object above
+          its own level (a low creator's objects are always
+          labeled low). A medium UI usually cannot open an
+          elevated engine's token: the owner / label bound is
+          what keeps that shipped topology working. */
+    bool     known     = false;
+    uint32_t server_il = 0;
+    if(f.token_known)
+    {
+        known     = true;
+        server_il = f.token_integrity;
+    }
+    else if(privileged_owner)
+    {
+        known     = true;
+        server_il = kIntegrityHigh;
+    }
+    else if(f.label_known)
+    {
+        known     = true;
+        server_il = f.label_integrity;
+    }
+    if(!known)
+    {
+        err = "cannot determine the pipe server's integrity level "
+              "(refusing an unverifiable server)";
+        return false;
+    }
+    if(server_il < f.client_integrity)
+    {
+        err = "pipe server integrity " + IntegrityText(server_il) +
+              " is below this client's " +
+              IntegrityText(f.client_integrity) +
+              " (refusing a lower-integrity, possibly squatted "
+              "server)";
+        return false;
+    }
+
+    /* 3. An ELEVATED client trusts only an Administrators /
+          LocalSystem-owned object — or, where policy makes the
+          creator the owner, a this-user object whose server
+          token it actually read at its own level (step 2). */
+    if(f.client_integrity > kIntegrityMedium && !privileged_owner &&
+       !(f.owner == PipeOwnerKind::Self && f.token_known))
+    {
+        err = "an elevated client requires an Administrators/"
+              "LocalSystem-owned pipe server";
+        return false;
+    }
+    return true;
+}
 
 bool VerifyPipeServer(void* pipe_handle, std::string& err)
 {
@@ -385,38 +627,25 @@ bool VerifyPipeServer(void* pipe_handle, std::string& err)
     }
     const PSID self_sid = (PSID)self.data();
 
-    /* Owner of the pipe object (READ_CONTROL is part of the
-       GENERIC_READ the client opened with). */
-    DWORD need = 0;
-    GetKernelObjectSecurity(h, OWNER_SECURITY_INFORMATION, nullptr, 0,
-                            &need);
-    if(need > 0)
+    PipeServerFacts facts;
+    facts.owner = ClassifyOwner(h, self_sid);
+    ULONG pid = 0;
+    if(!GetNamedPipeServerProcessId(h, &pid))
     {
-        std::vector<uint8_t> sd(need);
-        PSID  owner     = nullptr;
-        BOOL  defaulted = FALSE;
-        if(GetKernelObjectSecurity(h, OWNER_SECURITY_INFORMATION,
-                                   (PSECURITY_DESCRIPTOR)sd.data(),
-                                   need, &need) &&
-           GetSecurityDescriptorOwner((PSECURITY_DESCRIPTOR)sd.data(),
-                                      &owner, &defaulted) &&
-           owner != nullptr)
-        {
-            if(EqualSid(owner, self_sid) ||
-               IsWellKnownSid(owner, WinLocalSystemSid) ||
-               IsWellKnownSid(owner, WinBuiltinAdministratorsSid))
-            {
-                return true;
-            }
-        }
+        pid = 0;
     }
-    if(ServerProcessIsUser(h, self_sid))
+    facts.server_user_is_self = ServerProcessIsUser(pid, self_sid);
+    facts.label_known = PipeLabelRid(h, facts.label_integrity);
+    facts.token_known =
+        pid != 0 && QueryIntegrity(IntegritySubject::PipeServer, pid,
+                                   facts.token_integrity);
+    if(!QueryIntegrity(IntegritySubject::Self, 0,
+                       facts.client_integrity))
     {
-        return true;
+        err = "cannot read this process's integrity level";
+        return false;
     }
-    err = "pipe server is not owned by this user (refusing a "
-          "possibly squatted pipe name)";
-    return false;
+    return EvaluatePipeServerTrust(facts, err);
 }
 
 /*---------------------------------------------------------*\

@@ -116,7 +116,9 @@ class DiagnosticsController : public QObject
        journaled — telemetry that would evict every real
        event within seconds at live-effects rates; the
        bridge's frameStatus store and the preview-cadence
-       window carry it. */
+       window carry it. Draft-preview `frame` events are
+       skipped for the same reason (their `status` events
+       stay). */
     Q_PROPERTY(QVariantList eventLog READ eventLog
                    NOTIFY eventLogChanged)
 

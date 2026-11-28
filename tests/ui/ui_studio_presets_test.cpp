@@ -30,7 +30,10 @@
 #include <QJSValue>
 #include <QQmlComponent>
 #include <QQmlEngine>
+#include <QKeyEvent>
+#include <QQuickItem>
 #include <QQuickStyle>
+#include <QQuickWindow>
 #include <QSignalSpy>
 
 #include <cstdio>
@@ -426,6 +429,96 @@ int main(int argc, char** argv)
         }
     }
 
+    /* Audit Q-8: Open / Reload / Restore over a dirty draft
+       latch a replace confirmation. Its only buttons used to
+       live on the shell strip — BEHIND this modal popup, so the
+       action appeared to do nothing until the dialog closed.
+       The dialog must offer the confirmation itself. The stub
+       is a notifying QtObject so the dialog's bindings follow
+       the latch like they do on the real controller. */
+    std::printf("-- qml: WorkspaceActionsDialog replace confirm\n");
+    {
+        QQmlComponent stubComp(&engine);
+        stubComp.setData(R"QML(
+            import QtQuick
+            QtObject {
+                objectName: "wsStub"
+                property bool available: true
+                property bool managed: true
+                property bool dirty: true
+                property bool conflict: false
+                property bool saving: false
+                property string externalChange: ""
+                property string workspaceId: "desk"
+                property string workspaceName: "desk"
+                property int workspaceRevision: 3
+                property var workspaceList: ["desk", "attic"]
+                property bool replaceOffered: false
+                property string replaceText: ""
+                property int confirmed: 0
+                property int cancelled: 0
+                function refreshList() {}
+                function openWorkspace(id) {
+                    replaceText = "Open workspace '" + id + "'?"
+                    replaceOffered = true
+                }
+                function reload() { openWorkspace(workspaceId) }
+                function restoreBackup() { openWorkspace(workspaceId) }
+                function confirmReplace() {
+                    confirmed++; replaceOffered = false }
+                function cancelReplace() {
+                    cancelled++; replaceOffered = false }
+            }
+        )QML", QUrl());
+        std::unique_ptr<QObject> stub(stubComp.create());
+        CHECK(stub != nullptr);
+
+        QQuickWindow win;
+        win.resize(800, 700);
+        QObject* dlg = load("WorkspaceActionsDialog.qml");
+        if(dlg != nullptr && stub != nullptr)
+        {
+            dlg->setProperty("parent",
+                QVariant::fromValue(win.contentItem()));
+            dlg->setProperty("ctlOverride",
+                             QVariant::fromValue(stub.get()));
+            win.show();
+            QMetaObject::invokeMethod(dlg, "open");
+            QCoreApplication::processEvents();
+            CHECK(dlg->property("opened").toBool()
+                  || dlg->property("visible").toBool());
+
+            QMetaObject::invokeMethod(stub.get(), "openWorkspace",
+                Q_ARG(QVariant, QVariant(QStringLiteral("attic"))));
+            QCoreApplication::processEvents();
+            QObject* yes = dlg->findChild<QObject*>(
+                "wsDlgConfirmReplace");
+            QObject* no = dlg->findChild<QObject*>(
+                "wsDlgCancelReplace");
+            CHECK(yes != nullptr && no != nullptr);
+            if(yes != nullptr && no != nullptr)
+            {
+                auto* yi = qobject_cast<QQuickItem*>(yes);
+                CHECK(yi != nullptr && yi->isVisible());
+                QMetaObject::invokeMethod(yes, "clicked");
+                CHECK(stub->property("confirmed").toInt() == 1);
+                QCoreApplication::processEvents();
+                CHECK(yi != nullptr && !yi->isVisible());
+
+                /* Keep my draft path */
+                QMetaObject::invokeMethod(stub.get(), "reload");
+                QCoreApplication::processEvents();
+                CHECK(qobject_cast<QQuickItem*>(no)->isVisible());
+                QMetaObject::invokeMethod(no, "clicked");
+                CHECK(stub->property("cancelled").toInt() == 1);
+            }
+            QMetaObject::invokeMethod(dlg, "close");
+            QCoreApplication::processEvents();
+            dlg->setProperty("parent", QVariant());
+        }
+        delete dlg;
+    }
+
     std::printf("-- qml: WorkspaceImportDialog stub flow\n");
     {
         QObject* dlg = load("WorkspaceImportDialog.qml");
@@ -489,6 +582,147 @@ int main(int argc, char** argv)
                              QVariantMap({{ "old", "new" }}));
             const QVariant ch = callv(dlg, "collectChoices");
             CHECK(ch.toMap().value("old").toString() == "new");
+
+            /* Audit Q-13, in a window so the popup really opens
+               and closes. */
+            QQuickWindow win;
+            win.resize(800, 700);
+            dlg->setProperty("parent",
+                QVariant::fromValue(win.contentItem()));
+            win.show();
+            QMetaObject::invokeMethod(dlg, "open");
+            QCoreApplication::processEvents();
+            auto cancelled = [&] {
+                return stub.property("_calls").property("cancelled")
+                           .toInt();
+            };
+            /* (1) closing mid-operation (Escape, Close, outside)
+               releases the staged inspect — the Close button did,
+               Escape did not. */
+            if(pf)
+            {
+                pf->setProperty("text",
+                                "C:/bundles/desk.or2studio");
+                QMetaObject::invokeMethod(dlg, "readAndInspect");
+                CHECK(dlg->property("phase").toString()
+                      == "inspecting");
+                const int before = cancelled();
+                QMetaObject::invokeMethod(dlg, "close");
+                QCoreApplication::processEvents();
+                CHECK(cancelled() == before + 1);
+            }
+            QMetaObject::invokeMethod(dlg, "open");
+            QCoreApplication::processEvents();
+
+            /* (2) "done" is quiescent — another import and the
+               export path stay reachable without a reopen. */
+            QObject* ib = dlg->findChild<QObject*>("inspectBtn");
+            QObject* eb = dlg->findChild<QObject*>("exportBtn");
+            QObject* ef = dlg->findChild<QObject*>("exportPathField");
+            CHECK(ib && eb && ef && pf);
+            if(ib && eb && ef && pf)
+            {
+                pf->setProperty("text", "C:/bundles/next.or2studio");
+                ef->setProperty("text", "C:/out/desk.or2studio");
+                dlg->setProperty("phase", "done");
+                QCoreApplication::processEvents();
+                CHECK(pf->property("enabled").toBool());
+                CHECK(ib->property("enabled").toBool());
+                CHECK(ef->property("enabled").toBool());
+                CHECK(eb->property("enabled").toBool());
+                QMetaObject::invokeMethod(dlg, "readAndInspect");
+                CHECK(dlg->property("phase").toString()
+                      == "inspecting");
+            }
+
+            /* (3) "replace my layout" never carries over to the
+               next import. */
+            QObject* ob = dlg->findChild<QObject*>("overwriteBox");
+            CHECK(ob != nullptr);
+            if(ob)
+            {
+                ob->setProperty("checked", true);
+                QMetaObject::invokeMethod(dlg, "close");
+                QMetaObject::invokeMethod(dlg, "open");
+                QCoreApplication::processEvents();
+                CHECK(!ob->property("checked").toBool());
+            }
+
+            /* (4) paths can be browsed, and a picked file URL
+               becomes a plain local path */
+            CHECK(dlg->findChild<QObject*>("importBrowseBtn"));
+            CHECK(dlg->findChild<QObject*>("exportBrowseBtn"));
+            QVariant lp;
+            QMetaObject::invokeMethod(dlg, "localPath",
+                Q_RETURN_ARG(QVariant, lp),
+                Q_ARG(QVariant, QVariant(QStringLiteral(
+                    "file:///C:/my%20bundles/desk.or2studio"))));
+            CHECK(lp.toString()
+                  == QStringLiteral("C:/my bundles/desk.or2studio"));
+
+            QMetaObject::invokeMethod(dlg, "close");
+            QCoreApplication::processEvents();
+            dlg->setProperty("parent", QVariant());
+        }
+    }
+
+    /* Audit Q-9: the three modal popups never took keyboard
+       focus — the focus item stayed BEHIND the modal, so typing
+       went nowhere visible and Escape (CloseOnEscape needs the
+       popup to hold focus) did not close them. Each must focus
+       its first field on open, and Escape must close it. */
+    std::printf("-- qml: modal popups take focus\n");
+    {
+        struct Case { const char* file; const char* field;
+                      const char* opener; };
+        const Case cases[] = {
+            { "WorkspaceActionsDialog.qml", "wsCopyName",      "open" },
+            { "WorkspaceImportDialog.qml",  "importPathField", "open" },
+            { "DevicePresetEditor.qml",     "presetIdField",   "openNew" },
+        };
+        for(const Case& tc : cases)
+        {
+            QQuickWindow win;
+            win.resize(800, 700);
+            QObject* dlg = load(tc.file);
+            if(dlg == nullptr)
+            {
+                continue;
+            }
+            dlg->setProperty("parent",
+                QVariant::fromValue(win.contentItem()));
+            win.show();
+            win.requestActivate();
+            QCoreApplication::processEvents();
+            QMetaObject::invokeMethod(dlg, tc.opener);
+            QCoreApplication::processEvents();
+            auto* field = qobject_cast<QQuickItem*>(
+                dlg->findChild<QObject*>(tc.field));
+            CHECK(field != nullptr);
+            const bool focused =
+                field != nullptr && field->hasActiveFocus();
+            CHECK(focused);
+            if(!focused)
+            {
+                std::printf("   (%s: first field not focused)\n",
+                            tc.file);
+            }
+            QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape,
+                          Qt::NoModifier);
+            QCoreApplication::sendEvent(&win, &esc);
+            QKeyEvent escUp(QEvent::KeyRelease, Qt::Key_Escape,
+                            Qt::NoModifier);
+            QCoreApplication::sendEvent(&win, &escUp);
+            QCoreApplication::processEvents();
+            const bool closed = !dlg->property("visible").toBool();
+            CHECK(closed);
+            if(!closed)
+            {
+                std::printf("   (%s: Escape did not close)\n",
+                            tc.file);
+            }
+            dlg->setProperty("parent", QVariant());
+            delete dlg;
         }
     }
 

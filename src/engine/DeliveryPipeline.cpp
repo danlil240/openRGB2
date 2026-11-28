@@ -162,6 +162,19 @@ void DeliveryPipeline::SetDefaultBudget(Clock::duration min_interval)
     default_budget_ = min_interval;
 }
 
+void DeliveryPipeline::SetKeyframeInterval(Clock::duration interval)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    keyframe_interval_ = interval < Clock::duration::zero()
+                             ? Clock::duration::zero() : interval;
+}
+
+Clock::duration DeliveryPipeline::KeyframeInterval() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return keyframe_interval_;
+}
+
 bool DeliveryPipeline::Budget(const DeviceKey& controller,
                               Clock::duration& out) const
 {
@@ -548,20 +561,32 @@ bool DeliveryPipeline::DeliverOne(Lane& lane, RgbFrame frame,
 
     /* Unchanged-frame suppression + stale-live drop (live path
        only — reliable convergence is always transmitted). */
+    bool keyframe = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if(!reliable && lane.has_sent &&
-           ((!frame.synthetic && frame.sequence < lane.last_sent_seq) ||
-            frame.colors == lane.last_colors))
+        if(!reliable && lane.has_sent)
         {
-            /* Identical to the delivered state, or older than the
-               state already delivered (e.g. a reliable send
-               overtook it): retransmission is suppressed. A
-               synthetic frame only dedupes on identical colors —
-               its sequence lives outside the live namespace. */
-            ++lane.stats.suppressed;
-            ++aggregate_.suppressed;
-            return false;
+            const bool stale =
+                !frame.synthetic && frame.sequence < lane.last_sent_seq;
+            const bool same  = !stale && frame.colors == lane.last_colors;
+            /* E-5 keyframe: an identical frame is re-asserted once
+               the interval since this lane's last send has passed
+               — another writer may have changed the device behind
+               a static scene. Stale frames never qualify. */
+            keyframe = same &&
+                       keyframe_interval_ > Clock::duration::zero() &&
+                       now - lane.last_send >= keyframe_interval_;
+            if(stale || (same && !keyframe))
+            {
+                /* Identical to the delivered state, or older than
+                   the state already delivered (e.g. a reliable send
+                   overtook it): retransmission is suppressed. A
+                   synthetic frame only dedupes on identical colors
+                   — its sequence lives outside the live namespace. */
+                ++lane.stats.suppressed;
+                ++aggregate_.suppressed;
+                return false;
+            }
         }
     }
 
@@ -599,6 +624,11 @@ bool DeliveryPipeline::DeliverOne(Lane& lane, RgbFrame frame,
                                              : Clock::now();
     lane.stats.RecordTransportCompletion(completed);
     aggregate_.RecordTransportCompletion(completed);
+    if(keyframe)
+    {
+        ++lane.stats.keyframes;
+        ++aggregate_.keyframes;
+    }
     lane.last_send     = now;
     /* A send that straddled a topology change (RegisterDevice
        bumped the generation and reset the delivered state while

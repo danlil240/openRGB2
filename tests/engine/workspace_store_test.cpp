@@ -39,6 +39,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <process.h>
@@ -1395,6 +1396,337 @@ static void TestFailedCommitRetry()
     CHECK(lr.candidate->document.meta.name == "second");
 }
 
+/*---------------------------------------------------------*\
+|||| I-11: a wrong-typed manifest field never throws out of  ||
+|||| Load. Every damaged-newest-generation variant must fall ||
+|||| back to the marker backup (Recovered) — before the fix  ||
+|||| nlohmann's value()/type checks threw type_error, and    ||
+|||| startup re-adoption had no catch: a crash every launch. ||
+\*---------------------------------------------------------*/
+static void TestWrongTypedManifestNeverThrows()
+{
+    const fs::path types = g_tmp / "types-i11";
+    fs::create_directories(types);
+    WriteText((types / "mini-fan.device.json").string(),
+              TypeJson("mini-fan", 8, "base"));
+
+    WorkspaceStore::Deps deps;
+    deps.devices = RegistryWith(types.string());
+    const fs::path root = g_tmp / "ws-i11";
+    WorkspaceStore store(root.string(), deps);
+    const fs::path wsdir = root / "desk";
+
+    WorkspaceCandidate cand;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("one", "mini-fan")),
+                        deps.devices, deps.effects, cand));
+    CHECK(store.Commit("desk", cand, std::string(), 0).ok);
+    WorkspaceCandidate cand2;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("two", "mini-fan")),
+                        deps.devices, deps.effects, cand2));
+    CHECK(store.Commit("desk", cand2, std::string(), 1).ok);
+
+    const fs::path mpath =
+        wsdir / "generations" / "gen-000002" / "manifest.json";
+    const std::string good = ReadText(mpath.string());
+    const json gj = json::parse(good);
+    CHECK(gj.is_object());
+
+    struct Variant
+    {
+        const char* what;
+        json        patch;    /* merged over the good manifest */
+    };
+    const std::vector<Variant> variants = {
+        { "kind: number",           {{ "kind", 5 }} },
+        { "kind: array",            {{ "kind", json::array() }} },
+        { "schema_version: string", {{ "schema_version", "1" }} },
+        { "source_form: number",    {{ "source_form", 7 }} },
+        { "document: array",        {{ "document", json::array() }} },
+        { "document.file: number",  {{ "document", {
+              { "file", 5 }, { "sha", "x" } } }} },
+        { "document.sha: object",   {{ "document", {
+              { "file", "document.json" },
+              { "sha", json::object() } } }} },
+        { "original.file: array",   {{ "original", {
+              { "file", json::array() }, { "sha", "x" } } }} },
+        { "resources entry: string", {{ "resources", {
+              { "devices", {{ "mini-fan", "not-an-entry" }} } } }} },
+        { "resources entry.file: bool", {{ "resources", {
+              { "devices", {{ "mini-fan", {
+                    { "file", true }, { "sha", "x" } } }} } } }} },
+    };
+    for(const Variant& v : variants)
+    {
+        json m = gj;
+        m.merge_patch(v.patch);
+        WriteText(mpath.string(), m.dump(2));
+        bool threw = false;
+        WorkspaceStore::LoadResult lr;
+        try
+        {
+            lr = store.Load("desk");
+        }
+        catch(const std::exception& e)
+        {
+            threw = true;
+            std::printf("  (%s: Load threw %s)\n", v.what, e.what());
+        }
+        CHECK(!threw);
+        CHECK(lr.status == WorkspaceStore::LoadStatus::Recovered);
+        CHECK(lr.generation == 1);
+        CHECK(!lr.error.empty());
+        if(lr.status != WorkspaceStore::LoadStatus::Recovered)
+        {
+            std::printf("  (%s: status %d, %s)\n", v.what,
+                        (int)lr.status, lr.error.c_str());
+        }
+
+        /* The service surface (the startup re-adopt path) must
+           not throw either. */
+        WorkspaceService::Deps sdeps;
+        sdeps.devices = deps.devices;
+        WorkspaceService svc(root.string(), sdeps);
+        threw = false;
+        try
+        {
+            const WorkspaceService::Result r = svc.Open("desk");
+            CHECK(r.ok && r.recovered);
+        }
+        catch(const std::exception& e)
+        {
+            threw = true;
+            std::printf("  (%s: Open threw %s)\n", v.what, e.what());
+        }
+        CHECK(!threw);
+    }
+    WriteText(mpath.string(), good);
+    const WorkspaceStore::LoadResult lr = store.Load("desk");
+    CHECK(lr.status == WorkspaceStore::LoadStatus::Loaded);
+    CHECK(lr.generation == 2);
+}
+
+/*---------------------------------------------------------*\n|||| I-13: a commit that fails AFTER its library install     ||
+|||| leaves no library files behind. Commit installs the     ||
+|||| candidate's extracted types into the shared managed     ||
+|||| library first; a later failure (here: the generations   ||
+|||| dir cannot be created) used to leave them installed,    ||
+|||| visible in every catalog though nothing committed.      ||
+\*---------------------------------------------------------*/
+static void TestFailedCommitLeavesNoLibraryFiles()
+{
+    const fs::path root = g_tmp / "ws-i13-lib";
+    const fs::path lib  = root / "library" / "devices";
+    const fs::path wsdir = root / "desk";
+
+    WorkspaceCandidate cand;
+    cand.document.meta.name = "gizmo-desk";
+    {
+        studio::DeviceInstance inst;
+        inst.type = "gizmo";
+        cand.document.devices["g"] = inst;
+    }
+    studio::DevicePreset gizmo;
+    {
+        std::vector<std::string> perrs;
+        const json tj = json::parse(TypeJson("gizmo", 4, "NEW"));
+        CHECK(studio::DevicePresetFromJson(tj, gizmo, &perrs));
+    }
+    cand.extracted_types.push_back(gizmo);
+    cand.device_registry.Add(gizmo, nullptr);
+    {
+        auto resolved = std::make_shared<studio::SceneDocument>();
+        std::vector<std::string> rerrs;
+        CHECK(studio::ResolveScene(cand.document, cand.device_registry,
+                                   *resolved, &rerrs));
+        cand.resolved = std::move(resolved);
+    }
+
+    WorkspaceStore::Deps deps;   /* base registry knows no 'gizmo' */
+    WorkspaceStore store(root.string(), deps);
+
+    /* Block the publish step: a FILE where the generations dir
+       must be created. */
+    fs::create_directories(wsdir);
+    WriteText((wsdir / "generations").string(), "not a dir");
+    WorkspaceStore::CommitResult cr =
+        store.Commit("desk", cand, std::string(), 0);
+    CHECK(!cr.ok);
+    CHECK(!fs::exists(lib / "gizmo.device.json"));
+    if(fs::exists(lib / "gizmo.device.json"))
+    {
+        std::printf("  (failed commit left library/devices/"
+                    "gizmo.device.json: %s)\n", cr.error.c_str());
+    }
+
+    /* Unblocked, the same commit lands the type normally. */
+    std::error_code ec;
+    fs::remove(wsdir / "generations", ec);
+    cr = store.Commit("desk", cand, std::string(), 0);
+    CHECK(cr.ok);
+    CHECK(fs::exists(lib / "gizmo.device.json"));
+}
+
+/*---------------------------------------------------------*\n|||| I-13: workspace ids that Windows cannot hold as a      ||
+|||| directory (CON, NUL, COM1, ...) or that alias the      ||
+|||| store's own dirs (library/assets/transfers, any case)  ||
+|||| are refused; an id differing from an existing one only ||
+|||| in letter case never writes into (or reads) that       ||
+|||| workspace — NTFS would resolve both to one directory.  ||
+\*---------------------------------------------------------*/
+static void TestWorkspaceIdRules()
+{
+    for(const char* bad : { "CON", "con", "Nul", "PRN", "aux",
+                            "COM1", "com9", "LPT1", "lpt9",
+                            "library", "Library", "ASSETS",
+                            "transfers", "Transfers" })
+    {
+        CHECK(!WorkspaceStore::IsWorkspaceId(bad));
+        if(WorkspaceStore::IsWorkspaceId(bad))
+        {
+            std::printf("  (accepted reserved id '%s')\n", bad);
+        }
+    }
+    for(const char* ok : { "desk", "Desk-2", "console", "com10",
+                           "lpt", "nul_1", "my-assets" })
+    {
+        CHECK(WorkspaceStore::IsWorkspaceId(ok));
+    }
+
+    const fs::path types = g_tmp / "types-i13";
+    fs::create_directories(types);
+    WriteText((types / "mini-fan.device.json").string(),
+              TypeJson("mini-fan", 8, "base"));
+    WorkspaceStore::Deps deps;
+    deps.devices = RegistryWith(types.string());
+    const fs::path root = g_tmp / "ws-i13";
+    WorkspaceStore store(root.string(), deps);
+
+    WorkspaceCandidate cand;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("lower", "mini-fan")),
+                        deps.devices, deps.effects, cand));
+    CHECK(store.Commit("desk", cand, std::string(), 0).ok);
+
+    /* "Desk" at desk's revision would commit INTO desk. */
+    WorkspaceCandidate cand2;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("upper", "mini-fan")),
+                        deps.devices, deps.effects, cand2));
+    const WorkspaceStore::CommitResult cr =
+        store.Commit("Desk", cand2, std::string(), 1);
+    CHECK(!cr.ok);
+    CHECK(cr.error.find("case") != std::string::npos);
+    const WorkspaceStore::LoadResult lr = store.Load("desk");
+    CHECK(lr.status == WorkspaceStore::LoadStatus::Loaded);
+    CHECK(lr.workspace_revision == 1);
+    CHECK(lr.candidate &&
+          lr.candidate->document.meta.name == "lower");
+    /* Reads under the other case do not alias desk either. */
+    const WorkspaceStore::LoadResult la = store.Load("DESK");
+    CHECK(la.status != WorkspaceStore::LoadStatus::Loaded);
+    CHECK(la.candidate == nullptr);
+    CHECK(!store.LoadRevisions("DESK").exists);
+    const std::vector<std::string> ids = store.List();
+    CHECK(ids.size() == 1 && ids[0] == "desk");
+}
+
+/*---------------------------------------------------------*\
+|||| I-6: the `get` poll is metadata-only. The published     ||
+|||| snapshot carries the current document's bytes (built    ||
+|||| by the committing thread, not by the reader), and the   ||
+|||| external-change check re-reads + hashes the tracked     ||
+|||| files only when their size/write-time stamp moved —    ||
+|||| a recently-written ("racy") stamp always rescans.      ||
+\*---------------------------------------------------------*/
+static void BackdateTree(const fs::path& dir, int seconds)
+{
+    std::error_code ec;
+    const auto t = fs::file_time_type::clock::now() -
+                   std::chrono::seconds(seconds);
+    for(fs::recursive_directory_iterator it(dir, ec), end;
+        !ec && it != end; it.increment(ec))
+    {
+        if(it->is_regular_file(ec))
+        {
+            fs::last_write_time(it->path(), t, ec);
+        }
+    }
+}
+
+static void TestPollIsMetadataOnly()
+{
+    const fs::path types = g_tmp / "types-i6";
+    fs::create_directories(types);
+    WriteText((types / "mini-fan.device.json").string(),
+              TypeJson("mini-fan", 8, "base"));
+    WorkspaceStore::Deps deps;
+    deps.devices = RegistryWith(types.string());
+    const fs::path root = g_tmp / "ws-i6";
+    {
+        WorkspaceStore store(root.string(), deps);
+        WorkspaceCandidate cand;
+        CHECK(MakeCandidate(
+            json::parse(WorkspaceJson("poll-a", "mini-fan")),
+            deps.devices, deps.effects, cand));
+        CHECK(store.Commit("desk", cand, std::string(), 0).ok);
+    }
+    const fs::path wsdir = root / "desk";
+    BackdateTree(wsdir, 30);
+
+    WorkspaceService::Deps sdeps;
+    sdeps.devices = deps.devices;
+    WorkspaceService svc(root.string(), sdeps);
+    CHECK(svc.Open("desk").ok);
+    BackdateTree(wsdir, 30);
+
+    /* The adopt published the document bytes — the same bytes
+       DocumentBytes (download / content_sha256) serves. */
+    {
+        const WorkspaceService::PublishedState ps = svc.Snapshot();
+        CHECK(ps.document_bytes != nullptr);
+        std::string direct, derr;
+        CHECK(svc.DocumentBytes("desk", direct, derr));
+        CHECK(ps.document_bytes && *ps.document_bytes == direct);
+        CHECK(!direct.empty() && direct.front() == '{');
+    }
+
+    /* Quiet poll: one full scan, then stamp hits. */
+    const uint64_t scans0 = svc.ExternalFullScans();
+    for(int i = 0; i < 5; ++i)
+    {
+        CHECK(svc.CheckExternal().state == "none");
+    }
+    CHECK(svc.ExternalFullScans() - scans0 == 1);
+
+    /* An outside edit moves the stamp: rescanned once, then
+       the "modified" answer is served from the stamp. */
+    const fs::path doc = wsdir / "generations" / "gen-000001" /
+                         "document.json";
+    const std::string orig = ReadText(doc.string());
+    WriteText(doc.string(), orig + "\n/* outside edit */");
+    BackdateTree(wsdir, 20);
+    CHECK(svc.CheckExternal().state == "modified");
+    CHECK(svc.CheckExternal().state == "modified");
+    CHECK(svc.ExternalFullScans() - scans0 == 2);
+
+    /* Restored bytes: the stamp moved again -> rescan ->
+       same-content suppression reports "none". */
+    WriteText(doc.string(), orig);
+    BackdateTree(wsdir, 10);
+    CHECK(svc.CheckExternal().state == "none");
+    CHECK(svc.ExternalFullScans() - scans0 == 3);
+
+    /* Racy: a same-size rewrite that just happened is never
+       trusted to the stamp — every poll rescans until the
+       write ages out, so it cannot hide. */
+    std::string flipped = orig;
+    flipped[0] = flipped[0] == ' ' ? '\t' : ' ';
+    WriteText(doc.string(), flipped);
+    CHECK(svc.CheckExternal().state == "modified");
+    CHECK(svc.CheckExternal().state == "modified");
+    CHECK(svc.ExternalFullScans() - scans0 == 5);
+    WriteText(doc.string(), orig);
+    CHECK(svc.CheckExternal().state == "none");
+}
+
 int main()
 {
     g_tmp = fs::temp_directory_path() /
@@ -1420,6 +1752,10 @@ int main()
     TestLoadBackup();
     TestFutureSchemaRefusal();
     TestFailedCommitRetry();
+    TestWrongTypedManifestNeverThrows();
+    TestFailedCommitLeavesNoLibraryFiles();
+    TestWorkspaceIdRules();
+    TestPollIsMetadataOnly();
 
     fs::remove_all(g_tmp, ec);
     std::printf("%d checks, %d failures\n", checks, failures);

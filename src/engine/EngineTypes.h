@@ -236,6 +236,13 @@ enum class MeasurementProvenance
 ||   transport_rejected  — drained frames the downstream    |
 ||                         sink refused (not connected,     |
 ||                         send failure, validation)        |
+||   keyframes           — identical frames deliberately    |
+||                         re-sent because the lane's       |
+||                         keyframe interval had passed     |
+||                         since its last send (static-     |
+||                         scene re-assertion, E-5); also   |
+||                         counted in transport_completed,  |
+||                         never in suppressed              |
 ||   intervals           — between consecutive transport    |
 ||                         completions (seconds)            |
 \*---------------------------------------------------------*/
@@ -247,6 +254,7 @@ struct DeliveryStats
     uint64_t transport_completed = 0;
     uint64_t suppressed          = 0;
     uint64_t transport_rejected  = 0;
+    uint64_t keyframes           = 0;
 
     double   last_interval_s = 0.0;
     double   min_interval_s  = 0.0;

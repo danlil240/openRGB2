@@ -48,8 +48,11 @@
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QQuickItem>
 #include <QQuickStyle>
+#include <QQuickWindow>
 #include <QSignalSpy>
+#include <QTest>
 #include <QTemporaryDir>
 #include <QVariant>
 #include <QVariantMap>
@@ -907,6 +910,99 @@ Ed.CameraController {
                         CHECK(dt->property("textFocus").isValid());
                         CHECK(dl->property("textFocus").isValid());
                         CHECK(!dt->property("textFocus").toBool());
+                    }
+
+                    /* Audit Q-2: the viewport's key shortcuts are
+                       live only while the viewport is visible and
+                       holds focus. Main's StackLayout hides the
+                       Layout page when another page is current,
+                       but the viewport Loader stays alive and a
+                       window-wide Shortcut ignores visibility —
+                       W/E/P/F/Home/Escape fired from every page.
+                       Undo/redo belong to the shell alone: a
+                       second Ctrl+Z in the viewport made the key
+                       ambiguous, so neither fired. */
+                    std::printf("-- layout page: viewport shortcuts "
+                                "need the visible, focused viewport "
+                                "(audit Q-2)\n");
+                    auto* pageItem =
+                        qobject_cast<QQuickItem*>(page.get());
+                    auto* vpItem = qobject_cast<QQuickItem*>(vp);
+                    QObject* sel = vp ? vp->findChild<QObject*>(
+                        QStringLiteral("selCtl")) : nullptr;
+                    CHECK(pageItem != nullptr && vpItem != nullptr
+                          && sel != nullptr);
+                    if(pageItem && vpItem && sel)
+                    {
+                        QQuickWindow win;
+                        win.resize(1280, 900);
+                        pageItem->setParentItem(win.contentItem());
+                        pageItem->setSize(QSizeF(1280, 900));
+                        /* Stands in for Main.qml's shell-level
+                           undo shortcut. */
+                        QQmlComponent sc(&eng);
+                        sc.setData(
+                            "import QtQuick\n"
+                            "Shortcut { sequence: \"Ctrl+Z\";"
+                            " property int hits: 0;"
+                            " onActivated: hits++ }", QUrl());
+                        std::unique_ptr<QObject> shellUndo(
+                            sc.create(rc));
+                        CHECK(shellUndo != nullptr);
+                        if(shellUndo)
+                            shellUndo->setParent(win.contentItem());
+                        win.show();
+                        win.requestActivate();
+                        CHECK(QTest::qWaitForWindowActive(&win));
+
+                        auto tool = [&] {
+                            return sel->property("tool").toInt();
+                        };
+                        auto undoHits = [&] {
+                            return shellUndo
+                                ? shellUndo->property("hits").toInt()
+                                : -1;
+                        };
+                        ctl.setTool(0);
+                        QCoreApplication::processEvents();
+                        ctl.selectInstance(QStringLiteral("fan0"));
+
+                        /* Another page is current: the Layout page
+                           is hidden — every viewport key inert. */
+                        pageItem->setVisible(false);
+                        QCoreApplication::processEvents();
+                        QTest::keyClick(&win, Qt::Key_E);
+                        CHECK(tool() == 0);
+                        QTest::keyClick(&win, Qt::Key_Escape);
+                        CHECK(ctl.selectedInstances()
+                              == QVariantList({ "fan0" }));
+                        QTest::keyClick(&win, Qt::Key_Z,
+                                        Qt::ControlModifier);
+                        CHECK(undoHits() == 1);
+
+                        /* Layout current, focus elsewhere on the
+                           page: still inert. */
+                        pageItem->setVisible(true);
+                        pageItem->forceActiveFocus();
+                        QCoreApplication::processEvents();
+                        QTest::keyClick(&win, Qt::Key_P);
+                        CHECK(tool() == 0);
+
+                        /* Layout current and the viewport focused:
+                           the tool keys and Escape work; Ctrl+Z is
+                           still the shell's, never ambiguous. */
+                        vpItem->forceActiveFocus();
+                        QCoreApplication::processEvents();
+                        QTest::keyClick(&win, Qt::Key_E);
+                        CHECK(tool() == 1);
+                        QTest::keyClick(&win, Qt::Key_Z,
+                                        Qt::ControlModifier);
+                        CHECK(undoHits() == 2);
+                        QTest::keyClick(&win, Qt::Key_Escape);
+                        CHECK(ctl.selectedInstances().isEmpty());
+
+                        win.hide();
+                        pageItem->setParentItem(nullptr);
                     }
                 }
             }

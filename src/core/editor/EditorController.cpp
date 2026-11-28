@@ -610,8 +610,10 @@ std::optional<EditorEdit>
 EditorController::Rename(const std::string& id, const std::string& new_id)
 {
     last_error.clear();
-    if(gesture.active || !Exists(id) || new_id == id
-       || !IsPresetId(new_id) || Exists(new_id))
+    /* An open layer gesture is refused too: the rename may re-key
+       layer targets under its begin snapshot. */
+    if(gesture.active || layer_gesture.active || !Exists(id)
+       || new_id == id || !IsPresetId(new_id) || Exists(new_id))
     {
         return std::nullopt;
     }
@@ -711,6 +713,29 @@ EditorController::Rename(const std::string& id, const std::string& new_id)
         ws.emitter_colors[new_id + k.substr(id.size())] = v;
         CaptureKey(e.emitter_colors, ws.emitter_colors,
                    new_id + k.substr(id.size()));
+    }
+
+    /* effect-layer targets naming the instance subtree (LayerMatches
+       reaches "<id>/..." objects from "<id>") — authored stack only;
+       a registry-resolved look names types, not instances */
+    const EffectDelta effect_before = SnapEffect();
+    bool retargeted = false;
+    for(EffectLayer& l : ws.effect.layers)
+    {
+        for(std::string& t : l.targets)
+        {
+            if(PathBelongsTo(t, id))
+            {
+                t = new_id + t.substr(id.size());
+                retargeted = true;
+            }
+        }
+    }
+    if(retargeted)
+    {
+        e.has_effect    = true;
+        e.effect_before = effect_before;
+        e.effect_after  = SnapEffect();
     }
 
     for(std::string& s : selection)
@@ -1839,6 +1864,12 @@ void EditorController::CancelLayerGesture()
     layer_gesture = LayerGesture{};
 }
 
+void EditorController::CancelGestures()
+{
+    Cancel();
+    CancelLayerGesture();
+}
+
 /*---------------------------------------------------------*\
 || Stack-level ops                                          ||
 \*---------------------------------------------------------*/
@@ -2099,6 +2130,14 @@ EditorController::SetLayerField(size_t i, LayerField f, double v)
         if(!std::isfinite(l->scale))
         {
             last_error = "scale overflows float";
+            return UndoEffectOp(before);
+        }
+        /* Audit C-12: the > 0 check above ran on the double; a
+           value under float's range (1e-50) narrows to 0 and
+           wave/pulse divide by it. */
+        if(l->scale <= 0.0f)
+        {
+            last_error = "scale underflows float";
             return UndoEffectOp(before);
         }
         break;
@@ -2467,6 +2506,12 @@ EditorController::SetLayerStopColor(size_t i, size_t stop,
 /*---------------------------------------------------------*\
 || Directional flow (Wave card)                             ||
 \*---------------------------------------------------------*/
+bool EditorController::IsFlowLayer(const EffectLayer& l)
+{
+    return l.primitive == "wave" && l.space == CoordSpace::World
+        && l.targets.empty();
+}
+
 std::optional<EditorEdit>
 EditorController::SetFlow(const FlowEdit& f)
 {
@@ -2491,9 +2536,14 @@ EditorController::SetFlow(const FlowEdit& f)
     }
     if(!f.colors.empty())
     {
-        if(f.colors.size() < 2 || f.colors.size() > 5)
+        /* Any stop count a palette can hold: the card shows the
+           first flow layer's stops as swatches, so whatever it
+           shows (one stop, six) must be accepted back. The card's
+           own +/- buttons keep new edits in 2..5. */
+        if(f.colors.size() > EFFECT_MAX_STOPS)
         {
-            last_error = "wave needs 2 to 5 colors";
+            last_error = "wave needs 1 to "
+                       + std::to_string(EFFECT_MAX_STOPS) + " colors";
             return std::nullopt;
         }
         for(const ColorF& c : f.colors)
@@ -2526,53 +2576,102 @@ EditorController::SetFlow(const FlowEdit& f)
     std::vector<size_t> waves;
     for(size_t i = 0; i < ws.effect.layers.size(); i++)
     {
-        const EffectLayer& l = ws.effect.layers[i];
-        if(l.enabled && l.primitive == "wave")
+        /* Disabled flow layers are driven too, and the palette
+           target is the first flow layer in stack order whether
+           or not it is enabled: toggling a layer must not move the
+           card's colours onto another layer, nor leave a disabled
+           one pointing the old way when it comes back. */
+        if(IsFlowLayer(ws.effect.layers[i]))
         {
             waves.push_back(i);
         }
     }
     if(waves.empty())
     {
-        last_error = "this look has no wave layer";
+        last_error = "this look has no world-space wave layer";
         return UndoEffectOp(before);
     }
 
+    /* The card's speed is a magnitude: rescale by |speed0| so a
+       first layer running backwards keeps every layer's sign. A
+       stationary first layer gives no ratio: it alone takes the
+       new value and the other layers keep theirs (rather than all
+       being flattened to one speed). Wavelength likewise. */
     EffectLayer& first = ws.effect.layers[waves.front()];
-    const float speed0 = first.speed;
+    const float speed0 = std::fabs(first.speed);
     const float scale0 = first.scale;
     for(size_t i : waves)
     {
         EffectLayer& l = ws.effect.layers[i];
+        const bool is_first = (i == waves.front());
         if(f.direction)
         {
             l.direction = dir;
         }
         if(f.speed)
         {
-            l.speed = (speed0 > 0.0f) ? l.speed * (*f.speed / speed0)
-                                      : *f.speed;
+            if(speed0 > 0.0f)
+            {
+                l.speed *= *f.speed / speed0;
+            }
+            else if(is_first)
+            {
+                l.speed = *f.speed;
+            }
         }
         if(f.wavelength)
         {
-            l.scale = (scale0 > 0.0f)
-                    ? l.scale * (*f.wavelength / scale0)
-                    : *f.wavelength;
+            if(scale0 > 0.0f)
+            {
+                l.scale *= *f.wavelength / scale0;
+            }
+            else if(is_first)
+            {
+                l.scale = *f.wavelength;
+            }
+        }
+        /* Audit C-12: the proportional rescale runs in float, so
+           a valid request can still push a sibling layer's speed
+           to inf or its scale to inf/0 (wave divides by it).
+           Refuse the whole edit rather than store either. */
+        if((f.speed && !std::isfinite(l.speed))
+           || (f.wavelength
+               && (!std::isfinite(l.scale) || l.scale <= 0.0f)))
+        {
+            last_error = "wave edit overflows a layer's speed or length";
+            return UndoEffectOp(before);
         }
     }
     if(!f.colors.empty())
     {
-        Palette p;
+        std::vector<PaletteStop>& stops = first.palette.stops;
         const size_t n = f.colors.size();
-        for(size_t k = 0; k < n; k++)
+        if(n == stops.size())
         {
-            PaletteStop s;
-            s.pos   = (float)k / (float)n;
-            s.color = f.colors[k];
-            s.color.a = 1.0f;
-            p.stops.push_back(s);
+            /* Same count = a swatch recolour: keep the authored
+               stop positions (Aurora's 0/.35/.65/.85) and alpha. */
+            for(size_t k = 0; k < n; k++)
+            {
+                stops[k].color.r = f.colors[k].r;
+                stops[k].color.g = f.colors[k].g;
+                stops[k].color.b = f.colors[k].b;
+            }
         }
-        first.palette = p;
+        else
+        {
+            /* A swatch added or removed: evenly spaced stops (the
+               palette wraps, so the loop stays seamless). */
+            Palette p;
+            for(size_t k = 0; k < n; k++)
+            {
+                PaletteStop s;
+                s.pos   = (float)k / (float)n;
+                s.color = f.colors[k];
+                s.color.a = 1.0f;
+                p.stops.push_back(s);
+            }
+            first.palette = p;
+        }
     }
     return FinishEffectEdit(before, "edit wave");
 }

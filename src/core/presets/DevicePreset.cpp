@@ -7,6 +7,7 @@
 #include "DevicePreset.h"
 #include "../scene/EmitterLayout.h"
 #include "../scene/JsonFields.h"
+#include "../config/JsonBounded.h"
 
 #include <algorithm>
 #include <fstream>
@@ -901,16 +902,17 @@ bool DevicePresetFromJsonFile(const std::string& path, DevicePreset& p,
     }
     std::stringstream ss;
     ss << f.rdbuf();
-    nlohmann::json j;
-    try
-    {
-        j = nlohmann::json::parse(ss.str());
-    }
-    catch(const std::exception& e)
+    /* Depth-capped (audit I-2): preset folders are loaded
+       from user-supplied places (an imported file's sibling
+       presets/, the managed library). */
+    const nlohmann::json j = ParseJsonBounded(ss.str());
+    if(j.is_discarded())
     {
         if(errors)
         {
-            errors->push_back(path + ": invalid JSON (" + e.what() + ")");
+            errors->push_back(path + ": invalid JSON (or nested deeper "
+                              "than " + std::to_string(kMaxJsonDepth) +
+                              " levels)");
         }
         return false;
     }
@@ -968,22 +970,38 @@ bool ZoneLayoutToPoints(DeviceZone& z)
     {
         return false;   /* already explicit */
     }
-    /* group "" + addr_base 0 bakes the type-local layout; the
-       generated addresses pin the LED order (ring reverse swaps
-       address<->position, not geometry). */
+    /* group "" + addr_base 0 bakes the type-local layout. Ring
+       reverse swaps address<->position, not geometry, so the
+       generated point ORDER already pins the LED order.
+
+       Audit C-14: ring and strip addresses are always the
+       instance's addr_base + LED index, which is exactly the
+       points default — so they bake no explicit addresses.
+       Baking the addr_base-0 addresses made them win over every
+       instance's own addr_base (a baked zone on a shared channel
+       drove LEDs 0..n-1). A static matrix's addresses are its
+       map's cell values and ignore addr_base, so those are baked
+       verbatim and the baked zone ignores addr_base as before. */
     const std::vector<Emitter> em = GenerateZoneEmitters(z, "", 0);
     if(em.empty())
     {
         return false;   /* dynamic matrix / empty zone: nothing to bake */
     }
+    const bool explicit_addr = (z.layout.type == "matrix");
     ZoneLayout baked;
     baked.type = "points";
     baked.points.reserve(em.size());
-    baked.addresses.reserve(em.size());
+    if(explicit_addr)
+    {
+        baked.addresses.reserve(em.size());
+    }
     for(const Emitter& e : em)
     {
         baked.points.push_back(e.local_pos);
-        baked.addresses.push_back(e.address);
+        if(explicit_addr)
+        {
+            baked.addresses.push_back(e.address);
+        }
     }
     z.layout    = baked;
     z.led_count = (unsigned int)baked.points.size();

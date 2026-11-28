@@ -6,6 +6,7 @@
 
 #include "PowerLifecycle.h"
 
+#include <algorithm>
 #include <utility>
 
 namespace openrgb2
@@ -30,15 +31,48 @@ PowerLifecycle::PowerLifecycle(Deps deps, Config cfg)
 
 void PowerLifecycle::PostEvent(Event e)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if(pending_.size() >= cfg_.max_pending_events)
     {
-        /* Coalesce a storm: handlers are state-based and converge
-           on the newest state, so the oldest entry is the safe
-           drop (bounded queue — plan section 6). */
-        pending_.pop_front();
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(pending_.size() >= cfg_.max_pending_events)
+        {
+            /* Coalesce a storm: handlers are state-based and
+               converge on the newest state, so the oldest entry is
+               the safe drop (bounded queue — plan section 6). */
+            pending_.pop_front();
+        }
+        pending_.push_back(e);
+        if(e == Event::Suspend)
+        {
+            suspend_posted_ = true;
+        }
     }
-    pending_.push_back(e);
+    if(e != Event::Suspend)
+    {
+        return;
+    }
+    /* Audit E-7: Windows may sleep as soon as the monitor's
+       window proc returns from PBT_APMSUSPEND, while the queued
+       event waits up to 500 ms for Poll (longer behind a
+       blocking SDK call) and the lanes keep sending. Put the
+       output gate down and discard pending frames here, on the
+       caller's thread. Both are non-blocking pipeline calls;
+       playback parking and capture still happen in Poll.
+       gate_mutex_ orders this write against a Poll that is
+       mid-ApplyGateAndCapture, and suspend_posted_ keeps WantGate
+       true until the Suspend is applied, so a queued DisplayOn
+       cannot lift the gate in between. */
+    {
+        std::lock_guard<std::mutex> gate(gate_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            gated_ = true;
+        }
+        if(deps_.set_output_paused)
+        {
+            deps_.set_output_paused(true, "system suspend");
+        }
+    }
+    DropAllLanes();
 }
 
 bool PowerLifecycle::DisplayOn() const
@@ -81,6 +115,12 @@ std::string PowerLifecycle::Detail() const
 ||| Gate / helpers                                           ||
 \*---------------------------------------------------------*/
 
+bool PowerLifecycle::SuspendQueued() const   /* under mutex_ */
+{
+    return std::find(pending_.begin(), pending_.end(),
+                     Event::Suspend) != pending_.end();
+}
+
 bool PowerLifecycle::WantGate() const
 {
     /* The RGB output gate covers: display off, the suspend
@@ -88,7 +128,8 @@ bool PowerLifecycle::WantGate() const
        the transport while the recovery revalidation is still
        ordering itself. Single-caller state (Poll thread); the
        flags are mutated under mutex_ by ApplyEvent. */
-    return !display_on_ || suspended_ || restore_pending_;
+    return !display_on_ || suspended_ || suspend_posted_ ||
+           restore_pending_;
 }
 
 void PowerLifecycle::ApplyGateAndCapture()
@@ -97,23 +138,31 @@ void PowerLifecycle::ApplyGateAndCapture()
     bool capture_changed = false;
     std::string reason;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        gate   = WantGate();
-        gated_ = gate;
-        if(capture_paused_ != gate)
+        /* Decide and write under gate_mutex_ so a Suspend posted
+           from the monitor thread meanwhile (E-7) is never
+           overwritten by a stale "open" decision. */
+        std::lock_guard<std::mutex> gate_lock(gate_mutex_);
         {
-            capture_paused_  = gate;
-            capture_changed  = true;
+            std::lock_guard<std::mutex> lock(mutex_);
+            gate   = WantGate();
+            gated_ = gate;
+            if(capture_paused_ != gate)
+            {
+                capture_paused_  = gate;
+                capture_changed  = true;
+            }
+            reason = (suspended_ || suspend_posted_)
+                                    ? "system suspend"
+                   : restore_pending_ ? "post-wake restore"
+                                      : "display off";
         }
-        reason = suspended_       ? "system suspend"
-               : restore_pending_ ? "post-wake restore"
-                                  : "display off";
-    }
-    if(deps_.set_output_paused)
-    {
-        /* Always applied — SetOutputPaused refreshes the reason
-           even when the flag is unchanged (idempotent store). */
-        deps_.set_output_paused(gate, gate ? reason : "");
+        if(deps_.set_output_paused)
+        {
+            /* Always applied — SetOutputPaused refreshes the
+               reason even when the flag is unchanged
+               (idempotent store). */
+            deps_.set_output_paused(gate, gate ? reason : "");
+        }
     }
     if(deps_.playback)
     {
@@ -254,6 +303,9 @@ void PowerLifecycle::ApplyEvent(Event e)
     {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            /* The early gate PostEvent raised is now carried by
+               suspended_ (another Suspend may still be queued). */
+            suspend_posted_ = SuspendQueued();
             if(suspended_)
             {
                 return;
@@ -285,6 +337,10 @@ void PowerLifecycle::ApplyEvent(Event e)
             std::lock_guard<std::mutex> lock(mutex_);
             suspended_       = false;
             restore_pending_ = true;
+            /* A Suspend dropped by storm coalescing must not
+               leave its early gate behind; one posted after
+               this Resume is still queued and keeps it. */
+            suspend_posted_  = SuspendQueued();
         }
         ApplyGateAndCapture();   /* restore_pending_ holds the gate */
         if(deps_.log)

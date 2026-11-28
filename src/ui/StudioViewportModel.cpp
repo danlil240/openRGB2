@@ -30,6 +30,10 @@ StudioViewportModel::StudioViewportModel(
        full-document pushes that could fill the outbound queue. */
     push_timer_.setSingleShot(true);
     push_timer_.setInterval(debounce_ms_);
+    /* Every frame/clear path ends in previewChanged — derive the
+       colorless row list there, in one place. */
+    connect(this, &StudioViewportModel::previewChanged, this,
+            &StudioViewportModel::SyncObjectRows);
     connect(&push_timer_, &QTimer::timeout, this, [this]
             {
                 if(begin_sent_ && active_)
@@ -169,6 +173,30 @@ void StudioViewportModel::ClearFrame()
     partials_.clear();
 }
 
+void StudioViewportModel::SyncObjectRows()
+{
+    QVariantList rows;
+    rows.reserve(objects_.size());
+    for(const QVariant& v : objects_)
+    {
+        const QVariantMap o = v.toMap();
+        QVariantMap r;
+        r.insert(QStringLiteral("id"), o.value(QStringLiteral("id")));
+        r.insert(QStringLiteral("kind"),
+                 o.value(QStringLiteral("kind")));
+        r.insert(QStringLiteral("bound"),
+                 o.value(QStringLiteral("bound")));
+        r.insert(QStringLiteral("emitter_total"),
+                 o.value(QStringLiteral("emitter_total")));
+        rows.append(r);
+    }
+    if(rows != object_rows_)
+    {
+        object_rows_ = rows;
+        emit objectRowsChanged();
+    }
+}
+
 QVariant StudioViewportModel::colorsFor(const QString& objectId,
                                         int emitterCount) const
 {
@@ -271,8 +299,16 @@ void StudioViewportModel::Begin()
             "over the IPC bound)"));
         return;
     }
+    /* preview_end erased the engine's PreviewSession, so a
+       re-begin numbers frames from 1 again: forget the old
+       sequence (and its partials) or every new frame would be
+       dropped as stale until it overtook the old count (audit
+       U-13). The begin reply resets it once more, for old
+       frames still queued ahead of it. */
+    ClearFrame();
     begin_sent_   = true;
     pending_req_  = id;
+    begin_req_    = id;
     sent_visible_ = visible_;
 }
 
@@ -343,6 +379,17 @@ void StudioViewportModel::OnReply(int request_id,
         return;
     }
     pending_req_ = 0;
+    const bool begin_reply = request_id == begin_req_;
+    begin_req_ = 0;
+    if(begin_reply && type_name != QLatin1String("ERROR"))
+    {
+        /* Every frame of a previous preview precedes this reply
+           on the wire (the engine ended it before handling the
+           begin): whatever sequence those set is not this
+           preview's. */
+        sequence_ = 0;
+        partials_.clear();
+    }
     if(type_name == QLatin1String("ERROR"))
     {
         const QString detail =

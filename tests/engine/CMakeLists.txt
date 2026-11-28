@@ -101,6 +101,31 @@ set_tests_properties(e2e_fake_backend_test PROPERTIES
     LABELS engine
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Audit E-10 — OS shutdown / logoff / console-close notice: the
+# hidden top-level window's WM_QUERYENDSESSION/WM_ENDSESSION and
+# the console control handler, delivered directly (no real logoff).
+add_executable(session_end_test session_end_test.cpp)
+target_link_libraries(session_end_test PRIVATE
+    openrgb2_platform_windows)
+target_compile_definitions(session_end_test PRIVATE NDEBUG)
+add_test(NAME session_end_test COMMAND session_end_test)
+set_tests_properties(session_end_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Audit E-2 / P-8 — timer resolution + owner-loop schedule: the
+# 1 ms resolution request held from Start() to Stop() (injected
+# API, no global timer change) and the fixed-grid wake
+# computation that replaced the relative 20 ms sleep.
+add_executable(owner_loop_timing_test owner_loop_timing_test.cpp)
+target_link_libraries(owner_loop_timing_test PRIVATE
+    openrgb2_host)
+target_compile_definitions(owner_loop_timing_test PRIVATE NDEBUG)
+add_test(NAME owner_loop_timing_test COMMAND owner_loop_timing_test)
+set_tests_properties(owner_loop_timing_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Task 5.2 — mode qualification: rapid mode/parameter storm
 # (no wedge, no lost requests, pending always resolves),
 # disconnect during an uploaded-playback apply (honest
@@ -247,5 +272,20 @@ target_include_directories(ipc_workspace_test PRIVATE
 target_compile_definitions(ipc_workspace_test PRIVATE NDEBUG)
 add_test(NAME ipc_workspace_test COMMAND ipc_workspace_test)
 set_tests_properties(ipc_workspace_test PROPERTIES
+    LABELS engine
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Audit I-10 — openrgb2-ctl's CtlSession: `diag` follows --pipe,
+# job verbs wait in-session, upload -> commit and export ->
+# verified download composites over REAL named pipes against the
+# real EngineService + WorkspaceService.
+add_executable(engine_ctl_test engine_ctl_test.cpp)
+target_link_libraries(engine_ctl_test PRIVATE
+    openrgb2_engine
+    openrgb2_ipc
+    openrgb2_ctl)
+target_compile_definitions(engine_ctl_test PRIVATE NDEBUG)
+add_test(NAME engine_ctl_test COMMAND engine_ctl_test)
+set_tests_properties(engine_ctl_test PROPERTIES
     LABELS engine
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})

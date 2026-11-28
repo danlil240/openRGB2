@@ -39,12 +39,14 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -557,6 +559,94 @@ static void TestReducedLabeling()
     CHECK(f.object_total == 4);
 }
 
+/* Audit E-8: the per-draft work (world matrices, owner
+   lookups, painted-color fallback) is done once per APPLIED
+   draft, not once per sample — and the cached path paints
+   exactly the bytes the reference output math gives, for
+   untouched objects (painted fallback, per-emitter
+   overrides), linked copies and reduced frames alike. */
+static void TestSampleCacheIsPerDraft()
+{
+    std::printf("-- unit: sample cache built once per applied draft\n");
+    studio::PresetRegistry dev_reg;
+    std::vector<std::string> errs;
+    dev_reg.LoadDirectory((g_tmp / "types").string(), &errs);
+    studio::EffectRegistry eff_reg;
+    const std::vector<DeviceSnapshot> snaps = { TestSnapshot() };
+
+    /* No layers: every emitter takes the painted fallback,
+       one per-emitter override included; a mirrored copy and
+       an unbound object ride along. */
+    json doc_a = CompactDoc(3, 1, 0.6);
+    doc_a["effects"]["layers"] = json::array();
+    doc_a["device_settings"]["fan2"] =
+        json::object({{ "mirror_of", "fan0" }});
+    doc_a["colors"]["emitters"] = json::object({
+        { "fan0", json::object({{ "2", "#00FF10" }}) } });
+    json doc_b = CompactDoc(3, 0, 0.9);   /* static red layer */
+    auto cand_a = ParseCand(doc_a, dev_reg, eff_reg);
+    auto cand_b = ParseCand(doc_b, dev_reg, eff_reg);
+
+    for(int pass = 0; pass < 2; ++pass)
+    {
+        const bool reduced_pass = pass == 1;
+        PreviewSession::Deps pdeps;
+        pdeps.snapshots = [snaps] { return snaps; };
+        PreviewSession::Options popts;
+        if(reduced_pass)
+        {
+            popts.display_budget_leds = 10;
+        }
+        PreviewSession ps(pdeps, popts);
+        std::string err;
+        CHECK(ps.DraftCacheBuilds() == 0);
+
+        const std::shared_ptr<const WorkspaceCandidate> cands[] =
+            { cand_a, cand_b };
+        uint64_t rev = 0;
+        for(const auto& cand : cands)
+        {
+            CHECK(ps.SetCandidate(cand, ++rev, err));
+            PreparedStudioScene prepared;
+            CHECK(PrepareStudioScene(*cand, snaps, prepared, err));
+            for(int i = 0; i < 6; ++i)
+            {
+                const double t = 0.05 + 0.13 * i;
+                PreviewFrame f;
+                CHECK(ps.Sample(t, nullptr, f));
+                CHECK(f.draft_revision == rev);
+                CHECK(f.reduced == reduced_pass);
+                for(const PreviewObjectColors& o : f.objects)
+                {
+                    /* A linked copy previews its owner. */
+                    const studio::SceneObject* src =
+                        o.kind == "linked"
+                            ? studio::OutputOwner(*prepared.doc,
+                                                  o.object_id)
+                            : nullptr;
+                    const std::vector<RgbColor> want =
+                        RefObjectColors(prepared,
+                                        src ? src->id : o.object_id,
+                                        t, nullptr);
+                    if(o.indices.empty())
+                    {
+                        CHECK(o.colors == want);
+                        continue;
+                    }
+                    CHECK(o.indices.size() == o.colors.size());
+                    for(size_t k = 0; k < o.indices.size(); ++k)
+                    {
+                        CHECK(o.indices[k] < want.size() &&
+                              o.colors[k] == want[o.indices[k]]);
+                    }
+                }
+            }
+            /* Six samples of this draft, ONE cache build. */
+            CHECK(ps.DraftCacheBuilds() == rev);
+        }
+    }
+}
+
 /*---------------------------------------------------------*\
 || IPC: preview verbs over the real session machinery       ||
 \*---------------------------------------------------------*/
@@ -777,6 +867,7 @@ int main()
     TestDisabledInputsStayEmpty();
     TestHiddenPauseAndStaleCandidate();
     TestReducedLabeling();
+    TestSampleCacheIsPerDraft();
 
     uint32_t seq = 0;
 
@@ -1162,6 +1253,70 @@ int main()
             { "draft_revision", 4 } })).value("active", false));
     }
 
+    /*---- frame coalesce key spans sequences (audit I-8) -----*/
+    {
+        /* Latest-wins only works if a newer frame's chunk lands
+           in the SAME queue slot as the older frame's: the key
+           must be frame/<chunk>, not frame/<sequence>/<chunk>
+           (which never matched, so a slow client's queue filled
+           with stale frames and overflow evicted other kinds). */
+        std::printf("-- ipc: frame key is frame/<chunk>\n");
+        Rig rig(g_tmp / "r-key");
+        rig.eopts.preview.chunk_bytes = 4 * 1024;
+        rig.Start();
+        std::mutex km;
+        std::vector<std::string> keys;
+        rig.svc->SetSessionEventSink(
+            [&](uint64_t sid, const IpcEvent& ev,
+                const std::string& key)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(km);
+                    if(ev.kind == "preview")
+                    {
+                        keys.push_back(key);
+                    }
+                }
+                rig.server->EmitTo(sid, ev, key);
+            });
+        TestClient c;
+        Welcome(c, *rig.server);
+        c.SendMsg(MsgType::Subscribe, ++seq,
+                  json::object({{ "events", json::array({ "preview" }) }}));
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(WsCall(c, seq, json::object({
+            { "verb", "preview_begin" },
+            { "document", CompactDoc(24, 0, 1.0) },
+            { "draft_revision", 1 } })).value("active", false));
+        TimePoint now = Clock::now();
+        for(int i = 0; i < 10; ++i)
+        {
+            now += std::chrono::milliseconds(40);
+            rig.Tick(now);
+        }
+        std::set<std::string> frame_keys;
+        size_t frames = 0;
+        {
+            std::lock_guard<std::mutex> lock(km);
+            for(const std::string& k : keys)
+            {
+                if(k.rfind("frame/", 0) == 0)
+                {
+                    ++frames;
+                    frame_keys.insert(k);
+                }
+            }
+        }
+        CHECK(frames > frame_keys.size());  /* >1 sequence seen */
+        for(const std::string& k : frame_keys)
+        {
+            /* frame/<chunk> — one slot per chunk index */
+            CHECK(k.find('/', 6) == std::string::npos);
+        }
+        CHECK(frame_keys.count("frame/0") == 1);
+    }
+
     /*---- chunking below the IPC cap -------------------------*/
     {
         std::printf("-- ipc: chunked frame under cap\n");
@@ -1306,6 +1461,82 @@ int main()
             }
         }
         CHECK(!frame_seen);
+    }
+
+    /*---- I-7: preview frames leave the service OFF its mutex
+       (encoding a chunk never stalls SceneJson/apply), and
+       the pre-serialized body is exactly the event's JSON. */
+    {
+        std::printf("-- ipc: preview emit runs outside the service mutex\n");
+        Rig rig(g_tmp / "r-i7");
+        rig.Start();
+        std::mutex                         probe_m;
+        std::vector<std::future<uint64_t>> probes;   /* probe_m */
+        std::atomic<int> frames{ 0 }, blocked{ 0 }, raw_mismatch{ 0 };
+        rig.svc->SetSessionEventSink(
+            [&](uint64_t sid, const IpcEvent& ev,
+                const std::string& key)
+            {
+                if(ev.kind == "preview" &&
+                   key.rfind("frame/", 0) == 0)
+                {
+                    ++frames;
+                    /* Another thread reading service state must
+                       not wait for this emit to finish. */
+                    std::future<uint64_t> f = std::async(
+                        std::launch::async,
+                        [&rig] { return rig.svc->SceneRevision(); });
+                    if(f.wait_for(std::chrono::seconds(1)) !=
+                       std::future_status::ready)
+                    {
+                        ++blocked;
+                    }
+                    /* Serialized once by the producer, and
+                       exactly the event's JSON; the framed
+                       EVENT is byte-identical to the old
+                       envelope encode. */
+                    if(!ev.data_json ||
+                       *ev.data_json != ev.data.dump() ||
+                       EncodeEventMessage(ev) !=
+                           EncodeMessage(MsgType::Event, 0,
+                               json::object({
+                                   { "kind", ev.kind },
+                                   { "data", ev.data } })))
+                    {
+                        ++raw_mismatch;
+                    }
+                    std::lock_guard<std::mutex> g(probe_m);
+                    probes.push_back(std::move(f));
+                }
+                rig.server->EmitTo(sid, ev, key);
+            });
+        TestClient c;
+        Welcome(c, *rig.server);
+        c.SendMsg(MsgType::Subscribe, ++seq,
+                  json::object({{ "events", json::array({ "preview" }) }}));
+        const json r = WsCall(c, seq, json::object({
+            { "verb",           "preview_begin" },
+            { "document",       CompactDoc(3, 1, 0.5) },
+            { "draft_revision", 4 },
+        }));
+        CHECK(r.value("active", false));
+        json frame;
+        TimePoint now = Clock::now();
+        for(int i = 0; i < 40 && !frame.is_object(); ++i)
+        {
+            now += std::chrono::milliseconds(20);
+            rig.Tick(now);
+            CollectFrame(c, 30, frame);
+        }
+        CHECK(frame.is_object());
+        CHECK(frames.load() > 0);
+        CHECK(blocked.load() == 0);
+        CHECK(raw_mismatch.load() == 0);
+        std::lock_guard<std::mutex> g(probe_m);
+        for(std::future<uint64_t>& f : probes)
+        {
+            f.wait();
+        }
     }
 
     std::error_code ec;

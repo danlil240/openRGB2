@@ -49,10 +49,12 @@
 #include "effects/Presets.h"
 #include "scene/SceneTypes.h"
 
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 namespace openrgb2
 {
@@ -87,6 +89,17 @@ struct EngineServiceOptions
         size_t   display_budget_leds = 4096;
     };
     PreviewOptions preview;
+
+    /* Audit I-4: the serialized scene document rides inline in
+       SCENE/STATE/WELCOME/DIAGNOSTICS bodies only up to this
+       many bytes. Larger documents are announced by revision,
+       name and document_sha256 (document:null +
+       document_omitted:true) and served through a `scene`
+       download transfer — a big scene can never push WELCOME
+       past the 1 MiB body cap again. Only applies when the
+       transfer surface exists (Deps::workspace wired); without
+       it the document stays inline. 0 = always out of band. */
+    size_t scene_inline_max_bytes = 256u * 1024u;
 };
 
 class EngineService final : public IIpcService
@@ -163,7 +176,10 @@ public:
            document with NO objects never reaches the hook:
            applying an empty scene is a deliberate "new scene"
            staging step, not the thing to restore on the next
-           launch. Empty -> no persistence. */
+           launch. Runs on the service's background snapshot
+           writer, coalesced latest-wins (audit I-6) — never on
+           the request thread; FlushPersistedScene() and the
+           destructor drain it. Empty -> no persistence. */
         std::function<void(const studio::SceneDocument&)>
             persist_scene;
 
@@ -263,6 +279,14 @@ public:
     uint64_t SceneRevision() const;
     std::shared_ptr<const studio::SceneDocument> Scene() const;
 
+    /* Blocks until the last-scene snapshot writer has landed
+       every document queued so far (audit I-6: persist_scene
+       runs on a background writer, coalesced latest-wins, so
+       an apply never waits on the durable write). The owner
+       calls it at orderly shutdown; the destructor drains the
+       same way. No-op without a persist_scene hook. */
+    void     FlushPersistedScene();
+
     /* Diff-driven event emission for the push channel: call
        periodically (~500 ms) from the engine's owner loop.
        Emits topology/connection/playback/reactive events on
@@ -342,8 +366,27 @@ private:
     std::unique_ptr<WorkspaceCommands> ws_commands_;
 
     mutable std::mutex  mutex_;
+    /* Serializes scene read-copy-modify-apply edits (layout
+       verbs) and SET_SCENE replaces across sessions. */
+    std::mutex          scene_edit_mutex_;
     std::shared_ptr<const studio::SceneDocument> scene_;
     uint64_t            scene_revision_  = 0;
+    /* The applied document's serialized forms, built once per
+       scene revision (audit I-4): the JSON inlined into small
+       SCENE bodies, the bytes a `scene` download serves, and
+       their SHA-256 (document_sha256). Under mutex_; built
+       outside it. */
+    struct SceneDocForms
+    {
+        uint64_t revision = 0;
+        std::shared_ptr<const studio::SceneDocument> doc;
+        std::shared_ptr<const nlohmann::json>        json;
+        std::shared_ptr<const std::string>           bytes;
+        std::string                                  sha256;
+    };
+    mutable std::shared_ptr<const SceneDocForms> scene_forms_;
+    /* The current scene's forms (null when none is loaded). */
+    std::shared_ptr<const SceneDocForms> SceneForms() const;
     PlaybackMode        requested_mode_  = PlaybackMode::LiveEffects;
     TimePoint           started_;
 
@@ -354,6 +397,20 @@ private:
     std::function<void(uint64_t, const IpcEvent&,
                        const std::string&)> session_sink_;
 
+    /* Last-scene snapshot writer (audit I-6): a depth-1
+       latest-wins slot drained by one background thread —
+       a burst of applies lands only the newest document, and
+       the request thread never runs the durable write. The
+       thread starts with the first queued document. */
+    std::mutex              persist_mutex_;
+    std::condition_variable persist_cv_;
+    std::shared_ptr<const studio::SceneDocument> persist_pending_;
+    bool                    persist_busy_ = false;
+    bool                    persist_stop_ = false;
+    std::thread             persist_thread_;
+    void   QueuePersist(std::shared_ptr<const studio::SceneDocument> doc);
+    void   PersistMain();
+
     /* PollEvents diffing state. */
     std::string         last_connection_sig_;
     std::string         last_topology_sig_;
@@ -362,7 +419,13 @@ private:
     std::string         last_stats_sig_;
     TimePoint           last_frame_status_{};
 
-    void   Emit(const std::string& kind, const nlohmann::json& data);
+    /* Bodies are taken by value and moved into the event —
+       callers hand temporaries, so nothing is deep-copied on
+       the way to the sink (audit I-7). coalesce_key partitions
+       latest-wins inside the kind (audit I-8). */
+    void   Emit(const std::string& kind, nlohmann::json data,
+                const std::string& coalesce_key = std::string());
+    void   EmitEvent(IpcEvent ev);
     /* Task 4.4 LAYOUT_COMMAND surface (docs/ipc-protocol.md
        §5): identify drives the mapper's bounded blink
        overlay; the other verbs mutate the applied scene

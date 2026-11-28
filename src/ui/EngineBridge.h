@@ -224,6 +224,10 @@ public:
     void setWireOptionsForTesting(const EngineWireClient::Options& o);
     void setBackoffForTesting(const std::vector<int>& delays_ms);
     int  connectAttemptsForTesting() const;
+    /* Feed a reactive-state body the way a "reactive" event
+       does (offline tests can't drive the engine's inputs). */
+    void setReactiveForTesting(const QVariantMap& m)
+        { reactive_ = m; emit reactiveChanged(); }
 
     void setPipeName(const QString& name);
 
@@ -270,11 +274,30 @@ private:
     /*---- GUI-thread application of wire callbacks -------------*/
     void ApplyWelcome(const nlohmann::json& welcome);
     void ApplyEvent(const nlohmann::json& event_body);
+    /* GUI side of the frame_status slot: take the newest one
+       and apply it (audit U-10). */
+    void ApplyPendingFrameStatus();
     void ApplyReply(uint32_t request_id, ipc::MsgType type,
                     const nlohmann::json& body);
     void ApplySessionEnd(EngineWireClient::EndReason reason,
                          const std::string& detail);
     void RecomputeDegraded();
+
+    /* Audit I-4: a SCENE body (WELCOME state, scene EVENT,
+       GET_SCENE reply) may announce a large document by
+       document_sha256 instead of inlining it
+       (document_omitted). The bridge completes it through a
+       `scene` download transfer before publishing, so scene()
+       keeps its shape for every consumer: a loaded scene
+       carries its document. A body whose hash matches the
+       held document reuses it without a fetch. */
+    void AdoptScene(const nlohmann::json& body);
+    void StartSceneFetch();
+    bool HandleSceneFetchReply(uint32_t request_id, ipc::MsgType type,
+                               const nlohmann::json& body);
+    void FinishSceneFetch(const nlohmann::json* doc,
+                          const std::string& sha,
+                          const std::string& error);
 
     void setConnectionState(const QString& s);
     void setLastError(const QString& s);
@@ -309,6 +332,22 @@ private:
     QVariantList snapshots_;
     QVariantMap connection_;
     QVariantMap scene_;
+    /* Audit I-4 fetch state (GUI thread). */
+    QString        scene_doc_sha_;     /* sha of scene_'s document  */
+    nlohmann::json scene_pending_;     /* newest body awaiting its
+                                          document (null: none)      */
+    struct SceneFetch
+    {
+        int         stage    = 0;      /* 0 idle, 1 begin, 2 chunk  */
+        uint32_t    req      = 0;
+        std::string transfer_id;
+        uint64_t    length   = 0;
+        uint64_t    max_chunk = 0;
+        std::string sha256;
+        std::string bytes;
+        int         attempts = 0;
+    } scene_fetch_;
+    uint32_t       scene_finish_req_ = 0;  /* unawaited finish */
     QVariantMap playback_;
     QVariantMap frame_status_;
     QVariantMap frame_aggregate_;
@@ -317,16 +356,19 @@ private:
     /* Read on the worker thread (event filter), written on the
        GUI thread. */
     std::atomic<bool> frame_feed_active_{ true };
-    /* The newest frame_status dropped while the feed was
-       inactive. The engine only emits on change, so on
-       re-activation this IS the current state (static,
-       uploaded and power-gated output would otherwise keep
-       showing pre-hide data). frame_mu_ makes the worker's
-       "inactive? then park" and the GUI's "activate + take"
-       atomic w.r.t. each other, so a parked event can never
-       be applied after a newer posted one, nor be lost. */
+    /* ONE latest-wins frame_status slot (audit U-10). The wire
+       thread overwrites it and posts at most one apply while
+       none is queued, so a GUI thread that falls behind a ~30 Hz
+       feed converts and repaints only the newest frame instead
+       of a backlog. While the feed is inactive the slot is just
+       parked: the engine only emits on change, so on
+       re-activation it IS the current state (static, uploaded
+       and power-gated output would otherwise keep showing
+       pre-hide data). frame_mu_ guards slot + queued flag
+       between the wire thread and the GUI thread. */
     std::mutex                      frame_mu_;
-    std::unique_ptr<nlohmann::json> parked_frame_status_;
+    std::unique_ptr<nlohmann::json> pending_frame_status_;
+    bool                            frame_post_queued_ = false;
     QVariantMap delivery_stats_;
     QVariantList presets_;
     QVariantMap diagnostics_;

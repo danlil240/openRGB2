@@ -50,6 +50,9 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickStyle>
+#include <QQuickWindow>
+#include <QPointer>
+#include <QTest>
 #include <QSignalSpy>
 
 #include <cmath>
@@ -147,7 +150,7 @@ int main(int argc, char** argv)
     CHECK(effect_dir != nullptr && effect_dir[0] != '\0');
     /* Force the registry probe now — EffectLooks() caches the
        defaults layer on first access. */
-    CHECK(studio::FindPreset("aurora") != nullptr);
+    CHECK(studio::FindPreset("aurora").has_value());
 
     /*======================================================*\
     || A. EffectEditorController over the shared session    ||
@@ -396,6 +399,42 @@ int main(int argc, char** argv)
         CHECK(!rig.ctl.hasInlineLayers());
     }
 
+    std::printf("-- Ctrl+Z mid-scrub is refused; a reset cancels "
+                "the scrub (audit C-6)\n");
+    {
+        Rig rig;
+        rig.LoadDoc(CompactDoc("aurora"));
+        rig.ctl.setLayerOpacity(0, 0.5);          /* record 1 */
+        rig.ctl.beginLayerGesture();
+        rig.ctl.setLayerField(0, "speed", 3.0);
+        rig.ctl.undo();                           /* held slider */
+        CHECK(rig.ctl.gestureActive());
+        CHECK(rig.UndoCount() == 1);
+        rig.ctl.commitLayerGesture("speed scrub");
+        CHECK(rig.UndoCount() == 2);
+        rig.ctl.undo();
+        /* One undo takes back the scrub only. */
+        CHECK(rig.ctl.hasInlineLayers());
+        CHECK(std::fabs(rig.Working().effect.layers[0].opacity
+                        - 0.5f) < 1e-4);
+        CHECK(std::fabs(rig.Working().effect.layers[0].speed
+                        - 3.0f) > 1e-3);
+
+        /* Discarding the draft mid-scrub cancels the gesture and
+           tells QML. */
+        QSignalSpy gest(&rig.ctl,
+                        &EffectEditorController::gestureChanged);
+        rig.ctl.beginLayerGesture();
+        rig.ctl.setLayerField(0, "speed", 4.0);
+        gest.clear();
+        rig.ws.resetEdits();
+        CHECK(!rig.ctl.gestureActive());
+        CHECK(gest.count() >= 1);
+        CHECK(!rig.ctl.hasInlineLayers());
+        rig.ctl.commitLayerGesture("late release");
+        CHECK(rig.UndoCount() == 0);
+    }
+
     std::printf("-- selectPreset: stack cleared + fresh seed, "
                 "undoable\n");
     {
@@ -443,6 +482,131 @@ int main(int argc, char** argv)
         Rig rig2;
         rig2.LoadDoc(CompactDoc(""));
         CHECK(!rig2.ctl.remix());
+    }
+
+    std::printf("-- flowState: the Wave card only drives untargeted "
+                "world-space waves\n");
+    {
+        /* Reactor's waves are a local-space RAM wave and a
+           keyboard-targeted wave: a desk direction written onto
+           either turns it into a uniform flash, so the card is
+           not offered (audit C-4). */
+        Rig rig;
+        rig.LoadDoc(CompactDoc("reactor"));
+        CHECK(rig.ctl.flowState().value("available").toBool() == false);
+        CHECK(!rig.ctl.setFlowDirection(0, 0, -1));
+        CHECK(rig.UndoCount() == 0);
+        CHECK(!rig.ctl.hasInlineLayers());
+
+        Rig rig2;
+        rig2.LoadDoc(CompactDoc("aurora"));
+        CHECK(rig2.ctl.flowState().value("available").toBool());
+    }
+
+    std::printf("-- flowState follows the first flow layer, enabled "
+                "or not; speed is a magnitude\n");
+    {
+        /* Aurora: [0] static, [1] wave (4 stops), [2] noise. */
+        Rig rig;
+        rig.LoadDoc(CompactDoc("aurora"));
+        rig.ctl.setLayerEnabled(1, false);
+        QVariantMap f = rig.ctl.flowState();
+        CHECK(f.value("available").toBool());
+        CHECK(f.value("colors").toStringList().size() == 4);
+        rig.ctl.setLayerField(1, "speed", -0.2);
+        f = rig.ctl.flowState();
+        CHECK(std::fabs(f.value("speed").toDouble() - 0.2) < 1e-4);
+        CHECK(rig.ctl.setFlowSpeed(0.3));
+        CHECK(std::fabs(rig.Working().effect.layers[1].speed + 0.3f)
+              < 1e-4);
+    }
+
+    std::printf("-- Wave card adapter: flowState / setFlow* "
+                "(audit U-12)\n");
+    {
+        /* The packaged Wave look: [0] colour flow (4 stops, z -1,
+           1.25 m, 0.12 m/s), [1] screen swell, [2] keyboard
+           white. */
+        Rig rig;
+        rig.LoadDoc(CompactDoc("wave"));
+        QVariantMap f = rig.ctl.flowState();
+        CHECK(f.value("available").toBool());
+        const QVariantMap dir = f.value("direction").toMap();
+        CHECK(std::fabs(dir.value("z").toDouble() + 1.0) < 1e-4);
+        CHECK(std::fabs(f.value("speed").toDouble() - 0.12) < 1e-4);
+        CHECK(std::fabs(f.value("wavelength").toDouble() - 1.25) < 1e-4);
+        CHECK(f.value("colors").toStringList().size() == 4);
+        CHECK(f.value("keyboardLayer").toInt() == 2);
+        CHECK(f.value("keyboardOn").toBool());
+
+        /* Direction: one record over both waves, undoable. */
+        CHECK(rig.ctl.setFlowDirection(2, 0, 0));
+        CHECK(rig.UndoCount() == 1);
+        CHECK(std::fabs(rig.Working().effect.layers[0].direction.x
+                        - 1.0f) < 1e-4);
+        CHECK(std::fabs(rig.Working().effect.layers[1].direction.x
+                        - 1.0f) < 1e-4);
+        CHECK(std::fabs(rig.ctl.flowState().value("direction").toMap()
+                            .value("x").toDouble() - 1.0) < 1e-4);
+        rig.ctl.undo();
+        CHECK(!rig.ctl.hasInlineLayers());
+
+        /* Speed / wavelength rescale proportionally. */
+        CHECK(rig.ctl.setFlowSpeed(0.24));
+        CHECK(std::fabs(rig.Working().effect.layers[1].speed - 0.30f)
+              < 1e-4);
+        CHECK(rig.ctl.setFlowWavelength(2.5));
+        CHECK(std::fabs(rig.Working().effect.layers[1].scale - 1.8f)
+              < 1e-4);
+
+        /* Every count flowState can show is accepted back: a
+           6th swatch, then recolouring one of six. */
+        QStringList cols = rig.ctl.flowState().value("colors")
+                               .toStringList();
+        cols << "#FF0000" << "#00FF00";
+        CHECK(rig.ctl.setFlowColors(cols));
+        cols = rig.ctl.flowState().value("colors").toStringList();
+        CHECK(cols.size() == 6);
+        while(cols.size() < 6)
+        {
+            cols << "#FFFFFF";
+        }
+        cols[5] = "#0000FF";
+        CHECK(rig.ctl.setFlowColors(cols));
+        CHECK(rig.ctl.flowState().value("colors").toStringList()
+                  .value(5).compare("#0000FF", Qt::CaseInsensitive)
+              == 0);
+        /* ...and a one-colour palette can be recoloured. */
+        CHECK(rig.ctl.setFlowColors({ "#FFFFFF" }));
+        CHECK(rig.ctl.flowState().value("colors").toStringList()
+                  .size() == 1);
+        CHECK(rig.ctl.setFlowColors({ "#123456" }));
+
+        /* Refusals are honest: a status line, no record. */
+        const size_t recs = rig.UndoCount();
+        QSignalSpy status(&rig.ctl,
+                          &EffectEditorController::statusMessage);
+        CHECK(!rig.ctl.setFlowColors({}));
+        CHECK(!rig.ctl.setFlowColors({ "#FF0000", "not-a-color" }));
+        QStringList many;
+        for(unsigned int k = 0; k <= studio::EFFECT_MAX_STOPS; ++k)
+        {
+            many << "#FF0000";
+        }
+        CHECK(!rig.ctl.setFlowColors(many));
+        CHECK(!rig.ctl.setFlowSpeed(-1.0));
+        CHECK(!rig.ctl.setFlowDirection(0, 0, 0));
+        CHECK(status.count() == 5);
+        CHECK(rig.UndoCount() == recs);
+
+        /* Mid-gesture the card is refused — with a status line,
+           not silently. */
+        status.clear();
+        rig.ctl.beginLayerGesture();
+        CHECK(!rig.ctl.setFlowSpeed(0.4));
+        CHECK(status.count() == 1);
+        rig.ctl.cancelLayerGesture();
+        CHECK(rig.UndoCount() == recs);
     }
 
     std::printf("-- persisted input settings (draft inputs.*)\n");
@@ -729,6 +893,152 @@ int main(int argc, char** argv)
     }
 
     /*======================================================*\
+    || Q-1: a gradient-stop drag keeps its own handle        ||
+    \*======================================================*/
+    /* The real PaletteEditor in a real (offscreen) window,
+       driven by real mouse events. Every preview move emits
+       stackChanged; the handles must survive the reload so the
+       press that opened the layer gesture also gets the
+       release that commits it (ONE undo record, no gesture
+       left open). A grab taken away mid-drag must cancel the
+       gesture and restore the stops. */
+    std::printf("-- qml: palette stop drag survives reloads "
+                "(audit Q-1)\n");
+    {
+        Rig rig;
+        rig.LoadDoc(CompactDoc("aurora"));
+        /* Layer 1 of aurora: a wave with stops 0 / .35 / .65 /
+           .85 — materialize it so the stops are authored. */
+        rig.ctl.setLayerOpacity(1, 0.9);
+        const size_t undo0 = rig.UndoCount();
+        CHECK(rig.ctl.layerAt(1).value("palette").toList().size()
+              == 4);
+
+        QQmlEngine eng;
+        eng.rootContext()->setContextProperty(
+            QStringLiteral("effectEdit"), &rig.ctl);
+        QQmlComponent c(&eng, QUrl(QStringLiteral(
+            "qrc:/qt/qml/OpenRGB2/UI/studio/PaletteEditor.qml")));
+        CHECK(!c.isError());
+        QQuickWindow win;
+        win.resize(440, 200);
+        std::unique_ptr<QObject> o(c.create(eng.rootContext()));
+        auto* pal = qobject_cast<QQuickItem*>(o.get());
+        CHECK(pal != nullptr);
+        QObject* rep =
+            pal ? pal->findChild<QObject*>("stopHandles") : nullptr;
+        CHECK(rep != nullptr);
+        if(pal != nullptr && rep != nullptr)
+        {
+            pal->setParentItem(win.contentItem());
+            pal->setX(20);
+            pal->setY(20);
+            pal->setWidth(400);
+            pal->setProperty("layerIndex", 1);
+            win.show();
+            CHECK(QTest::qWaitForWindowExposed(&win));
+
+            auto handleAt = [&](int i) -> QQuickItem* {
+                QQuickItem* h = nullptr;
+                QMetaObject::invokeMethod(rep, "itemAt",
+                    Q_RETURN_ARG(QQuickItem*, h), Q_ARG(int, i));
+                return h;
+            };
+            auto centerOf = [&](QQuickItem* h) -> QPoint {
+                return h->mapToScene(QPointF(h->width() / 2,
+                                             h->height() / 2))
+                    .toPoint();
+            };
+            auto dragArea = [&](QQuickItem* h) -> QQuickItem* {
+                for(QQuickItem* ch : h->childItems())
+                {
+                    if(QString::fromLatin1(
+                           ch->metaObject()->className())
+                           .contains(QStringLiteral("MouseArea")))
+                    {
+                        return ch;
+                    }
+                }
+                return nullptr;
+            };
+
+            /* The page Flickable must not steal the drag. */
+            QQuickItem* h1 = handleAt(1);
+            CHECK(h1 != nullptr);
+            QQuickItem* ma1 = h1 ? dragArea(h1) : nullptr;
+            CHECK(ma1 != nullptr
+                  && ma1->property("preventStealing").toBool());
+
+            /* Drag stop 1 (.35) right past stop 2 (.65). */
+            if(h1 != nullptr)
+            {
+                QPointer<QQuickItem> held(h1);
+                QPoint p = centerOf(h1);
+                QTest::mousePress(&win, Qt::LeftButton, {}, p);
+                CHECK(rig.ctl.gestureActive());
+                for(int k = 0; k < 8; ++k)
+                {
+                    p.rx() += 20;
+                    QTest::mouseMove(&win, p);
+                }
+                /* THE REGRESSION: the handle that took the press
+                   is still alive after the preview reloads. */
+                CHECK(!held.isNull());
+                QTest::mouseRelease(&win, Qt::LeftButton, {}, p);
+                CHECK(!rig.ctl.gestureActive());
+                CHECK(rig.UndoCount() == undo0 + 1);
+                const QVariantList st =
+                    rig.ctl.layerAt(1).value("palette").toList();
+                CHECK(st.size() == 4);
+                bool movedPast = false;
+                for(const QVariant& v : st)
+                {
+                    const double pos =
+                        v.toMap().value("pos").toDouble();
+                    if(pos > 0.7 && pos < 0.8)
+                        movedPast = true;
+                    CHECK(std::fabs(pos - 0.35) > 1e-3);
+                }
+                CHECK(movedPast);
+                /* The handles still track the stops. */
+                CHECK(handleAt(3) != nullptr);
+            }
+
+            /* A grab taken away mid-drag (here: the drag area
+               disabled under the pointer) cancels the gesture
+               and restores the stops — no record, nothing
+               left open. */
+            QQuickItem* h0 = handleAt(0);
+            CHECK(h0 != nullptr);
+            if(h0 != nullptr)
+            {
+                const size_t undo1 = rig.UndoCount();
+                const QVariantList before =
+                    rig.ctl.layerAt(1).value("palette").toList();
+                QPoint p = centerOf(h0);
+                QTest::mousePress(&win, Qt::LeftButton, {}, p);
+                for(int k = 0; k < 4; ++k)
+                {
+                    p.rx() += 20;
+                    QTest::mouseMove(&win, p);
+                }
+                CHECK(rig.ctl.gestureActive());
+                QQuickItem* ma0 = dragArea(h0);
+                CHECK(ma0 != nullptr);
+                if(ma0 != nullptr)
+                    ma0->setEnabled(false);
+                CHECK(!rig.ctl.gestureActive());
+                CHECK(rig.UndoCount() == undo1);
+                CHECK(rig.ctl.layerAt(1).value("palette").toList()
+                      == before);
+                QTest::mouseRelease(&win, Qt::LeftButton, {}, p);
+                CHECK(rig.UndoCount() == undo1);
+            }
+            pal->setParentItem(nullptr);
+        }
+    }
+
+    /*======================================================*\
     || C. QML panels load headless + degrade honestly        ||
     \*======================================================*/
     std::printf("-- qml: studio panels load headless\n");
@@ -761,6 +1071,111 @@ int main(int argc, char** argv)
                             c.errorString().toUtf8().constData());
             }
             CHECK(o != nullptr);
+        }
+    }
+
+    /* Audit Q-10: the inspector text fields commit when the edit
+       ends (editingFinished = Enter OR focus loss), an unchanged
+       or refused edit leaves the model's value showing, and the
+       reactive-source badge follows the engine's input state. */
+    std::printf("-- qml: inspector fields commit on edit end; "
+                "source badge refreshes (audit Q-10)\n");
+    {
+        auto findIn = [](QObject* root, const char* name)
+            -> QObject* {
+            const QString n = QString::fromLatin1(name);
+            std::vector<QQuickItem*> stack;
+            if(auto* r = qobject_cast<QQuickItem*>(root))
+                stack.push_back(r);
+            while(!stack.empty())
+            {
+                QQuickItem* it = stack.back();
+                stack.pop_back();
+                if(it->objectName() == n)
+                    return it;
+                for(QQuickItem* ch : it->childItems())
+                    stack.push_back(ch);
+            }
+            return nullptr;
+        };
+        auto endEdit = [](QObject* field, const QString& text) {
+            field->setProperty("text", text);
+            QMetaObject::invokeMethod(field, "editingFinished");
+        };
+        Rig rig;
+        rig.LoadDoc(CompactDoc("aurora"));
+        rig.ctl.setSelectedLayer(1);   /* the wave layer */
+
+        QQmlEngine eng;
+        eng.rootContext()->setContextProperty(
+            QStringLiteral("effectEdit"), &rig.ctl);
+        QQmlComponent c(&eng, QUrl(QStringLiteral(
+            "qrc:/qt/qml/OpenRGB2/UI/studio/EffectInspector.qml")));
+        CHECK(!c.isError());
+        std::unique_ptr<QObject> o(c.create(eng.rootContext()));
+        CHECK(o != nullptr);
+        QObject* targets = o ? findIn(o.get(), "inspTargets")
+                             : nullptr;
+        QObject* originX = o ? findIn(o.get(), "inspOrigin_x")
+                             : nullptr;
+        QObject* pal = o ? findIn(o.get(), "paletteEditor")
+                         : nullptr;
+        QObject* stopColor = o ? findIn(o.get(), "stopColorField")
+                               : nullptr;
+        QObject* badge = o ? findIn(o.get(), "inspSourceState")
+                           : nullptr;
+        CHECK(targets && originX && pal && stopColor && badge);
+        if(targets && originX && pal && stopColor && badge)
+        {
+            /* Targets: focus loss commits; ending again with the
+               same text adds no record. */
+            const size_t u0 = rig.UndoCount();
+            endEdit(targets, QStringLiteral("fan0"));
+            CHECK(rig.ctl.layerAt(1).value("targets").toStringList()
+                  == QStringList({ "fan0" }));
+            CHECK(rig.UndoCount() == u0 + 1);
+            endEdit(targets, QStringLiteral("fan0"));
+            CHECK(rig.UndoCount() == u0 + 1);
+
+            /* Origin: a number commits; text that is not a number
+               is refused and the field shows the model again. */
+            endEdit(originX, QStringLiteral("0.25"));
+            CHECK(std::fabs(rig.ctl.layerAt(1).value("origin")
+                                .toMap().value("x").toDouble()
+                            - 0.25) < 1e-6);
+            const size_t u1 = rig.UndoCount();
+            endEdit(originX, QStringLiteral("abc"));
+            CHECK(rig.UndoCount() == u1);
+            CHECK(originX->property("text").toString()
+                  == QStringLiteral("0.25"));
+
+            /* Palette stop color: commits on edit end; a refused
+               color reverts the field. */
+            pal->setProperty("selStop", 0);
+            endEdit(stopColor, QStringLiteral("#00FF00"));
+            CHECK(QColor(rig.ctl.layerAt(1).value("palette").toList()
+                             .value(0).toMap().value("color")
+                             .toString()) == QColor("#00FF00"));
+            const size_t u2 = rig.UndoCount();
+            endEdit(stopColor, QStringLiteral("not-a-color"));
+            CHECK(rig.UndoCount() == u2);
+            CHECK(QColor(stopColor->property("text").toString())
+                  == QColor("#00FF00"));
+
+            /* Source badge follows the engine's reactive state. */
+            rig.ctl.setLayerSource(1, QStringLiteral("audio"));
+            CHECK(badge->property("text").toString()
+                  == QStringLiteral("not running"));
+            QVariantMap audio;
+            audio["id"] = QStringLiteral("audio");
+            audio["enabled"] = true;
+            audio["available"] = true;
+            audio["running"] = true;
+            QVariantMap reactive;
+            reactive["inputs"] = QVariantList({ audio });
+            rig.bridge.setReactiveForTesting(reactive);
+            CHECK(badge->property("text").toString()
+                  == QStringLiteral("live"));
         }
     }
 
@@ -843,6 +1258,146 @@ int main(int argc, char** argv)
             rig.ctl.undo();
             CHECK(rig.ctl.hasInlineLayers());
             CHECK(rig.ctl.presetId() == "aurora");
+        }
+    }
+
+    /*======================================================*\
+    || Q-3: Wave card direction + color add                  ||
+    \*======================================================*/
+    /* The stored direction is a unit vector (SetFlow
+       normalises), so per-axis x/y/z sliders fought the
+       normalisation. Heading + tilt span the same vector and
+       stay independent: heading never changes the tilt, tilt
+       never changes the heading (kept through vertical). */
+    std::printf("-- qml: wave heading/tilt drive the stored "
+                "direction (audit Q-3)\n");
+    {
+        auto findIn = [](QObject* root, const char* name)
+            -> QObject* {
+            const QString n = QString::fromLatin1(name);
+            if(QObject* c = root->findChild<QObject*>(n))
+                return c;
+            std::vector<QQuickItem*> stack;
+            if(auto* r = qobject_cast<QQuickItem*>(root))
+                stack.push_back(r);
+            while(!stack.empty())
+            {
+                QQuickItem* it = stack.back();
+                stack.pop_back();
+                if(it->objectName() == n)
+                    return it;
+                for(QQuickItem* ch : it->childItems())
+                    stack.push_back(ch);
+            }
+            return nullptr;
+        };
+        Rig rig;
+        rig.LoadDoc(CompactDoc("wave"));
+        CHECK(rig.ctl.flowState().value("available").toBool());
+        auto dirNear = [&](double x, double y, double z) {
+            const QVariantMap d = rig.ctl.flowState()
+                .value("direction").toMap();
+            const bool ok =
+                std::fabs(d.value("x").toDouble() - x) < 1e-3
+                && std::fabs(d.value("y").toDouble() - y) < 1e-3
+                && std::fabs(d.value("z").toDouble() - z) < 1e-3;
+            if(!ok)
+                std::printf("  direction is (%.4f, %.4f, %.4f)\n",
+                            d.value("x").toDouble(),
+                            d.value("y").toDouble(),
+                            d.value("z").toDouble());
+            return ok;
+        };
+
+        QQmlEngine eng;
+        eng.rootContext()->setContextProperty(
+            QStringLiteral("effectEdit"), &rig.ctl);
+        QQmlComponent c(&eng, QUrl(QStringLiteral(
+            "qrc:/qt/qml/OpenRGB2/UI/studio/WaveControls.qml")));
+        CHECK(!c.isError());
+        std::unique_ptr<QObject> o(c.create(eng.rootContext()));
+        CHECK(o != nullptr);
+        QObject* heading = o ? findIn(o.get(), "waveHeading")
+                             : nullptr;
+        QObject* tilt = o ? findIn(o.get(), "waveTilt") : nullptr;
+        CHECK(heading != nullptr);
+        CHECK(tilt != nullptr);
+        auto commit = [](QObject* s, double v) {
+            QMetaObject::invokeMethod(s, "gestureCommitted",
+                                      Q_ARG(double, v));
+        };
+        auto model = [](QObject* s) {
+            return s->property("modelValue").toDouble();
+        };
+        if(heading != nullptr && tilt != nullptr)
+        {
+            const double c30 = std::cos(30.0 * 3.14159265358979 / 180);
+            CHECK(dirNear(0, 0, -1));        /* the look's default */
+            CHECK(std::fabs(model(heading)) < 1e-6);
+            CHECK(std::fabs(model(tilt)) < 1e-6);
+
+            /* Heading alone turns the bands around the vertical. */
+            commit(heading, 90);
+            CHECK(dirNear(1, 0, 0));
+            /* Tilt alone keeps the heading. */
+            commit(tilt, 30);
+            CHECK(dirNear(c30, 0.5, 0));
+            CHECK(std::fabs(model(heading) - 90) < 1e-3);
+            /* Heading keeps the tilt. */
+            commit(heading, -90);
+            CHECK(dirNear(-c30, 0.5, 0));
+            CHECK(std::fabs(model(tilt) - 30) < 1e-3);
+            /* Straight up: heading is undefined but kept, so
+               tilting back restores it. */
+            commit(tilt, 90);
+            CHECK(dirNear(0, 1, 0));
+            CHECK(std::fabs(model(heading) + 90) < 1e-3);
+            commit(tilt, 0);
+            CHECK(dirNear(-1, 0, 0));
+
+            /* An axis-aligned direction can be tilted (the old
+               z slider could only flip its sign). */
+            CHECK(rig.ctl.setFlowDirection(0, 0, -1));
+            commit(tilt, -45);
+            CHECK(dirNear(0, -0.7071, -0.7071));
+        }
+
+        /* "+" appends a color only when the dialog is accepted —
+           a cancelled pick used to leave a duplicate stop. */
+        std::printf("-- qml: wave '+' adds a color only on accept "
+                    "(audit Q-3)\n");
+        auto colorCount = [&] {
+            return (int)rig.ctl.flowState().value("colors")
+                .toList().size();
+        };
+        const int n0 = colorCount();
+        CHECK(n0 >= 2 && n0 < 5);
+        QObject* add = o ? findIn(o.get(), "waveColorAdd") : nullptr;
+        QObject* dlg = o ? findIn(o.get(), "waveColorDialog")
+                         : nullptr;
+        CHECK(add != nullptr);
+        if(add != nullptr)
+        {
+            QMetaObject::invokeMethod(add, "clicked");
+            CHECK(colorCount() == n0);
+        }
+        CHECK(dlg != nullptr);
+        if(add != nullptr && dlg != nullptr)
+        {
+            /* A headless dialog never opens, so its accept()/
+               reject() don't emit — emit the outcome signals the
+               card handles directly. */
+            QMetaObject::invokeMethod(dlg, "rejected");
+            CHECK(colorCount() == n0);
+            QMetaObject::invokeMethod(add, "clicked");
+            dlg->setProperty("selectedColor", QColor("#123456"));
+            QMetaObject::invokeMethod(dlg, "accepted");
+            const QVariantList cols =
+                rig.ctl.flowState().value("colors").toList();
+            CHECK((int)cols.size() == n0 + 1);
+            CHECK(!cols.isEmpty()
+                  && QColor(cols.last().toString())
+                         == QColor("#123456"));
         }
     }
 

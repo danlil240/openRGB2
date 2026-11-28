@@ -52,6 +52,29 @@ Item {
     readonly property bool   upReverse: root.editorUp ? sceneEdit.paramReverse : false
     readonly property string upColor:   root.editorUp ? sceneEdit.paramColor   : "red"
 
+    /* Audit Q-11: the colour well + H/S/V sliders show the
+       TRACKED colour (they used to start at red and never read
+       upColor — a restored per-scene colour was invisible and the
+       next nudge sent red-based values). Never while the user is
+       mid-gesture or a send is pending; hue/saturation are kept
+       when the colour leaves them undefined (grey / black), so a
+       drag through V = 0 doesn't reset them. */
+    function syncUpColor() {
+        if(upH.pressed || upS.pressed || upV.pressed
+           || paramTimer.running)
+            return;
+        const c = Qt.color(root.upColor);
+        if(upColorWell.swatch.toString().toLowerCase()
+           === c.toString().toLowerCase())
+            return;
+        upV.value = c.hsvValue;
+        if(c.hsvValue > 0)
+            upS.value = c.hsvSaturation;
+        if(c.hsvHue >= 0 && c.hsvSaturation > 0)
+            upH.value = c.hsvHue;
+    }
+    onUpColorChanged: syncUpColor()
+
     /* Preview event rate — measured here from frame_status
        pushes, labelled separately from output rates (§5). */
     property int frameEvents: 0
@@ -87,12 +110,14 @@ Item {
     readonly property bool prefsUp:
         typeof uiPrefs !== "undefined" && uiPrefs !== null
 
-    Component.onCompleted:
+    Component.onCompleted: {
         if(root.prefsUp) {
             palH.value = uiPrefs.paletteHue;
             palS.value = uiPrefs.paletteSat;
             palV.value = uiPrefs.paletteVal;
         }
+        syncUpColor();
+    }
 
     Connections {
         target: typeof bridge !== "undefined" ? bridge : null
@@ -173,7 +198,7 @@ Item {
         anchors.fill: parent
         spacing: 0
 
-        Flickable {
+        PageFlickable {     /* scroll bar + focus-follow (audit Q-12) */
             objectName: "lightingScroll"
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -1227,11 +1252,23 @@ Item {
                         Timer {
                             id: paramTimer
                             interval: 150
-                            onTriggered: if(root.editorUp && root.engineUp)
-                                sceneEdit.sendPlaybackParams(
-                                    Math.round(upSpeedSlider.value),
-                                    dirCheck.checked,
-                                    upColorWell.swatch.toString())
+                            onTriggered: {
+                                if(root.editorUp && root.engineUp)
+                                    sceneEdit.sendPlaybackParams(
+                                        Math.round(upSpeedSlider.value),
+                                        dirCheck.checked,
+                                        upColorWell.swatch.toString());
+                                /* Audit Q-11: re-assert the tracked
+                                   values — a send that was skipped
+                                   (engine down) or a field the preset
+                                   doesn't take leaves the model where
+                                   it was, and a Binding only rewrites
+                                   on a CHANGE. */
+                                if(!upSpeedSlider.pressed)
+                                    upSpeedSlider.value = root.upSpeed;
+                                dirCheck.checked = root.upReverse;
+                                root.syncUpColor();
+                            }
                         }
 
                         RowLayout {
@@ -1481,10 +1518,21 @@ Item {
                                         text: modelData.label
                                         enabled: inputRow.usable
                                         onClicked: {
+                                            const want = inputCheck.checked;
+                                            /* Audit Q-11: the box shows
+                                               ENGINE truth — the click
+                                               only requests; the Binding
+                                               below flips it when the
+                                               engine reports the input
+                                               running (it rewrites only
+                                               on a change, so a refused
+                                               or pending request would
+                                               otherwise stick). */
+                                            inputCheck.checked = inputRow.on;
                                             bridge.reactiveCommand(
                                                 "set_enabled",
                                                 { "input": inputId,
-                                                  "enabled": inputCheck.checked })
+                                                  "enabled": want })
                                             /* Persist the authored
                                                source choice into the
                                                draft (Task 6 parity —
@@ -1493,8 +1541,7 @@ Item {
                                             if(typeof effectEdit !== "undefined"
                                                && effectEdit.ready)
                                                 effectEdit.setInputEnabled(
-                                                    inputId,
-                                                    inputCheck.checked)
+                                                    inputId, want)
                                         }
                                         Binding {
                                             target: inputCheck
@@ -1765,24 +1812,44 @@ Item {
                         width: parent.width
                         spacing: Theme.spaceM
 
+                        /* Audit Q-5: the model is the colorless
+                           objectRows (notified only when the object
+                           set changes) behind an integer count, so a
+                           pushed frame never rebuilds these cards;
+                           each strip pulls its own colors by id
+                           (O(1) in C++), re-read per frame through
+                           the sequence dependency. */
                         Repeater {
-                            model: (typeof viewport !== "undefined"
-                                    && viewport.previewActive)
-                                   ? (viewport.objects || []) : []
+                            id: draftRepeater
+                            objectName: "draftRepeater"
+                            readonly property var rows:
+                                (typeof viewport !== "undefined"
+                                 && viewport.previewActive)
+                                ? viewport.objectRows : []
+                            model: rows.length
                             Column {
+                                id: draftRow
+                                required property int index
+                                readonly property var row:
+                                    draftRepeater.rows[index] || ({})
                                 spacing: Theme.spaceXS
                                 Text {
-                                    text: modelData.id +
-                                          (modelData.kind === "linked"
+                                    text: draftRow.row.id +
+                                          (draftRow.row.kind === "linked"
                                            ? " (linked)" :
-                                           (!modelData.bound
+                                           (!draftRow.row.bound
                                             ? " (unbound)" : ""))
                                     color: Theme.textSecondary
                                     font.pixelSize: Theme.fontSizeSmall
                                 }
                                 FrameStrip {
                                     objectName: "draftStrip"
-                                    colors: modelData.colors || []
+                                    colors: viewport.sequence >= 0
+                                            ? (viewport.colorsFor(
+                                                   draftRow.row.id,
+                                                   draftRow.row.emitter_total
+                                                   || 0) || [])
+                                            : []
                                 }
                             }
                         }

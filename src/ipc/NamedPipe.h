@@ -35,6 +35,7 @@
 #include "IpcServer.h"
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -151,12 +152,99 @@ std::unique_ptr<IIpcChannel> ConnectNamedPipeChannel(
     const std::string& pipe_name, uint32_t timeout_ms,
     std::string& err);
 
-/* Server check on a connected client pipe HANDLE: true when
-   the pipe object's owner is this user, LocalSystem or
-   BUILTIN\Administrators (an ELEVATED engine of the same
-   user owns its objects as Administrators by default), or
-   else when the server process's token user is this user. */
+/* Server check on a connected client pipe HANDLE: gathers
+   PipeServerFacts (owner, server process user, the pipe
+   object's mandatory label, the server process's integrity
+   level, this process's integrity level) and applies
+   EvaluatePipeServerTrust. */
 bool VerifyPipeServer(void* pipe_handle, std::string& err);
+
+/*---------------------------------------------------------*\
+|| Integrity policy (audit I-9 / U-6)                        ||
+||                                                          ||
+|| The shipped topology runs the engine ELEVATED while the  ||
+|| UI / openrgb2-ctl may run at medium integrity, so the    ||
+|| engine pipe deliberately admits medium clients of the    ||
+|| same user (explicit Medium no-write-up label — see       ||
+|| BuildRestrictedSddl). The engine verbs never take client ||
+|| paths, so such a client cannot borrow the engine's       ||
+|| rights for file writes. What IS refused:                  ||
+||                                                          ||
+||   client \ server   medium    elevated   SYSTEM          ||
+||   medium            allow     allow      allow           ||
+||   elevated          REFUSE    allow      allow           ||
+||   low / sandboxed   REFUSE (label + engine-side floor)   ||
+||   any client vs a low-integrity server: REFUSE           ||
+||                                                          ||
+|| i.e. a client never trusts a server below its own        ||
+|| integrity level (an elevated UI must not act on paths    ||
+|| or data from a medium squatter), and an elevated client  ||
+|| additionally requires an Administrators/LocalSystem      ||
+|| pipe owner — or, on machines whose policy makes the      ||
+|| creator the owner, the server token read as at least     ||
+|| its own level.                                           ||
+\*---------------------------------------------------------*/
+
+/* Mandatory-label RIDs (SECURITY_MANDATORY_*_RID). */
+constexpr uint32_t kIntegrityUntrusted = 0x0000;
+constexpr uint32_t kIntegrityLow       = 0x1000;
+constexpr uint32_t kIntegrityMedium    = 0x2000;
+constexpr uint32_t kIntegrityHigh      = 0x3000;
+constexpr uint32_t kIntegritySystem    = 0x4000;
+
+enum class PipeOwnerKind
+{
+    Unknown,            /* owner could not be read            */
+    Self,               /* this process's token user          */
+    LocalSystem,
+    Administrators,     /* BUILTIN\Administrators             */
+    Other,
+};
+
+/* What a client knows about the server end of a pipe. */
+struct PipeServerFacts
+{
+    PipeOwnerKind owner               = PipeOwnerKind::Unknown;
+    /* GetNamedPipeServerProcessId -> token user == ours. */
+    bool          server_user_is_self = false;
+    /* The pipe OBJECT's mandatory label (an unlabeled object
+       counts as Medium). A creator can only label at or below
+       its own level, and a low-integrity creator's objects
+       are always labeled low — a lower bound that needs no
+       access to the server process. */
+    bool          label_known         = false;
+    uint32_t      label_integrity     = kIntegrityMedium;
+    /* The server PROCESS's token integrity, when readable (a
+       medium client usually cannot open an elevated token). */
+    bool          token_known         = false;
+    uint32_t      token_integrity     = 0;
+    /* This (client) process's integrity level. */
+    uint32_t      client_integrity    = kIntegrityMedium;
+};
+
+/* Pure trust decision over the facts (table above). Returns
+   false with err set when the server must be refused. */
+bool EvaluatePipeServerTrust(const PipeServerFacts& facts,
+                             std::string& err);
+
+/* Integrity-level lookups go through one probe so tests can
+   simulate an elevated client / a low server / an unreadable
+   token without elevating. */
+enum class IntegritySubject
+{
+    Self,               /* this process                        */
+    PipeServer,         /* client side: the server's process   */
+    PipeClient,         /* listener side: the client's process */
+};
+using IntegrityProbe = bool (*)(IntegritySubject subject,
+                                unsigned long pid,
+                                uint32_t& rid_out);
+/* nullptr restores the real token query. */
+void SetIntegrityProbeForTesting(IntegrityProbe probe);
+/* Integrity RID of `pid` (ignored for Self) through the probe;
+   false when the token cannot be read. */
+bool QueryIntegrity(IntegritySubject subject, unsigned long pid,
+                    uint32_t& rid_out);
 
 /*---------------------------------------------------------*\
 || NamedPipeListener — creates pipe instances under the    ||

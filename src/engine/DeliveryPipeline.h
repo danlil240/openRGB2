@@ -19,7 +19,9 @@
 ||     interval between sends for THAT controller — a slow  |
 ||     wireless group does not pace fast wired devices      |
 ||   - unchanged-frame suppression: a live frame identical  |
-||     to the last delivered one is not retransmitted       |
+||     to the last delivered one is not retransmitted —     |
+||     except a periodic keyframe (SetKeyframeInterval)     |
+||     that re-asserts a static scene                       |
 ||   - per-controller DeliveryStats (aggregate too), with   |
 ||     TransportMeasured provenance — completions mean      |
 ||     "accepted by the transport", never "displayed"       |
@@ -93,6 +95,21 @@ public:
                    Clock::duration min_interval);
     void SetDefaultBudget(Clock::duration min_interval);
     bool Budget(const DeviceKey& controller, Clock::duration& out) const;
+
+    /* Static-scene keyframe (audit E-5), pipeline-wide: a live
+       frame identical to the lane's delivered state is normally
+       suppressed, but once `interval` has passed since the
+       lane's last send it is transmitted anyway — so a device
+       another writer (G Hub, Dynamic Lighting, a firmware
+       reset) changed behind our back converges again while the
+       scene stays static. Counted in DeliveryStats::keyframes.
+       It rides the live path only, so the lane budget, a
+       suppressed (uploaded-playback) lane and the output-pause
+       gate all still apply; a keyframe needs a producer frame
+       pending — nothing is invented by the pipeline. Zero (the
+       pipeline default) = off; EngineHost sets 3 s. */
+    void            SetKeyframeInterval(Clock::duration interval);
+    Clock::duration KeyframeInterval() const;
 
     /*---- Submissions ---------------------------------------*\
 
@@ -313,6 +330,7 @@ private:
     std::shared_ptr<IFrameSink>        transport_;
     std::map<DeviceKey, std::shared_ptr<Lane>> lanes_;
     Clock::duration                    default_budget_{};
+    Clock::duration                    keyframe_interval_{};
     bool                               running_ = false;
     bool                               output_paused_ = false;
     std::string                        pause_reason_;

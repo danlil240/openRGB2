@@ -19,6 +19,13 @@
 |||   dropped, and later steps still run (skipping teardown ||
 |||   would strand later owners).                           ||
 |||                                                           ||
+|||   Audit E-10 makes the bounds enforced, not only        ||
+|||   measured: a step that throws is caught and recorded  ||
+|||   (later steps still run), and an opt-in watchdog calls ||
+|||   its handler — production exits the process — once the ||
+|||   whole sequence outlives TotalBound() + grace, naming  ||
+|||   the step still running.                               ||
+|||                                                           ||
 |||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 |\*---------------------------------------------------------*/
 
@@ -44,6 +51,8 @@ public:
         Clock::duration elapsed{};
         bool            ran    = false;
         bool            within = true;   /* elapsed <= bound */
+        bool            failed = false;  /* the step threw     */
+        std::string     error;           /* what it threw      */
     };
 
     struct Result
@@ -51,7 +60,12 @@ public:
         std::vector<StepResult> steps;
         Clock::duration         elapsed{};
         bool                    all_within_bound = true;
+        bool                    all_ok           = true; /* no throw */
+        bool                    watchdog_fired   = false;
     };
+
+    using WatchdogHandler =
+        std::function<void(const std::string& running_step)>;
 
     /* Register a teardown step (registration order is execution
        order). `bound` documents the time the step is designed to
@@ -71,6 +85,15 @@ public:
        injectable for deterministic tests. */
     Result Run(std::function<TimePoint()> now = Clock::now);
 
+    /* Arm a watchdog for Run(): if the sequence is still
+       running TotalBound() + grace after it started (real
+       time, whatever `now` Run() was given), `on_expire` is
+       called once from the watchdog thread with the name of
+       the step still running. Production passes a handler
+       that logs and exits the process; Run() itself only
+       records it (Result::watchdog_fired). */
+    void SetWatchdog(Clock::duration grace, WatchdogHandler on_expire);
+
 private:
     struct Step
     {
@@ -82,6 +105,8 @@ private:
     std::vector<Step> steps_;
     bool              ran_ = false;
     Result            result_;
+    Clock::duration   watchdog_grace_{};
+    WatchdogHandler   watchdog_;
 };
 
 } /* namespace openrgb2 */

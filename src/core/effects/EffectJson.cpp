@@ -9,6 +9,7 @@
 #include "Presets.h"                /* RemixRng / RotateYaw — the one draw stream */
 #include "../presets/DevicePreset.h"   /* IsPresetId — id == filename */
 #include "../scene/JsonFields.h"
+#include "../config/JsonBounded.h"
 #include "../scene/SceneJson.h"     /* SceneColorHex / ParseSceneColor */
 
 #include <cmath>
@@ -1179,13 +1180,17 @@ bool EffectDocumentFromJsonFile(const std::string& path,
     std::stringstream ss;
     ss << f.rdbuf();
     const std::string text = ss.str();
+    /* Depth-capped (audit I-2) — see DevicePreset's loader. */
     const nlohmann::ordered_json j =
-        nlohmann::ordered_json::parse(text, nullptr, false);
+        ParseJsonBounded<nlohmann::ordered_json>(text);
     if(j.is_discarded())
     {
         if(errors)
         {
-            errors->push_back(path + ": malformed JSON");
+            errors->push_back(path + ": malformed JSON (or nested "
+                              "deeper than " +
+                              std::to_string(kMaxJsonDepth) +
+                              " levels)");
         }
         return false;
     }

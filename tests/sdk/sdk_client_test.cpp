@@ -956,6 +956,247 @@ static void TestDuplicateKeysNoReenumeration()
               before[0].topology_generation);
 }
 
+/*---------------------------------------------------------*\
+||| Audit E-3: the 2 s topology refresh must not stall the  |||
+||| frame path. RefreshStatus used to hold the wire lock    |||
+||| across one round trip per controller, so every lane's   |||
+||| SubmitLatest waited for the whole sweep; reconnect      |||
+||| attempts also ran inside SubmitLatest (lane threads).   |||
+\*---------------------------------------------------------*/
+
+static FakeController NamedDimm(const std::string& serial)
+{
+    FakeController c = Dimm();
+    c.serial   = serial;
+    c.location = "i2c:" + serial;
+    return c;
+}
+
+static void TestRefreshDoesNotStallFrames()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup(), NamedDimm("D1"),
+                           NamedDimm("D2"), NamedDimm("D3"),
+                           NamedDimm("D4") };
+
+    FakeStream* stream = nullptr;
+    auto client = MakeClient(server, &stream);
+    CHECK(client->Connect());
+    const std::vector<DeviceSnapshot> snaps = client->Snapshots();
+    CHECK(snaps.size() == 5);
+
+    /* 60 ms per receive: count + 5 controller replies, two
+       receives each — ~720 ms of status traffic. Sends (the
+       frame path) are never delayed by the fake. */
+    stream->recv_delay_ms.store(60);
+
+    std::atomic<bool> refresh_running{ false };
+    std::atomic<bool> refresh_done{ false };
+    std::atomic<bool> refresh_ok{ false };
+    std::thread th([&]
+    {
+        refresh_running = true;
+        refresh_ok      = client->RefreshStatus();
+        refresh_done    = true;
+    });
+    while(!refresh_running.load())
+    {
+        std::this_thread::yield();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    /* Frames keep flowing while the refresh runs: each send
+       may wait for at most one status round trip (~120 ms),
+       never for the whole sweep. */
+    double worst_ms = 0.0;
+    int    sent_during = 0;
+    while(!refresh_done.load())
+    {
+        const auto t0 = Clock::now();
+        const SubmitResult r =
+            client->SubmitLatest(MakeFrame(snaps[1], { 1, 2, 3 }));
+        const double ms = std::chrono::duration<double, std::milli>(
+            Clock::now() - t0).count();
+        CHECK(r.status == SubmitStatus::Accepted);
+        if(!refresh_done.load())
+        {
+            ++sent_during;
+        }
+        if(ms > worst_ms)
+        {
+            worst_ms = ms;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    th.join();
+    stream->recv_delay_ms.store(0);
+    std::printf("refresh stall: worst send wait %.0f ms, %d sends "
+                "during the refresh\n", worst_ms, sent_during);
+    CHECK(refresh_ok.load());
+    CHECK(worst_ms < 350.0);
+    CHECK(sent_during >= 3);
+
+    /* Still an in-place refresh: generation unchanged. */
+    const std::vector<DeviceSnapshot> after = client->Snapshots();
+    CHECK(after.size() == 5);
+    CHECK(!after.empty() && after[0].topology_generation == 1);
+}
+
+/* Reconnect attempts belong to the owner loop (Poll), never
+   to the frame path: a SubmitLatest while Reconnecting is
+   refused at once, without a connect attempt. */
+static void TestSubmitNeverReconnects()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup() };
+
+    FakeStream* stream = nullptr;
+    auto client = MakeClient(server, &stream);
+    CHECK(client->Connect());
+    const DeviceSnapshot snap = client->Snapshots()[0];
+
+    stream->SetSendFails(true);
+    CHECK(client->SubmitLatest(MakeFrame(snap, { 1, 0, 0 })).status ==
+          SubmitStatus::Rejected);
+    CHECK(client->State() == ConnectionState::Reconnecting);
+    stream->SetSendFails(false);
+    server.listening = false;
+
+    for(int i = 0; i < 4; ++i)
+    {
+        CHECK(client->SubmitLatest(MakeFrame(snap, { 1, 0, 0 })).status ==
+              SubmitStatus::Rejected);
+    }
+    /* No attempt was made from the send path. */
+    CHECK(client->ReconnectAttempt() == 0);
+    CHECK(client->State() == ConnectionState::Reconnecting);
+
+    /* The owner loop's Poll drives the schedule. */
+    CHECK(!client->Poll());
+    CHECK(client->ReconnectAttempt() == 1);
+    server.listening = true;
+    CHECK(client->Poll());
+    CHECK(client->State() == ConnectionState::Connected);
+}
+
+/*---------------------------------------------------------*\
+||| One controller whose description cannot be parsed is   ||
+||| skipped -- the rest of the rig still enumerates and    ||
+||| keeps its enumeration indices (audit P-14). Only a     ||
+||| backend where EVERY description fails is an error.     ||
+\*---------------------------------------------------------*/
+
+static void TestUnparsableControllerSkipped()
+{
+    FakeSdkServer server;
+    FakeController bad = Dimm();
+    bad.serial         = "BAD";
+    bad.malformed_body = true;
+    server.controllers = { WirelessGroup(), bad, Keyboard() };
+
+    auto client = MakeClient(server);
+    CHECK(client->Connect());
+    CHECK(client->State() == ConnectionState::Connected);
+    CHECK(client->Snapshots().size() == 2);
+
+    const ConnectionSnapshotInfo info = client->ConnectionSnapshot();
+    CHECK(info.skipped_controllers.size() == 1);
+    CHECK(!info.skipped_controllers.empty() &&
+          info.skipped_controllers[0] == 1);
+
+    /* The keyboard after the bad entry keeps its server index:
+       its frames go to dev_id 2, not 1. */
+    DeviceSnapshot k;
+    CHECK(client->Snapshot(
+        DeviceKey{ "Corsair:Corsair K95", "K1", "hid:k1", "" }, k));
+    server.events.clear();
+    RgbFrame frame = MakeFrame(k, { 1, 2, 3 });
+    CHECK(client->SubmitLatest(frame).status == SubmitStatus::Accepted);
+    const ServerEvent* ev = FindEvent(server.events, kPktUpdateLEDs);
+    CHECK(ev != nullptr && ev->dev_id == 2);
+
+    /* The periodic refresh neither fails nor re-enumerates
+       (the server count still matches). */
+    const uint64_t gen = k.topology_generation;
+    CHECK(client->RefreshStatus());
+    DeviceSnapshot k2;
+    CHECK(client->Snapshot(k.key, k2) && k2.topology_generation == gen);
+
+    /* Every description unparsable: a protocol-level problem,
+       not one odd device -- the connection still fails. */
+    FakeSdkServer all_bad;
+    all_bad.controllers = { bad };
+    auto client2 = MakeClient(all_bad);
+    CHECK(!client2->Connect());
+    CHECK(client2->LastError().find("malformed controller data")
+          != std::string::npos);
+}
+
+/*---------------------------------------------------------*\
+||| Audit P-5: the backend announces a changed controller  |||
+||| list with DEVICE_LIST_UPDATED (packet 100) to every     |||
+||| client, at any protocol version. The client must read  |||
+||| it promptly: until it re-enumerates, a frame resolved  |||
+||| against the old positional index would land on a       |||
+||| shifted controller.                                    |||
+\*---------------------------------------------------------*/
+
+static void TestDeviceListUpdatedInvalidatesTopology()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup(), Dimm() };
+
+    FakeStream* stream = nullptr;
+    auto client = MakeClient(server, &stream);
+    CHECK(client->Connect());
+    std::vector<DeviceSnapshot> snaps = client->Snapshots();
+    CHECK(snaps.size() == 2);
+    const DeviceSnapshot* dimm = nullptr;
+    for(const DeviceSnapshot& s : snaps)
+    {
+        if(s.key.serial == "D1") dimm = &s;
+    }
+    CHECK(dimm != nullptr);
+    if(!dimm) return;
+    const uint64_t gen0 = dimm->topology_generation;
+    const RgbFrame stale = MakeFrame(*dimm, { 5, 5, 5 });
+
+    /* The backend rescans: the wireless group is gone, the
+       DIMM moves from index 1 to index 0, and the server
+       tells every client. */
+    server.RemoveController(0);
+    stream->InjectServerBytes(EncodePacket(0, kPktDeviceListUpdated, {}));
+    server.ClearEvents();
+
+    /* The very next frame on the old topology is refused —
+       never sent to the stale index 1. */
+    const SubmitResult r = client->SubmitLatest(stale);
+    CHECK(r.status == SubmitStatus::Rejected);
+    CHECK(server.CountEvents(kPktUpdateLEDs) == 0);
+    CHECK(client->State() == ConnectionState::Connected);
+
+    /* The owner loop's Poll re-enumerates: one controller, a
+       new generation, and frames route to the new index. */
+    CHECK(client->Poll());
+    snaps = client->Snapshots();
+    CHECK(snaps.size() == 1);
+    CHECK(!snaps.empty() && snaps[0].key.serial == "D1");
+    CHECK(!snaps.empty() && snaps[0].topology_generation > gen0);
+    if(!snaps.empty())
+    {
+        CHECK(client->SubmitLatest(MakeFrame(snaps[0], { 6, 6, 6 }))
+                  .status == SubmitStatus::Accepted);
+        CHECK(server.CountEvents(kPktUpdateLEDs, 0) == 1);
+        CHECK(server.CountEvents(kPktUpdateLEDs, 1) == 0);
+    }
+
+    /* Read by Poll alone too (no frame in between). */
+    server.AddController(WirelessGroup());
+    stream->InjectServerBytes(EncodePacket(0, kPktDeviceListUpdated, {}));
+    CHECK(client->Poll());
+    CHECK(client->Snapshots().size() == 2);
+}
+
 int main()
 {
     TestHandshakeCapsAt4();
@@ -981,6 +1222,10 @@ int main()
     TestUnsupportedReprobeSchedule();
     TestDetectingReplyIsNotData();
     TestDuplicateKeysNoReenumeration();
+    TestRefreshDoesNotStallFrames();
+    TestSubmitNeverReconnects();
+    TestUnparsableControllerSkipped();
+    TestDeviceListUpdatedInvalidatesTopology();
     std::printf("sdk client: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

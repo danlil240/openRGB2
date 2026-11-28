@@ -10,6 +10,7 @@
 
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Dialogs
 import QtQuick.Layouts
 import OpenRGB2.UI.theme
 import OpenRGB2.UI.components
@@ -27,6 +28,11 @@ Popup {
 
     width: 560; height: 600
     modal: true
+    /* Audit Q-9: a modal popup must own keyboard focus — without
+       it typing went to the item behind the modal and Escape
+       (CloseOnEscape acts only while the popup has focus) never
+       closed it. The first field takes focus on open. */
+    focus: true
     closePolicy: Popup.CloseOnEscape
     padding: 0
     background: Rectangle {
@@ -47,14 +53,20 @@ Popup {
         report = null
         status = ""
         renameMap = ({})
+        /* Audit Q-13: "replace my layout" is a per-import choice,
+           never carried into the next one. */
+        overwriteBox.checked = false
     }
 
-    onOpened: reset()
+    onOpened: {
+        reset()
+        pathField.forceActiveFocus()
+    }
 
     function readAndInspect() {
         var c = ctl()
         if (c === null) { status = qsTr("workspace unavailable"); return }
-        if (phase !== "idle" && phase !== "report") return
+        if (!canPick) return
         var r = c.readLocalFile(pathField.text.trim())
         if (r.ok !== true) {
             status = String(r.error !== undefined ? r.error
@@ -65,6 +77,8 @@ Popup {
         name = name.substring(Math.max(name.lastIndexOf("/"),
                                        name.lastIndexOf("\\")) + 1)
         phase = "inspecting"
+        report = null
+        overwriteBox.checked = false
         status = qsTr("Inspecting bundle…")
         /* readLocalFile returns base64 text — inspectImport
            decodes it before the bounded upload. */
@@ -92,7 +106,7 @@ Popup {
         var c = ctl()
         /* "done" is quiescent too — a successful import must
            not leave the export path dead until reopen. */
-        if (c === null || (phase !== "idle" && phase !== "done")) return
+        if (c === null || !quiet) return
         phase = "exporting"
         status = qsTr("Exporting…")
         /* void — the outcome lands in onExportReady or the
@@ -108,6 +122,49 @@ Popup {
         for (var i = 0; i < keys.length; i++)
             out[keys[i]] = renameMap[keys[i]]
         return out
+    }
+
+    /* Audit Q-13: every close path — Escape, the Close button, a
+       click outside — releases a staged inspect the same way;
+       Escape used to close without cancelling. (cancelImport is a
+       no-op once the commit has consumed the stage.) */
+    onClosed: {
+        var c = ctl()
+        if (c !== null && phase !== "idle")
+            c.cancelImport()
+    }
+
+    /* "idle" and "done" are quiescent: after an import finishes,
+       another inspect and the export stay reachable without
+       reopening the dialog (audit Q-13). */
+    readonly property bool quiet: phase === "idle" || phase === "done"
+    readonly property bool canPick: quiet || phase === "report"
+
+    /* FileDialog hands back file:// URLs; the fields hold plain
+       local paths (the controller accepts both). */
+    function localPath(u) {
+        var s = String(u)
+        if (s.indexOf("file:///") === 0)
+            s = s.substring(8)
+        else if (s.indexOf("file://") === 0)
+            s = "//" + s.substring(7)      /* UNC host */
+        return decodeURIComponent(s)
+    }
+    FileDialog {
+        id: importPick
+        title: qsTr("Choose a workspace bundle")
+        fileMode: FileDialog.OpenFile
+        nameFilters: [qsTr("Workspace bundles (*.or2studio)"),
+                      qsTr("All files (*)")]
+        onAccepted: pathField.text = dialog.localPath(selectedFile)
+    }
+    FileDialog {
+        id: exportPick
+        title: qsTr("Export the workspace bundle")
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "or2studio"
+        nameFilters: [qsTr("Workspace bundles (*.or2studio)")]
+        onAccepted: exportPathField.text = dialog.localPath(selectedFile)
     }
 
     Connections {
@@ -127,6 +184,7 @@ Popup {
                 return
             }
             dialog.report = rep
+            overwriteBox.checked = false
             var seeds = {}
             var confs = rep.conflicts !== undefined ? rep.conflicts : []
             for (var i = 0; i < confs.length; i++)
@@ -200,12 +258,18 @@ Popup {
                 objectName: "importPathField"
                 Layout.fillWidth: true
                 placeholderText: qsTr("path to .or2studio bundle")
-                enabled: dialog.phase === "idle" || dialog.phase === "report"
+                enabled: dialog.canPick
+            }
+            AppButton {
+                objectName: "importBrowseBtn"
+                text: qsTr("Browse…")
+                enabled: dialog.canPick
+                onClicked: importPick.open()
             }
             AppButton {
                 objectName: "inspectBtn"
                 text: qsTr("Inspect")
-                enabled: (dialog.phase === "idle" || dialog.phase === "report")
+                enabled: dialog.canPick
                          && pathField.text.trim() !== ""
                 onClicked: dialog.readAndInspect()
             }
@@ -421,12 +485,18 @@ Popup {
                 objectName: "exportPathField"
                 Layout.fillWidth: true
                 placeholderText: qsTr("destination path (.or2studio)")
-                enabled: dialog.phase === "idle"
+                enabled: dialog.quiet
+            }
+            AppButton {
+                objectName: "exportBrowseBtn"
+                text: qsTr("Browse…")
+                enabled: dialog.quiet
+                onClicked: exportPick.open()
             }
             AppButton {
                 objectName: "exportBtn"
                 text: qsTr("Export")
-                enabled: dialog.phase === "idle"
+                enabled: dialog.quiet
                          && exportPathField.text.trim() !== ""
                 onClicked: dialog.doExport()
             }
@@ -437,12 +507,8 @@ Popup {
             Item { Layout.fillWidth: true }
             AppButton {
                 text: qsTr("Close")
-                onClicked: {
-                    var c = dialog.ctl()
-                    if (c !== null && dialog.phase !== "idle")
-                        c.cancelImport()
-                    dialog.close()
-                }
+                /* the cancel rides onClosed, shared with Escape */
+                onClicked: dialog.close()
             }
         }
     }

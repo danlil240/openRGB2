@@ -175,10 +175,17 @@ Rectangle {
         readonly property bool editing: input.activeFocus || scrub.pressed
 
         function fmt(v) { return v.toFixed(decimals) }
+        /* Show what the model holds (audit Q-7): a refused or
+           clamped commit, a cancelled scrub or abandoned text
+           must not leave its text standing in the field. */
+        function resync() { input.text = fmt(value) }
         function commitText() {
             var v = parseFloat(input.text)
-            if (isFinite(v))
+            /* Enter and the focus loss after it both end the edit;
+               unchanged text commits nothing (no empty record). */
+            if (isFinite(v) && fmt(v) !== fmt(value))
                 committed(v)
+            resync()
         }
         onValueChanged: {
             if (!editing)
@@ -196,24 +203,42 @@ Rectangle {
             color: Theme.bg; radius: 3; border.color: Theme.borderStrong
             TextInput {
                 id: input
+                objectName: "numInput"
                 anchors.fill: parent; anchors.margins: 3
                 color: Theme.textPrimary; font.pixelSize: 11
                 text: nf.fmt(nf.value)
                 selectByMouse: true
                 validator: DoubleValidator { locale: "C" }
-                onAccepted: { nf.commitText(); focus = false }
+                /* editingFinished = Enter or focus loss with
+                   acceptable text — both commit. */
+                onEditingFinished: nf.commitText()
+                onAccepted: focus = false
                 onActiveFocusChanged: {
                     if (activeFocus)
                         inspector.activeField = nf
-                    else if (inspector.activeField === nf)
-                        inspector.activeField = null
+                    else {
+                        if (inspector.activeField === nf)
+                            inspector.activeField = null
+                        /* Text the validator never accepted gets
+                           no editingFinished — drop it after the
+                           focus change settles. */
+                        Qt.callLater(function() {
+                            if (!nf.editing)
+                                nf.resync()
+                        })
+                    }
                 }
             }
             /* Drag-to-scrub strip along the field's left edge. */
             MouseArea {
                 id: scrub
+                objectName: "numScrub"
                 anchors.left: parent.left
                 width: 10; height: parent.height
+                /* The docked inspector sits in the Layout page's
+                   Flickable, which would otherwise steal the scrub
+                   past its threshold (audit Q-7; as in 21a7b63). */
+                preventStealing: true
                 cursorShape: Qt.SizeHorCursor
                 property real anchor: 0
                 property real startVal: 0
@@ -237,9 +262,12 @@ Rectangle {
                         inspector.activeField = null
                     nf.commitText()
                 }
+                /* A stolen grab drops the scrubbed value. */
                 onCanceled: {
-                    if (inspector.activeField === nf)
+                    if (inspector.activeField === nf
+                        && !input.activeFocus)
                         inspector.activeField = null
+                    nf.resync()
                 }
             }
         }
@@ -362,7 +390,8 @@ Rectangle {
         }
 
         /* Position fields — millimeters (saved positions stay m). */
-        NumField { label: "X"; suffix: "mm"; value: inspector.posX; decimals: 1; scrubStep: 1
+        NumField { objectName: "numPosX"
+                   label: "X"; suffix: "mm"; value: inspector.posX; decimals: 1; scrubStep: 1
                    enabled: inspector.hasTarget; opacity: enabled ? 1 : 0.4
                    onCommitted: function(v) { inspector.commitPos(0, v) } }
         NumField { label: "Y"; suffix: "mm"; value: inspector.posY; decimals: 1; scrubStep: 1

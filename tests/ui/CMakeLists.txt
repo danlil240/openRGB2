@@ -124,16 +124,21 @@ set_tests_properties(ui_workspace_test PROPERTIES
 # drops, reduced labeling, status pauses, refusal honesty,
 # reconnect re-begin, and the hard separation from the
 # transport-accepted frame_status feed).
+# Audit Q-5 adds the real LightingPage draft cards over the same
+# feed, so the suite also links the QML module + Qt Quick.
 add_executable(ui_studio_preview_test ui_studio_preview_test.cpp)
 target_link_libraries(ui_studio_preview_test PRIVATE
     openrgb2_ui
+    openrgb2_uiplugin
     openrgb2_ipc_wire
-    openrgb2_studio_core)
+    openrgb2_studio_core
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
 target_include_directories(ui_studio_preview_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src/ui)
 target_compile_definitions(ui_studio_preview_test PRIVATE NDEBUG)
 set_target_properties(ui_studio_preview_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(ui_studio_preview_test)
 add_test(NAME ui_studio_preview_test COMMAND ui_studio_preview_test)
 set_tests_properties(ui_studio_preview_test PROPERTIES
     LABELS ui
@@ -195,7 +200,7 @@ target_link_libraries(qml_workspace_save_test PRIVATE
     openrgb2_ui
     openrgb2_uiplugin
     openrgb2_ipc_wire
-    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Test)
 target_include_directories(qml_workspace_save_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src/ui)
@@ -255,6 +260,28 @@ set_tests_properties(qml_diagnostics_test PROPERTIES
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${QT_BIN_DIR}")
 
+# Audit Q-11: the real LightingPage.qml against notifying
+# QtObject stubs — a reactive-input checkbox re-asserts engine
+# state after a click, and the uploaded-preset colour well shows
+# the tracked colour instead of a hard-coded red.
+add_executable(qml_lighting_state_test qml_lighting_state_test.cpp)
+target_link_libraries(qml_lighting_state_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+target_include_directories(qml_lighting_state_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(qml_lighting_state_test PRIVATE NDEBUG)
+set_target_properties(qml_lighting_state_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(qml_lighting_state_test)
+add_test(NAME qml_lighting_state_test COMMAND qml_lighting_state_test)
+set_tests_properties(qml_lighting_state_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
+
 # Task 4.8: the real shell headless — Tab/Space focus chain,
 # Ctrl+1..5 view switching, Ctrl+S focused-commit save,
 # accessible-name resolution, theme contrast (WCAG ratios),
@@ -286,6 +313,28 @@ foreach(scale 1.00 1.25 1.50 2.00)
         ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:${QT_BIN_DIR};QT_SCALE_FACTOR=set:${scale}")
 endforeach()
+
+# Audit Q-12: the real shell in a shown window — a vertical
+# scroll bar on every page, keyboard focus below the fold scrolls
+# into view, and the Layout 2D/3D toggle shows (and keeps) its
+# checked state.
+add_executable(qml_scroll_toggle_test qml_scroll_toggle_test.cpp)
+target_link_libraries(qml_scroll_toggle_test PRIVATE
+    openrgb2_ui
+    openrgb2_uiplugin
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+target_include_directories(qml_scroll_toggle_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui)
+target_compile_definitions(qml_scroll_toggle_test PRIVATE NDEBUG)
+set_target_properties(qml_scroll_toggle_test PROPERTIES AUTOMOC ON)
+qt_import_qml_plugins(qml_scroll_toggle_test)
+add_test(NAME qml_scroll_toggle_test COMMAND qml_scroll_toggle_test)
+set_tests_properties(qml_scroll_toggle_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
 
 # studio-import Task 5: the scene/object editing surface —
 # the real ObjectEditorController + SceneObjectModel +
@@ -460,6 +509,38 @@ set_target_properties(ui_workspace_recovery_test PROPERTIES
 add_test(NAME ui_workspace_recovery_test
          COMMAND ui_workspace_recovery_test)
 set_tests_properties(ui_workspace_recovery_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
+
+# Audit I-4: scene content out of band. The real EngineService +
+# WorkspaceService + IpcServer serve a scene whose document is past
+# the 1 MiB body cap (and, with a tiny inline bound, every scene):
+# WELCOME/STATE/SCENE carry revision/name/hash, the EngineBridge
+# fetches the document through a `scene` download transfer and
+# paints bridge.scene() with it.
+add_executable(ui_scene_transfer_test
+    ui_scene_transfer_test.cpp)
+target_link_libraries(ui_scene_transfer_test PRIVATE
+    openrgb2_ui
+    openrgb2_ipc_wire
+    openrgb2_ipc
+    openrgb2_engine
+    openrgb2_studio_core
+    Qt6::Gui)
+target_include_directories(ui_scene_transfer_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui
+    ${CMAKE_SOURCE_DIR}/src/ipc
+    ${CMAKE_SOURCE_DIR}/src/engine)
+target_compile_definitions(ui_scene_transfer_test
+    PRIVATE NDEBUG)
+set_target_properties(ui_scene_transfer_test PROPERTIES
+    AUTOMOC ON)
+add_test(NAME ui_scene_transfer_test
+         COMMAND ui_scene_transfer_test)
+set_tests_properties(ui_scene_transfer_test PROPERTIES
     LABELS ui
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     ENVIRONMENT_MODIFICATION

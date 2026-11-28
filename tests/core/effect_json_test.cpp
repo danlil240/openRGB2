@@ -7,7 +7,10 @@
 |||   resolved layer stacks + evaluated frames are         |
 |||   compared against tests/fixtures/effects/<id>.fixture.|
 |||   json (captured from BuildPreset BEFORE the           |
-|||   representation changed — the parity oracle).         |
+|||   representation changed — the parity oracle). Wave,   |
+|||   added later as a JSON-only look, has a fixture       |
+|||   captured from its JSON (audit C-11): a regression    |
+|||   lock rather than migration parity.                   |
 |||                                                           |
 |||   Also covers: document round-trips, the remix-spec    |
 |||   grammar (including out-of-document-order misuse),    |
@@ -305,7 +308,7 @@ static void TestFixtureParity()
 {
     static const char* const ids[] = {
         "aurora", "reactor", "comet", "chrome", "portal",
-        "embers", "shockwave", "keyripple", "ambient",
+        "embers", "shockwave", "keyripple", "ambient", "wave",
     };
     const std::string dir = FindFixtureDir();
     const SceneDocument doc = BuildDefaultDesk();
@@ -425,7 +428,10 @@ static void TestFixtureParity()
         }
     }
     std::printf("parity: %d frame cases checked\n", cases_total);
-    CHECK(cases_total == 144, "144 fixture cases");
+    /* 7 non-reactive looks x 12 + 3 reactive x 24. Audit C-11:
+       wave, the tenth shipped look, joined the oracle (its
+       fixture was captured with tests/core/effect_fixture_gen). */
+    CHECK(cases_total == 156, "156 fixture cases");
 }
 
 /*---------------------------------------------------------*\
@@ -436,7 +442,7 @@ static void TestPackagedDocs()
     const std::string dir = FindPackagedDir();
     static const char* const ids[] = {
         "aurora", "reactor", "comet", "chrome", "portal",
-        "embers", "shockwave", "keyripple", "ambient",
+        "embers", "shockwave", "keyripple", "ambient", "wave",
     };
     for(const char* id : ids)
     {
@@ -463,8 +469,8 @@ static void TestPackagedDocs()
 
     /* Registry-backed listing reproduces the shipped metadata. */
     CHECK(PresetList().size() == 10, "ten looks registered");
-    const PresetInfo* p = FindPreset("shockwave");
-    CHECK(p != nullptr && p->needs == "audio" && p->name == "Bass shockwave",
+    const std::optional<PresetInfo> p = FindPreset("shockwave");
+    CHECK(p && p->needs == "audio" && p->name == "Bass shockwave",
           "shockwave metadata from JSON");
 }
 
@@ -1194,6 +1200,50 @@ static void TestPersonalLookFile()
     std::filesystem::remove_all(dir, ec);
 }
 
+/*---------------------------------------------------------*\
+||| Audit C-15 - PresetList()/FindPreset lifetime. The    |
+||| listing used to live in a static vector cleared and   |
+||| rebuilt on every call, so a FindPreset pointer was    |
+||| silently rewritten (or left dangling on a regrow) by  |
+||| the next PresetList() anywhere - including a nested   |
+||| call inside a range-for over the list itself.         |
+\*---------------------------------------------------------*/
+static void TestPresetListLifetime()
+{
+    const auto held = FindPreset("aurora");
+    CHECK(held && held->name == "Aurora", "lifetime: aurora found");
+
+    const EffectDocument* base = EffectLooks().Find("aurora");
+    CHECK(base != nullptr, "lifetime: aurora document");
+    if(base == nullptr)
+    {
+        return;
+    }
+    EffectDocument over = *base;
+    over.name = "Aurora (override)";
+    CHECK(EffectLooks().Add(over), "lifetime: override registers");
+    const size_t n = PresetList().size();
+
+    CHECK(held && held->id == "aurora" && held->name == "Aurora",
+          "lifetime: a FindPreset result survives a later PresetList");
+    const auto now = FindPreset("aurora");
+    CHECK(now && now->name == "Aurora (override)",
+          "lifetime: a fresh lookup sees the override");
+
+    /* Nested lookups while iterating the listing. */
+    size_t seen = 0;
+    for(const PresetInfo& p : PresetList())
+    {
+        if(FindPreset(p.id) && FindPreset(p.id)->id == p.id)
+        {
+            ++seen;
+        }
+    }
+    CHECK(seen == n, "lifetime: nested lookups inside the listing");
+
+    EffectLooks().ClearFiles();
+}
+
 int main()
 {
     std::printf("== effect_json_test ==\n");
@@ -1205,6 +1255,7 @@ int main()
     TestWorkspaceLayers();
     TestSceneDocLayers();
     TestPersonalLookFile();
+    TestPresetListLifetime();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

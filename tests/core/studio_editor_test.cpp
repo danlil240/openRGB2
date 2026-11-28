@@ -505,6 +505,49 @@ static void TestRename()
 }
 
 /*---------------------------------------------------------*\
+|| Rename re-keys effect-layer targets naming the instance ||
+|| subtree (audit C-7) inside the same undo record.        ||
+\*---------------------------------------------------------*/
+static void TestRenameTargets()
+{
+    using namespace studio;
+
+    StudioDocument w = Fixture();
+    EffectLayer l;
+    l.primitive = "static";
+    l.targets = { "fan0", "fan0/body", "fan0m", "fan_body", "fan1" };
+    EffectLayer other;
+    other.targets = { "fan1" };
+    w.effect.layers = { l, other };
+    EditorController ctl(w);
+
+    std::optional<EditorEdit> e = ctl.Rename("fan0", "fan0r");
+    CHECK(e.has_value() && e->has_effect,
+          "rename targets: effect delta recorded");
+    CHECK(w.effect.layers[0].targets
+              == std::vector<std::string>({ "fan0r", "fan0r/body",
+                                            "fan0m", "fan_body",
+                                            "fan1" }),
+          "rename targets: subtree targets re-keyed, others kept");
+    CHECK(w.effect.layers[1].targets
+              == std::vector<std::string>({ "fan1" }),
+          "rename targets: unrelated layer untouched");
+    RevertEditorEdit(w, *e);
+    CHECK(w.effect.layers[0].targets[0] == "fan0"
+          && w.effect.layers[0].targets[1] == "fan0/body"
+          && w.devices.count("fan0") == 1,
+          "rename targets: undo restores targets with the devices");
+    ApplyEditorEdit(w, *e);
+    CHECK(w.effect.layers[0].targets[0] == "fan0r",
+          "rename targets: redo re-applies");
+
+    /* No target names the instance: no effect delta. */
+    std::optional<EditorEdit> e2 = ctl.Rename("desk", "desk2");
+    CHECK(e2.has_value() && !e2->has_effect,
+          "rename targets: no delta when no target matches");
+}
+
+/*---------------------------------------------------------*\
 || Delete cascades descendants, strips dangling mirrors,  ||
 || and reverts to the byte-identical document.            ||
 \*---------------------------------------------------------*/
@@ -1376,18 +1419,38 @@ static void TestZoneLayoutToPoints()
     z.layout.start_angle_deg = 90.0f;
     z.layout.face_y_m        = 0.01f;
     z.layout.reverse         = true;
+    /* Audit C-14: a ring/strip address is ALWAYS the instance's
+       addr_base + LED index, so the baked zone must keep that
+       relationship - explicit baked addresses (0..n-1) would win
+       over a per-instance addr_base and drive the wrong LEDs. */
+    const std::vector<Emitter> ring_at8 = GenerateZoneEmitters(z, "g", 8);
     CHECK(ZoneLayoutToPoints(z), "zp: ring converts");
     CHECK(z.layout.type == "points" && z.layout.points.size() == 4
-          && z.layout.addresses.size() == 4 && z.led_count == 4,
-          "zp: points + addresses baked, count synced");
+          && z.led_count == 4,
+          "zp: points baked, count synced");
+    CHECK(z.layout.addresses.empty(),
+          "zp: ring bakes no explicit addresses (addr_base + index)");
+    {
+        const std::vector<Emitter> b = GenerateZoneEmitters(z, "g", 8);
+        bool same = b.size() == ring_at8.size();
+        for(size_t i = 0; same && i < b.size(); i++)
+        {
+            same = b[i].address == ring_at8[i].address
+                && NearVec(b[i].local_pos, ring_at8[i].local_pos);
+        }
+        CHECK(same, "zp: baked ring honours a per-instance addr_base");
+    }
     /* address 0 sits at the start angle; reversed order walks
        counter-clockwise (ang = start - i*90). */
     CHECK(NearVec(z.layout.points[0], { 0.0f, 0.01f, -0.05f }),
           "zp: address 0 at start angle");
     CHECK(NearVec(z.layout.points[1], { 0.05f, 0.01f, 0.0f }),
           "zp: reverse step direction preserved");
-    CHECK(z.layout.addresses[0] == 0 && z.layout.addresses[3] == 3,
-          "zp: addresses pin the physical order");
+    {
+        const std::vector<Emitter> b = GenerateZoneEmitters(z, "", 0);
+        CHECK(b.size() == 4 && b[0].address == 0 && b[3].address == 3,
+              "zp: point order pins the physical order");
+    }
 
     /* strip — spacing 10 mm from origin (100,0,0) mm */
     DeviceZone s;
@@ -1395,7 +1458,15 @@ static void TestZoneLayoutToPoints()
     s.layout.type       = "strip";
     s.layout.spacing_m  = 0.01f;
     s.layout.origin     = { 0.1f, 0.0f, 0.0f };
+    const std::vector<Emitter> strip_at5 = GenerateZoneEmitters(s, "g", 5);
     CHECK(ZoneLayoutToPoints(s), "zp: strip converts");
+    {
+        const std::vector<Emitter> b = GenerateZoneEmitters(s, "g", 5);
+        CHECK(s.layout.addresses.empty() && b.size() == 3
+              && b[0].address == strip_at5[0].address
+              && b[2].address == strip_at5[2].address,
+              "zp: baked strip honours a per-instance addr_base");
+    }
     CHECK(NearVec(s.layout.points[1], { 0.11f, 0.0f, 0.0f }),
           "zp: strip pitch lands");
     CHECK(s.led_count == 3, "zp: strip count synced");
@@ -1412,7 +1483,18 @@ static void TestZoneLayoutToPoints()
     m.layout.pitch_z_m = 0.02f;
     m.layout.empty_cell = 0xFFFFFFFFu;
     m.layout.map       = { 0u, 0xFFFFFFFFu, 1u, 2u };
+    /* A static matrix's addresses are its map's cell values and
+       ignore addr_base, so they ARE baked explicitly - the baked
+       zone ignores addr_base exactly as the matrix did. */
+    const std::vector<Emitter> mx_at5 = GenerateZoneEmitters(m, "g", 5);
     CHECK(ZoneLayoutToPoints(m), "zp: static matrix converts");
+    {
+        const std::vector<Emitter> b = GenerateZoneEmitters(m, "g", 5);
+        CHECK(b.size() == 3 && mx_at5.size() == 3
+              && b[0].address == mx_at5[0].address
+              && b[2].address == mx_at5[2].address,
+              "zp: baked matrix keeps its cell addresses");
+    }
     CHECK(m.layout.points.size() == 3 && m.led_count == 3,
           "zp: only live cells baked");
     CHECK(m.layout.addresses[0] == 0 && m.layout.addresses[1] == 1
@@ -1773,11 +1855,21 @@ static void TestFlowEdit()
     CHECK(w.effect.layers[1].palette.stops.size() == 1,
           "flow: swell keeps its own palette");
 
+    /* Any count the card can show (a palette's stops) is accepted
+       back — 1 and 6+ included (audit U-12); only the schema cap
+       refuses. */
     EditorController::FlowEdit bad;
-    bad.colors = { ColorF{ 1, 0, 0, 1 } };
-    CHECK(!ctl.SetFlow(bad).has_value(), "flow: one color refused");
     bad.colors.assign(6, ColorF{ 1, 0, 0, 1 });
-    CHECK(!ctl.SetFlow(bad).has_value(), "flow: six colors refused");
+    CHECK(ctl.SetFlow(bad).has_value()
+          && w.effect.layers[0].palette.stops.size() == 6,
+          "flow: six colors accepted");
+    bad.colors = { ColorF{ 0, 1, 0, 1 } };
+    CHECK(ctl.SetFlow(bad).has_value()
+          && w.effect.layers[0].palette.stops.size() == 1,
+          "flow: one color accepted");
+    bad.colors.assign(EFFECT_MAX_STOPS + 1, ColorF{ 1, 0, 0, 1 });
+    CHECK(!ctl.SetFlow(bad).has_value() && !ctl.LastError().empty(),
+          "flow: colors over the stop cap refused");
     EditorController::FlowEdit zero;
     zero.direction = Vec3{ 0, 0, 0 };
     CHECK(!ctl.SetFlow(zero).has_value(), "flow: zero direction refused");
@@ -1785,12 +1877,203 @@ static void TestFlowEdit()
     neg.speed = -1.0f;
     CHECK(!ctl.SetFlow(neg).has_value(), "flow: negative speed refused");
 
+    /* Audit C-12: the proportional rescale is computed in float —
+       a valid finite request can still overflow a sibling layer
+       to inf (or underflow its scale to 0). Refused, untouched. */
+    {
+        StudioDocument w3 = Fixture();
+        w3.effect.layers = stack();
+        w3.effect.layers[0].speed = 1e-30f;   /* speed0 (first wave) */
+        w3.effect.layers[1].speed = 1e10f;
+        w3.effect.layers[0].scale = 1e30f;    /* scale0 */
+        w3.effect.layers[1].scale = 1e-30f;
+        EditorController ctl3(w3);
+        EditorController::FlowEdit big;
+        big.speed = 1e10f;                    /* x1e40 on layer 1 */
+        CHECK(!ctl3.SetFlow(big).has_value()
+              && std::isfinite(w3.effect.layers[1].speed)
+              && w3.effect.layers[0].speed == 1e-30f,
+              "flow: speed rescale overflow refused");
+        EditorController::FlowEdit tiny;
+        tiny.wavelength = 1e-10f;             /* x1e-40 on layer 1 */
+        CHECK(!ctl3.SetFlow(tiny).has_value()
+              && w3.effect.layers[1].scale > 0.0f
+              && w3.effect.layers[0].scale == 1e30f,
+              "flow: wavelength rescale underflow refused");
+    }
+
     StudioDocument w2 = Fixture();
     EffectLayer st;  st.primitive = "static";
     w2.effect.layers = { st };
     EditorController ctl2(w2);
     CHECK(!ctl2.SetFlow(d).has_value() && !ctl2.LastError().empty(),
           "flow: refused on a look without wave layers");
+}
+
+/*---------------------------------------------------------*\
+||| SetFlow only drives untargeted world-space waves (audit  |
+||| C-4): a world direction written onto a local-space wave  |
+||| (Reactor's RAM wave) or a targeted one turns it into a   |
+||| uniform flash.                                           |
+\*---------------------------------------------------------*/
+static void TestFlowEditSpace()
+{
+    using namespace studio;
+    EffectLayer flow;
+    flow.primitive = "wave";
+    flow.speed = 0.1f;  flow.scale = 1.0f;
+    flow.palette = MakePalette({ MakeSceneColor(255, 0, 0),
+                                 MakeSceneColor(0, 0, 255) });
+    EffectLayer local = flow;
+    local.space = CoordSpace::Local;
+    local.speed = 0.08f;  local.scale = 0.1f;
+    EffectLayer targeted = flow;
+    targeted.targets = { "keyboard_body" };
+    targeted.speed = 0.3f;  targeted.scale = 0.25f;
+
+    CHECK(EditorController::IsFlowLayer(flow),
+          "flow space: untargeted world wave is a flow layer");
+    CHECK(!EditorController::IsFlowLayer(local),
+          "flow space: local-space wave is not a flow layer");
+    CHECK(!EditorController::IsFlowLayer(targeted),
+          "flow space: targeted wave is not a flow layer");
+
+    StudioDocument w = Fixture();
+    w.effect.layers = { local, targeted, flow };
+    EditorController ctl(w);
+
+    EditorController::FlowEdit d;
+    d.direction = Vec3{ 0.0f, 0.0f, -1.0f };
+    d.speed = 0.2f;
+    d.wavelength = 2.0f;
+    d.colors = { ColorF{ 0, 1, 0, 1 }, ColorF{ 1, 1, 0, 1 } };
+    CHECK(ctl.SetFlow(d).has_value(), "flow space: edit lands");
+    CHECK(NearVec(w.effect.layers[2].direction, { 0, 0, -1 })
+          && Near(w.effect.layers[2].speed, 0.2f)
+          && Near(w.effect.layers[2].scale, 2.0f)
+          && Near(w.effect.layers[2].palette.stops[0].color.g, 1.0f),
+          "flow space: the world wave takes the whole edit");
+    CHECK(NearVec(w.effect.layers[0].direction, { 1, 0, 0 })
+          && Near(w.effect.layers[0].speed, 0.08f)
+          && Near(w.effect.layers[0].scale, 0.1f)
+          && Near(w.effect.layers[0].palette.stops[0].color.r, 1.0f),
+          "flow space: local-space wave untouched");
+    CHECK(NearVec(w.effect.layers[1].direction, { 1, 0, 0 })
+          && Near(w.effect.layers[1].speed, 0.3f)
+          && Near(w.effect.layers[1].scale, 0.25f)
+          && Near(w.effect.layers[1].palette.stops[0].color.r, 1.0f),
+          "flow space: targeted wave untouched");
+
+    /* Reactor: only a local-space RAM wave and a keyboard-targeted
+       wave — nothing for the card to drive. */
+    StudioDocument w2 = Fixture();
+    w2.effect.layers = { local, targeted };
+    EditorController ctl2(w2);
+    EditorController::FlowEdit dir;
+    dir.direction = Vec3{ 0.0f, 0.0f, -1.0f };
+    CHECK(!ctl2.SetFlow(dir).has_value() && !ctl2.LastError().empty(),
+          "flow space: refused when only local/targeted waves exist");
+    CHECK(NearVec(w2.effect.layers[0].direction, { 1, 0, 0 }),
+          "flow space: refusal leaves the local wave alone");
+}
+
+/*---------------------------------------------------------*\
+||| SetFlow colour/stop/speed handling (audit C-5).          |
+\*---------------------------------------------------------*/
+static void TestFlowEditStops()
+{
+    using namespace studio;
+    EffectLayer flow;
+    flow.primitive = "wave";
+    flow.speed = 0.2f;  flow.scale = 0.5f;
+    /* Aurora's uneven stops. */
+    flow.palette.stops = {
+        PaletteStop{ 0.0f,  ColorF{ 0.0f, 0.8f, 0.7f, 1.0f } },
+        PaletteStop{ 0.35f, ColorF{ 0.4f, 0.25f, 0.9f, 1.0f } },
+        PaletteStop{ 0.65f, ColorF{ 0.0f, 0.1f, 0.2f, 0.5f } },
+        PaletteStop{ 0.85f, ColorF{ 0.0f, 0.35f, 0.4f, 1.0f } } };
+    EffectLayer swell = flow;
+    swell.speed = 0.4f;  swell.scale = 1.0f;
+    swell.palette = MakePalette({ MakeSceneColor(255, 255, 255) });
+
+    /* Recolouring one swatch keeps every stop position (and the
+       stops' alpha); only a count change re-spaces evenly. */
+    {
+        StudioDocument w = Fixture();
+        w.effect.layers = { flow, swell };
+        EditorController ctl(w);
+        EditorController::FlowEdit c;
+        for(const PaletteStop& s : flow.palette.stops)
+        {
+            c.colors.push_back(s.color);
+        }
+        c.colors[1] = ColorF{ 1, 0, 0, 1 };
+        CHECK(ctl.SetFlow(c).has_value(), "flow stops: recolor lands");
+        const auto& st = w.effect.layers[0].palette.stops;
+        CHECK(st.size() == 4 && Near(st[0].pos, 0.0f)
+              && Near(st[1].pos, 0.35f) && Near(st[2].pos, 0.65f)
+              && Near(st[3].pos, 0.85f),
+              "flow stops: same count keeps the stop positions");
+        CHECK(Near(st[1].color.r, 1.0f) && Near(st[1].color.g, 0.0f),
+              "flow stops: the edited swatch changed");
+        CHECK(Near(st[2].color.a, 0.5f),
+              "flow stops: same count keeps stop alpha");
+
+        c.colors.push_back(ColorF{ 0, 1, 0, 1 });
+        CHECK(ctl.SetFlow(c).has_value(), "flow stops: add lands");
+        CHECK(st.size() == 5 && Near(st[1].pos, 0.2f)
+              && Near(st[4].pos, 0.8f),
+              "flow stops: a count change re-spaces evenly");
+    }
+
+    /* A disabled flow layer still is the palette target and still
+       follows the direction — toggling a layer must not move the
+       card onto another layer. */
+    {
+        StudioDocument w = Fixture();
+        EffectLayer off = flow;
+        off.enabled = false;
+        w.effect.layers = { off, swell };
+        EditorController ctl(w);
+        EditorController::FlowEdit d;
+        d.direction = Vec3{ 0, 0, -1 };
+        d.colors = { ColorF{ 1, 0, 0, 1 }, ColorF{ 0, 0, 1, 1 } };
+        CHECK(ctl.SetFlow(d).has_value(), "flow disabled: edit lands");
+        CHECK(NearVec(w.effect.layers[0].direction, { 0, 0, -1 })
+              && NearVec(w.effect.layers[1].direction, { 0, 0, -1 }),
+              "flow disabled: disabled wave follows the direction");
+        CHECK(w.effect.layers[0].palette.stops.size() == 2
+              && w.effect.layers[1].palette.stops.size() == 1,
+              "flow disabled: palette stays on the first flow layer");
+    }
+
+    /* A stationary first layer has no ratio: it takes the new
+       speed and the others keep theirs (never flattened). A
+       negative first speed rescales by its magnitude, keeping
+       every layer's sign. */
+    {
+        StudioDocument w = Fixture();
+        EffectLayer still = flow;
+        still.speed = 0.0f;
+        w.effect.layers = { still, swell };
+        EditorController ctl(w);
+        EditorController::FlowEdit s;
+        s.speed = 0.3f;
+        CHECK(ctl.SetFlow(s).has_value(), "flow speed0=0: edit lands");
+        CHECK(Near(w.effect.layers[0].speed, 0.3f)
+              && Near(w.effect.layers[1].speed, 0.4f),
+              "flow speed0=0: other waves keep their speed");
+
+        StudioDocument w2 = Fixture();
+        EffectLayer back = flow;
+        back.speed = -0.2f;
+        w2.effect.layers = { back, swell };
+        EditorController ctl2(w2);
+        CHECK(ctl2.SetFlow(s).has_value(), "flow speed0<0: edit lands");
+        CHECK(Near(w2.effect.layers[0].speed, -0.3f)
+              && Near(w2.effect.layers[1].speed, 0.6f),
+              "flow speed0<0: rescale by magnitude, signs kept");
+    }
 }
 
 static void TestEffectLayers()
@@ -1898,6 +2181,12 @@ static void TestEffectLayers()
         CHECK(!ctl.SetLayerField(0, EditorController::LayerField::Phase,
                                  1e300).has_value(),
               "fx: float-overflow phase refused");
+        /* Audit C-12: a positive double that underflows float
+           narrows to scale 0 (EvalWave divides by it). */
+        CHECK(!ctl.SetLayerField(0, EditorController::LayerField::Scale,
+                                 1e-50).has_value()
+              && w.effect.layers[0].scale > 0.0f,
+              "fx: float-underflow scale refused");
         CHECK(ctl.SetLayerField(0, EditorController::LayerField::Density,
                                 -2.0).has_value()
               && w.effect.layers[0].density == 0.0f,
@@ -2277,6 +2566,7 @@ int main()
     TestSnap();
     TestRotate();
     TestRename();
+    TestRenameTargets();
     TestDeleteUndo();
     TestDuplicateMirrored();
     TestGroup();
@@ -2296,6 +2586,8 @@ int main()
     TestPresetSchemaRoundTrip();
     TestEffectLayers();
     TestFlowEdit();
+    TestFlowEditSpace();
+    TestFlowEditStops();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

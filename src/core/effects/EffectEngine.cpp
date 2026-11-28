@@ -8,8 +8,42 @@
 
 #include "../scene/SceneGraph.h"
 
+#include <algorithm>
+
 namespace studio
 {
+
+void EffectEngine::SetLayers(const std::vector<EffectLayer>& new_layers)
+{
+    layers = new_layers;
+    drives.assign(layers.size(), LayerDrive{});
+    Prepare();
+}
+
+/* Audit C-9: layer-only invariants once per stack, not per LED. */
+void EffectEngine::Prepare()
+{
+    prepared.clear();
+    prepared.reserve(layers.size());
+    for(const EffectLayer& L : layers)
+    {
+        prepared.push_back(PrepareLayer(L));
+    }
+}
+
+void EffectEngine::ReplaceLayers(const std::vector<EffectLayer>& new_layers,
+                                 double t)
+{
+    std::vector<LayerDrive> next(new_layers.size());
+    const size_t n = std::min(layers.size(), new_layers.size());
+    for(size_t i = 0; i < n; i++)
+    {
+        next[i] = ContinueDrive(layers[i], drives[i], new_layers[i], t);
+    }
+    layers = new_layers;
+    drives = std::move(next);
+    Prepare();
+}
 
 void EffectEngine::Evaluate(const SceneDocument& doc, double t,
                             FrameColors& frame, const InputState* input) const
@@ -30,11 +64,32 @@ void EffectEngine::Evaluate(const SceneDocument& doc,
                             double t, FrameColors& frame,
                             const InputState* input) const
 {
-    frame.clear();
     if(layers.empty())
     {
+        frame.clear();
         return;
     }
+
+    /* Audit C-9: the layer's time terms (wrapped phase, comet head,
+       noise drift) depend only on the layer and t — once per layer
+       per frame, not once per emitter. Audit C-10: the scratch is
+       per thread (Evaluate stays const and reentrant) and keeps its
+       capacity, so a steady-state tick does not allocate it. */
+    thread_local std::vector<LayerFrame> terms;
+    terms.resize(layers.size());
+    for(size_t k = 0; k < layers.size(); k++)
+    {
+        terms[k] = LayerFrameTerms(layers[k], prepared[k], drives[k], t);
+    }
+
+    /* Audit C-10: `frame` is REUSED, not cleared. A caller that
+       hands back the previous tick's map keeps its nodes and color
+       vectors (same object ids, same emitter counts in steady
+       state), so a tick allocates nothing. Entries of objects that
+       are no longer evaluated-and-touched are removed: in the loop
+       for evaluated objects, by the sweep below for the rest. */
+    size_t live = 0;
+    std::vector<SceneColor> fresh;
 
     for(const SceneObject& obj : doc.objects)
     {
@@ -46,16 +101,21 @@ void EffectEngine::Evaluate(const SceneDocument& doc,
             continue;
         }
 
-        std::vector<SceneColor> colors(obj.emitters.size());
+        const auto entry  = frame.find(obj.id);
+        const bool reuse  = entry != frame.end();
+        std::vector<SceneColor>& colors = reuse ? entry->second : fresh;
+        colors.resize(obj.emitters.size());
         bool touched = false;
 
         /* Per-object lookups hoisted out of the emitter loop —
            the same resolution EmitterColor(doc, obj.id, i) does
-           (owner -> per-emitter override -> object color -> 0),
-           with the owner scan and map finds done once. */
+           (per-emitter override -> object color -> 0). Only
+           Device objects get here, and a Device is its own output
+           owner (OutputOwner only redirects Linked copies), so
+           the owner is obj.id — no linear OutputOwner scan of the
+           document per object per tick (audit C-10). */
         const Mat4&        model    = world.at(obj.id);
-        const SceneObject* owner    = OutputOwner(doc, obj.id);
-        const std::string& owner_id = owner ? owner->id : obj.id;
+        const std::string& owner_id = obj.id;
         const auto         ov       = doc.emitter_colors.find(owner_id);
         const bool         has_ov   = ov != doc.emitter_colors.end();
         const auto         base     = doc.object_colors.find(owner_id);
@@ -84,8 +144,9 @@ void EffectEngine::Evaluate(const SceneDocument& doc,
                 }
             }
             ColorF acc = ToColorF(painted);
-            for(const EffectLayer& layer : layers)
+            for(size_t k = 0; k < layers.size(); k++)
             {
+                const EffectLayer& layer = layers[k];
                 if(!layer.enabled || !LayerMatches(layer, obj, e))
                 {
                     continue;
@@ -93,7 +154,8 @@ void EffectEngine::Evaluate(const SceneDocument& doc,
                 touched  = true;
                 /* r.a already carries layer.opacity — every
                    primitive applies it (BlendOver's contract). */
-                const ColorF r = EvalPrimitive(layer, in);
+                const ColorF r = EvalPrepared(layer, prepared[k],
+                                              terms[k], in);
                 acc = BlendOver(acc, r, layer.blend);
             }
             colors[i] = ToSceneColor(acc);
@@ -101,7 +163,36 @@ void EffectEngine::Evaluate(const SceneDocument& doc,
 
         if(touched)
         {
-            frame[obj.id] = std::move(colors);
+            ++live;
+            if(!reuse)
+            {
+                frame.emplace(obj.id, std::move(fresh));
+                fresh = std::vector<SceneColor>();
+            }
+        }
+        else if(reuse)
+        {
+            frame.erase(entry);
+        }
+    }
+
+    /* Leftover entries belong to objects that left the document or
+       are no longer evaluated Devices (a Linked copy now, or no
+       emitters). Only a document change gets here. */
+    if(frame.size() != live)
+    {
+        for(auto it = frame.begin(); it != frame.end();)
+        {
+            const SceneObject* o = FindObject(doc, it->first);
+            if(o == nullptr || o->kind != ObjectKind::Device
+               || o->emitters.empty())
+            {
+                it = frame.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
         }
     }
 }

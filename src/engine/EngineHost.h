@@ -68,6 +68,7 @@
 #include "Transport.h"
 
 #include "WinPowerMonitor.h"
+#include "WinTimerResolution.h"
 
 #include <atomic>
 #include <chrono>
@@ -127,6 +128,13 @@ struct EngineHostOptions
        frames and resyncs the lanes. */
     std::chrono::milliseconds sdk_topology_poll{ 2000 };
 
+    /* Audit E-5: static-scene keyframe interval for every
+       delivery lane (DeliveryPipeline::SetKeyframeInterval).
+       Unchanged frames are otherwise never resent, so a device
+       reset by G Hub, Dynamic Lighting or its firmware stays
+       wrong until the scene changes. 0 = off. */
+    std::chrono::milliseconds delivery_keyframe{ 3000 };
+
     /* IPC surface (docs/ipc-protocol.md). Pipe names are
        overridable so a test never touches the well-known
        names a real engine may own. */
@@ -180,6 +188,22 @@ struct EngineHostOptions
     bool        reactive_inputs = true;
     std::function<std::unique_ptr<IReactiveSource>(
         const std::string& id)> reactive_factory;
+
+    /* Audit E-10: the shutdown watchdog. When set, Stop() arms
+       OrderlyShutdown's watchdog: if teardown is still running
+       TotalBound() + shutdown_watchdog_grace after it began,
+       this is called (from the watchdog thread) with the step
+       still running. The engine executable logs and exits the
+       process there; empty (the default, tests) = measure
+       only, as before. */
+    std::function<void(const std::string& running_step)>
+                              shutdown_watchdog;
+    std::chrono::milliseconds shutdown_watchdog_grace{ 2000 };
+    /* Audit E-2: the 1 ms timer-resolution request held from
+       Start() to Stop(). Empty = timeBeginPeriod/timeEndPeriod;
+       tests inject counters so they never change the real
+       timer. */
+    platform::ScopedTimerResolution::Api timer_api;
 
     /* Log sink (default: stderr with the engine prefix). */
     std::function<void(const std::string&)> log;
@@ -235,6 +259,23 @@ public:
     bool StopRequested() const;
     bool Started() const;
 
+    /* Owner-loop schedule (audit E-2). The fast tick (frame_status
+       + draft previews) runs on a fixed grid anchored at Run()'s
+       start: Run() sleeps until NextOwnerWake — the first grid
+       slot strictly after `now` (missed slots are dropped, never
+       replayed), or the next maintenance pass if that is sooner.
+       17 ms: every second slot (34 ms) clears the 33 ms publish
+       cap with 1 ms left for wake jitter, so the feeds publish
+       at ~29 Hz; the old relative 20 ms sleep took ~31 ms on the
+       default 15.6 ms timer (~16 Hz). */
+    static constexpr Clock::duration kOwnerTick =
+        std::chrono::milliseconds(17);
+    static TimePoint NextOwnerWake(TimePoint anchor, TimePoint now,
+                                   TimePoint next_maint);
+    /* True while the 1 ms timer resolution is held. */
+    bool TimerResolutionActive() const
+    { return timer_resolution_.Active(); }
+
     /*---- Introspection (diagnostics/tests) ------------------*/
     Engine&                  GetEngine()     { return engine_; }
     PlaybackController*      GetPlayback()   { return playback_.get(); }
@@ -257,6 +298,11 @@ public:
        the scan never ran. */
     nlohmann::json           OwnershipJson() const;
     uint64_t                 FramesProduced() const;
+    /* The managed-backend pid a QUIT stop_backend armed for the
+       teardown handoff (0 = none). E-11: it must be stored
+       before StopRequested() turns true. */
+    uint32_t                 PendingBackendPid() const
+    { return pending_backend_pid_.load(); }
 
     void Log(const std::string& line) const;
 
@@ -271,6 +317,10 @@ private:
        startup scan logs every finding; a re-scan logs only
        what changed. Takes ownership_mutex_. */
     void ScanCompetitors(bool initial);
+    /* QUIT stop_backend intake: resolves the verified-own
+       backend and stores pending_backend_pid_; returns the
+       reply fields. Runs BEFORE stop_ is set (E-11). */
+    nlohmann::json ArmBackendHandoff(bool stop_backend);
     /* QUIT stop_backend teardown: re-verifies the pending
        pid's image against opts_.backend_exe, signals its
        shutdown event (WM_CLOSE fallback for windowed
@@ -295,8 +345,9 @@ private:
        the new topology lands in `snaps` this same poll. */
     void ReconcileZoneSizes(std::vector<DeviceSnapshot>& snaps);
 
-    /* Event-interest gate for host-side event producers (stub:
-       true until IpcServer::HasSubscriber is merged). */
+    /* Event-interest gate for host-side event producers: true
+       only while an IPC client subscribes to `kind`
+       (IpcServer::HasSubscriber). */
     bool EventInterest(const char* kind) const;
 
     EngineHostOptions        opts_;
@@ -321,6 +372,8 @@ private:
     std::unique_ptr<PowerLifecycle>          lifecycle_;
     std::unique_ptr<ReactiveInputs>          reactive_;
     platform::WinPowerMonitor                power_monitor_;
+    /* Held from Start() to the end of Stop() (E-2). */
+    platform::ScopedTimerResolution          timer_resolution_;
     /* studio-import Task 11: the engine-owned physical LED
        calibration session (calibration_* workspace verbs).
        Declared AFTER the deps it calls (pipeline_, sdk_,
@@ -342,6 +395,26 @@ private:
 
     std::atomic<uint64_t>                    frames_{ 0 };
     std::atomic<bool>                        capture_paused_{ false };
+
+    /* E-6: playback's wired-target list (bound, connected,
+       non-wireless controllers), cached per SDK topology
+       generation + connection state + bound-controller set.
+       Tick asks for it ~30x/s while uploaded playback runs;
+       rebuilding meant deep-copying every snapshot each time.
+       Cached entries carry identity/topology fields only (key,
+       generation, zones, connection) — no colors, LED names or
+       modes, which no wired-target consumer reads. */
+    std::vector<DeviceSnapshot> WiredTargets();
+    struct WiredTargetCache
+    {
+        bool                        valid      = false;
+        uint64_t                    generation = 0;
+        ConnectionState             state = ConnectionState::Disconnected;
+        std::vector<DeviceKey>      bound;
+        std::vector<DeviceSnapshot> targets;
+    };
+    std::mutex                               wired_cache_mutex_;
+    WiredTargetCache                         wired_cache_;
     /* The managed-backend pid a QUIT stop_backend request
        resolved at ask time (0 = none pending). Stop() re-
        verifies before signaling — the pid is a handle to

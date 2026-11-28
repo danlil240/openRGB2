@@ -29,6 +29,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <limits>
 #include <string>
 
 namespace openrgb2 { namespace ipc {
@@ -257,7 +258,8 @@ std::shared_ptr<const std::string>
 WorkspaceCommands::CachedDocumentBytes(const std::string& id,
                                        uint64_t workspace_revision,
                                        uint64_t resource_revision,
-                                       std::string& err) const
+                                       std::string& err,
+                                       std::string* sha256) const
 {
     std::lock_guard<std::mutex> g(cache_mutex_);
     const auto it = doc_cache_.find(id);
@@ -265,21 +267,40 @@ WorkspaceCommands::CachedDocumentBytes(const std::string& id,
        it->second.workspace_revision == workspace_revision &&
        it->second.resource_revision == resource_revision)
     {
+        if(sha256)
+        {
+            *sha256 = it->second.sha256;
+        }
         return it->second.bytes;
-    }
-    std::string bytes;
-    /* One bounded load per (id,revisions) — repeat download
-       begins and content_sha256 reads hit the cache. */
-    if(!service_->DocumentBytes(id, bytes, err))
-    {
-        return nullptr;
     }
     DocCacheEntry e;
     e.workspace_revision = workspace_revision;
     e.resource_revision  = resource_revision;
     e.seq    = doc_cache_seq_++;
-    e.bytes  = std::make_shared<const std::string>(
-                   std::move(bytes));
+    /* The current workspace's bytes were serialized by the
+       committing thread into the published snapshot (audit
+       I-6) — shared, not re-serialized or copied. Others: one
+       bounded load per (id,revisions) — repeat download
+       begins and content_sha256 reads hit the cache. */
+    const WorkspaceService::PublishedState snap = service_->Snapshot();
+    if(snap.managed && snap.id == id && snap.document_bytes &&
+       snap.workspace_revision == workspace_revision &&
+       snap.resource_revision == resource_revision)
+    {
+        e.bytes = snap.document_bytes;
+    }
+    else
+    {
+        std::string bytes;
+        if(!service_->DocumentBytes(id, bytes, err))
+        {
+            return nullptr;
+        }
+        e.bytes = std::make_shared<const std::string>(
+                      std::move(bytes));
+    }
+    /* Hashed once per cached revision, never per poll. */
+    e.sha256 = Sha256Hex(*e.bytes);
     doc_cache_[id] = std::move(e);
     while(doc_cache_.size() > kMaxDocCacheEntries)
     {
@@ -292,6 +313,10 @@ WorkspaceCommands::CachedDocumentBytes(const std::string& id,
             }
         }
         doc_cache_.erase(oldest);
+    }
+    if(sha256)
+    {
+        *sha256 = doc_cache_[id].sha256;
     }
     return doc_cache_[id].bytes;
 }
@@ -334,11 +359,11 @@ nlohmann::json WorkspaceCommands::SnapshotJson() const
        Cached per revision: at most one bounded store read per
        commit, amortized across every get/download. */
     std::string err;
-    if(const std::shared_ptr<const std::string> bytes =
-           CachedDocumentBytes(snap.id, snap.workspace_revision,
-                               snap.resource_revision, err))
+    std::string sha;
+    if(CachedDocumentBytes(snap.id, snap.workspace_revision,
+                           snap.resource_revision, err, &sha))
     {
-        out["content_sha256"] = Sha256Hex(*bytes);
+        out["content_sha256"] = sha;
     }
     return out;
 }
@@ -591,13 +616,42 @@ IpcReply WorkspaceCommands::HandleCatalog(const nlohmann::json& body)
     }));
 }
 
-IpcReply WorkspaceCommands::HandleResourceGet(const nlohmann::json& body)
+IpcReply WorkspaceCommands::HandleResourceGet(uint64_t session_id,
+                                              const nlohmann::json& body)
 {
     /* studio-import Task 9 — one library resource's full
        document for the type/look editors. The catalog row's
        metadata page stays lean; the document rides this
-       single-item read (a device type is far under the reply
-       cap). */
+       single-item read. A device type is normally far under
+       the reply cap, but nothing bounds a type/look below the
+       4 MiB file cap: a document past the inline budget is
+       staged as a session-bound download instead of an
+       over-cap reply (audit I-12) — the client reads it with
+       transfer_chunk/transfer_finish like any download. */
+    constexpr size_t kInlineDocumentBytes = 768u * 1024u;
+    auto reply_with = [&](nlohmann::json out, nlohmann::json doc,
+                          const char* transfer_kind) -> IpcReply
+    {
+        std::string text = doc.dump();
+        if(text.size() <= kInlineDocumentBytes)
+        {
+            out["document"] = std::move(doc);
+            return IpcReply::Success(MsgType::Ok, std::move(out));
+        }
+        const WorkspaceTransfer::BeginResult r =
+            transfers_.StageDownload(session_id, transfer_kind, text);
+        if(!r.ok)
+        {
+            return FailDetail(ErrCode::BadRequest, r.error, r.detail);
+        }
+        out["document_omitted"] = true;
+        out["transfer_id"]      = r.transfer_id;
+        out["length"]           = r.length;
+        out["sha256"]           = r.sha256;
+        out["max_chunk_bytes"]  =
+            transfers_.TransferOptions().max_chunk_decoded_bytes;
+        return IpcReply::Success(MsgType::Ok, std::move(out));
+    };
     const std::string kind = body.value("kind", std::string());
     const std::string rid  = body.value("id",   std::string());
     if(rid.empty() || !studio::IsPresetId(rid))
@@ -616,13 +670,12 @@ IpcReply WorkspaceCommands::HandleResourceGet(const nlohmann::json& body)
             return FailDetail(ErrCode::Unavailable,
                 "no device type '" + rid + "'", "unavailable");
         }
-        return IpcReply::Success(MsgType::Ok, nlohmann::json::object({
+        return reply_with(nlohmann::json::object({
             { "kind",             kind                      },
             { "id",               rid                       },
             { "from_file",        reg->HasFile(rid)         },
             { "packaged_default", reg->HasDefault(rid)      },
-            { "document",         studio::ToJson(*p)        },
-        }));
+        }), studio::ToJson(*p), "type");
     }
     if(kind == "effect")
     {
@@ -634,13 +687,12 @@ IpcReply WorkspaceCommands::HandleResourceGet(const nlohmann::json& body)
             return FailDetail(ErrCode::Unavailable,
                 "no effect look '" + rid + "'", "unavailable");
         }
-        return IpcReply::Success(MsgType::Ok, nlohmann::json::object({
+        return reply_with(nlohmann::json::object({
             { "kind",             kind                          },
             { "id",               rid                           },
             { "from_file",        reg->HasFile(rid)             },
             { "packaged_default", reg->HasDefault(rid)          },
-            { "document",         studio::EffectDocumentToJson(*d) },
-        }));
+        }), studio::EffectDocumentToJson(*d), "look");
     }
     return FailDetail(ErrCode::BadRequest,
         "resource_get kind must be device_type|effect",
@@ -657,7 +709,11 @@ IpcReply WorkspaceCommands::HandleJobVerb(uint64_t session_id,
 {
     /* A `staged` token only ever belongs to the session that
        produced it — a foreign or expired token fails before
-       the job exists. */
+       the job exists. An accepted job PINS its token until it
+       reaches a terminal state (OnJobFinished): a job queued
+       behind slow work must not find its token idled out
+       (audit I-5). */
+    std::string pinned;
     const auto sit = body.find("staged");
     if(sit != body.end())
     {
@@ -667,17 +723,46 @@ IpcReply WorkspaceCommands::HandleJobVerb(uint64_t session_id,
                               "staged must be a token string",
                               "bad_request");
         }
-        if(!transfers_.StagedFor(session_id,
-                                 sit->get<std::string>()))
+        const std::string pin =
+            transfers_.PinStaged(session_id, sit->get<std::string>());
+        if(pin == "transfer_expired")
+        {
+            return FailDetail(ErrCode::BadRequest,
+                "staged token expired — upload it again",
+                "transfer_expired");
+        }
+        if(!pin.empty())
         {
             return FailDetail(ErrCode::BadRequest,
                 "staged token is not consumable by this session",
                 "bad_request");
         }
+        pinned = sit->get<std::string>();
     }
 
-    const WorkspaceService::JobResult r =
-        service_->Enqueue(session_id, verb, body);
+    WorkspaceService::JobResult r;
+    if(pinned.empty())
+    {
+        r = service_->Enqueue(session_id, verb, body);
+    }
+    else
+    {
+        /* Enqueue + record under pins_mutex_: a job that runs
+           to completion before the record lands would find no
+           pin to release in OnJobFinished (the worker's event
+           hook takes this mutex, so it waits here instead).
+           Enqueue itself never calls back into this object. */
+        std::lock_guard<std::mutex> lock(pins_mutex_);
+        r = service_->Enqueue(session_id, verb, body);
+        if(r.accepted)
+        {
+            job_pins_[r.job_id] = JobPin{ session_id, pinned };
+        }
+    }
+    if(!pinned.empty() && !r.accepted)
+    {
+        transfers_.UnpinStaged(pinned);
+    }
     if(r.accepted)
     {
         return IpcReply::Success(MsgType::Ok, nlohmann::json::object({
@@ -780,13 +865,56 @@ IpcReply WorkspaceCommands::HandleTransferBegin(
         }));
     }
 
+    if(direction == "download" && kind == "scene")
+    {
+        /* Audit I-4: the APPLIED scene document — SCENE/STATE/
+           WELCOME announce it by revision + document_sha256
+           and never inline a large one. Staged as a document
+           download (same bounds); the reply echoes the
+           revision so a client can match it to the SCENE body
+           it is completing. */
+        const SceneSource src =
+            scene_source_ ? scene_source_() : SceneSource{};
+        if(!src.bytes)
+        {
+            return FailDetail(ErrCode::Unavailable,
+                              "no scene is loaded", "no_scene");
+        }
+        const WorkspaceTransfer::BeginResult r =
+            transfers_.StageDownload(session_id, "document",
+                                     *src.bytes);
+        if(!r.ok)
+        {
+            return FailDetail(ErrCode::BadRequest, r.error, r.detail);
+        }
+        return IpcReply::Success(MsgType::Ok, nlohmann::json::object({
+            { "transfer_id",     r.transfer_id                    },
+            { "length",          r.length                         },
+            { "sha256",          r.sha256                         },
+            { "revision",        src.revision                     },
+            { "max_chunk_bytes", transfers_.TransferOptions()
+                                     .max_chunk_decoded_bytes   },
+        }));
+    }
+
     if(direction == "download")
     {
         /* Bounded document read materialized for staged
            download — document/type/look content rides the
            transfer mechanism, not an inline body. Revisions
            are the cheap staleness key: repeat begins serve
-           the cached bytes; a commit invalidates honestly. */
+           the cached bytes; a commit invalidates honestly.
+           This path only ever serves a workspace DOCUMENT, so
+           the declared kind must say so — any other kind would
+           stage it under the wrong cap and label (audit I-12;
+           export bundles and oversized resources are staged by
+           their own verbs). */
+        if(kind != "document")
+        {
+            return FailDetail(ErrCode::BadRequest,
+                "download kind must be \"document\" (a workspace) "
+                "or \"scene\" (the applied scene)", "bad_request");
+        }
         const std::string id = body.value("id", std::string());
         if(id.empty() || !WorkspaceStore::IsWorkspaceId(id))
         {
@@ -794,8 +922,22 @@ IpcReply WorkspaceCommands::HandleTransferBegin(
                 "download requires {id} naming a managed "
                 "workspace", "bad_request");
         }
-        const WorkspaceStore::Revisions rev =
-            service_->Store().LoadRevisions(id);
+        /* The current workspace's revisions come from the
+           published snapshot — no marker read on the reader
+           thread (audit I-6); others read the durable marker. */
+        WorkspaceStore::Revisions rev;
+        const WorkspaceService::PublishedState snap =
+            service_->Snapshot();
+        if(snap.managed && snap.id == id)
+        {
+            rev.exists             = true;
+            rev.workspace_revision = snap.workspace_revision;
+            rev.resource_revision  = snap.resource_revision;
+        }
+        else
+        {
+            rev = service_->Store().LoadRevisions(id);
+        }
         if(!rev.exists || !rev.error.empty())
         {
             return FailDetail(ErrCode::BadRequest,
@@ -979,7 +1121,7 @@ IpcReply WorkspaceCommands::Handle(uint64_t session_id,
     if(verb == "get")     return HandleGet(session_id, body);
     if(verb == "list")    return HandleList(body);
     if(verb == "catalog") return HandleCatalog(body);
-    if(verb == "resource_get") return HandleResourceGet(body);
+    if(verb == "resource_get") return HandleResourceGet(session_id, body);
 
     if(verb == "validate"       || verb == "commit"      ||
        verb == "save_copy"      || verb == "import_inspect" ||
@@ -1034,6 +1176,17 @@ void WorkspaceCommands::OnSessionEnd(uint64_t session_id)
     }
     transfers_.CancelSession(session_id);
     {
+        /* the session's tokens are gone — so are their pins
+           (a running job's late terminal event then finds
+           nothing to release) */
+        std::lock_guard<std::mutex> lock(pins_mutex_);
+        for(auto it = job_pins_.begin(); it != job_pins_.end();)
+        {
+            it = it->second.session_id == session_id
+                ? job_pins_.erase(it) : std::next(it);
+        }
+    }
+    {
         std::lock_guard<std::mutex> lock(preview_mutex_);
         previews_.erase(session_id);
     }
@@ -1066,6 +1219,22 @@ void WorkspaceCommands::OnSessionEnd(uint64_t session_id)
 void WorkspaceCommands::SweepExpired()
 {
     transfers_.SweepExpired();
+}
+
+void WorkspaceCommands::OnJobFinished(uint64_t job_id)
+{
+    std::string token;
+    {
+        std::lock_guard<std::mutex> lock(pins_mutex_);
+        const auto it = job_pins_.find(job_id);
+        if(it == job_pins_.end())
+        {
+            return;
+        }
+        token = std::move(it->second.token);
+        job_pins_.erase(it);
+    }
+    transfers_.UnpinStaged(token);
 }
 
 bool WorkspaceCommands::ReadStaged(const std::string& token,
@@ -1168,9 +1337,16 @@ IpcReply WorkspaceCommands::PreviewCandidate(
                               "bad_request");
         }
         /* Session-bound consumption, same rule the job verbs
-           enforce. */
-        if(!transfers_.StagedFor(session_id,
-                                 sit->get<std::string>()))
+           enforce (a lapsed token says so — audit I-5). */
+        const std::string chk = transfers_.CheckStaged(
+            session_id, sit->get<std::string>());
+        if(chk == "transfer_expired")
+        {
+            return FailDetail(ErrCode::BadRequest,
+                "staged token expired — upload it again",
+                "transfer_expired");
+        }
+        if(!chk.empty())
         {
             return FailDetail(ErrCode::BadRequest,
                 "staged token is not consumable by this session",
@@ -1568,30 +1744,49 @@ void WorkspaceCommands::PollPreviews(TimePoint now)
            reassemble strictly by sequence and never present a
            partial set as complete. */
         const size_t budget = preview_deps_.chunk_bytes;
-        nlohmann::json objects = nlohmann::json::array();
+        /* Each object is serialized ONCE: the dump that sizes
+           it against the chunk budget is the text the chunk
+           carries (audit I-7) — the server frames the
+           assembled data_json verbatim instead of dumping the
+           chunk again. */
+        struct Chunk
+        {
+            nlohmann::json objects = nlohmann::json::array();
+            std::string    text;          /* "o1,o2,..." */
+        };
+        std::vector<Chunk> chunks(1);
         size_t bytes = 2;
         int    chunk = 0;
         /* Two passes: count chunks first so every chunk knows
            `chunks` — a single-object overflow still emits (the
            1 MiB envelope bound applies at encode, honestly). */
-        std::vector<nlohmann::json> chunks;
         for(const PreviewObjectColors& o : frame.objects)
         {
             nlohmann::json jo = PreviewObjectJson(o);
-            const size_t n = jo.dump().size() + 1;
-            if(bytes + n > budget && !objects.empty())
+            std::string    js = jo.dump();
+            const size_t n = js.size() + 1;
+            if(bytes + n > budget && !chunks.back().objects.empty())
             {
-                chunks.push_back(std::move(objects));
-                objects = nlohmann::json::array();
+                chunks.emplace_back();
                 bytes = 2;
             }
-            objects.push_back(std::move(jo));
+            Chunk& ck = chunks.back();
+            if(!ck.text.empty())
+            {
+                ck.text += ',';
+            }
+            ck.text += js;
+            ck.objects.push_back(std::move(jo));
             bytes += n;
         }
-        chunks.push_back(std::move(objects));
         const int total = (int)chunks.size();
-        for(nlohmann::json& objs : chunks)
+        for(Chunk& ck : chunks)
         {
+            /* The envelope fields serialize with an EMPTY
+               objects array; the chunk's pre-dumped objects
+               are spliced into that one "[]" slot — the same
+               bytes data.dump() yields once objects is moved
+               in below. */
             nlohmann::json data = nlohmann::json::object({
                 { "type",           "frame"              },
                 { "sequence",       frame.sequence       },
@@ -1599,16 +1794,34 @@ void WorkspaceCommands::PollPreviews(TimePoint now)
                 { "scene_time_s",   frame.scene_time_s   },
                 { "chunk",          chunk                },
                 { "chunks",         total                },
-                { "objects",        std::move(objs)      },
+                { "objects",        nlohmann::json::array() },
                 { "reduced",        frame.reduced        },
                 { "emitter_total",  frame.emitter_total  },
                 { "emitter_sent",   frame.emitter_sent   },
                 { "object_total",   frame.object_total   },
             });
-            preview_deps_.emit(sid,
-                IpcEvent{ event_kind::kPreview, std::move(data) },
-                "frame/" + std::to_string(frame.sequence)
-                       + "/" + std::to_string(chunk));
+            std::string text = data.dump();
+            static const char kSlot[] = "\"objects\":[]";
+            const size_t at = text.find(kSlot);
+            IpcEvent ev;
+            ev.kind = event_kind::kPreview;
+            if(at != std::string::npos)
+            {
+                text.insert(at + sizeof(kSlot) - 2, ck.text);
+                ev.data_json =
+                    std::make_shared<const std::string>(std::move(text));
+            }
+            data["objects"] = std::move(ck.objects);
+            ev.data = std::move(data);
+            /* Key on the chunk SLOT, not the sequence: a newer
+               frame's chunk k replaces a still-queued older
+               chunk k (latest-wins across sequences), so a slow
+               client's queue holds at most one frame's worth of
+               chunks. Each chunk carries its own sequence; the
+               client assembles strictly by sequence, so a mix of
+               old and new chunks never paints (audit I-8). */
+            preview_deps_.emit(sid, ev,
+                "frame/" + std::to_string(chunk));
             ++chunk;
         }
     }
@@ -1627,6 +1840,11 @@ void WorkspaceCommands::PollPreviews(TimePoint now)
 ||   src/engine/CalibrationSession.*; this layer only      ||
 ||   validates, binds, and reports the honest status.      ||
 \*---------------------------------------------------------*/
+
+void WorkspaceCommands::SetSceneSource(std::function<SceneSource()> fn)
+{
+    scene_source_ = std::move(fn);
+}
 
 void WorkspaceCommands::SetCalibrationDeps(CalibrationDeps deps)
 {
@@ -1872,12 +2090,28 @@ IpcReply WorkspaceCommands::HandleCalibrationShow(
                           "led must be an integer",
                           "bad_request");
     }
+    /* Range-check at full width BEFORE narrowing: get<int>()
+       of 2^32+2 is 2 — a valid LED the client never asked
+       for (audit I-13). Anything outside int is out of range
+       for every zone; in-range values keep the engine
+       session's own [-1, led_count) check. */
+    const nlohmann::json& led_j = body["led"];
+    const bool led_fits = led_j.is_number_unsigned()
+        ? led_j.get<uint64_t>() <=
+              (uint64_t)std::numeric_limits<int>::max()
+        : led_j.get<int64_t>() >= std::numeric_limits<int>::min() &&
+          led_j.get<int64_t>() <= std::numeric_limits<int>::max();
+    if(!led_fits)
+    {
+        return FailDetail(ErrCode::Unavailable,
+                          "led is out of range", "out_of_range");
+    }
     std::string err;
     /* The ENGINE session validates owner + token — this
        layer never weakens that check. */
     if(!session->Show(session_id,
                       body["token"].get<std::string>(),
-                      body["led"].get<int>(), err))
+                      (int)led_j.get<int64_t>(), err))
     {
         const char* detail = "show_failed";
         if(err.find("still starting") != std::string::npos)

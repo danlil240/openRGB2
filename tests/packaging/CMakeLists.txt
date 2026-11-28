@@ -13,6 +13,17 @@ if(WIN32)
         LABELS packaging
         TIMEOUT 30)
 
+    # Audit P-14: the staged manifest's backend pin comes from
+    # vendor/provenance/MANIFEST.md, not a string literal.
+    add_test(NAME package_stage_pin_test
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/stage_release_pin_tests.ps1
+            -StageScript ${CMAKE_SOURCE_DIR}/packaging/windows/stage-release.ps1
+            -RepoRoot ${CMAKE_SOURCE_DIR})
+    set_tests_properties(package_stage_pin_test PROPERTIES
+        LABELS packaging
+        TIMEOUT 30)
+
     add_test(NAME package_launcher_test
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
             -File ${CMAKE_CURRENT_SOURCE_DIR}/launcher_tests.ps1
@@ -38,6 +49,20 @@ if(WIN32)
         LABELS packaging
         TIMEOUT 30)
 
+    # Audit P-2: the REAL stage-release.ps1 against fake inputs and a
+    # fake windeployqt -- re-staging keeps a run-in-place package's
+    # state\ and profiles\local\, and never wipes a non-package dir.
+    add_executable(fake_windeployqt fake_windeployqt.cpp)
+    target_compile_features(fake_windeployqt PRIVATE cxx_std_17)
+    add_test(NAME package_stage_release_state_test
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/stage_release_state_tests.ps1
+            -StageScript ${CMAKE_SOURCE_DIR}/packaging/windows/stage-release.ps1
+            -FakeWindeployqt $<TARGET_FILE:fake_windeployqt>)
+    set_tests_properties(package_stage_release_state_test PROPERTIES
+        LABELS packaging
+        TIMEOUT 300)
+
     add_test(NAME package_lifecycle_test
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
             -File ${CMAKE_CURRENT_SOURCE_DIR}/package_lifecycle_tests.ps1
@@ -45,4 +70,14 @@ if(WIN32)
     set_tests_properties(package_lifecycle_test PROPERTIES
         LABELS packaging
         TIMEOUT 300)
+
+    # Audit P-14: stage-release.ps1 -VerifyOnly hashes the staged
+    # tree against its manifest.json (changed / missing / unlisted).
+    add_test(NAME package_stage_verify_test
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/stage_release_verify_tests.ps1
+            -StageScript ${CMAKE_SOURCE_DIR}/packaging/windows/stage-release.ps1)
+    set_tests_properties(package_stage_verify_test PROPERTIES
+        LABELS packaging
+        TIMEOUT 120)
 endif()

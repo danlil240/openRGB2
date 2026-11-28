@@ -29,7 +29,14 @@ Popup {
 
     width: 520; height: 560
     modal: true
+    /* Audit Q-9: a modal popup must own keyboard focus — without
+       it typing went to the item behind the modal and Escape
+       (CloseOnEscape acts only while the popup has focus) never
+       closed it. The first editable field
+       takes focus on open (the id is fixed while editing). */
+    focus: true
     closePolicy: Popup.CloseOnEscape
+    onOpened: (editing ? nameField : idField).forceActiveFocus()
     padding: 0
     background: Rectangle {
         color: Theme.surface

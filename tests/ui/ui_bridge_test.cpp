@@ -625,6 +625,104 @@ int main(int argc, char** argv)
         bridge.stop();
     }
 
+    /*---- U-10: per-frame GUI work is latest-wins -------------*/
+    std::printf("-- frame_status latest-wins + polled stores "
+                "emit on change\n");
+    {
+        ui::EngineBridge bridge;
+        auto             pipe = std::make_shared<TestPipe>();
+        bridge.setChannelFactoryForTesting(
+            [&](std::string& err) -> std::unique_ptr<IIpcChannel>
+            {
+                (void)err;
+                return pipe->ClientChannel();
+            });
+        ui::EngineWireClient::Options wopts;
+        wopts.keepalive_ms = 0;
+        bridge.setWireOptionsForTesting(wopts);
+        bridge.start();
+        ServerPeer srv = pipe->Peer();
+        CHECK(DriveServerHandshake(srv));
+        CHECK(PumpUntil([&] {
+            return bridge.connectionState() == "connected";
+        }));
+        CHECK(AnswerAutoPulls(srv));
+        PumpUntil([] { return false; }, 100);
+
+        /* A burst of frame_status while the GUI thread is busy
+           (here: not pumping) must cost ONE conversion + repaint,
+           of the newest frame — not one per frame. */
+        int fs_signals = 0;
+        QObject::connect(&bridge, &ui::EngineBridge::frameStatusChanged,
+                         [&] { ++fs_signals; });
+        const int burst = 20;
+        for(int i = 0; i < burst; ++i)
+        {
+            srv.SendMsg(MsgType::Event, 0,
+                nlohmann::json::object({
+                    { "kind", "frame_status" },
+                    { "data", nlohmann::json::object({
+                        { "seq", i },
+                        { "controllers", nlohmann::json::array() },
+                        { "aggregate", nlohmann::json::object({
+                            { "mean_interval_s", 0.033 } }) } }) } }));
+        }
+        srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "scene" },
+                { "data", nlohmann::json::object({
+                    { "name", "after-burst" } }) } }));
+        QThread::msleep(300);    /* the wire thread drains all */
+        CHECK(PumpUntil([&] {
+            return bridge.scene().value("name").toString()
+                   == "after-burst";
+        }));
+        PumpUntil([] { return false; }, 100);
+        CHECK(fs_signals >= 1);
+        CHECK(fs_signals < burst);
+        CHECK(bridge.frameStatus().value("seq").toInt() == burst - 1);
+
+        /* Polled stores: an identical reply is not a change. */
+        int ds_signals = 0, snap_signals = 0;
+        QObject::connect(&bridge, &ui::EngineBridge::deliveryStatsChanged,
+                         [&] { ++ds_signals; });
+        QObject::connect(&bridge, &ui::EngineBridge::snapshotsChanged,
+                         [&] { ++snap_signals; });
+        const nlohmann::json stats = nlohmann::json::object({
+            { "aggregate", nlohmann::json::object({
+                { "frames", 42 } }) } });
+        const nlohmann::json snaps = nlohmann::json::object({
+            { "snapshots", nlohmann::json::array({
+                nlohmann::json::object({ { "name", "SL" },
+                                         { "led_count", 120 } }) }) } });
+        for(int round = 0; round < 3; ++round)
+        {
+            CHECK(bridge.getDeliveryStats() > 0);
+            CHECK(bridge.getSnapshots() > 0);
+            Message m;
+            for(int k = 0; k < 2; ++k)
+            {
+                CHECK(srv.RecvMsg(m, 4000));
+                if(m.type == MsgType::GetDeliveryStats)
+                {
+                    srv.SendMsg(MsgType::DeliveryStats, m.request_id,
+                                stats);
+                }
+                else
+                {
+                    srv.SendMsg(MsgType::Snapshots, m.request_id,
+                                snaps);
+                }
+            }
+        }
+        PumpUntil([] { return false; }, 300);
+        CHECK(ds_signals == 1);
+        CHECK(snap_signals == 1);
+        CHECK(bridge.deliveryStats().value("aggregate").toMap()
+                  .value("frames").toInt() == 42);
+        bridge.stop();
+    }
+
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

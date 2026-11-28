@@ -99,6 +99,18 @@ void SceneWorker::NoteStepFailure(const std::string& msg)
     }
 }
 
+void SceneWorker::SetEvaluateGate(EvaluateGate gate)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    evaluate_gate_ = std::move(gate);
+}
+
+uint64_t SceneWorker::Evaluations() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return evaluations_;
+}
+
 TimePoint SceneWorker::Epoch() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -146,16 +158,22 @@ bool SceneWorker::Step(TimePoint now)
        keeps latest-wins semantics identical. */
     InputProvider provider;
     OutputGate    gate;
+    EvaluateGate  eval_gate;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        provider = input_provider_;
-        gate     = output_gate_;
+        provider  = input_provider_;
+        gate      = output_gate_;
+        eval_gate = evaluate_gate_;
     }
-    /* The gate is read outside the lock for the same reason as
-       the provider (it takes the pipeline's own mutex). */
+    /* The gates are read outside the lock for the same reason as
+       the provider (they take the pipeline's / playback's own
+       mutexes). */
     const bool gated = gate && gate();
+    /* E-6: output owned by another producer — tick the clock and
+       run the callback, but evaluate nothing. */
+    const bool skip_eval = !gated && eval_gate && eval_gate();
     std::shared_ptr<const studio::InputState> pulled_input;
-    if(provider && !gated)
+    if(provider && !gated && !skip_eval)
     {
         pulled_input = provider();
     }
@@ -170,7 +188,12 @@ bool SceneWorker::Step(TimePoint now)
             active_scene_      = std::move(pending_scene_);
             pending_scene_     = SceneState{};
             has_pending_scene_ = false;
-            engine_.SetLayers(active_scene_.scene.layers);
+            /* Audit C-2: replace at this tick's scene time so a
+               layer whose speed/wavelength changed keeps its
+               pattern where it is (t below is the same value). */
+            engine_.ReplaceLayers(
+                active_scene_.scene.layers,
+                std::chrono::duration<double>(now - epoch_).count());
             world_dirty_ = true;
         }
         if(has_pending_input_)
@@ -182,7 +205,7 @@ bool SceneWorker::Step(TimePoint now)
         /* Pull input: the provider (ReactiveInputs) owns the
            per-tick state when wired — pause/disable takes
            effect on the very next tick. */
-        if(provider && !gated)
+        if(provider && !gated && !skip_eval)
         {
             active_input_ = std::move(pulled_input);
         }
@@ -210,6 +233,15 @@ bool SceneWorker::Step(TimePoint now)
             std::chrono::duration<double>(now - epoch_).count();
         frame.sample_time  = now;
         frame.scene_revision = active_scene_.revision;
+        if(evaluate && skip_eval)
+        {
+            evaluate             = false;
+            frame.evaluate_gated = true;
+        }
+        if(evaluate)
+        {
+            ++evaluations_;
+        }
         cb = callback_;
     }
 
@@ -249,6 +281,10 @@ bool SceneWorker::Step(TimePoint now)
                     *active_scene_.scene.doc);
                 world_dirty_  = false;
             }
+            /* Audit C-10: evaluate into last tick's buffers. The
+               callback only reads the frame (synchronously), so
+               the colors come back to the scratch afterwards. */
+            frame.colors.swap(frame_scratch_);
             engine_.Evaluate(*active_scene_.scene.doc, active_world_,
                              frame.scene_time_s,
                              frame.colors, input);
@@ -256,6 +292,10 @@ bool SceneWorker::Step(TimePoint now)
         if(cb)
         {
             cb(frame);
+        }
+        if(evaluate)
+        {
+            frame_scratch_.swap(frame.colors);
         }
     }
     catch(const std::exception& e)

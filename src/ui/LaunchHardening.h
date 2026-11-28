@@ -71,6 +71,22 @@ QString SystemPowerShellPath();
    PowerShell child. Arguments are the caller's. */
 void PrepareHiddenPowerShell(QProcess& process);
 
+/* Absolute explorer.exe from the Windows directory — never a
+   PATH / current-directory / app-directory lookup. */
+QString SystemExplorerPath();
+
+/* Audit U-6: a folder path that came from the engine (e.g.
+   workspace_dir) before the (possibly elevated) UI hands it to
+   the shell. Accepted only as an absolute drive-letter path
+   ("X:\..." or "X:/...") to an EXISTING directory — no URL
+   scheme, no UNC / device path (the syntactic checks run
+   before any filesystem call, so a \\host\share never even
+   triggers an SMB lookup), no wildcard / quote / stream
+   characters. On success `native` is the cleaned native path;
+   on refusal `why` says what failed. */
+bool ValidateShellFolder(const QString& reported, QString* native,
+                         QString* why);
+
 /* The start-openrgb2.ps1 ownership-gate contract: a refused
    run exits 3 and prints "OWNERSHIP CONFLICT"; each competitor
    is one line containing "ownership CONFLICT:". Returns true

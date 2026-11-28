@@ -21,8 +21,11 @@
 |||                                                           ||
 |||   Events funnel to one sink callback — production wires ||
 |||   PowerLifecycle::PostEvent. The sink is invoked on the ||
-|||   monitor thread and must be cheap (PostEvent only      ||
-|||   queues); blocking restore I/O never runs here.        ||
+|||   monitor thread and must be cheap (PostEvent queues;   ||
+|||   for PBT_APMSUSPEND it also drops the pipeline output  ||
+|||   gate before returning, so the gate is down before    ||
+|||   Windows sleeps — audit E-7); blocking restore I/O    ||
+|||   never runs here.                                      ||
 |||                                                           ||
 |||   Display-off semantics preserved from the reference:   ||
 |||   the display counts as off only when EVERY reported    ||

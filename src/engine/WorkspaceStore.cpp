@@ -207,13 +207,30 @@ nlohmann::json FileEntry(const std::string& rel, const std::string& bytes)
     });
 }
 
+/* A string member, or "" when `obj` is not an object, lacks
+   `key`, or holds another type. Record files are read from
+   disk and may be damaged: json::value() THROWS type_error on
+   a wrong-typed member (or a non-object), and a throw out of
+   Load reaches startup re-adoption (audit I-11). Every
+   record read here type-checks the way ReadMarker does. */
+std::string StringMember(const nlohmann::json& obj, const char* key)
+{
+    if(!obj.is_object())
+    {
+        return std::string();
+    }
+    const auto it = obj.find(key);
+    return it != obj.end() && it->is_string()
+        ? it->get<std::string>() : std::string();
+}
+
 /* Verify one manifest file entry exists on disk with matching
    size + hash. */
 bool VerifyEntry(const fs::path& dir, const nlohmann::json& entry,
                  const std::string& what, std::string& err)
 {
-    const std::string rel = entry.value("file", std::string());
-    const std::string sha = entry.value("sha",  std::string());
+    const std::string rel = StringMember(entry, "file");
+    const std::string sha = StringMember(entry, "sha");
     if(rel.empty() || sha.empty())
     {
         err = what + ": manifest entry missing file/sha";
@@ -448,6 +465,74 @@ void PruneGenerations(const fs::path& wsdir,
 }
 
 /*---------------------------------------------------------*\
+|||| Library-install rollback (audit I-13)                 ||
+\*---------------------------------------------------------*/
+
+/* Every regular file under the given dirs (recursive). Never
+   throws: a missing dir contributes nothing. */
+std::set<std::string> RegularFilesUnder(
+    const std::vector<fs::path>& dirs)
+{
+    std::set<std::string> out;
+    for(const fs::path& d : dirs)
+    {
+        std::error_code ec;
+        fs::recursive_directory_iterator it(d, ec), end;
+        for(; !ec && it != end; it.increment(ec))
+        {
+            std::error_code fec;
+            if(it->is_regular_file(fec))
+            {
+                out.insert(it->path().string());
+            }
+        }
+    }
+    return out;
+}
+
+/* Commit installs extracted types/looks/assets into the SHARED
+   managed library before its later fallible steps (re-
+   validation, resolve, staging writes, publish rename, marker).
+   The installers never overwrite — they only ADD files — so a
+   commit that fails afterwards removes exactly the files its
+   install added, and the library is as it was. Armed with the
+   pre-install listing; disarmed when the commit succeeds. */
+class LibraryInstallRollback
+{
+public:
+    LibraryInstallRollback(std::vector<fs::path> dirs,
+                           const bool& committed)
+        : dirs_(std::move(dirs))
+        , before_(RegularFilesUnder(dirs_))
+        , committed_(committed)
+    {
+    }
+    ~LibraryInstallRollback()
+    {
+        if(committed_)
+        {
+            return;
+        }
+        for(const std::string& f : RegularFilesUnder(dirs_))
+        {
+            if(before_.find(f) == before_.end())
+            {
+                std::error_code ec;
+                fs::remove(f, ec);
+            }
+        }
+    }
+    LibraryInstallRollback(const LibraryInstallRollback&) = delete;
+    LibraryInstallRollback& operator=(
+        const LibraryInstallRollback&) = delete;
+
+private:
+    std::vector<fs::path>  dirs_;
+    std::set<std::string>  before_;
+    const bool&            committed_;
+};
+
+/*---------------------------------------------------------*\
 |||| Manifest                                              ||
 \*---------------------------------------------------------*/
 
@@ -474,8 +559,10 @@ bool ReadManifest(const fs::path& gendir, Manifest& out,
         err = "manifest is not valid JSON";
         return false;
     }
-    if(j.value("kind", std::string()) != kManifestKind ||
-       j.value("schema_version", -1) != kRecordSchema)
+    const auto vit = j.find("schema_version");
+    if(StringMember(j, "kind") != kManifestKind ||
+       vit == j.end() || !vit->is_number_integer() ||
+       vit->get<long long>() != kRecordSchema)
     {
         err = "unrecognised manifest record";
         return false;
@@ -487,7 +574,12 @@ bool ReadManifest(const fs::path& gendir, Manifest& out,
         err = "manifest carries no valid generation id";
         return false;
     }
-    out.source_form = j.value("source_form", std::string());
+    if(j.contains("source_form") && !j["source_form"].is_string())
+    {
+        err = "manifest source_form is not a string";
+        return false;
+    }
+    out.source_form = StringMember(j, "source_form");
     out.resources   = j.count("resources") && j["resources"].is_object()
         ? j["resources"] : nlohmann::json::object();
     return true;
@@ -966,12 +1058,83 @@ std::string WorkspaceStore::DefaultRoot()
     return "profiles/local/workspaces";
 }
 
+namespace
+{
+
+std::string AsciiLower(std::string s)
+{
+    for(char& c : s)
+    {
+        if(c >= 'A' && c <= 'Z')
+        {
+            c = (char)(c - 'A' + 'a');
+        }
+    }
+    return s;
+}
+
+/* An existing entry under `root` whose name equals `id` only
+   case-insensitively ("" when none, or when the exact name
+   exists). NTFS resolves both spellings to ONE directory, so
+   such an id would read and write another workspace. */
+std::string CaseAliasOf(const fs::path& root, const std::string& id)
+{
+    const std::string want = AsciiLower(id);
+    std::string alias;
+    std::error_code iec;
+    fs::directory_iterator it(root, iec), end;
+    for(; !iec && it != end; it.increment(iec))
+    {
+        const std::string n = it->path().filename().string();
+        if(n == id)
+        {
+            return std::string();
+        }
+        if(alias.empty() && AsciiLower(n) == want)
+        {
+            alias = n;
+        }
+    }
+    return alias;
+}
+
+std::string CaseAliasError(const std::string& id,
+                           const std::string& alias)
+{
+    return "workspace id '" + id + "' differs only in letter "
+           "case from existing '" + alias + "' — ids are "
+           "case-insensitive on disk";
+}
+
+} /* anonymous namespace */
+
 bool WorkspaceStore::IsWorkspaceId(const std::string& id)
 {
     /* Portable single-segment charset — the same rule the
-       resource ids follow; "library" is the shared managed
-       library dir, never a workspace. */
-    return studio::IsPresetId(id) && id != "library";
+       resource ids follow — minus every name that cannot be a
+       workspace directory (audit I-13), compared
+       case-insensitively because the filesystem is:
+         - the store's own root-level dirs (the shared managed
+           library, its assets, the transfer staging root);
+         - the Windows reserved device names, which never name
+           a directory (CON, PRN, AUX, NUL, COM1-9, LPT1-9). */
+    if(!studio::IsPresetId(id))
+    {
+        return false;
+    }
+    const std::string l = AsciiLower(id);
+    if(l == "library" || l == "assets" || l == "transfers" ||
+       l == "con" || l == "prn" || l == "aux" || l == "nul")
+    {
+        return false;
+    }
+    if(l.size() == 4 &&
+       (l.compare(0, 3, "com") == 0 || l.compare(0, 3, "lpt") == 0) &&
+       l[3] >= '1' && l[3] <= '9')
+    {
+        return false;
+    }
+    return true;
 }
 
 std::string WorkspaceStore::WorkspaceDir(const std::string& id) const
@@ -1060,6 +1223,12 @@ WorkspaceStore::Revisions WorkspaceStore::LoadRevisions(
         r.error = "invalid workspace id '" + id + "'";
         return r;
     }
+    if(const std::string alias = CaseAliasOf(root_, id);
+       !alias.empty())
+    {
+        r.error = CaseAliasError(id, alias);
+        return r;    /* exists:false — not THIS id's workspace */
+    }
     const fs::path wsdir = WorkspaceDir(id);
     std::error_code ec;
     if(!fs::is_directory(wsdir, ec))
@@ -1104,6 +1273,12 @@ bool WorkspaceStore::ReadActiveDocumentBytes(
     if(!IsWorkspaceId(id))
     {
         err = "invalid workspace id '" + id + "'";
+        return false;
+    }
+    if(const std::string alias = CaseAliasOf(root_, id);
+       !alias.empty())
+    {
+        err = CaseAliasError(id, alias);
         return false;
     }
     const fs::path wsdir = WorkspaceDir(id);
@@ -1242,6 +1417,13 @@ WorkspaceStore::LoadResult WorkspaceStore::Load(
     {
         res.status = LoadStatus::Failed;
         res.error  = "invalid workspace id '" + id + "'";
+        return res;
+    }
+    if(const std::string alias = CaseAliasOf(root_, id);
+       !alias.empty())
+    {
+        res.status = LoadStatus::Failed;
+        res.error  = CaseAliasError(id, alias);
         return res;
     }
     const fs::path wsdir = WorkspaceDir(id);
@@ -1389,6 +1571,13 @@ WorkspaceStore::LoadResult WorkspaceStore::LoadBackup(
     {
         res.status = LoadStatus::Failed;
         res.error  = "invalid workspace id '" + id + "'";
+        return res;
+    }
+    if(const std::string alias = CaseAliasOf(root_, id);
+       !alias.empty())
+    {
+        res.status = LoadStatus::Failed;
+        res.error  = CaseAliasError(id, alias);
         return res;
     }
     const fs::path wsdir = WorkspaceDir(id);
@@ -1617,6 +1806,110 @@ WorkspaceStore::ExternalFingerprint WorkspaceStore::ExternalScan(
     return fp;
 }
 
+WorkspaceStore::ExternalStampResult WorkspaceStore::ExternalStamp(
+    const std::string& id) const
+{
+    ExternalStampResult out;
+    if(!IsWorkspaceId(id))
+    {
+        return out;            /* racy: the caller just scans */
+    }
+    const fs::path wsdir = WorkspaceDir(id);
+    /* Anything written within this window is "racy" — far
+       wider than any file-time granularity. */
+    const auto now     = fs::file_time_type::clock::now();
+    const auto horizon = now - std::chrono::seconds(3);
+    bool racy = false;
+    std::string st;
+    auto stamp_file = [&](const char* tag, const fs::path& p)
+    {
+        std::error_code ec;
+        const fs::file_status fs_st = fs::status(p, ec);
+        st += tag;
+        st += '=';
+        if(ec || !fs::exists(fs_st))
+        {
+            st += "absent;";
+            return;
+        }
+        const uintmax_t   sz = fs::is_regular_file(fs_st)
+                                   ? fs::file_size(p, ec) : 0;
+        const fs::file_time_type t = fs::last_write_time(p, ec);
+        if(ec || t > horizon)
+        {
+            racy = true;
+        }
+        st += std::to_string((uint64_t)sz);
+        st += '@';
+        st += std::to_string(
+            (long long)t.time_since_epoch().count());
+        st += ';';
+    };
+
+    std::error_code ec;
+    if(!fs::is_directory(wsdir, ec))
+    {
+        out.stamp = "unwatched";
+        out.racy  = false;
+        return out;
+    }
+    stamp_file("m", wsdir / "active");
+    stamp_file("b", wsdir / "active.lkg");
+    /* The pointed generation comes from the marker itself —
+       a tiny read; a corrupt/absent marker leaves the
+       generation part out (the marker's own stamp moved). */
+    const Marker primary = ReadMarker(wsdir / "active");
+    if(primary.exists && primary.valid)
+    {
+        const fs::path gendir =
+            wsdir / "generations" / primary.generation;
+        st += "g=" + primary.generation + ";";
+        stamp_file("doc",  gendir / "document.json");
+        stamp_file("man",  gendir / "manifest.json");
+        stamp_file("orig", gendir / "original.json");
+        const fs::path rdir = gendir / "resources";
+        if(fs::is_directory(rdir, ec))
+        {
+            std::vector<std::string> entries;
+            for(fs::recursive_directory_iterator it(rdir, ec), end;
+                !ec && it != end; it.increment(ec))
+            {
+                /* Regular files only — the set ExternalScan
+                   stamps (a directory's own write time moves
+                   with its entries, which are listed here). */
+                std::error_code fec;
+                if(!it->is_regular_file(fec))
+                {
+                    continue;
+                }
+                const fs::file_time_type t =
+                    fs::last_write_time(it->path(), fec);
+                if(fec || t > horizon)
+                {
+                    racy = true;
+                }
+                entries.push_back(
+                    fs::relative(it->path(), rdir, fec)
+                        .generic_string() + ":" +
+                    std::to_string(it->file_size(fec)) + "@" +
+                    std::to_string((long long)
+                        t.time_since_epoch().count()));
+            }
+            std::sort(entries.begin(), entries.end());
+            st += "res=";
+            for(const std::string& e : entries)
+            {
+                st += e;
+                st += ',';
+            }
+            st += ';';
+        }
+    }
+    out.stamp = std::move(st);
+    out.racy  = racy;
+    return out;
+}
+
 WorkspaceStore::CommitResult WorkspaceStore::Commit(
     const std::string& id,
     const WorkspaceCandidate& candidate,
@@ -1678,6 +1971,12 @@ WorkspaceStore::CommitResult WorkspaceStore::Commit(
         return fail("workspace dir '" + wsdir.string() +
                     "' escapes the managed root — refused");
     }
+    /* "Desk" must never write into "desk" (audit I-13). */
+    if(const std::string alias = CaseAliasOf(root_, id);
+       !alias.empty())
+    {
+        return fail(CaseAliasError(id, alias));
+    }
 
     /*---- Revision gate: a stale writer is rejected before
     ||   anything is staged. A corrupt primary marker is not
@@ -1726,6 +2025,19 @@ WorkspaceStore::CommitResult WorkspaceStore::Commit(
         candidate.extracted_types;
     std::vector<studio::EffectDocument> ex_fx    =
         candidate.extracted_effects;
+    /* Any failure from here until res.ok removes what the
+       install added (audit I-13); res outlives the guard. A
+       candidate that extracts nothing installs nothing — no
+       listing then. */
+    const bool installs = !ex_types.empty() || !ex_fx.empty() ||
+                          !candidate.extracted_assets.empty();
+    LibraryInstallRollback install_rollback(
+        installs ? std::vector<fs::path>{
+                       fs::path(LibraryDevicesDir()),
+                       fs::path(LibraryEffectsDir()),
+                       fs::path(LibraryAssetsDir()) }
+                 : std::vector<fs::path>{},
+        res.ok);
     {
         std::string ierr;
         if(!InstallDeviceTypes(LibraryDevicesDir(), deps_.devices,
@@ -2062,6 +2374,12 @@ WorkspaceStore::ResourceInstallResult WorkspaceStore::InstallEffectResource(
         return fail("workspace dir '" + wsdir.string() +
                     "' escapes the managed root — refused");
     }
+    /* "Desk" must never write into "desk" (audit I-13). */
+    if(const std::string alias = CaseAliasOf(root_, id);
+       !alias.empty())
+    {
+        return fail(CaseAliasError(id, alias));
+    }
 
     /*---- Revision gate — same primary/backup discipline as
     ||   Commit: an unreadable marker is never guessed at.
@@ -2258,6 +2576,12 @@ bool LoadResourceGate(const WorkspaceStore& store,
     {
         err = "workspace dir '" + wsdir.string() +
               "' escapes the managed root — refused";
+        return false;
+    }
+    if(const std::string alias = CaseAliasOf(store.Root(), id);
+       !alias.empty())
+    {
+        err = CaseAliasError(id, alias);
         return false;
     }
     const Marker primary = ReadMarker(wsdir / "active");

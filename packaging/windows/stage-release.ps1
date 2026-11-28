@@ -173,7 +173,15 @@ if(-not $VcRedistDir) {
 #--------------------------------------------------------------------#
 # Small helpers                                                       #
 #--------------------------------------------------------------------#
-function Fail([string]$msg) { Write-Host "ERROR: $msg" -ForegroundColor Red; exit 1 }
+function Fail([string]$msg) {
+    Write-Host "ERROR: $msg" -ForegroundColor Red
+    if($script:UserStateHolding -and (Test-Path -LiteralPath $script:UserStateHolding)) {
+        Write-Host ("  the package's user state (state\, profiles\local\) is kept " +
+            "in $script:UserStateHolding -- the next successful staging run " +
+            "puts it back") -ForegroundColor Yellow
+    }
+    exit 1
+}
 function Info([string]$msg) { Write-Host "  $msg" }
 function Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 
@@ -202,6 +210,99 @@ function ConvertTo-ManifestPath([string]$p) {
         return ('<profile>' + $norm.Substring($prof.Length))
     }
     return $norm
+}
+
+# The vendored backend's pin as the provenance record states it
+# (vendor/provenance/MANIFEST.md, row "OpenRGB submodule (backend)":
+# fork commit + branch). It used to be a string literal here that
+# could silently drift from the record (audit P-14); a record without
+# that row is an error, never a default.
+function Get-BackendPin([string]$Root) {
+    $md = Join-Path $Root "vendor\provenance\MANIFEST.md"
+    if(-not (Test-Path -LiteralPath $md)) { throw "provenance record not found: $md" }
+    $row = [regex]::Match((Get-Content -Raw -LiteralPath $md),
+                          '(?m)^\|\s*OpenRGB submodule \(backend\)\s*\|.*$')
+    $sha = if($row.Success) { [regex]::Match($row.Value, '\b[0-9a-f]{40}\b') } else { $null }
+    $branch = if($row.Success) { [regex]::Match($row.Value, 'branch\s+`([^`]+)`') } else { $null }
+    if(-not $sha -or -not $sha.Success -or -not $branch.Success) {
+        throw "$md has no 'OpenRGB submodule (backend)' row with a 40-hex commit and a branch"
+    }
+    return "vendor/OpenRGB @ $($sha.Value) ($($branch.Groups[1].Value); see vendor/provenance/MANIFEST.md)"
+}
+
+#--------------------------------------------------------------------#
+# Re-staging over a package that was RUN IN PLACE (audit P-2)         #
+#--------------------------------------------------------------------#
+# Running a staged package (OpenRGB2.cmd straight from build\package)
+# writes user state INTO it: state\ (backend config, run file, logs)
+# and profiles\local\ (the engine profile, workspaces). Re-staging
+# used to Remove-Item the whole tree, deleting both. Now:
+#  * the wipe is refused unless the directory is recognisably a
+#    staged package -- manifest.json, or the marker of a staging run
+#    that did not finish -- or is empty: a mistyped -OutDir is never
+#    deleted;
+#  * the two user-state folders move to the sibling holding dir
+#    "<OutDir>.user-state" before the wipe and move back only after
+#    manifest.json is written, so they are never staged, hashed or
+#    verified as package content (the exclusion asserts below still
+#    hold). A failed run leaves them in the holding dir (Fail says
+#    where); the next run keeps them there and restores them.
+$UserStateDirs = @("state", "profiles\local")
+$StagingMarker = ".staging-incomplete"
+$script:UserStateHolding = $null
+
+# $null when $Dir may be wiped and re-staged, else why not.
+function Test-RestageableDir([string]$Dir) {
+    if(Test-Path -LiteralPath (Join-Path $Dir "manifest.json")) { return $null }
+    if(Test-Path -LiteralPath (Join-Path $Dir $StagingMarker)) { return $null }
+    if(-not (Get-ChildItem -LiteralPath $Dir -Force | Select-Object -First 1)) { return $null }
+    return "it has no manifest.json, so it is not a staged OpenRGB2 package"
+}
+
+# Moves the user-state folders of $Dir into $Holding. A folder already
+# held by an earlier failed run stays where it is; one present in BOTH
+# places is ambiguous and throws before anything moves.
+function Save-PackageUserState([string]$Dir, [string]$Holding) {
+    foreach($rel in $UserStateDirs) {
+        if((Test-Path -LiteralPath (Join-Path $Dir $rel)) -and
+           (Test-Path -LiteralPath (Join-Path $Holding $rel))) {
+            throw ("both $(Join-Path $Dir $rel) and $(Join-Path $Holding $rel) " +
+                   "exist -- keep one of them, then re-run")
+        }
+    }
+    $moved = @()
+    foreach($rel in $UserStateDirs) {
+        $src = Join-Path $Dir $rel
+        if(-not (Test-Path -LiteralPath $src)) { continue }
+        $dst = Join-Path $Holding $rel
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+        Move-Item -LiteralPath $src -Destination $dst
+        $moved += $rel
+    }
+    return ,$moved
+}
+
+# Moves held user-state folders back into $Dir, then drops the holding
+# dir once nothing is left in it.
+function Restore-PackageUserState([string]$Dir, [string]$Holding) {
+    $restored = @()
+    if(-not (Test-Path -LiteralPath $Holding)) { return ,$restored }
+    foreach($rel in $UserStateDirs) {
+        $src = Join-Path $Holding $rel
+        if(-not (Test-Path -LiteralPath $src)) { continue }
+        $dst = Join-Path $Dir $rel
+        if(Test-Path -LiteralPath $dst) {
+            throw "$dst exists in the freshly staged package -- $src was left in place"
+        }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+        Move-Item -LiteralPath $src -Destination $dst
+        $restored += $rel
+    }
+    if(-not (Get-ChildItem -LiteralPath $Holding -Recurse -File -Force |
+             Select-Object -First 1)) {
+        Remove-Item -LiteralPath $Holding -Recurse -Force
+    }
+    return ,$restored
 }
 
 #--------------------------------------------------------------------#
@@ -233,9 +334,18 @@ if(-not $VerifyOnly) {
                     "install-recovery.md","RELEASE.md")) {
         Require (Join-Path $PkgDir $s) "managed-lifecycle file $s" | Out-Null
     }
+    try { $backendPin = Get-BackendPin $RepoRoot }
+    catch { Fail "backend pin: $($_.Exception.Message)" }
 
     Step "Staging OpenRGB2 $version -> $OutDir"
+    $holding = "$OutDir.user-state"
+    if(Test-Path -LiteralPath $holding) { $script:UserStateHolding = $holding }
     if(Test-Path $OutDir) {
+        $notPackage = Test-RestageableDir $OutDir
+        if($notPackage) {
+            Fail ("refusing to delete ${OutDir}: $notPackage. Pass a new " +
+                  "or empty -OutDir, or remove that directory yourself.")
+        }
         # A running staged stack holds its payload DLLs locked -- refuse
         # the wipe with a pointer at the managed stop instead of dying
         # mid-delete on UnauthorizedAccess. Two signals, both scoped to
@@ -279,6 +389,15 @@ if(-not $VerifyOnly) {
                   ")$hint -- stop them first: scripts\stop-openrgb2.ps1 " +
                   "(elevated instances need an elevated shell)")
         }
+        # A package that was run in place holds user state: set it
+        # aside BEFORE the wipe (moves within the volume; refusal here
+        # deletes nothing).
+        try { $held = Save-PackageUserState $OutDir $holding }
+        catch { Fail "could not set the package's user state aside: $($_.Exception.Message) -- nothing was deleted" }
+        if($held.Count -gt 0) {
+            $script:UserStateHolding = $holding
+            Info "user state of the run-in-place package set aside ($($held -join ', ')) -> $holding"
+        }
         # Retry past transient locks (AV/indexer), then give up cleanly.
         $wiped = $false
         foreach($try_ in 1..3) {
@@ -290,6 +409,10 @@ if(-not $VerifyOnly) {
         }
     }
     New-Item -ItemType Directory -Force -Path $OutDir          | Out-Null
+    # Until manifest.json exists this marks the tree as a staging run
+    # in progress, so a failed run can still be re-staged.
+    Set-Content -Encoding ASCII -LiteralPath (Join-Path $OutDir $StagingMarker) `
+        "stage-release.ps1 run in progress (no manifest.json yet)"
     New-Item -ItemType Directory -Force -Path (Join-Path $OutDir "backend") | Out-Null
 
     #--------------------------------------------------------------#
@@ -505,7 +628,7 @@ if(-not $VerifyOnly) {
 
     $files = @()
     Get-ChildItem $OutDir -Recurse -File |
-        Where-Object { $_.Name -ne "manifest.json" } |
+        Where-Object { $_.Name -ne "manifest.json" -and $_.Name -ne $StagingMarker } |
         ForEach-Object {
             $rel = ($_.FullName.Substring($OutDir.Length).TrimStart('\','/') -replace '\\','/')
             $origin =
@@ -549,7 +672,7 @@ if(-not $VerifyOnly) {
             configuration= $Configuration
             qt_dir       = ConvertTo-ManifestPath $QtDir
             backend_dir  = ConvertTo-ManifestPath $BackendDeployDir
-            backend_pin  = "vendor/OpenRGB @ 53a477eab8d14b0bc49aeb40e3d569cbcb16a377 (lianli-wireless; see vendor/provenance/MANIFEST.md)"
+            backend_pin  = $backendPin
             vc_redist    = ConvertTo-ManifestPath $VcRedistDir
         }
         exclusions_verified = @(
@@ -700,6 +823,60 @@ if($forbidden.Count -gt 0) {
     Fail "package contains excluded components (effect plugins / WinRing0 / yuz.dll / debug DLLs / user state)"
 }
 
+# -VerifyOnly re-checks the tree against the manifest.json written when
+# it was staged (audit P-14: it used to check presence and exclusions
+# only, so a changed, missing or planted file still passed). Every
+# listed file must exist with its recorded SHA-256 and size, and every
+# file present must be listed -- except manifest.json itself and the
+# user state a run-in-place package writes (state\, profiles\local\;
+# executables and DLLs there are still reported).
+if($VerifyOnly) {
+    $vm = $null
+    try { $vm = Get-Content -Raw -LiteralPath (Join-Path $OutDir "manifest.json") | ConvertFrom-Json }
+    catch { $vm = $null }
+    if(-not $vm -or -not $vm.PSObject.Properties['files']) {
+        Fail "manifest.json is unreadable or lists no files"
+    }
+    $mismatch = @()
+    $listed   = @{}
+    $hashed   = 0
+    foreach($e in @($vm.files)) {
+        $rel = [string]$e.path
+        if(-not $rel -or [IO.Path]::IsPathRooted($rel) -or $rel.Contains(':') -or
+           $rel -match '(^|[\\/])\.{1,2}([\\/]|$)') {
+            $mismatch += "unsafe path: $rel"; continue
+        }
+        $rel = $rel -replace '\\','/'
+        $listed[$rel.ToLowerInvariant()] = $true
+        $full = Join-Path $OutDir ($rel -replace '/','\')
+        if(-not (Test-Path -LiteralPath $full -PathType Leaf)) {
+            $mismatch += "missing: $rel"; continue
+        }
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $full).Hash.ToLower()
+        $size = (Get-Item -LiteralPath $full).Length
+        $hashed++
+        if($hash -ne ([string]$e.sha256).ToLower() -or
+           ($e.PSObject.Properties['bytes'] -and [int64]$e.bytes -ne $size)) {
+            $mismatch += "changed: $rel"
+        }
+    }
+    foreach($f in @(Get-ChildItem -LiteralPath $OutDir -Recurse -File -Force)) {
+        $rel = ($f.FullName.Substring($OutDir.Length).TrimStart('\','/') -replace '\\','/')
+        if($rel -eq "manifest.json") { continue }
+        if(($rel -like "state/*" -or $rel -like "profiles/local/*") -and
+           $rel -notmatch '\.(dll|exe)$') { continue }
+        if(-not $listed.ContainsKey($rel.ToLowerInvariant())) {
+            $mismatch += "not in manifest: $rel"
+        }
+    }
+    if($mismatch.Count -gt 0) {
+        Write-Host "MANIFEST MISMATCH:" -ForegroundColor Red
+        $mismatch | Select-Object -First 25 | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+        Fail "$($mismatch.Count) file(s) do not match manifest.json"
+    }
+    Info "manifest check passed ($hashed files hashed)"
+}
+
 # Signature assert -- runs for both staging and -VerifyOnly: with -Sign
 # every staged executable must carry a Valid Authenticode signature.
 if($Sign) {
@@ -720,6 +897,14 @@ if(-not $VerifyOnly) {
         Fail "manifest.json was not written"
     }
     Info "manifest.json written ($($files.Count) files) after verification passed"
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath (Join-Path $OutDir $StagingMarker)
+    # Only now does the run-in-place user state go back (audit P-2):
+    # it was never part of what was verified and hashed above.
+    if(Test-Path -LiteralPath $holding) {
+        try { $back = Restore-PackageUserState $OutDir $holding }
+        catch { Fail "could not restore the package's user state: $($_.Exception.Message)" }
+        if($back.Count -gt 0) { Info "user state restored ($($back -join ', '))" }
+    }
 }
 
 Write-Host "PACKAGE OK: $OutDir" -ForegroundColor Green

@@ -139,34 +139,32 @@ void ResetEffectLooks()
 /*---------------------------------------------------------*\
 |||| Listing / resolution                                    |
 \*---------------------------------------------------------*/
-const std::vector<PresetInfo>& PresetList()
+std::vector<PresetInfo> PresetList()
 {
-    /* Rebuilt per call — registry contents change on file
-       reload, so a stale static table would lie. Callers
-       consume the list immediately (same contract as the old
-       fixed table). */
-    static std::vector<PresetInfo> cache;
-    cache.clear();
+    /* Built per call — registry contents change on file reload,
+       so a cached table would lie; a fresh vector per caller also
+       means no caller's copy is ever rewritten under it. */
+    std::vector<PresetInfo> out;
     const std::vector<std::string> order(kKnownOrder,
                                          kKnownOrder + kKnownCount);
     for(const EffectRegistry::EffectInfo& i : EffectLooks().List(order))
     {
-        cache.push_back({ i.id, i.name, i.description, i.needs,
-                          i.from_file });
+        out.push_back({ i.id, i.name, i.description, i.needs,
+                        i.from_file });
     }
-    return cache;
+    return out;
 }
 
-const PresetInfo* FindPreset(const std::string& id)
+std::optional<PresetInfo> FindPreset(const std::string& id)
 {
-    for(const PresetInfo& p : PresetList())
+    for(PresetInfo& p : PresetList())
     {
         if(p.id == id)
         {
-            return &p;
+            return std::move(p);
         }
     }
-    return nullptr;
+    return std::nullopt;
 }
 
 std::vector<EffectLayer> BuildPreset(const std::string& id, unsigned int seed)

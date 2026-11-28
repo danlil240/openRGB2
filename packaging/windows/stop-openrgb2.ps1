@@ -103,11 +103,25 @@ function Test-OwnProcess {
     } catch { return $false }
 }
 
+# Same-named processes: the live process table, or -- when a table
+# was injected (offline-test seam, objects with ProcessName, Id,
+# Path) -- only its entries. The packaging suite injects its own
+# stand-ins so a real OpenRGB2 stack running on the host (elevated,
+# hence unverifiable) cannot change the result (audit P-6).
+function Get-NamedProcesses {
+    param([string]$Name, [object[]]$ProcessList, [bool]$UseList)
+    if($UseList) {
+        return @($ProcessList | Where-Object { $_ -and $_.ProcessName -eq $Name })
+    }
+    return @(Get-Process -Name $Name -ErrorAction SilentlyContinue)
+}
+
 # Discover a running managed process by image path (fallback when the
 # run file is absent or its PID was recycled).
 function Find-ByImagePath {
-    param([string]$Name, [string]$ExpectedPath)
-    return Get-Process -Name $Name -ErrorAction SilentlyContinue |
+    param([string]$Name, [string]$ExpectedPath,
+          [object[]]$ProcessList, [bool]$UseList)
+    return Get-NamedProcesses $Name $ProcessList $UseList |
         Where-Object { try {
             $_.Path -and $_.Path.Equals($ExpectedPath,
                                         [StringComparison]::OrdinalIgnoreCase)
@@ -125,18 +139,20 @@ function Resolve-OwnPid {
     param(
         [int]$RunFilePid,
         [string]$ImageName,
-        [string]$ExpectedPath
+        [string]$ExpectedPath,
+        [object[]]$ProcessList,
+        [bool]$UseList
     )
     if($RunFilePid -gt 0 -and
        (Test-OwnProcess $RunFilePid $ExpectedPath)) {
         return [pscustomobject]@{ Pid=$RunFilePid; Unverifiable=@(); Foreign=@() }
     }
-    if($p = Find-ByImagePath $ImageName $ExpectedPath) {
+    if($p = Find-ByImagePath $ImageName $ExpectedPath $ProcessList $UseList) {
         return [pscustomobject]@{ Pid=$p.Id; Unverifiable=@(); Foreign=@() }
     }
     $unverifiable = @()
     $foreign      = @()
-    foreach($p in @(Get-Process -Name $ImageName -ErrorAction SilentlyContinue)) {
+    foreach($p in @(Get-NamedProcesses $ImageName $ProcessList $UseList)) {
         $img = $null
         try { $img = $p.Path } catch { $img = $null }
         if($img) { $foreign      += [pscustomobject]@{ Id=$p.Id; Path=$img } }
@@ -172,8 +188,13 @@ function Invoke-ManagedStop {
         [int]$TimeoutSeconds,
         [bool]$Force,
         [bool]$Elevated,
-        [string]$CtlExe
+        [string]$CtlExe,
+        # offline-test seam: same-named process discovery sees only
+        # these entries (see Get-NamedProcesses); never forwarded to
+        # an elevated re-launch
+        [object[]]$ProcessList
     )
+    $useList = $PSBoundParameters.ContainsKey('ProcessList')
 
     if(-not $InstallDir) {
         $InstallDir = Split-Path -Parent $PSScriptRoot
@@ -252,7 +273,8 @@ function Invoke-ManagedStop {
     # it locks openrgb2-ui.exe, so update/rollback refuse while it
     # runs. A UI that launched this script (tray "Quit OpenRGB2") is an
     # ancestor of ours: it is left to exit by itself once we return.
-    $ui = Resolve-OwnPid -RunFilePid 0 -ImageName "openrgb2-ui" -ExpectedPath $UiExe
+    $ui = Resolve-OwnPid -RunFilePid 0 -ImageName "openrgb2-ui" -ExpectedPath $UiExe `
+        -ProcessList $ProcessList -UseList $useList
     $uiPid = [int]$ui.Pid
     $ancestors = Get-AncestorPids
     if($uiPid -ne 0 -and $ancestors -contains $uiPid) {
@@ -304,7 +326,8 @@ function Invoke-ManagedStop {
     $runEnginePid = 0
     if($run) { try { $runEnginePid = [int]$run.engine_pid } catch { } }
     $eng = Resolve-OwnPid -RunFilePid $runEnginePid `
-        -ImageName "openrgb2-engine" -ExpectedPath $EngineExe
+        -ImageName "openrgb2-engine" -ExpectedPath $EngineExe `
+        -ProcessList $ProcessList -UseList $useList
     $enginePid = [int]$eng.Pid
 
     if($enginePid -eq 0) {
@@ -353,7 +376,8 @@ function Invoke-ManagedStop {
     $runBackendPid = 0
     if($run) { try { $runBackendPid = [int]$run.backend_pid } catch { } }
     $bk = Resolve-OwnPid -RunFilePid $runBackendPid `
-        -ImageName "OpenRGB" -ExpectedPath $BackendExe
+        -ImageName "OpenRGB" -ExpectedPath $BackendExe `
+        -ProcessList $ProcessList -UseList $useList
     $backendPid = [int]$bk.Pid
 
     if($backendPid -eq 0) {
@@ -376,6 +400,17 @@ function Invoke-ManagedStop {
             Info "backend: not running"
             $backendGone = $true
         }
+    } elseif(-not $engineGone) {
+        # The backend is closed only AFTER the engine fully exits
+        # (audit B-2: this used to signal it anyway). An engine that
+        # outlived its bound, or one that is running but
+        # unverifiable, may still be mid-delivery -- leave the
+        # backend up; the kept run file drives the retry.
+        Fail ("backend (pid $backendPid) left running: the engine has " +
+            "not exited, and the backend only closes after it -- re-run " +
+            "once the engine is stopped (-Force, or -Elevated for an " +
+            "elevated stack)")
+        $exitCode = 1
     } else {
         Step "backend (pid $backendPid): shutdown event -- graceful handoff"
         $bkProc = Get-Process -Id $backendPid -ErrorAction SilentlyContinue
@@ -401,8 +436,16 @@ function Invoke-ManagedStop {
                 # pid owns -- graceful, and this pid is already verified
                 # ours. It errors harmlessly when the process owns no
                 # windows at all; the bounded wait below still applies.
+                # Under Windows PowerShell 5.1 + $ErrorActionPreference
+                # "Stop", the stderr line taskkill writes for a
+                # windowless process ("can only be terminated
+                # forcefully") becomes a TERMINATING error through
+                # 2>&1 -- it used to abort the whole stop here
+                # (audit B-2). Contain it: the bounded wait below
+                # decides what happens next.
                 Info "no shutdown event or main window -- posting WM_CLOSE to all its top-level windows"
-                $null = & taskkill.exe /PID $backendPid 2>&1
+                try { $null = & taskkill.exe /PID $backendPid 2>&1 }
+                catch { Info "taskkill could not post WM_CLOSE (the backend owns no windows)" }
             }
         }
         if($bkProc -and -not $bkProc.WaitForExit($TimeoutSeconds * 1000)) {

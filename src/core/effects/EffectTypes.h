@@ -72,12 +72,97 @@ struct EvalInput
 };
 
 /* Does this layer touch this emitter? Empty targets = all.
-   Matches object id, object geometry tag, or emitter group. */
+   Matches object id (or an instance path above it, on a '/'
+   boundary: "fan0" reaches "fan0/body"), object geometry tag,
+   or emitter group. */
 bool   LayerMatches(const EffectLayer& layer, const SceneObject& obj,
                     const Emitter& emitter);
 
-/* Evaluate one primitive — returns color + coverage (a). */
+/*---------------------------------------------------------*\
+|||| LayerDrive — a per-layer offset on the time-driven term |
+|||| (audit C-2). Every moving primitive advances by          |
+|||| t * speed (/ scale), and t is seconds since the worker   |
+|||| started, so swapping in a layer with a new speed or      |
+|||| wavelength moved its pattern by an amount proportional   |
+|||| to uptime. EffectEngine::ReplaceLayers picks an offset   |
+|||| per layer so the motion term is continuous at the        |
+|||| replacement time. Zero (the default) is the plain        |
+|||| absolute-time evaluation, bit-for-bit.                   |
+||||                                                         |
+||||   cycles — wave/pulse/gradient/spin: phase cycles added  |
+||||            to the term before it is wrapped;             |
+||||            comet: metres added to the head distance      |
+||||   nx..nz — noise: lattice-space drift added to the       |
+||||            sample point (noise is not periodic)          |
+\*---------------------------------------------------------*/
+struct LayerDrive
+{
+    double cycles = 0.0;
+    double nx     = 0.0;
+    double ny     = 0.0;
+    double nz     = 0.0;
+};
+
+/*---------------------------------------------------------*\
+|||| Prepared evaluation (audit C-9). The per-LED hot path   |
+|||| used to string-compare the primitive name, re-normalise |
+|||| the direction, allocate the comet's segment table and   |
+|||| recompute the time phase for EVERY emitter.             |
+||||                                                         |
+||||   PreparedLayer — layer-only invariants, built once per |
+||||                   SetLayers/ReplaceLayers              |
+||||   LayerFrame    — layer + time terms, built once per    |
+||||                   layer per Evaluate                    |
+||||                                                         |
+|||| EvalPrepared(L, P, F, in) is bit-identical to           |
+|||| EvalPrimitive(L, in, drive) for the same t and drive.  |
+\*---------------------------------------------------------*/
+enum class Primitive : unsigned char
+{
+    Static, Wave, Pulse, Gradient, Spin, Comet, Noise,
+    Ripple, ScreenField, Level,
+};
+
+struct PreparedLayer
+{
+    Primitive          prim     = Primitive::Static;
+    Vec3               dir;             /* Normalize(direction): wave, gradient */
+    std::vector<float> seg_len;         /* comet: closed-path segment lengths   */
+    float              path_len = 0.0f; /* comet: loop length (0 = degenerate)  */
+};
+
+struct LayerFrame
+{
+    float  tphase = 0.0f;               /* wave/pulse/gradient/spin: wrapped    */
+                                        /* time phase (drive included)          */
+    float  head   = 0.0f;               /* comet: head arc position (m)         */
+    double ox = 0.0, oy = 0.0, oz = 0.0;/* noise: direction * t * speed         */
+    double nx = 0.0, ny = 0.0, nz = 0.0;/* noise: the layer's drive offset      */
+};
+
+PreparedLayer PrepareLayer(const EffectLayer& layer);
+LayerFrame    LayerFrameTerms(const EffectLayer& layer,
+                              const PreparedLayer& prepared,
+                              const LayerDrive& drive, double t);
+ColorF        EvalPrepared(const EffectLayer& layer,
+                           const PreparedLayer& prepared,
+                           const LayerFrame& frame, const EvalInput& in);
+
+/* Evaluate one primitive — returns color + coverage (a). Prepares
+   the layer on every call: for one-off samples; the engine uses
+   the prepared path above. */
 ColorF EvalPrimitive(const EffectLayer& layer, const EvalInput& in);
+ColorF EvalPrimitive(const EffectLayer& layer, const EvalInput& in,
+                     const LayerDrive& drive);
+
+/* The drive for `to` that continues `from` (running with
+   `from_drive`) at time t: both evaluate the same motion term at
+   t. Returns `from_drive` unchanged when nothing that feeds the
+   term changed, and a zero drive when the primitive differs or
+   has no time term (ripple/screenfield/level/static). */
+LayerDrive ContinueDrive(const EffectLayer& from,
+                         const LayerDrive& from_drive,
+                         const EffectLayer& to, double t);
 
 /* Composite src over dst with src.a already including opacity. */
 ColorF BlendOver(ColorF dst, ColorF src, BlendMode mode);

@@ -168,6 +168,7 @@ nlohmann::json StatsToJson(const DeliveryStats& s)
         { "transport_completed", s.transport_completed },
         { "suppressed",          s.suppressed          },
         { "transport_rejected",  s.transport_rejected  },
+        { "keyframes",           s.keyframes           },
         { "last_interval_s",     s.last_interval_s     },
         { "min_interval_s",      s.min_interval_s      },
         { "max_interval_s",      s.max_interval_s      },
@@ -337,8 +338,18 @@ EngineService::EngineService(Engine& engine, Deps deps,
         deps_.workspace->SetJobEventHook(
             [this](const WorkspaceService::JobStatus& st)
             {
+                /* the job no longer needs its staged token */
+                if(ws_commands_)
+                {
+                    ws_commands_->OnJobFinished(st.job_id);
+                }
+                /* keyed per job: a terminal record never
+                   replaces — or is replaced by — the published
+                   snapshot queued just before it, or another
+                   job's record (audit I-8) */
                 Emit(event_kind::kWorkspace,
-                     JobStatusToJson(st));
+                     JobStatusToJson(st),
+                     "job/" + std::to_string(st.job_id));
             });
         /* The published snapshot rebroadcasts on every change —
            without it a session whose subscribe-time snapshot
@@ -374,10 +385,19 @@ EngineService::EngineService(Engine& engine, Deps deps,
             [this](uint64_t sid, const IpcEvent& ev,
                    const std::string& key)
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if(session_sink_)
+                /* The sink frames (serializes) the chunk —
+                   never under the service mutex, which every
+                   SCENE/STATE read and apply takes (audit
+                   I-7). */
+                std::function<void(uint64_t, const IpcEvent&,
+                                   const std::string&)> sink;
                 {
-                    session_sink_(sid, ev, key);
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    sink = session_sink_;
+                }
+                if(sink)
+                {
+                    sink(sid, ev, key);
                 }
             };
         pd.max_sessions        = options_.preview.max_sessions;
@@ -400,13 +420,36 @@ EngineService::EngineService(Engine& engine, Deps deps,
             [this](uint64_t sid, const IpcEvent& ev,
                    const std::string& key)
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if(session_sink_)
+                std::function<void(uint64_t, const IpcEvent&,
+                                   const std::string&)> sink;
                 {
-                    session_sink_(sid, ev, key);
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    sink = session_sink_;
+                }
+                if(sink)
+                {
+                    sink(sid, ev, key);
                 }
             };
         ws_commands_->SetCalibrationDeps(std::move(cd));
+
+        /* Audit I-4: the applied scene document is served out
+           of band — transfer_begin {direction:"download",
+           kind:"scene"} stages the same bytes document_sha256
+           names. */
+        ws_commands_->SetSceneSource(
+            [this]()
+            {
+                WorkspaceCommands::SceneSource src;
+                if(const std::shared_ptr<const SceneDocForms> f =
+                       SceneForms())
+                {
+                    src.revision = f->revision;
+                    src.bytes    = f->bytes;
+                    src.sha256   = f->sha256;
+                }
+                return src;
+            });
     }
 }
 
@@ -419,6 +462,83 @@ EngineService::~EngineService()
         deps_.workspace->SetJobEventHook(nullptr);
         deps_.workspace->SetSnapshotEventHook(nullptr);
     }
+    /* Durability: a queued last-scene snapshot is written
+       before the writer exits — the restore-after-restart
+       contract never depends on the owner remembering to
+       flush. */
+    {
+        std::lock_guard<std::mutex> lock(persist_mutex_);
+        persist_stop_ = true;
+    }
+    persist_cv_.notify_all();
+    if(persist_thread_.joinable())
+    {
+        persist_thread_.join();
+    }
+}
+
+void EngineService::QueuePersist(
+    std::shared_ptr<const studio::SceneDocument> doc)
+{
+    {
+        std::lock_guard<std::mutex> lock(persist_mutex_);
+        if(persist_stop_)
+        {
+            return;
+        }
+        /* Latest-wins: an unwritten older document is simply
+           replaced — only the newest apply is the scene to
+           restore. */
+        persist_pending_ = std::move(doc);
+        if(!persist_thread_.joinable())
+        {
+            persist_thread_ = std::thread([this] { PersistMain(); });
+        }
+    }
+    persist_cv_.notify_all();
+}
+
+void EngineService::PersistMain()
+{
+    std::unique_lock<std::mutex> lock(persist_mutex_);
+    for(;;)
+    {
+        persist_cv_.wait(lock, [this]
+        {
+            return persist_pending_ != nullptr || persist_stop_;
+        });
+        if(!persist_pending_)
+        {
+            return;            /* stop requested, nothing queued */
+        }
+        std::shared_ptr<const studio::SceneDocument> doc =
+            std::move(persist_pending_);
+        persist_pending_.reset();
+        persist_busy_ = true;
+        lock.unlock();
+        /* The hook owns its own failure reporting (the host
+           logs it); persistence never breaks the apply. */
+        try
+        {
+            deps_.persist_scene(*doc);
+        }
+        catch(...)
+        {
+        }
+        lock.lock();
+        persist_busy_ = false;
+        persist_cv_.notify_all();
+    }
+}
+
+void EngineService::FlushPersistedScene()
+{
+    std::unique_lock<std::mutex> lock(persist_mutex_);
+    persist_cv_.wait(lock, [this]
+    {
+        return (persist_pending_ == nullptr && !persist_busy_) ||
+               !persist_thread_.joinable();
+    });
 }
 
 void EngineService::SetEventSink(
@@ -451,7 +571,17 @@ void EngineService::SetServerStatsProvider(
 }
 
 void EngineService::Emit(const std::string& kind,
-                         const nlohmann::json& data)
+                         nlohmann::json data,
+                         const std::string& coalesce_key)
+{
+    IpcEvent ev;
+    ev.kind         = kind;
+    ev.data         = std::move(data);
+    ev.coalesce_key = coalesce_key;
+    EmitEvent(std::move(ev));
+}
+
+void EngineService::EmitEvent(IpcEvent ev)
 {
     std::function<void(const IpcEvent&)> sink;
     {
@@ -460,7 +590,7 @@ void EngineService::Emit(const std::string& kind,
     }
     if(sink)
     {
-        sink(IpcEvent{ kind, data });
+        sink(ev);
     }
 }
 
@@ -671,10 +801,11 @@ bool EngineService::ApplyPreparedScene(const PreparedStudioScene& prepared,
        all funnel through here. An object-less document is a
        deliberate "new scene" staging step, not the scene to
        restore on next launch — it never overwrites the
-       snapshot. */
+       snapshot. The durable write runs on the background
+       writer (audit I-6), never on the request thread. */
     if(deps_.persist_scene && !doc->objects.empty())
     {
-        deps_.persist_scene(*doc);
+        QueuePersist(doc);
     }
     return true;
 }
@@ -695,22 +826,73 @@ std::shared_ptr<const studio::SceneDocument> EngineService::Scene() const
 || Payload builders                                          ||
 \*---------------------------------------------------------*/
 
+std::shared_ptr<const EngineService::SceneDocForms>
+EngineService::SceneForms() const
+{
+    std::shared_ptr<const studio::SceneDocument> doc;
+    uint64_t rev = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(!scene_)
+        {
+            return nullptr;
+        }
+        if(scene_forms_ && scene_forms_->doc == scene_ &&
+           scene_forms_->revision == scene_revision_)
+        {
+            return scene_forms_;
+        }
+        doc = scene_;
+        rev = scene_revision_;
+    }
+    /* Serialized once per revision, off the service mutex. */
+    auto f = std::make_shared<SceneDocForms>();
+    f->revision = rev;
+    f->doc      = doc;
+    f->json     = std::make_shared<const nlohmann::json>(
+                      studio::ToJson(*doc));
+    f->bytes    = std::make_shared<const std::string>(f->json->dump());
+    f->sha256   = Sha256Hex(*f->bytes);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(scene_ == doc && scene_revision_ == rev)
+    {
+        scene_forms_ = f;
+    }
+    return f;
+}
+
 nlohmann::json EngineService::SceneJsonLocked() const
 {
     nlohmann::json out;
+    const std::shared_ptr<const SceneDocForms> forms = SceneForms();
+    out["loaded"] = forms != nullptr;
+    if(forms)
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        out["loaded"]   = scene_ != nullptr;
-        out["revision"] = scene_revision_;
-        if(scene_)
+        out["revision"]        = forms->revision;
+        out["name"]            = forms->doc->name;
+        out["document_sha256"] = forms->sha256;
+        out["document_bytes"]  = (uint64_t)forms->bytes->size();
+        /* Audit I-4: a large document never rides inline — the
+           1 MiB body cap must hold for WELCOME/STATE/SCENE/
+           DIAGNOSTICS whatever the scene size. Clients fetch it
+           with transfer_begin {direction:"download",
+           kind:"scene"} and verify document_sha256. */
+        if(!ws_commands_ ||
+           forms->bytes->size() <= options_.scene_inline_max_bytes)
         {
-            out["name"]     = scene_->name;
-            out["document"] = studio::ToJson(*scene_);
+            out["document"] = *forms->json;
         }
         else
         {
-            out["document"] = nullptr;
+            out["document"]         = nullptr;
+            out["document_omitted"] = true;
         }
+    }
+    else
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        out["revision"] = scene_revision_;
+        out["document"] = nullptr;
     }
     out["applied_revision"] = engine_.Worker().AppliedRevision();
     out["playing"]          = engine_.Worker().HasScene();
@@ -1116,6 +1298,7 @@ nlohmann::json EngineService::IpcStatsJson() const
         { "responses_out",    st.responses_out    },
         { "events_sent",      st.events_sent      },
         { "events_dropped",   st.events_dropped   },
+        { "events_oversize",  st.events_oversize  },
         { "queued_events",    st.queued_events    },
         { "resync_bytes",     st.resync_bytes     },
         { "rejected_hellos",  st.rejected_hellos  },
@@ -1435,6 +1618,8 @@ IpcReply EngineService::Dispatch(MsgType type,
             return r;
         }
         std::string err;
+        /* ordered against layout read-modify-apply edits */
+        std::lock_guard<std::mutex> edit(scene_edit_mutex_);
         if(!ApplySceneDocument(doc, err))
         {
             return IpcReply::Fail(ErrCode::BadRequest, err);
@@ -1899,6 +2084,15 @@ IpcReply EngineService::HandleLayoutCommand(
     {
         return HandleIdentify(body);
     }
+    /* Every other layout verb is read-copy-modify-apply on the
+       current scene. Each session dispatches on its own reader
+       thread, so two concurrent edits would both copy the same
+       document and the second apply would silently revert the
+       first (audit I-13). One edit at a time — SET_SCENE takes
+       the same lock so a whole-document replace is ordered
+       against them too. Never held while waiting on anything
+       but the apply itself. */
+    std::lock_guard<std::mutex> edit(scene_edit_mutex_);
     if(verb == "add_object")
     {
         return HandleAddObjects(body);
@@ -2460,6 +2654,20 @@ IpcReply EngineService::HandleAddObjects(const nlohmann::json& body)
             "add_object requires "
             "{controllers:[<DeviceKey>...]}");
     }
+    /* Bounded batch (audit I-13): every added object runs the
+       smallest-free-id search over the whole document, so an
+       unbounded list (a 1 MiB body holds ~10k repeats of one
+       live zone) is super-quadratic work on this session's
+       reader thread and an equally large scene. A real rig
+       has far fewer zones than this per add. */
+    constexpr size_t kMaxAddControllers = 256;
+    if(body["controllers"].size() > kMaxAddControllers)
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "add_object takes at most " +
+            std::to_string(kMaxAddControllers) +
+            " controllers per request");
+    }
 
     std::shared_ptr<const studio::SceneDocument> cur = Scene();
     if(!cur)
@@ -2809,13 +3017,28 @@ IpcReply EngineService::HandleReactiveCommand(
 void EngineService::PollEvents(TimePoint now)
 {
     std::vector<IpcEvent> pending;
-
-    const nlohmann::json conn = ConnectionJson();
-    if(conn.dump() != last_connection_sig_)
+    /* Each diff signature IS the body's serialization: dump
+       once, move the body into the event, and hand the dump
+       along as data_json so the server never serializes it
+       again (audit I-7). */
+    auto diff = [&pending](const char* kind, nlohmann::json body,
+                           std::string& last_sig)
     {
-        last_connection_sig_ = conn.dump();
-        pending.push_back(IpcEvent{ event_kind::kConnection, conn });
-    }
+        auto dumped = std::make_shared<const std::string>(body.dump());
+        if(*dumped == last_sig)
+        {
+            return;
+        }
+        last_sig = *dumped;
+        IpcEvent ev;
+        ev.kind      = kind;
+        ev.data      = std::move(body);
+        ev.data_json = std::move(dumped);
+        pending.push_back(std::move(ev));
+    };
+
+    diff(event_kind::kConnection, ConnectionJson(),
+         last_connection_sig_);
 
     /* Topology is structure, not pixels: the diff signature
        excludes per-frame `colors` — with them, any animated
@@ -2824,36 +3047,30 @@ void EngineService::PollEvents(TimePoint now)
        payload still carries colors so consumers get a fresh
        frame on real changes; per-frame colors stream via
        frame_status regardless. */
-    const nlohmann::json sig =
-        SnapshotsJson(/*include_colors*/ false);
-    if(sig.dump() != last_topology_sig_)
     {
-        last_topology_sig_ = sig.dump();
-        pending.push_back(IpcEvent{ event_kind::kTopology,
-                                    SnapshotsJson() });
+        std::string sig =
+            SnapshotsJson(/*include_colors*/ false).dump();
+        if(sig != last_topology_sig_)
+        {
+            last_topology_sig_ = std::move(sig);
+            IpcEvent ev;
+            ev.kind = event_kind::kTopology;
+            ev.data = SnapshotsJson();
+            pending.push_back(std::move(ev));
+        }
     }
 
-    const nlohmann::json play = PlaybackJson();
-    if(play.dump() != last_playback_sig_)
-    {
-        last_playback_sig_ = play.dump();
-        pending.push_back(IpcEvent{ event_kind::kPlayback, play });
-    }
+    diff(event_kind::kPlayback, PlaybackJson(), last_playback_sig_);
 
     /* reactive: status strings shift on their own (a source
        reinitializing, a display disappearing) — diff-driven
        like the others so subscribers see them without a
        command round-trip. */
-    const nlohmann::json react = ReactiveJson();
-    if(react.dump() != last_reactive_sig_)
-    {
-        last_reactive_sig_ = react.dump();
-        pending.push_back(IpcEvent{ event_kind::kReactive, react });
-    }
+    diff(event_kind::kReactive, ReactiveJson(), last_reactive_sig_);
 
-    for(const IpcEvent& ev : pending)
+    for(IpcEvent& ev : pending)
     {
-        Emit(ev.kind, ev.data);
+        EmitEvent(std::move(ev));
     }
 
     /* Idle workspace transfers expire on the owner tick too —

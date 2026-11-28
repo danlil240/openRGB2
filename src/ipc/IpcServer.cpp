@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
+#include <map>
 #include <set>
 #include <thread>
 #include <vector>
@@ -57,6 +58,32 @@ bool IsRequestType(MsgType t)
 
 } /* anonymous namespace */
 
+std::vector<uint8_t> EncodeEventMessage(const IpcEvent& ev)
+{
+    /* nlohmann objects serialize keys in sorted order — "data"
+       before "kind" — so this is the same byte stream the old
+       json::object({{"kind",..},{"data",..}}).dump() produced,
+       minus the deep copy of `data` and, with data_json, the
+       second dump. */
+    std::string raw;
+    const std::string kind = nlohmann::json(ev.kind).dump();
+    if(ev.data_json)
+    {
+        raw.reserve(ev.data_json->size() + kind.size() + 18);
+        raw += "{\"data\":";
+        raw += *ev.data_json;
+    }
+    else
+    {
+        raw  = "{\"data\":";
+        raw += ev.data.dump();
+    }
+    raw += ",\"kind\":";
+    raw += kind;
+    raw += '}';
+    return EncodeRawMessage(MsgType::Event, 0, raw);
+}
+
 struct IpcServer::Session
 {
     uint64_t                    id    = 0;
@@ -94,6 +121,11 @@ struct IpcServer::Session
     std::mutex                out_mutex;
     std::condition_variable   out_cv;
     std::deque<OutMsg>        out_queue;
+    /* Live events offered to this session per coalesce slot
+       (kind or kind+key), out_mutex. SUBSCRIBE compares it
+       around building the initial snapshot: a slot that moved
+       already carries newer state than the snapshot. */
+    std::map<std::string, uint64_t> enq_count;
 
     std::mutex                sub_mutex;
     std::set<std::string>     subscribed;
@@ -105,6 +137,47 @@ struct IpcServer::Session
        never double-counted). */
     std::atomic<uint64_t>     resync_bytes{ 0 };
 };
+
+namespace
+{
+
+/* High-rate telemetry kinds (~30 Hz) — the first to go when a
+   session's queue is full. Everything else (workspace job
+   records and snapshots, scene, playback, topology, ...) is
+   rare and a lost one leaves the client stale. */
+bool IsHighRateKey(const std::string& qkey)
+{
+    const std::string kind = qkey.substr(0, qkey.find('\x1f'));
+    return kind == event_kind::kPreview ||
+           kind == event_kind::kFrameStatus;
+}
+
+/* Overflow policy for one incoming event at a full queue
+   (out_mutex held). Evicts the OLDEST queued high-rate event;
+   when none is queued, a high-rate newcomer is refused rather
+   than displacing a low-rate event, and a low-rate newcomer
+   evicts the queue head (the previous behaviour). Returns
+   false when the newcomer must be dropped (audit I-8). */
+template<class Queue>
+bool MakeRoom(Queue& q, const std::string& incoming_qkey)
+{
+    for(auto it = q.begin(); it != q.end(); ++it)
+    {
+        if(IsHighRateKey(it->kind))
+        {
+            q.erase(it);
+            return true;
+        }
+    }
+    if(IsHighRateKey(incoming_qkey))
+    {
+        return false;
+    }
+    q.pop_front();
+    return true;
+}
+
+} /* anonymous namespace */
 
 /*---------------------------------------------------------*\
 || IpcServer                                                 ||
@@ -261,24 +334,31 @@ void IpcServer::Emit(const IpcEvent& ev)
         return;
     }
 
-    std::vector<uint8_t> encoded =
-        EncodeMessage(MsgType::Event, 0,
-            nlohmann::json::object({
-                { "kind", ev.kind },
-                { "data", ev.data },
-            }));
+    std::vector<uint8_t> encoded = EncodeEventMessage(ev);
     if(encoded.empty())
     {
+        /* Over the body cap: never sent — counted, not silent
+           (audit I-4). */
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++stats_.events_dropped;
+        ++stats_.events_oversize;
         return;
     }
     const Session::Bytes bytes =
         std::make_shared<const std::vector<uint8_t>>(std::move(encoded));
 
+    /* Latest-wins partitions on the event's coalesce key
+       inside the kind (same scheme as EmitTo). */
+    const std::string qkey =
+        ev.coalesce_key.empty()
+            ? ev.kind
+            : ev.kind + "\x1f" + ev.coalesce_key;
+
     for(const std::shared_ptr<Session>& s : targets)
     {
-        /*---- Bounded enqueue: latest-wins per kind, then     ----*\
-        | oldest-eviction at the cap. Drops are counted, never    |
-        | queued unboundedly.                                     |
+        /*---- Bounded enqueue: latest-wins per (kind, key),   ----*\
+        | then eviction at the cap — high-rate kinds first (see   |
+        | MakeRoom). Drops are counted, never queued unboundedly. |
         \*--------------------------------------------------------*/
         bool coalesced = false;
         bool dropped   = false;
@@ -286,7 +366,7 @@ void IpcServer::Emit(const IpcEvent& ev)
             std::lock_guard<std::mutex> lock(s->out_mutex);
             for(Session::OutMsg& m : s->out_queue)
             {
-                if(m.kind == ev.kind)
+                if(m.kind == qkey)
                 {
                     m.bytes   = bytes;    /* replace, don't grow   */
                     coalesced = true;
@@ -295,13 +375,18 @@ void IpcServer::Emit(const IpcEvent& ev)
             }
             if(!coalesced)
             {
+                bool room = true;
                 if(s->out_queue.size() >= options_.max_queued_events)
                 {
-                    s->out_queue.pop_front();
+                    room    = MakeRoom(s->out_queue, qkey);
                     dropped = true;
                 }
-                s->out_queue.push_back(Session::OutMsg{ ev.kind, bytes });
+                if(room)
+                {
+                    s->out_queue.push_back(Session::OutMsg{ qkey, bytes });
+                }
             }
+            ++s->enq_count[qkey];
         }
         s->out_cv.notify_one();
         {
@@ -348,23 +433,24 @@ void IpcServer::EmitTo(uint64_t session_id, const IpcEvent& ev,
         }
     }
     /* Encoded only once a subscribed target exists. */
-    std::vector<uint8_t> encoded =
-        EncodeMessage(MsgType::Event, 0,
-            nlohmann::json::object({
-                { "kind", ev.kind },
-                { "data", ev.data },
-            }));
+    std::vector<uint8_t> encoded = EncodeEventMessage(ev);
     if(encoded.empty())
     {
+        /* Over the body cap: never sent — counted, not silent
+           (audit I-4). */
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++stats_.events_dropped;
+        ++stats_.events_oversize;
         return;
     }
     const Session::Bytes bytes =
         std::make_shared<const std::vector<uint8_t>>(std::move(encoded));
     /* The coalesce key partitions latest-wins INSIDE the kind:
-       a queued chunk of a superseded sequence is replaced only
-       by the same (sequence,chunk) slot — never by a different
-       chunk, so a partial frame can never assemble across
-       sequences. */
+       a queued preview chunk is replaced only by the same chunk
+       SLOT of a newer frame (key frame/<chunk>) — never by a
+       different chunk. Chunks carry their sequence and the
+       client assembles strictly by sequence, so a partial
+       frame can never be painted across sequences. */
     const std::string qkey =
         coalesce_key.empty()
             ? ev.kind
@@ -385,14 +471,19 @@ void IpcServer::EmitTo(uint64_t session_id, const IpcEvent& ev,
         }
         if(!coalesced)
         {
+            bool room = true;
             if(target->out_queue.size() >= options_.max_queued_events)
             {
-                target->out_queue.pop_front();
+                room    = MakeRoom(target->out_queue, qkey);
                 dropped = true;
             }
-            target->out_queue.push_back(
-                Session::OutMsg{ qkey, bytes });
+            if(room)
+            {
+                target->out_queue.push_back(
+                    Session::OutMsg{ qkey, bytes });
+            }
         }
+        ++target->enq_count[qkey];
     }
     target->out_cv.notify_one();
     {
@@ -983,6 +1074,18 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
                 std::lock_guard<std::mutex> lock(s->sub_mutex);
                 s->subscribed = std::move(want);
             }
+            /* Live events start queuing the moment the
+               subscription is set — BEFORE the initial
+               snapshots below are built. Record each slot's
+               count now: a slot that moves while its snapshot
+               is being read already holds state at least as
+               new, so that (older) snapshot must not be
+               queued behind it (audit I-13). */
+            std::map<std::string, uint64_t> enq_at_subscribe;
+            {
+                std::lock_guard<std::mutex> lock(s->out_mutex);
+                enq_at_subscribe = s->enq_count;
+            }
             nlohmann::json subs = nlohmann::json::array();
             {
                 std::lock_guard<std::mutex> lock(s->sub_mutex);
@@ -1023,10 +1126,25 @@ void IpcServer::ReaderMain(std::shared_ptr<Session> s)
                         EncodeMessage(MsgType::Event, 0,
                             nlohmann::json::object(
                                 {{ "kind", k }, { "data", snap }}));
-                    if(!ev.empty())
+                    if(ev.empty())
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        ++stats_.events_dropped;
+                        ++stats_.events_oversize;
+                    }
+                    else
                     {
                         std::lock_guard<std::mutex> lock(s->out_mutex);
-                        if(s->out_queue.size()
+                        const auto now_it = s->enq_count.find(k);
+                        const auto was_it = enq_at_subscribe.find(k);
+                        const uint64_t now_n =
+                            now_it == s->enq_count.end()
+                                ? 0 : now_it->second;
+                        const uint64_t was_n =
+                            was_it == enq_at_subscribe.end()
+                                ? 0 : was_it->second;
+                        if(now_n == was_n &&
+                           s->out_queue.size()
                            < options_.max_queued_events)
                         {
                             s->out_queue.push_back(Session::OutMsg{ k,

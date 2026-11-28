@@ -51,6 +51,9 @@ WorkspaceDraftStore::WorkspaceDraftStore(QObject* parent)
     debounce_.setSingleShot(true);
     connect(&debounce_, &QTimer::timeout,
             this, &WorkspaceDraftStore::Flush);
+    max_wait_.setSingleShot(true);
+    connect(&max_wait_, &QTimer::timeout,
+            this, &WorkspaceDraftStore::Flush);
 }
 
 void WorkspaceDraftStore::setRootForTesting(const QString& dir)
@@ -69,6 +72,11 @@ void WorkspaceDraftStore::setClientIdForTesting(
 void WorkspaceDraftStore::setDebounceForTesting(int ms)
 {
     debounce_ms_ = ms < 0 ? 0 : ms;
+}
+
+void WorkspaceDraftStore::setMaxWaitForTesting(int ms)
+{
+    max_wait_ms_ = ms < 0 ? 0 : ms;
 }
 
 QString WorkspaceDraftStore::rootDir() const
@@ -104,11 +112,20 @@ void WorkspaceDraftStore::Stage(const QString& workspace_id,
     rec.document          = document;
     pending_[workspace_id] = std::move(rec);
     debounce_.start(debounce_ms_);
+    /* The debounce restarts on every edit, so a continuous
+       edit stream (slider scrub, drag) would never write; the
+       maximum wait runs from the first unwritten Stage and is
+       never pushed back (audit U-8). */
+    if(!max_wait_.isActive())
+    {
+        max_wait_.start(max_wait_ms_);
+    }
 }
 
 void WorkspaceDraftStore::Flush()
 {
     debounce_.stop();
+    max_wait_.stop();
     if(pending_.empty())
     {
         return;

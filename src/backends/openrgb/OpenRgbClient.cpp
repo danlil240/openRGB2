@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstring>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace openrgb2
@@ -99,6 +100,7 @@ ConnectionSnapshotInfo OpenRgbClient::ConnectionSnapshot() const
     out.protocol_version  = protocol_version_;
     out.reconnect_attempt = reconnect_attempt_;
     out.last_error        = last_error_;
+    out.skipped_controllers = skipped_controllers_;
     return out;
 }
 
@@ -183,6 +185,12 @@ RecvResult OpenRgbClient::RecvPacket(Packet& pkt)
     {
         NoteWirelessReplyIo();
     }
+    else if(pkt.header.pkt_id == kPktDeviceListUpdated)
+    {
+        /* Wherever it lands — a Request() reply wait,
+           DrainPending, a probe — the notice is never lost. */
+        NoteDeviceListUpdatedIo();
+    }
     return RecvResult::Ok;
 }
 
@@ -227,7 +235,8 @@ std::vector<uint8_t> OpenRgbClient::Request(uint32_t dev_id, uint32_t pkt_id,
 void OpenRgbClient::DrainPending()
 {
     /* Consume unsolicited packets so the socket never backs up.
-       Below protocol 6 the server sends none; this is defensive. */
+       Below protocol 6 the only one is DEVICE_LIST_UPDATED,
+       which RecvPacket flags (P-5) before it is dropped. */
     Packet pkt;
     for(;;)
     {
@@ -295,6 +304,10 @@ bool OpenRgbClient::EnumerateIo(std::string& err)
         pv = protocol_version_;
     }
 
+    /* This enumeration answers every DEVICE_LIST_UPDATED read
+       so far; one that arrives while it runs sets the flag
+       again (P-5). */
+    device_list_updated_ = false;
     const std::vector<uint8_t> count_reply =
         Request(0, kPktControllerCount, {}, kPktControllerCount);
     if(count_reply.size() != 4)
@@ -309,6 +322,7 @@ bool OpenRgbClient::EnumerateIo(std::string& err)
        atomically under mutex_ — a state reader never observes
        a half-enumerated device list. */
     std::map<DeviceKey, DeviceRecord> devices;
+    std::vector<uint32_t>             skipped;
     for(uint32_t i = 0; i < count; ++i)
     {
         const std::vector<uint8_t> data =
@@ -319,9 +333,20 @@ bool OpenRgbClient::EnumerateIo(std::string& err)
         if(!ParseControllerData(data.data(), data.size(),
                                 pv, c))
         {
-            err = "malformed controller data for device " +
-                  std::to_string(i);
-            return false;
+            /* One description that does not parse is that
+               device's problem, not the rig's (audit P-14): the
+               reply was a whole, well-framed packet, so the
+               stream is still in sync -- skip the controller and
+               keep every other index. Recorded for diagnostics;
+               only an enumeration where EVERY description fails
+               (a protocol-level mismatch) is an error below. */
+            skipped.push_back(i);
+            if(err.empty())
+            {
+                err = "malformed controller data for device " +
+                      std::to_string(i);
+            }
+            continue;
         }
 
         DeviceRecord rec;
@@ -367,6 +392,11 @@ bool OpenRgbClient::EnumerateIo(std::string& err)
            RefreshStatus compares like with like. */
         devices.emplace(rec.snap.key, std::move(rec));
     }
+    if(count > 0 && skipped.size() == count)
+    {
+        return false;               /* err names the first index */
+    }
+    err.clear();
 
     /* Every enumeration is a topology generation: frames stamped
        with an older generation are obsolete. The generation bump
@@ -382,6 +412,7 @@ bool OpenRgbClient::EnumerateIo(std::string& err)
         }
         devices_ = std::move(devices);
         server_controller_count_ = count;
+        skipped_controllers_     = std::move(skipped);
     }
     /* Probe the wireless-status extension on every enumeration:
        covers Connect(), Enumerate(), and the structural-
@@ -508,14 +539,34 @@ bool OpenRgbClient::Enumerate()
 |||| Reconnect schedule                                      ||
 |\*---------------------------------------------------------*/
 
+void OpenRgbClient::YieldToSenders() const
+{
+    /* Called between refresh round trips with NO lock held: let
+       every frame send already queued on io_mutex_ go first.
+       Bounded so a continuous stream of senders can delay a
+       refresh step, never starve it. */
+    const TimePoint until = Clock::now() + std::chrono::milliseconds(20);
+    while(send_waiters_.load(std::memory_order_acquire) > 0 &&
+          Clock::now() < until)
+    {
+        std::this_thread::yield();
+    }
+}
+
 bool OpenRgbClient::RefreshStatus()
 {
-    std::lock_guard<std::mutex> io(io_mutex_);
+    /* E-3: the wire lock (io_mutex_) is taken per ROUND TRIP,
+       never across the whole sweep. Every lane's SubmitLatest
+       needs the same lock to send, so holding it across one
+       request per controller stalled all output for the full
+       refresh (several round trips every 2 s). Between round
+       trips a frame can go out; each step re-checks that the
+       topology it snapshotted is still current — a concurrent
+       re-enumeration (another refresh, a reconnect, a resize)
+       makes this refresh moot, and a broken connection ends it.
 
-    /* Snapshot everything the wire phase needs — the io_mutex_
-       hold means no other thread can commit a topology change
-       mid-refresh, so this view stays consistent for the whole
-       call. */
+       Snapshot everything the wire phase needs at the start,
+       tagged with the topology generation. */
     struct KnownDevice
     {
         DeviceKey                 key;
@@ -525,109 +576,176 @@ bool OpenRgbClient::RefreshStatus()
     };
     uint32_t                pv = 0;
     uint32_t                server_count = 0;
+    uint64_t                generation = 0;
     std::vector<KnownDevice> known;
+
+    /* Under io_mutex_: is the snapshot still the live topology?
+       false ends the refresh; `result` is what to return
+       (true when someone else already re-enumerated). */
+    const auto still_current = [this, &generation](bool& result)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if(state_ != ConnectionState::Connected)
         {
-            last_error_ = "not connected";
+            /* Broken mid-refresh: last_error_ already holds
+               the reason MarkBrokenIo recorded. */
+            result = false;
             return false;
         }
-        pv = protocol_version_;
-        server_count = server_controller_count_;
-        known.reserve(devices_.size());
-        for(const auto& entry : devices_)
+        if(topology_generation_ != generation)
         {
-            known.push_back(KnownDevice{ entry.first,
-                                         entry.second.index,
-                                         entry.second.snap.device_type,
-                                         entry.second.snap.zones });
+            result = true;     /* superseded by a fresher view */
+            return false;
+        }
+        return true;
+    };
+
+    /*---- Step 1: snapshot + controller count ---------------*/
+    {
+        std::lock_guard<std::mutex> io(io_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if(state_ != ConnectionState::Connected)
+            {
+                last_error_ = "not connected";
+                return false;
+            }
+            pv           = protocol_version_;
+            server_count = server_controller_count_;
+            generation   = topology_generation_;
+            known.reserve(devices_.size());
+            for(const auto& entry : devices_)
+            {
+                known.push_back(KnownDevice{ entry.first,
+                                             entry.second.index,
+                                             entry.second.snap.device_type,
+                                             entry.second.snap.zones });
+            }
+        }
+        try
+        {
+            /* A device added or removed changes the server-side
+               count — the per-device refresh below iterates only
+               the KNOWN map, so it can never see an addition and
+               sees a removal only indirectly through a shifted
+               index. Re-fetch the count first: any difference
+               takes the full re-enumeration path (generation bump
+               obsoletes stale frames + remaps positional ids).
+               Compared against the SERVER count recorded at
+               enumeration, not known.size(): duplicate-key
+               controllers collapse in the map, and comparing with
+               the map size would re-enumerate on every refresh. */
+            const std::vector<uint8_t> count_reply =
+                Request(0, kPktControllerCount, {},
+                        kPktControllerCount);
+            if(count_reply.size() != 4)
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                last_error_ = "malformed controller count reply";
+                return false;
+            }
+            uint32_t count = 0;
+            memcpy(&count, count_reply.data(), 4);
+            if(count != server_count)
+            {
+                std::string err;
+                if(!EnumerateIo(err))
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    last_error_ = err;
+                    return false;
+                }
+                return true;
+            }
+        }
+        catch(const TransportError& e)
+        {
+            MarkBrokenIo(e.what(), Clock::now());
+            return false;
         }
     }
 
-    try
+    /*---- Step 2: one controller per wire-lock hold ---------*/
+    bool structural = false;
+    std::vector<std::pair<DeviceKey, SdkController>> fresh;
+    fresh.reserve(known.size());
+    for(const KnownDevice& kd : known)
     {
-        /* A device added or removed changes the server-side
-           count — the per-device refresh below iterates only
-           the KNOWN map, so it can never see an addition and
-           sees a removal only indirectly through a shifted
-           index. Re-fetch the count first: any difference
-           takes the full re-enumeration path (generation bump
-           obsoletes stale frames + remaps positional ids).
-           Compared against the SERVER count recorded at
-           enumeration, not known.size(): duplicate-key
-           controllers collapse in the map, and comparing with
-           the map size would re-enumerate on every refresh. */
-        const std::vector<uint8_t> count_reply =
-            Request(0, kPktControllerCount, {},
-                    kPktControllerCount);
-        if(count_reply.size() != 4)
+        YieldToSenders();
+        std::lock_guard<std::mutex> io(io_mutex_);
+        bool result = false;
+        if(!still_current(result))
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            last_error_ = "malformed controller count reply";
+            return result;
+        }
+        std::vector<uint8_t> data;
+        try
+        {
+            data = Request(kd.index, kPktControllerData,
+                           BuildControllerDataRequest(pv),
+                           kPktControllerData);
+        }
+        catch(const TransportError& e)
+        {
+            MarkBrokenIo(e.what(), Clock::now());
             return false;
         }
-        uint32_t count = 0;
-        memcpy(&count, count_reply.data(), 4);
-        if(count != server_count)
+        SdkController c;
+        if(!ParseControllerData(data.data(), data.size(), pv, c))
         {
-            std::string err;
-            if(!EnumerateIo(err))
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                last_error_ = err;
-                return false;
-            }
-            return true;
+            /* A known device whose description stopped
+               parsing: re-enumerate (which skips it) rather
+               than failing every refresh (audit P-14). */
+            structural = true;
+            break;
         }
-
-        bool structural = false;
-        std::vector<std::pair<DeviceKey, SdkController>> fresh;
-        fresh.reserve(known.size());
-        for(const KnownDevice& kd : known)
+        /* A different identity or a changed zone/LED layout
+           at an expected index means the topology moved —
+           take the full re-enumeration path so the
+           generation bump invalidates stale frames. */
+        if(MakeKey(c) != kd.key ||
+           (int32_t)c.type != kd.device_type ||
+           c.zones.size() != kd.zones.size())
         {
-            const std::vector<uint8_t> data =
-                Request(kd.index, kPktControllerData,
-                        BuildControllerDataRequest(pv),
-                        kPktControllerData);
-            SdkController c;
-            if(!ParseControllerData(data.data(), data.size(),
-                                    pv, c))
+            structural = true;
+        }
+        else
+        {
+            for(size_t z = 0; z < c.zones.size(); ++z)
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                last_error_ = "malformed controller data on refresh";
-                return false;
-            }
-            /* A different identity or a changed zone/LED layout
-               at an expected index means the topology moved —
-               take the full re-enumeration path so the
-               generation bump invalidates stale frames. */
-            if(MakeKey(c) != kd.key ||
-               (int32_t)c.type != kd.device_type ||
-               c.zones.size() != kd.zones.size())
-            {
-                structural = true;
-            }
-            else
-            {
-                for(size_t z = 0; z < c.zones.size(); ++z)
+                if(c.zones[z].leds_count !=
+                   kd.zones[z].led_count ||
+                   c.zones[z].matrix_rows !=
+                   kd.zones[z].matrix_rows ||
+                   c.zones[z].matrix_cols !=
+                   kd.zones[z].matrix_cols ||
+                   c.zones[z].matrix_map !=
+                   kd.zones[z].matrix_map)
                 {
-                    if(c.zones[z].leds_count !=
-                       kd.zones[z].led_count ||
-                       c.zones[z].matrix_rows !=
-                       kd.zones[z].matrix_rows ||
-                       c.zones[z].matrix_cols !=
-                       kd.zones[z].matrix_cols ||
-                       c.zones[z].matrix_map !=
-                       kd.zones[z].matrix_map)
-                    {
-                        structural = true;
-                        break;
-                    }
+                    structural = true;
+                    break;
                 }
             }
-            fresh.emplace_back(kd.key, std::move(c));
         }
+        fresh.emplace_back(kd.key, std::move(c));
+        if(structural)
+        {
+            break;   /* re-enumeration below re-reads them all */
+        }
+    }
+
+    /*---- Step 3: commit (or re-enumerate) ------------------*/
+    YieldToSenders();
+    std::lock_guard<std::mutex> io(io_mutex_);
+    {
+        bool result = false;
+        if(!still_current(result))
+        {
+            return result;
+        }
+    }
+    try
+    {
         if(structural)
         {
             /* Same path as Enumerate() — a genuine topology
@@ -644,7 +762,9 @@ bool OpenRgbClient::RefreshStatus()
         /* In-place refresh: mode/parameter state and the
            last-enumerated colors only — the generation (and
            therefore every pending frame) stays valid. Committed
-           in one state-lock hold. */
+           in one state-lock hold; the generation check above
+           (same io hold) guarantees devices_ is the map the
+           sweep read. */
         {
             std::lock_guard<std::mutex> lock(mutex_);
             for(auto& pair : fresh)
@@ -652,8 +772,7 @@ bool OpenRgbClient::RefreshStatus()
                 const auto it = devices_.find(pair.first);
                 if(it == devices_.end())
                 {
-                    continue;    /* defensive — devices_ cannot
-                                    change under the io hold  */
+                    continue;    /* defensive */
                 }
                 DeviceRecord& rec    = it->second;
                 SdkController& c     = pair.second;
@@ -982,6 +1101,40 @@ void OpenRgbClient::MarkBrokenIo(const std::string& reason,
     next_attempt_      = now + options_.backoff.DelayFor(0);
 }
 
+void OpenRgbClient::NoteDeviceListUpdatedIo()
+{
+    device_list_updated_ = true;
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++topology_generation_;
+}
+
+void OpenRgbClient::ReadAsyncIo(TimePoint now)
+{
+    /* Caller holds io_mutex_. Only meaningful on a live
+       connection; DrainPending reads whatever is readable
+       right now (a zero-timeout select first — no wait when
+       the socket is quiet). */
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(state_ != ConnectionState::Connected)
+        {
+            return;
+        }
+    }
+    if(!stream_->IsOpen())
+    {
+        return;
+    }
+    try
+    {
+        DrainPending();
+    }
+    catch(const TransportError& e)
+    {
+        MarkBrokenIo(e.what(), now);
+    }
+}
+
 void OpenRgbClient::PollIo(TimePoint now)
 {
     /* stream_->IsOpen()/PeerClosed() are wire-side probes —
@@ -1042,6 +1195,32 @@ bool OpenRgbClient::Poll(TimePoint now)
 {
     std::lock_guard<std::mutex> io(io_mutex_);
     PollIo(now);
+    ReadAsyncIo(now);
+    /* P-5: the backend's controller list changed — re-enumerate
+       here, on the owner loop, never on a lane thread (the
+       send path only reads the notice and stops stale-index
+       writes through the generation bump). */
+    bool connected = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        connected = state_ == ConnectionState::Connected;
+    }
+    if(connected && device_list_updated_)
+    {
+        std::string err;
+        try
+        {
+            if(!EnumerateIo(err))
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                last_error_ = err;
+            }
+        }
+        catch(const TransportError& e)
+        {
+            MarkBrokenIo(e.what(), now);
+        }
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     return state_ == ConnectionState::Connected;
 }
@@ -1082,6 +1261,12 @@ std::vector<DeviceSnapshot> OpenRgbClient::Snapshots() const
     return out;
 }
 
+uint64_t OpenRgbClient::TopologyGeneration() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return topology_generation_;
+}
+
 bool OpenRgbClient::Snapshot(const DeviceKey& controller,
                              DeviceSnapshot& out) const
 {
@@ -1103,8 +1288,39 @@ bool OpenRgbClient::Snapshot(const DeviceKey& controller,
 SubmitResult OpenRgbClient::SubmitLatest(const RgbFrame& frame)
 {
     const TimePoint now = Clock::now();
-    std::lock_guard<std::mutex> io(io_mutex_);
-    PollIo(now);                       /* drive scheduled retries */
+    /* E-3: reconnect attempts never run here. A connect +
+       handshake + enumeration can take seconds, and this is
+       every lane's send path — a lane thread must not own the
+       reconnect schedule. The owner loop drives it through
+       Poll(); while not Connected a frame is refused at once,
+       before touching the wire lock. */
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(state_ != ConnectionState::Connected)
+        {
+            ++stats_.rejected;
+            return SubmitResult::Reject("backend not connected");
+        }
+    }
+    /* Announce the wait so a refresh between round trips lets
+       this send through first (see send_waiters_). */
+    send_waiters_.fetch_add(1, std::memory_order_acq_rel);
+    std::unique_lock<std::mutex> io(io_mutex_);
+    send_waiters_.fetch_sub(1, std::memory_order_acq_rel);
+    /* Cheap liveness probe (no I/O wait): a peer close that has
+       not surfaced as a send error yet still breaks the
+       connection here — the owner loop's Poll reconnects. */
+    if(stream_->IsOpen() && stream_->PeerClosed())
+    {
+        MarkBrokenIo("peer closed connection", now);
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++stats_.rejected;
+        return SubmitResult::Reject("backend not connected");
+    }
+    /* P-5: read a pending DEVICE_LIST_UPDATED before validating
+       — its generation bump refuses this frame instead of
+       sending it to a positional index that may have moved. */
+    ReadAsyncIo(now);
 
     /* Validate against committed state in one state-lock hold.
        Holding io_mutex_ means nothing can re-enumerate or

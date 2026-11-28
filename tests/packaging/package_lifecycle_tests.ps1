@@ -151,13 +151,16 @@ $startSrc = Get-Content (Join-Path $ScriptsDir "start-openrgb2.ps1") -Raw
 # otherwise make them refuse as unverifiable.
 $NoProcs = @()
 
-# Hosts may run a real elevated OpenRGB2 stack: the stop checks expect
-# exit 1 then (unverifiable, reported honestly), never a silent 0.
-function Get-HostUnverifiable {
-    return @(Get-Process -Name "openrgb2-engine","openrgb2-ui","OpenRGB" `
-        -ErrorAction SilentlyContinue | Where-Object {
-            $img = $null; try { $img = $_.Path } catch { $img = $null }
-            -not $img })
+# The host may run a real OpenRGB2 stack -- elevated, so its image
+# paths are unreadable here and every same-named lookup would see an
+# UNVERIFIABLE process (audit P-6: the suite failed whenever one ran).
+# Every check that drives the real scripts' same-named discovery
+# therefore injects a process table holding ONLY this suite's own
+# stand-ins (live Get-Process objects, so image paths are real); the
+# unverifiable case is covered with an explicit synthetic entry.
+function Get-SpawnedTable {
+    return @(foreach($id in $script:Spawned) {
+        Get-Process -Id $id -ErrorAction SilentlyContinue })
 }
 
 # Body runs under try/finally: an exception mid-run must not leak the
@@ -305,6 +308,41 @@ Kill-Spawned
 Remove-Item -Force -ErrorAction SilentlyContinue $runFile
 
 #====================================================================#
+Section "T4b engine dies at startup: the backend this start spawned is not orphaned"
+#====================================================================#
+# The engine stand-in (whoami.exe) rejects the engine's arguments and
+# exits at once; the backend stand-in (cmd.exe) stays up and has no
+# shutdown event (an older backend), so it cannot be closed
+# gracefully from here. It used to be left running with no run file
+# (audit P-14); now it is recorded so stop-openrgb2.ps1 closes it.
+$instI = Join-Path $TestRoot "install-i"
+New-FakeTree $instI "1.0.0" "I" (Join-Path $Sys32 "cmd.exe") (Join-Path $Sys32 "whoami.exe")
+$runFileI = Join-Path $instI "state\openrgb2.run.json"
+$rc = Invoke-ManagedStart -InstallDir $instI -Scene "" -NoUI $true `
+    -TakeOver $false -ScanOnly $false -Elevated $false `
+    -BackendWaitSeconds 1 -ListenerPidOverride 0 `
+    -ProcessList @([pscustomobject]@{pid=54; exe="Steam.exe"})
+Check ($rc -eq 1) "engine that exits during startup -> 1"
+$orphanPid = 0
+if(Test-Path $runFileI) {
+    $runI = Get-Content $runFileI -Raw | ConvertFrom-Json
+    $orphanPid = [int]$runI.backend_pid
+    $script:Spawned += $orphanPid
+    Check ([int]$runI.engine_pid -eq 0) "run file records no engine"
+} else { Check $false "run file records the backend this start spawned" }
+# stop-openrgb2.ps1 signals a run-file pid only after this same
+# image-path verification (Resolve-OwnPid -> Test-OwnProcess).
+Check ($orphanPid -gt 0 -and
+       (Test-OwnProcess $orphanPid (Join-Path $instI "backend\OpenRGB.exe"))) `
+      "the recorded pid is the still-running backend this start spawned (stop can verify it)"
+# whatever happened above, never leak the stand-in (matched by OUR
+# temp image path only)
+$script:Spawned += @(Get-Process -Name "OpenRGB" -ErrorAction SilentlyContinue |
+    Where-Object { try { $_.Path -eq (Join-Path $instI "backend\OpenRGB.exe") } catch { $false } } |
+    ForEach-Object { $_.Id })
+Kill-Spawned
+
+#====================================================================#
 Section "T5 update preserves user state"
 #====================================================================#
 $instB = Join-Path $TestRoot "install-b"
@@ -417,7 +455,7 @@ New-Item -ItemType Directory -Force (Join-Path $instC "state") | Out-Null
 } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $instC "state\openrgb2.run.json")
 
 $rc = Invoke-ManagedStop -InstallDir $instC -TimeoutSeconds 3 `
-    -Force $true -CtlExe $ctlStub
+    -Force $true -CtlExe $ctlStub -ProcessList (Get-SpawnedTable)
 Check ($rc -eq 0) "clean stop returns 0"
 if(Test-Path $marker) {
     $m = Get-Content $marker -Raw | ConvertFrom-Json
@@ -435,19 +473,18 @@ Check ((Sha (Join-Path $instC "profiles\local\engine-state.json")) -eq $profBefo
 Check (-not (Test-Path (Join-Path $instC "state\openrgb2.run.json"))) `
       "run file cleared"
 
-# nothing-running stop is a clean no-op -- unless the HOST itself
-# has same-named processes we cannot verify (e.g. a real elevated
-# managed stack running on the dev box): those are honestly reported
-# and the exit is 1, never a silent 0. Expected rc mirrors the
-# script's own rule: unreadable image path -> unverifiable.
+# nothing-running stop is a clean no-op.
 $rc = Invoke-ManagedStop -InstallDir $instC -TimeoutSeconds 1 `
-    -Force $false -CtlExe $ctlStub
-$hostUnverifiable = @(Get-HostUnverifiable)
-if($hostUnverifiable.Count -eq 0) {
-    Check ($rc -eq 0) "stop with nothing running exits 0"
-} else {
-    Check ($rc -eq 1) `
-        "stop exits 1 when host has unverifiable same-named procs (elevated stack present)"
+    -Force $false -CtlExe $ctlStub -ProcessList (Get-SpawnedTable)
+Check ($rc -eq 0) "stop with nothing running exits 0"
+# Same-named processes whose image path cannot be read (an elevated
+# stack seen from this shell) are reported honestly -- exit 1, never
+# a silent 0 -- and never touched.
+foreach($name in @("openrgb2-ui", "openrgb2-engine", "OpenRGB")) {
+    $hiddenProc = @([pscustomobject]@{ ProcessName=$name; Id=4242; Path=$null })
+    $rc = Invoke-ManagedStop -InstallDir $instC -TimeoutSeconds 1 `
+        -Force $true -CtlExe $ctlStub -ProcessList $hiddenProc
+    Check ($rc -eq 1) "stop exits 1 when a same-named $name is unverifiable"
 }
 
 # UI step: closing the window hides the UI to the tray, so without
@@ -458,18 +495,16 @@ $uiProc = Start-Process -FilePath (Join-Path $instC "openrgb2-ui.exe") -PassThru
 $script:Spawned += $uiProc.Id
 Start-Sleep -Milliseconds 400
 $rc = Invoke-ManagedStop -InstallDir $instC -TimeoutSeconds 1 `
-    -Force $false -CtlExe $ctlStub
+    -Force $false -CtlExe $ctlStub -ProcessList (Get-SpawnedTable)
 $uiAlive = $false
 try { $uiAlive = $null -ne (Get-Process -Id $uiProc.Id -ErrorAction Stop) } catch {}
 Check ($rc -eq 1 -and $uiAlive) "UI still running without -Force -> reported (exit 1), not killed"
 $rc = Invoke-ManagedStop -InstallDir $instC -TimeoutSeconds 1 `
-    -Force $true -CtlExe $ctlStub
+    -Force $true -CtlExe $ctlStub -ProcessList (Get-SpawnedTable)
 $uiAlive = $false
 try { $uiAlive = $null -ne (Get-Process -Id $uiProc.Id -ErrorAction Stop) } catch {}
 Check (-not $uiAlive) "stop -Force closes OUR UI (verified by image path)"
-if(@(Get-HostUnverifiable).Count -eq 0) {
-    Check ($rc -eq 0) "stop -Force with the UI exits 0"
-}
+Check ($rc -eq 0) "stop -Force with the UI exits 0"
 Kill-Spawned
 
 #====================================================================#
@@ -480,7 +515,8 @@ New-FakeTree $instD "1.0.0" "D" (Join-Path $Sys32 "cmd.exe") (Join-Path $Sys32 "
 $running = Start-Process -FilePath (Join-Path $instD "openrgb2-engine.exe") -PassThru
 $script:Spawned += $running.Id
 Start-Sleep -Milliseconds 500
-$rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instD -SkipVerify $true
+$rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instD -SkipVerify $true `
+    -SkipAclHardening $true -ProcessList (Get-SpawnedTable)
 Check ($rc -eq 1) "update refused while engine running"
 Check ((Read-Tag $instD) -eq "D") "refused update changed nothing"
 Check (-not (Test-Path "$instD.previous")) "refused update took no snapshot"
@@ -491,14 +527,16 @@ Kill-Spawned
 $ui = Start-Process -FilePath (Join-Path $instD "openrgb2-ui.exe") -PassThru
 $script:Spawned += $ui.Id
 Start-Sleep -Milliseconds 500
-$rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instD -SkipVerify $true
+$rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir $instD -SkipVerify $true `
+    -SkipAclHardening $true -ProcessList (Get-SpawnedTable)
 Check ($rc -eq 1) "update refused while UI running"
 Check ((Read-Tag $instD) -eq "D") "UI-blocked update changed nothing"
 # rollback refuses while running too (needs a valid backup present
 # first -- the running check must fire before any restore).
 New-FakeTree "$instD.previous" "0.9.0" "D0" `
     (Join-Path $Sys32 "cmd.exe") (Join-Path $Sys32 "cmd.exe")
-$rc = Invoke-PackageRollback -InstallDir $instD -BackupDir "" -SkipVerify $true
+$rc = Invoke-PackageRollback -InstallDir $instD -BackupDir "" -SkipVerify $true `
+    -ProcessList (Get-SpawnedTable)
 Check ($rc -eq 1) "rollback refused while UI running"
 Check ((Read-Tag $instD) -eq "D") "refused rollback changed nothing"
 Kill-Spawned
@@ -530,6 +568,82 @@ try {
     Check ($rc -eq 1) "update refused while an install exe is locked"
     Check ((Read-Tag $instD) -eq "D") "lock-refused update changed nothing"
 } finally { $lock.Dispose() }
+
+#====================================================================#
+Section "T8b stop: windowless backend fallback; backend waits for the engine"
+#====================================================================#
+# A headless backend owns NO window, so the taskkill (no /F) fallback
+# writes an error to stderr -- under Windows PowerShell 5.1 with
+# $ErrorActionPreference = "Stop" that "2>&1" line used to become a
+# terminating error and abort the whole stop (audit B-2).
+# The backend stand-in is a copy of PING.EXE: unlike a powershell.exe
+# stand-in (.NET keeps a hidden top-level window, so taskkill succeeds)
+# it owns no window at all, exactly like the headless --server backend.
+$instG = Join-Path $TestRoot "install-g"
+$psExe = Join-Path $Sys32 "WindowsPowerShell\v1.0\powershell.exe"
+New-FakeTree $instG "1.0.0" "G" (Join-Path $Sys32 "PING.EXE") $psExe
+New-Item -ItemType Directory -Force (Join-Path $instG "state") | Out-Null
+function Start-Windowless([string]$exe) {
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe
+    $psi.Arguments = if($exe -like "*OpenRGB.exe") { "-n 300 127.0.0.1" }
+                     else { '-NoProfile -Command "Start-Sleep 300"' }
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true          # no console window at all
+    $psi.RedirectStandardOutput = $true  # keep ping's lines out of the log
+    $p = [Diagnostics.Process]::Start($psi)
+    $script:Spawned += $p.Id
+    return $p
+}
+function Write-RunFile([string]$dir, [int]$enginePid, [int]$backendPid) {
+    [ordered]@{
+        install_dir = $dir; engine_pid = $enginePid; backend_pid = $backendPid
+        engine_exe  = Join-Path $dir "openrgb2-engine.exe"
+        backend_exe = Join-Path $dir "backend\OpenRGB.exe"
+    } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $dir "state\openrgb2.run.json")
+}
+
+$engG = Start-Windowless (Join-Path $instG "openrgb2-engine.exe")
+$bkG  = Start-Windowless (Join-Path $instG "backend\OpenRGB.exe")
+Start-Sleep -Milliseconds 400
+$env:OPENRGB2_TEST_ENGINE_PID  = "$($engG.Id)"
+$env:OPENRGB2_TEST_BACKEND_PID = "$($bkG.Id)"
+Write-RunFile $instG $engG.Id $bkG.Id
+$threw = $null
+try {
+    $rc = Invoke-ManagedStop -InstallDir $instG -TimeoutSeconds 2 `
+        -Force $true -CtlExe $ctlStub
+} catch { $threw = $_.Exception.Message }
+Check ($null -eq $threw) "windowless backend: the taskkill fallback never aborts the stop ($threw)"
+$bkAlive = $false
+try { $bkAlive = $null -ne (Get-Process -Id $bkG.Id -ErrorAction Stop) } catch {}
+Check (-not $bkAlive) "windowless backend still reached the -Force step after the graceful bound"
+Kill-Spawned
+
+# The engine did NOT exit (QUIT ignored, no -Force): the backend must
+# not be signaled -- closing it under a live engine breaks the
+# ordering the whole script exists for. The test owns the backend's
+# shutdown event, so a signal would be visible here.
+$noopCtl = Join-Path $TestRoot "noop-ctl.ps1"
+Set-Content -Encoding UTF8 $noopCtl "# ignores QUIT"
+$engG = Start-Windowless (Join-Path $instG "openrgb2-engine.exe")
+$bkG  = Start-Windowless (Join-Path $instG "backend\OpenRGB.exe")
+Start-Sleep -Milliseconds 400
+$evG = New-Object Threading.EventWaitHandle($false,
+           [Threading.EventResetMode]::ManualReset,
+           "Local\OpenRGB2-Backend-Shutdown-$($bkG.Id)")
+try {
+    Write-RunFile $instG $engG.Id $bkG.Id
+    $rc = Invoke-ManagedStop -InstallDir $instG -TimeoutSeconds 1 `
+        -Force $false -CtlExe $noopCtl
+    Check ($rc -eq 1) "engine outlived the bound -> stop exits 1"
+    Check (-not $evG.WaitOne(0)) "backend NOT signaled while the engine still runs"
+    $bkAlive = $false
+    try { $bkAlive = $null -ne (Get-Process -Id $bkG.Id -ErrorAction Stop) } catch {}
+    Check $bkAlive "backend left running for the retry"
+    Check (Test-Path (Join-Path $instG "state\openrgb2.run.json")) "run file kept for the retry"
+} finally { $evG.Dispose() }
+Kill-Spawned
 
 #====================================================================#
 Section "T9 backend guard: foreign OpenRGB.exe refuses the spawn"
@@ -673,6 +787,37 @@ $rc = Invoke-PackageRollback -InstallDir $instE -BackupDir $pkgEvil -SkipVerify 
 Check ($rc -eq 1 -and (Read-Tag $instE) -eq "V2") "rollback refuses a backup manifest with a '..' path"
 
 #====================================================================#
+Section "T12b -InstallDir with a trailing separator"
+#====================================================================#
+# Resolve-Path keeps a trailing '\', and the snapshot path is built
+# as "$InstallDir.previous" -- "C:\x\inst\.previous" lands INSIDE the
+# install, so the update copied the install into itself (audit P-9).
+$instH = Join-Path $TestRoot "install-h"
+New-UserStateInstall $instH
+foreach($sep in @('\', '/')) {
+    $threw = $null
+    try {
+        $rc = Invoke-PackageUpdate -PackageDir $pkgV2 -InstallDir ($instH + $sep) `
+            -SkipVerify $false -SkipAclHardening $true -ProcessList $NoProcs
+    } catch { $threw = $_.Exception.Message; $rc = -1 }
+    Check ($rc -eq 0 -and $null -eq $threw) "update with -InstallDir '...$sep' returns 0 ($threw)"
+    Check (-not (Test-Path (Join-Path $instH ".previous")) -and
+           -not (Test-Path (Join-Path $instH ".previous.tmp"))) `
+          "update with '...$sep': no snapshot inside the install"
+    Check ((Test-Path "$instH.previous") -and (Read-Tag "$instH.previous") -eq "V1") `
+          "update with '...$sep': snapshot is the sibling install-h.previous"
+    $threw = $null
+    try {
+        $rc = Invoke-PackageRollback -InstallDir ($instH + $sep) -BackupDir "" `
+            -SkipVerify $false -ProcessList $NoProcs
+    } catch { $threw = $_.Exception.Message; $rc = -1 }
+    Check ($rc -eq 0 -and (Read-Tag $instH) -eq "V1") `
+          "rollback with -InstallDir '...$sep' finds the sibling snapshot ($threw)"
+    Remove-Item -LiteralPath "$instH.previous" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $instH ".previous") -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+#====================================================================#
 Section "T13 start: unreadable image path is unverifiable, never foreign"
 #====================================================================#
 # PID 4 (System) is a live process whose image path no user-mode
@@ -787,6 +932,35 @@ Check ($text -match "OpenRGB2 managed startup" -and
 $expectRc = if($text -match "UNVERIFIABLE:") { 4 }
             elseif($text -match "ownership CONFLICT:") { 3 } else { 0 }
 Check ($scanRc -eq $expectRc) "start -File exit code $scanRc matches its stdout findings (expected $expectRc)"
+
+#====================================================================#
+Section "T16 start -Elevated: forwards -ScanOnly, returns the elevated exit code"
+#====================================================================#
+# The UAC re-launch used to drop -ScanOnly (the elevated copy started
+# the whole stack) and always returned 0 without waiting (audit
+# P-14). Start-Process is stubbed: no UAC prompt, nothing spawned.
+$script:ElevCall = $null
+$rcElev = & {
+    function Start-Process {
+        param([string]$FilePath, [string]$Verb, [object]$ArgumentList,
+              [switch]$PassThru, [switch]$Wait, [string]$WindowStyle)
+        $script:ElevCall = [pscustomobject]@{
+            File = $FilePath; Verb = $Verb; Args = (@($ArgumentList) -join ' ')
+            PassThru = [bool]$PassThru; Waited = $false }
+        $fake = [pscustomobject]@{ ExitCode = 3 }
+        $fake | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+            $script:ElevCall.Waited = $true }
+        if($PassThru) { return $fake }
+    }
+    Invoke-ManagedStart -InstallDir $instA -Scene "" -NoUI $true `
+        -TakeOver $false -ScanOnly $true -Elevated $true `
+        -BackendWaitSeconds 1 -ListenerPidOverride 0
+}
+Check ($null -ne $script:ElevCall -and $script:ElevCall.Verb -eq "RunAs") "-Elevated re-launches via RunAs"
+Check ($null -ne $script:ElevCall -and $script:ElevCall.Args -match '(^|\s)-ScanOnly(\s|$)') `
+      "-Elevated forwards -ScanOnly to the elevated copy"
+Check ($null -ne $script:ElevCall -and $script:ElevCall.Waited) "-Elevated waits for the elevated copy"
+Check (@($rcElev).Count -eq 1 -and $rcElev -eq 3) "-Elevated returns the elevated copy's exit code (3)"
 
 } catch {
     $script:Fail++

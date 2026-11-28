@@ -69,7 +69,7 @@ Item {
         function onVisibilityChanged() { root.syncDiagActive(); }
     }
 
-    Flickable {
+    PageFlickable {     /* scroll bar + focus-follow (audit Q-12) */
         anchors.fill: parent
         contentHeight: col.implicitHeight
         clip: true

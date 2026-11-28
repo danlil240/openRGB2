@@ -93,7 +93,7 @@ Item {
         }
     }
 
-    Flickable {
+    PageFlickable {     /* scroll bar + focus-follow (audit Q-12) */
         anchors.fill: parent
         contentWidth: col.implicitWidth
         contentHeight: col.implicitHeight + Theme.spaceXL

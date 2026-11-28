@@ -47,6 +47,116 @@ file lists everything that is still open.
   `C:\Users\daniel\tools\openrgb-unified`. In CTest the UI tests need
   `QT_QPA_PLATFORM=offscreen` and the Qt `bin` directory on `PATH`.
 
+## Status after the fix pass (2026-11-28, later)
+
+Every bug finding below was worked by a subagent on its own `fix/*`
+branch from `bf51423`, with a regression test seen failing first
+(exceptions noted). Features and other non-bug items got plans in
+[`docs/plans/`](plans/README.md). All of it is combined on
+`integration/audit-fixes` (every branch plus this doc, conflicts resolved
+as described below): a clean Release build, and CTest 91/91 on two
+consecutive runs, `package_lifecycle_test` included, with the elevated
+install running. It is not merged into `main` yet. Each branch ran the full suite with only the known P-6 failure;
+`fix/p-6-lifecycle-test-isolation` makes that test pass too. No branch
+was checked in the running app or on hardware.
+
+| Finding | Branch(es) | Result |
+| --- | --- | --- |
+| E-2 / P-8 | `fix/e-2-timer-resolution` | fixed (`e2e_responsiveness_test` spacing 5→10 ms, else it trips the 128 req/s bound) |
+| E-3 | `fix/e-3-topology-refresh-stall` | fixed |
+| E-4 | `fix/e-4-identify-seq` | fixed |
+| E-5 | `fix/e-5-static-reassert` | fixed (3 s keyframe, `keyframes` stat); visibility on the wireless group needs hardware |
+| E-6 | `fix/e-6-playback-evaluate-gate` | fixed |
+| E-7 / P-11 (suspend) | `fix/e-7-suspend-gate` | fixed (an in-flight send is not awaited) |
+| E-8 | `fix/e-8-preview-sample-cache` | fixed |
+| E-9 | `fix/e-9-active-workspace-race` | fixed, no test (no deterministic symptom) |
+| E-10 / P-11 (shutdown) | `fix/e-10-shutdown-bounds` | fixed |
+| E-11 / I-3 | `fix/e-11-quit-backend-race` | fixed |
+| E-12 | plans E-12a/b/c | planned |
+| I-2 | `fix/i-2-json-depth-cap` | fixed |
+| I-4 | `fix/i-4-scene-out-of-band` | fixed above 256 KiB; smaller scenes stay inline; diag pipe gets metadata only for large scenes |
+| I-5 | `fix/i-5-transfer-token-expiry` | fixed (finished tokens live 15 min) |
+| I-6 | `fix/i-6-reader-thread-io` | fixed |
+| I-7 | `fix/i-7-event-copies` | fixed; colour-string packing skipped (wire change) |
+| I-8 | `fix/i-8-preview-coalesce` | fixed |
+| I-9 | `fix/i-9-pipe-integrity` | fixed; elevated paths tested by injection only |
+| I-10 | `fix/i-10-ctl-sessions` | fixed; preview verbs deliberately not offered |
+| I-11 | `fix/i-11-manifest-type-check` | fixed |
+| I-12 | `fix/i-12-protocol-mismatches` | fixed |
+| I-13 | `fix/i-13-layout-lost-update`, `fix/i-13-subscribe-snapshot-order` (stacked on I-8), `fix/i-13-commit-library-rollback`, `fix/i-13-calibration-led-range`, `fix/i-13-add-object-bound`, `fix/i-13-workspace-id-rules` | all six fixed |
+| C-2 | `fix/c-2-phase-continuity` | fixed |
+| C-4 | `fix/c-4-flow-space` | fixed (Reactor no longer shows the Wave card) |
+| C-5 | `fix/c-5-flow-stops` (stacked on C-4) | fixed |
+| C-6 | `fix/c-6-gesture-cancel` | fixed |
+| C-7 | `fix/c-7-instance-targets` | instance-id part fixed; type/category targets planned |
+| C-8 | `fix/c-8-inputbus-idle` | fixed |
+| C-9 | `fix/c-9-prepared-layers` (stacked on C-2) | fixed, output bit-identical |
+| C-10 | `fix/c-10-evaluate-overhead` (stacked on C-9) | fixed |
+| C-11 | `fix/c-11-wave-goldens` | fixed (instance-id test is on the C-7 branch) |
+| C-12 | `fix/c-12-float-narrowing` | fixed |
+| C-13 | plan | planned |
+| C-14 | `fix/c-14-zone-addr-base` | fixed (dormant: no caller yet) |
+| C-15 | `fix/c-15-onset-zero-sensitivity`, `fix/c-15-preset-list-lifetime`, `fix/c-15-gradient-wave-convention` | fixed; the convention item is documented only (changing it would alter saved looks) |
+| U-3, U-5, U-7, U-8, U-9, U-10, U-11 | `fix/u-<n>-…` (one each) | fixed |
+| U-6 | `fix/u-6-open-folder-path` + the pipe-owner part on `fix/i-9-pipe-integrity` | fixed |
+| U-12 | `fix/u-12-wave-card-adapter` (stacked on C-5) | fixed |
+| U-13 | `fix/u-13-save-over-ipc-bound`, `fix/u-13-viewport-sequence-reset` | fixed |
+| U-14 | plan | planned |
+| Q-1 … Q-13 | `fix/q-<n>-…` (one each) | all fixed |
+| Q-14 | plan | planned |
+| B-2 | `fix/b-2-stop-script` | reproduced on PowerShell 5.1 and fixed |
+| P-2, P-4, P-5, P-6, P-9 | `fix/p-<n>-…` (one each) | fixed |
+| P-7 | `docs/p-7-provenance-record` + plan | record added; pacing change planned |
+| P-10, P-12, P-13 | plans | planned (P-2's branch adds the first `stage-release.ps1` test) |
+| P-14 | `fix/p-14-verifyonly-hashes`, `fix/p-14-elevated-start-scanonly`, `fix/p-14-engine-startup-orphan`, `fix/p-14-backend-pin`, `fix/p-14-skip-unparsable-controller` | all five fixed |
+| Stale docs and TODO | `docs/hygiene-stale-docs` | fixed (ARGB headers left "unsupported": no hardware re-check recorded) |
+| Roadmap gaps, hygiene | plans ROADMAP-gaps, HYG-1 … HYG-5 | planned |
+
+**Merging.** Merging all 80 branches in turn, 67 apply cleanly and 13
+conflict (in the order used on `integration/audit-fixes`, a few more
+test files collided too: `workspace_store_test.cpp`,
+`ipc_engine_service_test.cpp`, `sdk_client_test.cpp`,
+`ui_workspace_test.cpp`; each was two new tests at the same spot, kept
+both). P-14's unparsable-controller handling was folded into E-3's new
+`RefreshStatus` loop (mark structural and re-enumerate). I-4's
+`kind:"scene"` download sits before I-12's kind check, so both hold.
+Originally conflicting: `c-15-gradient-wave-convention`, `e-2-timer-resolution`,
+`e-8-preview-sample-cache`, `i-11-manifest-type-check`,
+`i-13-workspace-id-rules`, `i-4-scene-out-of-band`,
+`i-5-transfer-token-expiry`, `i-6-reader-thread-io`,
+`i-7-event-copies`, `p-14-skip-unparsable-controller`,
+`p-5-device-list-updated`, `u-7-job-terminal-latch`,
+`u-9-fetch-revision-label`. Resolutions the agents spelled out:
+
+- **E-3 + P-5** (`OpenRgbClient.cpp` `SubmitLatest`): keep E-3's block
+  and add P-5's `ReadAsyncIo(now)` right after the `PeerClosed` check;
+  drop `PollIo(now)`. Taking E-3's side alone silently loses P-5's read.
+- **I-5 + I-8**: both edit the job-event hook in `EngineService.cpp`;
+  keep both changes. I-4, I-7 and I-8 touch the encode lines of
+  `IpcServer::Emit`/`EmitTo`.
+- **U-3 + U-7**: one hunk in `WorkspaceController::OnJobEvent` needs a
+  hand merge.
+- **C-15 convention + C-9**: re-place the comment block above the new
+  `EvalWave`.
+- **E-2 + E-10**: keep both sides in the two CMakeLists and
+  `EngineHostOptions`.
+
+**Follow-ups the agents found (not done):**
+
+- `DevicePresetController` treats a `resource_get` reply without a
+  `document` as an error, so device types over 768 KiB (I-12) won't
+  open in the editor yet.
+- `ui/studio/WaveControls.qml` still says "Colors (%1 of 2–5)" after
+  U-12 widened the range to 1–64.
+- P-4: the existing priority-7 sign-in task shows as stale, and the UI
+  calls it "a task for another OpenRGB2 location".
+- `stage-release.ps1`: under StrictMode, `.Count` on a single preset
+  JSON throws (harmless with the real presets).
+- `packaging/windows/RELEASE.md` lines 89 and 139 still say the ARGB
+  headers enumerate 0 LEDs.
+- About 15 vendor commits after the import are not itemised in
+  `vendor/provenance/MANIFEST.md`.
+
 ## Suggested next ten
 
 Ordered by user impact per unit of effort.

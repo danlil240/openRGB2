@@ -287,6 +287,13 @@ public:
     std::optional<EditorEdit> CommitLayerGesture(
         const std::string& label = "edit layers");
     void CancelLayerGesture();
+    /* Cancel whichever gesture is open (transform or layer),
+       restoring its begin snapshot. Session entry points that
+       replace or rewind the document (load, remote move, draft
+       recovery, discard, whole-document edits) call this BEFORE
+       touching ws, so a stale snapshot can never be restored
+       over, or recorded against, the new document. */
+    void CancelGestures();
 
     /* Stack-level ops. `primitive` must be one of the JSON grammar
        names ("static" | "gradient" | "wave" | "pulse" | "comet" |
@@ -338,20 +345,27 @@ public:
                                               const ColorF& color);
 
     /* Directional-flow op (the Wave card): ONE record that drives
-       every enabled `wave` layer together, so a look built from a
+       every flow layer (IsFlowLayer: untargeted world-space
+       `wave`, enabled or not) together, so a look built from a
        color flow plus a brightness swell keeps both moving the
        same way. Unset fields are left alone.
          direction  — non-zero, finite; normalized onto each layer
                       (wave bands travel along +direction)
-         colors     — 2..5 stops, rewritten as evenly spaced stops
-                      on the FIRST wave layer (the palette wraps,
-                      so the loop is seamless); other layers keep
-                      their own palette
-         speed      — m/s of the first layer, > 0
+         colors     — 1..EFFECT_MAX_STOPS stops (any count the
+                      card can show; its +/- keep new edits in
+                      2..5) on the FIRST flow layer in stack
+                      order; the same count recolours the stops
+                      in place (positions and alpha kept), a new
+                      count is rewritten as evenly spaced stops
+                      (the palette wraps, so the loop is
+                      seamless); other layers keep their palette
+         speed      — m/s magnitude of the first layer, > 0
          wavelength — meters of the first layer, > 0
-       speed/wavelength rescale every wave layer by the same ratio
-       as the first, so a look's internal proportions survive.
-       No enabled wave layer -> refused with LastError(). */
+       speed/wavelength rescale every flow layer by the same ratio
+       as the first (speed by |first|, so signs survive), so a
+       look's internal proportions survive; a first layer at 0
+       takes the value alone. No flow layer -> refused with
+       LastError(). */
     struct FlowEdit
     {
         std::optional<Vec3>  direction;
@@ -360,6 +374,13 @@ public:
         std::optional<float> wavelength;
     };
     std::optional<EditorEdit> SetFlow(const FlowEdit& f);
+    /* Is this layer one the Wave card drives? Untargeted
+       world-space `wave` layers only: the card's direction is a
+       desk (world) axis, so writing it onto a local-space layer
+       (Reactor's RAM wave) or onto a layer masked to a few
+       objects would turn it into a uniform flash. SetFlow and
+       the adapter's flowState().available share this test. */
+    static bool IsFlowLayer(const EffectLayer& l);
 
     /* Path-point ops (comet). */
     std::optional<EditorEdit> AddLayerPathPoint(size_t i,

@@ -494,13 +494,16 @@ int main()
            commit's apply_scene seam can never race a
            destructing IPC service. */
         "workspace-jobs",
+        /* I-6: the background last-scene writer drains once
+           no apply can arrive any more. */
+        "scene-snapshot",
         "scene-worker", "reactive-inputs",
         "delivery-pipeline", "sdk-transport",
     };
-    CHECK(sd.steps.size() == 9);
-    if(sd.steps.size() == 9)
+    CHECK(sd.steps.size() == 10);
+    if(sd.steps.size() == 10)
     {
-        for(size_t i = 0; i < 9; ++i)
+        for(size_t i = 0; i < 10; ++i)
         {
             CHECK(sd.steps[i].name == want_order[i]);
             CHECK(sd.steps[i].within);

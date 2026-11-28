@@ -61,6 +61,7 @@
 #include "SdkWire.h"
 #include "Transport.h"
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -99,6 +100,9 @@ struct ConnectionSnapshotInfo
     uint32_t        protocol_version  = 0;    /* negotiated, <= 4 */
     uint32_t        reconnect_attempt = 0;
     std::string     last_error;
+    /* Server indices whose CONTROLLER_DATA could not be parsed
+       at the last enumeration -- skipped, not fatal. */
+    std::vector<uint32_t> skipped_controllers;
 };
 
 /* Cached result of the LIANLI_WIRELESS_STATUS vendor
@@ -191,7 +195,14 @@ public:
        or removed device, caught by the count) falls through
        to the full EnumerateIo path and bumps the
        generation. False when disconnected or the fetch fails
-       (connection marked broken). */
+       (connection marked broken).
+       The wire lock is taken per round trip, never across the
+       whole sweep (E-3): live frames go out between the count
+       and controller-data requests, so a refresh delays a
+       send by at most one status round trip. A concurrent
+       re-enumeration (reconnect, resize, another refresh) ends
+       the refresh early with true — the topology is already
+       fresh. */
     bool RefreshStatus();
 
     /* Last server-reported mode state for `controller` —
@@ -210,7 +221,14 @@ public:
        while Connected (a peer close starts the schedule), and
        performs the next due attempt while Reconnecting. After
        backoff.max_attempts failures the state latches to
-       Disconnected until Connect()/ReconnectNow(). */
+       Disconnected until Connect()/ReconnectNow(). Poll and
+       ReconnectNow are the ONLY reconnect drivers — the send
+       path (SubmitLatest, lane threads) never attempts one
+       (E-3); the owner loop polls. While Connected, Poll also
+       reads unsolicited backend packets: DEVICE_LIST_UPDATED
+       (packet 100 — the backend sends it to every client at
+       any protocol version when its controller list changes)
+       re-enumerates here, on the owner loop (P-5). */
     bool            Poll(TimePoint now = Clock::now());
     bool            ReconnectNow();
     uint32_t        ReconnectAttempt() const;
@@ -225,6 +243,12 @@ public:
     std::vector<DeviceSnapshot> Snapshots() const;
     bool Snapshot(const DeviceKey& controller, DeviceSnapshot& out) const;
 
+    /* The current topology generation (state lock only, no
+       copy) — lets callers cache snapshot-derived data and
+       rebuild only when the topology moved (E-6). Mode/colour
+       refreshes never bump it. */
+    uint64_t TopologyGeneration() const;
+
     /*---- IFrameSink: the direct-mode send path ----------------*\
     | Validates the frame against the current snapshot          |
     | (unknown controller, not connected, stale topology        |
@@ -233,7 +257,9 @@ public:
     | controller index, and sends ONE UPDATELEDS packet for     |
     | the whole controller. A transport failure breaks the      |
     | connection (Reconnecting) and returns Rejected —          |
-    | SubmitResult is never "displayed".                        |
+    | SubmitResult is never "displayed". While not Connected    |
+    | it rejects at once without touching the wire: reconnect   |
+    | attempts belong to Poll() (E-3).                          |
     \*---------------------------------------------------------*/
     SubmitResult  SubmitLatest(const RgbFrame& frame) override;
     DeliveryStats Stats() const override;
@@ -333,8 +359,26 @@ private:
     void NoteWirelessReplyIo();
     void MarkBrokenIo(const std::string& reason, TimePoint now);
     void PollIo(TimePoint now);
+    /* P-5: non-blocking read of unsolicited packets while
+       Connected (RecvPacket flags DEVICE_LIST_UPDATED). A
+       transport fault marks the connection broken. */
+    void ReadAsyncIo(TimePoint now);
+    /* RecvPacket saw DEVICE_LIST_UPDATED: the positional
+       controller indices may have shifted. Bumps the topology
+       generation WITHOUT re-stamping the snapshots (the
+       ResizeZone rule), so every frame stamped on the old
+       topology is refused as stale until the re-enumeration
+       Poll() runs. */
+    void NoteDeviceListUpdatedIo();
 
     mutable std::mutex   io_mutex_;  /* wire serialization      */
+    /* Frame sends waiting for io_mutex_ (E-3). std::mutex is not
+       fair: a refresh that releases and re-takes the wire lock
+       between round trips would win every race against a lane
+       blocked on it. The refresh yields while this is non-zero
+       (bounded — see YieldToSenders). */
+    std::atomic<uint32_t> send_waiters_{ 0 };
+    void YieldToSenders() const;
     mutable std::mutex   mutex_;     /* state reads/commits     */
     OpenRgbClientOptions options_;
     std::unique_ptr<IStreamTransport> stream_;
@@ -361,9 +405,19 @@ private:
        duplicate-key controllers collapse. */
     uint32_t               server_controller_count_ = 0;
 
+    /* Server indices skipped at the last enumeration because
+       their CONTROLLER_DATA did not parse (state lock). */
+    std::vector<uint32_t>  skipped_controllers_;
+
     /* Packet-4000 requests sent whose replies have not been
        read yet. io_mutex_ only (wire-side bookkeeping). */
     uint32_t               wireless_pending_ = 0;
+
+    /* DEVICE_LIST_UPDATED seen since the last enumeration
+       (P-5). io_mutex_ only; EnumerateIo clears it before its
+       count request, so a notice that lands mid-enumeration
+       triggers one more. */
+    bool                   device_list_updated_ = false;
 };
 
 } /* namespace sdk */

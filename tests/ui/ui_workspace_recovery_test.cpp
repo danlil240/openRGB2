@@ -50,8 +50,10 @@
 #include "EngineBridge.h"
 #include "WorkspaceController.h"
 #include "WorkspaceDraftStore.h"
+#include "LaunchHardening.h"
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QTemporaryDir>
 #include <QStringList>
 #include <QVariantMap>
@@ -339,6 +341,31 @@ int main(int argc, char** argv)
           root);
     CHECK(fs::path(rig.ctl.workspaceDir().toStdWString()) ==
           wsdir);
+    /* Audit U-6: the engine-reported folder opens through the
+       absolute system explorer.exe with the native path — never
+       QDesktopServices/openUrl. */
+    {
+        QString     launched_program;
+        QStringList launched_args;
+        int         launches = 0;
+        rig.ctl.setShellLauncherForTesting(
+            [&](const QString& program, const QStringList& args)
+            {
+                ++launches;
+                launched_program = program;
+                launched_args    = args;
+                return true;
+            });
+        rig.ctl.openWorkspaceFolder();
+        CHECK(launches == 1);
+        CHECK(launched_program == launch::SystemExplorerPath());
+        CHECK(launched_args.size() == 1);
+        CHECK(launched_args.value(0) ==
+              QDir::toNativeSeparators(QDir::cleanPath(
+                  QString::fromStdWString(wsdir.wstring()))));
+        CHECK(rig.ctl.error().isEmpty());
+        rig.ctl.setShellLauncherForTesting(nullptr);
+    }
     CHECK(rig.ctl.externalChange().isEmpty());
     CHECK(!rig.ctl.dirty());
 

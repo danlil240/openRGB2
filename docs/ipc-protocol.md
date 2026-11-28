@@ -36,6 +36,26 @@ implementer needs nothing else.
   ELEVATED engine of the same user creates — the managed engine runs
   elevated while the UI may not); failing that, the server process's
   token user must equal the client's. Otherwise the connect fails closed.
+- Integrity (audit I-9/U-6): the SDDL also carries an explicit
+  `S:(ML;;NW;;;ME)` label, and the listener drops any client whose token
+  is below Medium (or unreadable). The client additionally requires the
+  server to run at no lower integrity than itself — the server token's
+  level when readable, else a lower bound (an Administrators/LocalSystem
+  owner implies an elevated creator; otherwise the object's label) — and
+  an ELEVATED client requires an Administrators/LocalSystem owner (or a
+  this-user owner whose server token it read at its own level, for
+  machines whose policy makes the creator the owner). Allowed
+  combinations:
+
+  | client \ server | medium | elevated | SYSTEM |
+  | --- | --- | --- | --- |
+  | medium | allow | allow (shipped: elevated stack, non-elevated UI/ctl) | allow |
+  | elevated | **refuse** | allow | allow |
+  | low / sandboxed | refuse (label + listener floor) | refuse | refuse |
+
+  Any client refuses a low-integrity server. A medium client driving an
+  elevated engine is by design: no verb accepts a client path, so it
+  cannot borrow the engine's rights for file writes.
 
 ## 1. Framing
 
@@ -65,7 +85,7 @@ Bounds (plan section 6 — everything is bounded):
 | Write deadline | 5 s per outbound message |
 | Requests per second per connection | 128 (1 s windows; over-cap `too_large` messages count) |
 | Concurrent sessions per pipe | 8 (independent caps — a full command pipe cannot starve diagnostics) |
-| Queued events per session | 64 (per-kind latest-wins, oldest evicted) |
+| Queued events per session | 64 (latest-wins per kind + coalesce key; overflow evicts high-rate `preview`/`frame_status` first, else the oldest) |
 | Resync scan | ≤ 4 MiB skipped per message |
 | Over-cap body skip | `body_len` ≤ 4 MiB is discarded by its declared length; larger → close |
 | JSON nesting | ≤ 64 levels per body; deeper → `ERROR(malformed)` |
@@ -152,7 +172,10 @@ Two more robustness guarantees worth knowing:
   runs inline on the session's reader thread and there is no
   handler deadline — a thread cannot be safely cancelled
   mid-call. Handlers are required to be non-blocking
-  (in-memory engine state only; `src/ipc/IpcService.h`). If a
+  (in-memory engine state only; `src/ipc/IpcService.h`) — e.g. the
+  last-scene snapshot a `SET_SCENE` triggers is written by a
+  background writer (latest-wins, drained at shutdown), never on
+  the reader thread. If a
   future handler ever blocks, the blast radius is its own
   session (one of ≤8 slots): other sessions, the event writer,
   and the engine are unaffected.
@@ -176,7 +199,7 @@ Request → reply. `request_id` echoes.
 | 0x0109 | UNSUBSCRIBE | `{}` | OK `{subscribed:[]}` |
 | 0x010A | PING | `{}` | PONG `{}` |
 | 0x010B | GET_PRESETS | `{}` | PRESETS |
-| 0x010C | QUIT | `{}` or `{stop_backend:true}` | OK `{shutting_down:true, ordered:true, stop_backend:bool, backend?}` / ERROR |
+| 0x010C | QUIT | `{}` or `{stop_backend:true}` | OK `{shutting_down:true, ordered:true, stop_backend:bool, backend?, backend_pid?}` / ERROR |
 | 0x010D | REACTIVE_COMMAND | `{verb, ...args}` | OK `<reactive body>` / ERROR |
 | 0x010E | WORKSPACE_COMMAND | `{verb, ...args}` | OK `<verb body>` / ERROR |
 | 0x0300 | DIAG_GET | `{}` | DIAGNOSTICS (valid on both pipes) |
@@ -204,9 +227,23 @@ the SDK link:
                  "protocol_version":4,"reconnect_attempt":0,"last_error":""} }
 ```
 
-**SCENE** — `{loaded, revision, applied_revision, playing, name, document}`
+**SCENE** — `{loaded, revision, applied_revision, playing, name, document,
+document_sha256?, document_bytes?, document_omitted?, workspace:{managed}}`
 where `document` is the core SceneDocument JSON (same schema `--scene`
-accepts) or `null`. SET_SCENE applies the same path as `--scene` (inline
+accepts) or `null`, and `workspace.managed` tells a client that predates
+`studio_workspace_v1` whether a managed workspace is active (SET_SCENE is
+then refused with `workspace_required`). A loaded scene always carries
+`document_sha256` (SHA-256 hex of the document's compact serialization)
+and `document_bytes` (its length). The document rides inline only up to
+256 KiB serialized (`EngineServiceOptions::scene_inline_max_bytes`); a
+larger one is sent as `document:null, document_omitted:true` — so WELCOME,
+STATE, the `scene` EVENT and DIAGNOSTICS stay under the 1 MiB body cap
+whatever the scene size — and the client fetches it with
+`WORKSPACE_COMMAND transfer_begin {direction:"download", kind:"scene"}`
+(then `transfer_chunk`/`transfer_finish`) and verifies the bytes against
+`document_sha256`. Omission only happens when the transfer surface exists
+(`studio_workspace_v1`); the diagnostics pipe cannot transfer, so a
+diagnostics reader sees metadata only for a large scene. SET_SCENE applies the same path as `--scene` (inline
 `effect.layers`, else the named `effect.preset` through the registry —
 unknown presets → `bad_request`), takes effect on the next 60 Hz tick, and
 emits a `scene` event.
@@ -281,10 +318,15 @@ map_stats, controllers:[{key, stats, pending, colors, budget_ms,
 delivered, wireless, suppressed, owned}]}`; per-controller form adds
 `{controller, found, stats}`. `stats` =
 `{submitted,replaced_pending,rejected,transport_completed,suppressed,
-transport_rejected,last_interval_s,min_interval_s,max_interval_s,
-mean_interval_s,interval_count,provenance}`.
+transport_rejected,keyframes,last_interval_s,min_interval_s,
+max_interval_s,mean_interval_s,interval_count,provenance}`.
 `transport_completed` means *accepted by the transport* — never
-"displayed" (plan section 4). Every registered lane produces a
+"displayed" (plan section 4). `keyframes` counts frames identical to
+the lane's last delivered state that were resent anyway because the
+static-scene keyframe interval (3 s by default) had passed since that
+lane's last send — so a device another writer changed converges again
+while the scene stays static. They are included in
+`transport_completed` and never in `suppressed`. Every registered lane produces a
 `controllers` row, including lanes that have never delivered — the row
 says so with `delivered:false`, zeroed counters, and empty `colors`
 (a "bound but never delivered" controller is a visible row, not an
@@ -308,8 +350,11 @@ counters alone cannot distinguish from "nothing submitted".
 
 **STATE** — `{engine:{running,scene_clock_hz,scene_sequence}, scene:{...},
 sdk:{...}, playback:{...}, power:{...}, reactive:{...}, ownership:{...}|null,
-ipc:{sessions_active, messages_in, responses_out, events_sent, events_dropped,
-queued_events, resync_bytes, rejected_hellos, rate_limited, refused_busy}}`.
+ipc:{sessions_active, sessions_total, messages_in, responses_out, events_sent,
+events_dropped, events_oversize, queued_events, resync_bytes, rejected_hellos,
+rate_limited, refused_busy}}` (`sessions_total` counts every accepted session
+since start; `events_oversize` counts events whose body exceeded the 1 MiB
+cap and were never sent — they are in `events_dropped` too).
 
 **OWNERSHIP** (STATE/DIAGNOSTICS field, `null` when no ownership
 report is wired) — the Task-3.9 startup scan's verbatim,
@@ -361,7 +406,9 @@ standard as `stop-openrgb2.ps1`). Only a process whose image path
 equals the declared `--backend-exe` EXACTLY is ever signaled; the OK
 reply reports the decision honestly in `backend` (`closing`,
 `not_configured`, `not_found`, `unverifiable`) — `closing` is a
-decision at request time, not a guarantee the process exited.
+decision at request time, not a guarantee the process exited — and,
+with `closing`, `backend_pid`: the verified process the handoff will
+signal.
 
 **POWER** (STATE/DIAGNOSTICS field, `null` when unwired) —
 `{display_on, suspended, output_paused, power_hold, restore_pending,
@@ -434,8 +481,9 @@ loaded scene → `unavailable`. Fields:
   live snapshot — absent topology → `unavailable`; clients cannot
   fabricate controller identities.
 - `add_object` is how a scene is built FROM live hardware: each
-  entry in `controllers` is a `<DeviceKey>` whose `zone` names the
-  zone to place. Every key resolves against the current topology
+  entry in `controllers` (at most 256 per request — more is
+  `bad_request` before anything resolves) is a `<DeviceKey>` whose
+  `zone` names the zone to place. Every key resolves against the current topology
   snapshot (same lookup as `set_binding` — keys absent from
   topology can't be bound; a disconnected-but-enumerated device
   CAN, matching the offline-binding rule). Resolved keys get a
@@ -596,6 +644,15 @@ token alongside the human `message`. Handlers only validate, enqueue,
 or read snapshots — every file-touching operation is a job on the
 workspace service's single bounded worker.
 
+Workspace ids are `[A-Za-z0-9_-]+` naming one directory under the
+managed root. The store's own directories (`library`, `assets`,
+`transfers`) and the Windows reserved device names (`CON`, `PRN`,
+`AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`) are refused in any letter
+case. Ids are case-insensitive on disk: an id that differs from an
+existing workspace only in case (`Desk` vs `desk`) neither reads nor
+writes that workspace — loads report it unusable and commits/installs
+fail with an error naming the existing id.
+
 Revisions are uint64 counters: `workspace_revision` moves on durable
 commit, `resource_revision` on resource-set change. Candidate verbs
 (`commit`, `save_copy`, `import_commit`) carry `base_revision` and
@@ -608,14 +665,14 @@ telemetry stay live — the plan only gates document mutation.
 
 | verb | body | reply |
 | --- | --- | --- |
-| `get` | `{id?}` | `{managed,id?,workspace_revision,resource_revision,generation?,name?,content_sha256?,source_form?,workspace_root,workspace_dir?,external_change,external_detail?}` — `id` reads the durable marker of a non-current workspace. For the CURRENT workspace the reply also carries the managed paths and the passive external-change compare (Task 10): `external_change` is `"none"` \| `"modified"` \| `"deleted"` — REPORT ONLY, the engine never reloads or applies on detection, and a byte-identical rewrite reproduces the same signature (same-content suppression, re-baselined at every adopt/commit) |
+| `get` | `{id?}` | `{managed,id?,workspace_revision,resource_revision,generation?,name?,content_sha256?,source_form?,workspace_root,workspace_dir?,external_change,external_detail?}` — `id` reads the durable marker of a non-current workspace (reply `{managed,id,workspace_revision,resource_revision,marker_error?}`; `marker_error` is a human note present when the primary marker is unreadable: the revisions are then the last-known-good backup marker's, or `0` with `managed:true` when no marker is readable). For the CURRENT workspace the reply also carries the managed paths and the passive external-change compare (Task 10): `external_change` is `"none"` \| `"modified"` \| `"deleted"` — REPORT ONLY, the engine never reloads or applies on detection, and a byte-identical rewrite reproduces the same signature (same-content suppression, re-baselined at every adopt/commit) |
 | `list` | `{offset?,limit?}` (limit ≤256) | `{workspaces:[id...],total,offset,limit,active}` |
 | `catalog` | `{kind:devices|effects|workspaces,offset?,limit?}` | `{kind,entries:[...],total,offset,limit,more,next_offset}` — pages are additionally byte-budgeted (~768 KiB serialized); `more:true` + `next_offset` continue the walk, and `next_offset` always advances so a malformed stream can't stall. `effects` entries carry `document_text` (authored field-order byte stream); an oversized lone entry degrades to `document_omitted:true` (document_text dropped) then `description_omitted:true` (bounded description) instead of failing the page |
 | `validate`/`commit`/`save_copy`/`import_inspect`/`import_commit`/`export`/`reload`/`restore_backup`/`resource_install`/`resource_remove` | `{staged?|document?, base_revision?, resource_revision?, id?, name?, ...}` | `OK {accepted:true,job_id}` or `OK {accepted:false,detail:"busy"}` (bounded queue full); `staged` is a finished upload token owned by this session |
-| `resource_get` | `{kind:device_type|effect, id:<preset id>}` | `{kind,id,found,document?,from_file?,packaged_default?}` — synchronous read of the effective resource (file-layer override over the packaged default); `found:false` when no layer resolves |
+| `resource_get` | `{kind:device_type|effect, id:<preset id>}` | `{kind,id,from_file,packaged_default,document}` — synchronous read of the effective resource (file-layer override over the packaged default); `ERROR unavailable` when no layer resolves. A document whose serialization exceeds 768 KiB is never inlined: the reply carries `document_omitted:true` plus a session-bound download `{transfer_id,length,sha256,max_chunk_bytes}` (kind `type`/`look`) read with `transfer_chunk`/`transfer_finish` |
 | `job_status` | `{job_id}` | job status record (below) |
 | `job_cancel` | `{job_id}` | `{cancelled:true,job_id}` / ERROR |
-| `transfer_begin` | `{direction:"upload",kind,length,sha256}` / `{direction:"download",kind,id}` | upload: `{transfer_id,max_chunk_bytes}`; download: `{transfer_id,length,sha256,max_chunk_bytes}` — client-supplied paths are never accepted; staging is server-named inside the managed root |
+| `transfer_begin` | `{direction:"upload",kind,length,sha256}` / `{direction:"download",kind?,id}` / `{direction:"download",kind:"scene"}` (a workspace download's `kind` must be `document`, the default; `scene` takes no `id`; any other kind is `bad_request`) | upload: `{transfer_id,max_chunk_bytes}`; download: `{transfer_id,length,sha256,max_chunk_bytes}` (`kind:"scene"` stages the APPLIED scene document — the bytes SCENE's `document_sha256` names — and adds `revision`; `unavailable`+`no_scene` when none is loaded) — client-supplied paths are never accepted; staging is server-named inside the managed root |
 | `transfer_chunk` | `{transfer_id,offset,data:<base64>}` (upload) / `{transfer_id,offset,max_bytes?}` (download) | upload: `{offset,received}`; download: `{offset,data:<base64>,eof}` — ordered, ≤192 KiB decoded per chunk |
 | `transfer_finish` | `{transfer_id}` | `{finished:true,staged?,bytes?}` — upload verifies declared length + SHA-256 before minting the `staged` token |
 | `transfer_cancel` | `{transfer_id}` | `{cancelled:true}` |
@@ -682,7 +739,13 @@ Task-10 verb details — file actions + external-change recovery:
   scan reproduces the baseline. The UI polls it; detection never
   auto-loads, never saves, and never touches `apply_scene` — the
   notice is the whole mechanism and the user picks reload vs.
-  keep-draft explicitly.
+  keep-draft explicitly. The poll is metadata-first: the tracked
+  files' existence/size/write-time stamp is compared with the last
+  full scan's, and the bytes are re-read and hashed only when the
+  stamp moved or a tracked file was written in the last few
+  seconds. `content_sha256` hashes bytes the committing thread
+  published with the snapshot (once per revision), so `get` never
+  re-serializes or re-reads the document.
 
 The preview verbs drive the bounded draft-preview feed (Task 7,
 plan §3.4): ONE `PreviewSession` per IPC session, at most two
@@ -753,9 +816,24 @@ stays durable (the reconnecting client reconciles by
 revision/content_sha256). The per-session transfer bound counts OPEN
 (streaming) transfers — a `transfer_finish`-verified upload keeps
 serving its `staged` token to this session's jobs without holding a
-stream slot (idle expiry and `transfer_cancel` still reclaim it). Document/type/look content moves ONLY
+stream slot (idle expiry and `transfer_cancel` still reclaim it).
+Expiry: an OPEN transfer (upload still streaming, any download) dies
+after 60 s without a begin/chunk/finish on it; a finish-verified
+`staged` token dies after 15 min without use. Every use refreshes it
+(a job verb or `preview_*` naming it, the job's read of it), and a
+job that references it pins it from acceptance until the job reaches
+a terminal state — a job queued behind slow work never finds its
+token gone. Using a lapsed id (chunk, finish, a job verb's or
+`preview_*`'s `staged`) fails `ERROR bad_request` with
+`detail:"transfer_expired"`; an id this session never held stays
+`unknown_transfer` (tombstones are bounded, so a very old id may also
+read `unknown_transfer`). Either way the client uploads again.
+Document/type/look content moves ONLY
 through transfers — the 1 MiB envelope bound is never expanded to fit
-a scene or a binary asset.
+a scene or a binary asset. The one inline exception is a SMALL applied
+scene document in SCENE bodies (≤ 256 KiB, kept for legacy clients);
+anything larger is announced by `document_sha256` and fetched with a
+`kind:"scene"` download.
 
 ## 6. Diagnostics channel (read-only by construction)
 
@@ -773,7 +851,11 @@ undocumented one (plan section 4).
 `SUBSCRIBE {events:"all"}` or `{events:[kind,...]}` registers per-session
 subscriptions (bounded queue, see §1). Replies `OK {subscribed:[...]}` then
 immediately pushes one EVENT per subscribed kind carrying current state —
-a subscriber never needs a second request to paint.
+a subscriber never needs a second request to paint. Live events flow from
+the moment the subscription is set; when one of a kind (same coalesce
+slot) reaches the session while that kind's snapshot is being built, the
+snapshot is skipped — the live event is at least as new, and an older
+snapshot behind it would leave the client stale.
 
 `EVENT` (type `0x8200`, `request_id = 0`): `{kind, data}` where `data`
 matches the corresponding pull body:
@@ -781,7 +863,7 @@ matches the corresponding pull body:
 | kind | data | emitted |
 | --- | --- | --- |
 | `topology` | SNAPSHOTS body | snapshot list / generation / connection change |
-| `scene` | SCENE body | scene applied (SET_SCENE or --scene) |
+| `scene` | SCENE body (a large `document` is omitted — fetch it by `document_sha256`, §5) | scene applied (SET_SCENE or --scene) |
 | `playback` | PLAYBACK body | requested-mode or applied-status change |
 | `connection` | `sdk` object | SDK link state change |
 | `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |
@@ -814,8 +896,11 @@ session's preview. Two record types:
   never presented as complete. Reassembly is strict: a client paints
   a frame only when all `chunks` of one `sequence` arrive intact;
   stale or partial sequences are dropped. Latest-wins coalescing in
-  the per-session queue keys on `frame/<sequence>/<chunk>`, so a
-  superseded frame never eats a newer chunk of the same slot.
+  the per-session queue keys on `frame/<chunk>`: a newer frame's
+  chunk replaces the still-queued chunk of the same index, so a slow
+  client's queue holds at most one frame's worth of chunks (a mix of
+  sequences in flight is resolved by the strict per-sequence
+  reassembly).
 
 Draft-preview `colors` and `frame_status` `colors` answer different
 questions — what the unsaved draft evaluates to vs. what transport
@@ -823,11 +908,16 @@ accepted for delivery — and are never interchangeable physical
 measurements.
 
 An `events` field that is neither `"all"` nor an array of strings, or any
-unknown kind name → `bad_request` (subscription unchanged). Queue overflow
-drops the oldest queued event (counted in `ipc.events_dropped`); a queued
-event of a kind is replaced by a newer one rather than appended (for
-`preview`, replacement additionally partitions on the coalesce key:
-`status` for status records, `frame/<sequence>/<chunk>` for chunks).
+unknown kind name → `bad_request` (subscription unchanged). A queued
+event of a kind is replaced by a newer one rather than appended;
+replacement additionally partitions on a coalesce key for `preview`
+(`status` for status records, `frame/<chunk>` for chunks) and for
+`workspace` (a job-terminal record is keyed `job/<job_id>`, so it never
+replaces or is replaced by the published-state snapshot or another job's
+record). Queue overflow evicts the oldest queued high-rate event
+(`preview`, `frame_status`); a high-rate event arriving at a queue with
+none queued is dropped itself, and any other event evicts the oldest
+queued event. Every drop or replacement counts in `ipc.events_dropped`.
 
 ## 8. Notes for implementers
 

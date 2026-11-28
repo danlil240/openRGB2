@@ -19,8 +19,16 @@
 
 #include "../sdk/fake_sdk_server.h"
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace openrgb2;
@@ -1219,6 +1227,24 @@ int main()
         }
         CHECK(saw_conn && saw_topo && saw_play && saw_frame
               && saw_react);
+        /* I-7: a diff body travels with the dump its signature
+           already made — exactly data.dump() — and the framed
+           EVENT is byte-identical to the old envelope encode. */
+        int pre_serialized = 0;
+        for(const IpcEvent& e : events)
+        {
+            if(e.data_json)
+            {
+                ++pre_serialized;
+                CHECK(*e.data_json == e.data.dump());
+            }
+            CHECK(EncodeEventMessage(e) ==
+                  EncodeMessage(MsgType::Event, 0,
+                      nlohmann::json::object({
+                          { "kind", e.kind },
+                          { "data", e.data } })));
+        }
+        CHECK(pre_serialized == 3);   /* connection/playback/reactive */
 
         events.clear();
         svc.PollEvents();
@@ -1421,7 +1447,8 @@ int main()
             return std::vector<DeviceSnapshot>{ add_snap, dimm };
         };
         /* persist_scene — the last-scene snapshot hook: fires
-           once per successful apply that carries objects. */
+           once per successful apply that carries objects, on
+           the background writer (I-6) — flush before counting. */
         int         persist_calls = 0;
         std::string persisted_name;
         d6.persist_scene =
@@ -1475,8 +1502,29 @@ int main()
         r = svc6.Dispatch(MsgType::SetScene,
             nlohmann::json::object({{ "document", seed_doc }}));
         CHECK(r.code == ErrCode::Ok);
+        svc6.FlushPersistedScene();
         CHECK(persist_calls == 1);
         CHECK(persisted_name == "seed");
+
+        /* Audit I-13: the controllers list is bounded. 257
+           copies of one live zone refuse up front instead of
+           authoring 257 objects on the reader thread (every
+           new id scans the whole document — a ~1 MiB body of
+           repeats ran for minutes). The scene is untouched. */
+        {
+            nlohmann::json many = nlohmann::json::array();
+            for(int i = 0; i < 257; ++i)
+            {
+                many.push_back(fan3);
+            }
+            r = svc6.Dispatch(MsgType::LayoutCommand,
+                nlohmann::json::object({
+                    { "verb",        "add_object" },
+                    { "controllers", many         },
+                }));
+            CHECK(r.code == ErrCode::BadRequest);
+            CHECK(persist_calls == 1);
+        }
 
         /* All-fail batch: an unknown controller -> Unavailable;
            the per-entry reason lands in `skipped` and the scene
@@ -1494,6 +1542,7 @@ int main()
         CHECK(r.body["skipped"].is_array());
         CHECK(r.body["skipped"].size() == 1);
         CHECK(svc6.SceneRevision() == rev0);
+        svc6.FlushPersistedScene();
         CHECK(persist_calls == 1);
 
         /* Happy path: Fan 3 (40 LEDs) -> one new binding whose
@@ -1522,6 +1571,7 @@ int main()
             r.body["added"][0].value("object_id", std::string());
         const std::string fan3_bid =
             r.body["added"][0].value("binding", std::string());
+        svc6.FlushPersistedScene();
         CHECK(persist_calls == 2);
 
         r = svc6.Dispatch(MsgType::GetScene, nlohmann::json::object());
@@ -1705,6 +1755,7 @@ int main()
                     }) },
                 }));
             CHECK(r.code == ErrCode::Ok);
+            svc6.FlushPersistedScene();
             CHECK(persist_calls == pc);
 
             /* ...and the bootstrap path: adding a device to the
@@ -1722,6 +1773,7 @@ int main()
                             {"zone","Fan 1"}}) }) },
                 }));
             CHECK(r.code == ErrCode::Ok);
+            svc6.FlushPersistedScene();
             CHECK(persist_calls == pc + 1);
             CHECK(persisted_name == "scratch");
         }
@@ -2005,6 +2057,199 @@ int main()
         CHECK(r.body["detail"].is_string());
         CHECK(r.body["detail"].get<std::string>()
                   .find("wireless") != std::string::npos);
+    }
+
+    /*---- concurrent layout verbs never lose an update -----
+           (audit I-13). Each verb is read-copy-modify-apply on
+           the current scene; two sessions (two reader threads)
+           editing DIFFERENT objects must both stick. Thread A
+           only ever moves "a", thread B only "b": after A's own
+           apply, a.x must still be A's value — a revert means
+           B applied a copy taken before A's apply. */
+    {
+        Engine           engine12;
+        DeliveryPipeline pipe12;
+        DeviceMapper     mapper12;
+        EngineService::Deps d12;
+        d12.pipeline = &pipe12;
+        d12.mapper   = &mapper12;
+        EngineService svc12(engine12, d12);
+        const nlohmann::json two = nlohmann::json::object({
+            { "version", 2 }, { "name", "two" },
+            { "bindings", nlohmann::json::array() },
+            { "objects", nlohmann::json::array({
+                nlohmann::json::object({
+                    { "id", "a" }, { "kind", "decor" } }),
+                nlohmann::json::object({
+                    { "id", "b" }, { "kind", "decor" } }) }) },
+        });
+        IpcReply r = svc12.Dispatch(MsgType::SetScene,
+            nlohmann::json::object({{ "document", two }}));
+        CHECK(r.code == ErrCode::Ok);
+
+        std::atomic<int> lost{ 0 }, failed{ 0 };
+        auto mover = [&](const char* oid)
+        {
+            for(int i = 1; i <= 300; ++i)
+            {
+                const double x = (double)i;
+                const IpcReply m = svc12.Dispatch(
+                    MsgType::LayoutCommand,
+                    nlohmann::json::object({
+                        { "verb", "set_position" },
+                        { "object_id", oid },
+                        { "position", nlohmann::json::object(
+                            {{"x", x}, {"y", 0.0}, {"z", 0.0}}) },
+                    }));
+                if(m.code != ErrCode::Ok)
+                {
+                    ++failed;
+                    continue;
+                }
+                const IpcReply g = svc12.Dispatch(MsgType::GetScene,
+                    nlohmann::json::object());
+                for(const nlohmann::json& o :
+                        g.body["document"]["objects"])
+                {
+                    if(o.value("id", "") == oid &&
+                       o["position"].value("x", -1.0) != x)
+                    {
+                        ++lost;
+                    }
+                }
+            }
+        };
+        std::thread ta(mover, "a");
+        std::thread tb(mover, "b");
+        ta.join();
+        tb.join();
+        CHECK(failed.load() == 0);
+        CHECK(lost.load() == 0);
+        if(lost.load() != 0)
+        {
+            std::printf("  (lost layout updates: %d)\n",
+                        lost.load());
+        }
+        r = svc12.Dispatch(MsgType::GetScene, nlohmann::json::object());
+        for(const nlohmann::json& o : r.body["document"]["objects"])
+        {
+            CHECK(o["position"].value("x", -1.0) == 300.0);
+        }
+    }
+
+    /*---- I-6: last-scene persistence runs OFF the request
+       thread, coalesced latest-wins, and is durable: a slow
+       snapshot write never stalls SET_SCENE, a burst lands
+       the LAST document, and teardown drains the pending
+       write (the restore-after-restart contract). ---------*/
+    {
+        Engine           engine12;
+        DeliveryPipeline pipe12;
+        DeviceMapper     mapper12;
+        EngineService::Deps d12;
+        d12.pipeline = &pipe12;
+        d12.mapper   = &mapper12;
+        std::mutex              gate_m;
+        std::condition_variable gate_cv;
+        bool                    gate_open = false;
+        std::atomic<int>        calls12{ 0 };
+        std::string             last12;          /* gate_m */
+        std::thread::id         hook_thread;     /* gate_m */
+        d12.persist_scene =
+            [&](const studio::SceneDocument& dd)
+            {
+                std::unique_lock<std::mutex> lk(gate_m);
+                gate_cv.wait(lk, [&] { return gate_open; });
+                ++calls12;
+                last12      = dd.name;
+                hook_thread = std::this_thread::get_id();
+            };
+        auto scene_named = [](const std::string& name)
+        {
+            return nlohmann::json::object({{ "document",
+                nlohmann::json::object({
+                    { "version", 2 }, { "name", name },
+                    { "bindings", nlohmann::json::array() },
+                    { "objects", nlohmann::json::array({
+                        nlohmann::json::object({
+                            { "id", "case" },
+                            { "kind", "decor" } }) }) } }) }});
+        };
+        auto svc12 = std::make_unique<EngineService>(engine12, d12);
+        /* Three SET_SCENEs while the snapshot write is stuck:
+           every one must answer promptly. */
+        auto burst = std::async(std::launch::async, [&]
+        {
+            bool ok = true;
+            for(const char* n : { "p1", "p2", "p3" })
+            {
+                ok = ok && svc12->Dispatch(MsgType::SetScene,
+                               scene_named(n)).code == ErrCode::Ok;
+            }
+            return ok;
+        });
+        const bool prompt =
+            burst.wait_for(std::chrono::seconds(3)) ==
+            std::future_status::ready;
+        CHECK(prompt);
+        {
+            std::lock_guard<std::mutex> lk(gate_m);
+            gate_open = true;
+        }
+        gate_cv.notify_all();
+        CHECK(burst.get());
+        svc12->FlushPersistedScene();
+        {
+            std::lock_guard<std::mutex> lk(gate_m);
+            /* p1 may already be in flight when p2/p3 land;
+               p2 is superseded by p3 — never three writes,
+               and the last write is the last applied scene. */
+            CHECK(calls12.load() >= 1 && calls12.load() <= 2);
+            CHECK(last12 == "p3");
+            CHECK(hook_thread != std::this_thread::get_id());
+        }
+
+        /* Durability: a pending write is drained by teardown
+           even when nobody flushed. */
+        {
+            std::lock_guard<std::mutex> lk(gate_m);
+            gate_open = false;
+        }
+        auto second = std::async(std::launch::async, [&]
+        {
+            return svc12->Dispatch(MsgType::SetScene,
+                       scene_named("q1")).code == ErrCode::Ok &&
+                   svc12->Dispatch(MsgType::SetScene,
+                       scene_named("q2")).code == ErrCode::Ok;
+        });
+        const bool prompt2 =
+            second.wait_for(std::chrono::seconds(3)) ==
+            std::future_status::ready;
+        CHECK(prompt2);
+        if(!prompt2)
+        {
+            /* Never tear the service down under a Dispatch
+               still stuck in the hook. */
+            {
+                std::lock_guard<std::mutex> lk(gate_m);
+                gate_open = true;
+            }
+            gate_cv.notify_all();
+        }
+        CHECK(second.get());
+        auto teardown = std::async(std::launch::async,
+                                   [&] { svc12.reset(); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        {
+            std::lock_guard<std::mutex> lk(gate_m);
+            gate_open = true;
+        }
+        gate_cv.notify_all();
+        teardown.get();
+        {
+            std::lock_guard<std::mutex> lk(gate_m);
+            CHECK(last12 == "q2");
+        }
     }
 
     std::printf("ipc_engine_service_test: %d checks, %d failures\n",

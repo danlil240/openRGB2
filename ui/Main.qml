@@ -199,10 +199,14 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+5"; onActivated: root.currentView = 4 }
     /* Ctrl+S saves the Lighting working copy — commits any
        focused field's uncommitted text first (same path as
-       the on-screen Save button). */
+       the on-screen Save button). In a managed workspace the
+       Layout view edits the SAME shared draft, so Ctrl+S
+       commits it from there too (audit Q-4); legacy layout
+       ops apply immediately and have nothing to save. */
     Shortcut {
         sequence: "Ctrl+S"
-        enabled: root.currentView === 1
+        enabled: (root.currentView === 1
+                  || (root.currentView === 2 && root.wsManaged))
                  && typeof sceneEdit !== "undefined"
                  && !sceneEdit.saving
         onActivated: lightingPage.commitPendingEdits()
@@ -231,8 +235,7 @@ ApplicationWindow {
                          && root.currentView === 2
                          && typeof layoutCtl !== "undefined"
                          && layoutCtl.canUndo))
-        onActivated: root.wsManaged ? workspace.undo()
-                                    : layoutCtl.undo()
+        onActivated: root.shellUndo(false)
     }
     Shortcut {
         sequence: "Ctrl+Shift+Z"
@@ -245,8 +248,7 @@ ApplicationWindow {
                          && root.currentView === 2
                          && typeof layoutCtl !== "undefined"
                          && layoutCtl.canRedo))
-        onActivated: root.wsManaged ? workspace.redo()
-                                    : layoutCtl.redo()
+        onActivated: root.shellUndo(true)
     }
     Shortcut {
         sequence: "Ctrl+Y"
@@ -259,8 +261,24 @@ ApplicationWindow {
                          && root.currentView === 2
                          && typeof layoutCtl !== "undefined"
                          && layoutCtl.canRedo))
-        onActivated: root.wsManaged ? workspace.redo()
-                                    : layoutCtl.redo()
+        onActivated: root.shellUndo(true)
+    }
+    /* The one owner of the undo keys (audit Q-2: the 3D viewport
+       declared them too, which made them ambiguous). The
+       viewport's mid-drag refusal moves here: an undo under a
+       live transform gesture would write beneath the snapshot
+       the drag previews against, so it is refused and the
+       status line says why. */
+    function shellUndo(redo) {
+        if(root.wsManaged && typeof objectCtl !== "undefined"
+           && objectCtl && objectCtl.gestureActive()) {
+            objectCtl.setStatusMessage(qsTr("finish the drag first"));
+            return;
+        }
+        if(root.wsManaged)
+            redo ? workspace.redo() : workspace.undo();
+        else
+            redo ? layoutCtl.redo() : layoutCtl.undo();
     }
 
     /* Workspace notices (foreign commits, import/export

@@ -33,6 +33,13 @@ Item {
         typeof objectCtl !== "undefined" && objectCtl.ready
     readonly property bool engineUp:
         typeof bridge !== "undefined" && bridge.connected
+    /* Audit Q-4: in a managed workspace every edit here lands in
+       the shared UNSAVED draft (the same one Lighting edits) —
+       nothing reaches the engine until a commit, so the page
+       carries its own Save and the hint says so. Legacy
+       (unmanaged) layout ops still apply immediately. */
+    readonly property bool wsManaged:
+        typeof workspace !== "undefined" && workspace.managed
     /* A recovered local draft has no engine baseline
        (hasScene) and may exist with NO engine at all —
        workspace.ready is the honest "a draft is staged" gate
@@ -76,13 +83,14 @@ Item {
             uiPrefs.layoutShow3d = on;
     }
 
-    function draftColorsFor(id) {
+    /* Audit Q-5: an O(1) id lookup in C++ — reading
+       viewport.objects here copied every object's colors into JS
+       once per delegate per frame (O(objects^2)). `n` densifies a
+       reduced frame's sparse samples per emitter. */
+    function draftColorsFor(id, n) {
         if(!root.previewUp) return [];
-        const objs = viewport.objects || [];
-        for(let i = 0; i < objs.length; ++i)
-            if(objs[i].id === id)
-                return objs[i].colors || [];
-        return [];
+        const c = viewport.colorsFor(id, n);
+        return c ? c : [];
     }
 
     /* items() / linkPairs() feed the canvas — both recompute
@@ -90,6 +98,9 @@ Item {
        reads are binding-tracked by QML). */
     property var itemList: []
     property var linkPairs: []
+    /* The selected object's emitter rows (calibration list). */
+    readonly property var selEmitters:
+        root.ctlUp ? layoutCtl.selectedEmitters : []
     property var view: ({ "s": 200, "ox": 20, "oz": 20,
                           "minX": 0, "minZ": 0 })
 
@@ -235,7 +246,7 @@ Item {
     onWidthChanged: computeView()
     onHeightChanged: computeView()
 
-    Flickable {
+    PageFlickable {     /* scroll bar + focus-follow (audit Q-12) */
         objectName: "layoutScroll"
         anchors.fill: parent
         contentHeight: col.implicitHeight
@@ -347,6 +358,25 @@ Item {
                              && workspace.available
                     onClicked: wsActionsDlg.open()
                 }
+                /* Commits the shared draft — the same workspace
+                   commit as Lighting's Save / Ctrl+S, through
+                   sceneEdit.save() so the deviceless-commit
+                   guard applies here too. */
+                AppButton {
+                    objectName: "layoutSaveButton"
+                    visible: root.wsManaged
+                    primary: true
+                    text: root.wsManaged && workspace.saving
+                          ? qsTr("Saving…") : qsTr("Save")
+                    enabled: root.wsManaged && root.engineUp
+                             && workspace.dirty && !workspace.saving
+                    onClicked: {
+                        if(typeof sceneEdit !== "undefined")
+                            sceneEdit.save();
+                        else
+                            workspace.save();
+                    }
+                }
                 Text {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignRight
@@ -355,6 +385,22 @@ Item {
                     font.pixelSize: Theme.fontSizeSmall
                     elide: Text.ElideRight
                 }
+            }
+            /* A Save refused before send (e.g. a deviceless
+               draft) is reported where the Save was pressed;
+               engine rejections already reach the row below. */
+            Text {
+                objectName: "layoutSaveError"
+                visible: root.wsManaged
+                         && typeof sceneEdit !== "undefined"
+                         && sceneEdit.saveError !== ""
+                         && sceneEdit.saveErrorSource === "input"
+                width: parent.width - 2 * col.padding
+                text: visible ? qsTr("Not saved: %1")
+                                    .arg(sceneEdit.saveError) : ""
+                color: Theme.warn
+                font.pixelSize: Theme.fontSizeSmall
+                wrapMode: Text.WordWrap
             }
             Row {
                 visible: root.ctlUp && layoutCtl.lastError !== ""
@@ -421,18 +467,25 @@ Item {
                             visible: root.quick3dUp
                             height: visible ? implicitHeight : 0
                             spacing: Theme.spaceS
+                            /* Audit Q-12: `checked` mirrors show3d
+                               and AppButton now paints it. Not
+                               `checkable` — a click must not flip
+                               the state locally (clicking the
+                               active view used to un-check it). */
                             AppButton {
                                 objectName: "view2dButton"
                                 text: qsTr("2D")
-                                checkable: true
                                 checked: !root.show3d
+                                Accessible.checkable: true
+                                Accessible.checked: checked
                                 onClicked: root.setShow3d(false)
                             }
                             AppButton {
                                 objectName: "view3dButton"
                                 text: qsTr("3D")
-                                checkable: true
                                 checked: root.show3d
+                                Accessible.checkable: true
+                                Accessible.checked: checked
                                 onClicked: root.setShow3d(true)
                             }
                             /* Render quality tier — persisted as
@@ -653,13 +706,24 @@ Item {
 
                             /* the scene objects — real document
                                order, real transforms */
+                            /* Audit Q-6: an INTEGER model — every
+                               edit re-emits itemsChanged and
+                               reassigns itemList; a JS-array model
+                               destroyed and recreated every delegate
+                               on each edit, dropping keyboard focus
+                               after one arrow-key nudge. With a
+                               count the delegates survive (only a
+                               count change rebuilds) and `o`
+                               re-reads its row in place. */
                             Repeater {
                                 objectName: "canvasItems"
-                                model: root.itemList
+                                model: root.itemList.length
                                 delegate: Item {
                                     id: d
                                     objectName: "canvasObj_" + o.id
-                                    property var o: modelData
+                                    required property int index
+                                    property var o:
+                                        root.itemList[index] || ({})
                                     property bool dragging: false
                                     /* Keyboard parity with drag
                                        (Task 4.8): Tab reaches the
@@ -794,9 +858,15 @@ Item {
                                                 margins: 2
                                             }
                                             visible: root.previewUp
+                                            /* sequence: the per-
+                                               frame dependency */
                                             colors:
-                                                root.draftColorsFor(
-                                                    d.o.id)
+                                                root.previewUp
+                                                && viewport.sequence >= 0
+                                                ? root.draftColorsFor(
+                                                    d.o.id,
+                                                    d.o.emitter_count || 0)
+                                                : []
                                             maxSwatches: 12
                                         }
                                     }
@@ -1016,6 +1086,8 @@ Item {
                             width: parent.width
                             text: root.show3d
                                   ? qsTr("3D view. Click selects · drag orbits · Ctrl+drag moves/rotates · Shift+drag marquee · MMB/Space pans · wheel zooms · W/E/P tools · F/Home frame · Esc cancels. Edits are undoable (Ctrl+Z / Ctrl+Shift+Z). Emitter dots show the unsaved draft preview — not delivered output.")
+                                  : root.wsManaged
+                                  ? qsTr("Top view, meters. Drag objects to arrange — or Tab to an object and nudge with the arrow keys (Shift for fine steps). Edits go to the unsaved workspace draft and are undoable (Ctrl+Z / Ctrl+Shift+Z); Save (Ctrl+S) commits them. Linked copies (LINK) share their source's output.")
                                   : qsTr("Top view, meters. Drag objects to arrange — or Tab to an object and nudge with the arrow keys (Shift for fine steps). Edits apply immediately and are undoable (Ctrl+Z / Ctrl+Shift+Z). Linked copies (LINK) share their source's output.")
                             color: Theme.textDisabled
                             font.pixelSize: Theme.fontSizeSmall
@@ -1485,14 +1557,24 @@ Item {
                                 wrapMode: Text.WordWrap
                                 width: parent.width
                             }
+                            /* Audit Q-6: integer model over the
+                               page's emitter rows — a calibrate
+                               re-emits selectedChanged, and a
+                               list-valued model reset the view
+                               (scroll jumped to the top, the
+                               focused address field was destroyed).
+                               Delegates now survive and re-read
+                               their row. */
                             ListView {
+                                objectName: "calibrationList"
                                 width: parent.width
                                 height: Math.min(200, contentHeight)
                                 clip: true
-                                model: root.ctlUp
-                                       ? layoutCtl.selectedEmitters
-                                       : []
+                                model: root.selEmitters.length
                                 delegate: Column {
+                                    required property int index
+                                    readonly property var modelData:
+                                        root.selEmitters[index] || ({})
                                     width: ListView.view.width
                                     spacing: 2
                                     RowLayout {

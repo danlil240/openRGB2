@@ -15,6 +15,8 @@
 #include "EffectTypes.h"
 #include "../presets/EffectRegistry.h"
 
+#include <optional>
+
 namespace studio
 {
 
@@ -42,13 +44,17 @@ struct PresetInfo
                                     /* file-only)                       */
 };
 
-/* Preset strip listing — the nine shipped looks in fixed card
-   order (metadata from the registry: a file override supplies
-   the file's name/description/needs), then any file-only looks
-   sorted by id. Rebuilt on each call; the pointer a FindPreset
-   returns is valid until the next call. */
-const std::vector<PresetInfo>& PresetList();
-const PresetInfo*              FindPreset(const std::string& id);
+/* Preset strip listing — the shipped looks in fixed card order
+   (metadata from the registry: a file override supplies the
+   file's name/description/needs), then any file-only looks
+   sorted by id. Built fresh on each call and returned BY VALUE
+   (audit C-15): it used to be a static vector cleared and
+   rebuilt per call, so a FindPreset pointer was rewritten — or
+   left dangling — by the next PresetList() anywhere, and two
+   threads listing at once raced on the one vector. FindPreset
+   returns a copy for the same reason; nullopt = unknown id. */
+std::vector<PresetInfo>   PresetList();
+std::optional<PresetInfo> FindPreset(const std::string& id);
 
 /* Resolve a look's layers via the registry (remix draws consume
    the seed's stream in document order). Unknown id -> empty list;

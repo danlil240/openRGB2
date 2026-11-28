@@ -30,6 +30,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <memory>
 #include <string>
 
 namespace openrgb2
@@ -51,6 +52,20 @@ struct IpcEvent
 {
     std::string    kind;
     nlohmann::json data = nlohmann::json::object();
+    /* Latest-wins partition inside the kind for IpcServer::Emit
+       (EmitTo takes its key as an argument): "" coalesces with
+       any queued keyless event of the kind; a key coalesces
+       only with the same key. A workspace job-terminal record
+       carries "job/<id>" so it never replaces — or is replaced
+       by — a snapshot or another job's record. */
+    std::string    coalesce_key;
+    /* Optional: `data` already serialized (exactly
+       data.dump()) by a producer that had to dump it anyway —
+       a diff signature, a size-budgeted preview chunk. The
+       server frames these bytes verbatim instead of dumping
+       `data` a second time (audit I-7). `data` stays filled
+       for in-process consumers. */
+    std::shared_ptr<const std::string> data_json;
 };
 
 struct IpcReply

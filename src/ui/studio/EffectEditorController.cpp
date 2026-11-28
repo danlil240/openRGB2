@@ -15,6 +15,7 @@
 #include "scene/SceneResolver.h"      /* ResolveScene               */
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 
 namespace openrgb2
@@ -95,6 +96,11 @@ EffectEditorController::EffectEditorController(EngineBridge* bridge,
                 this, &EffectEditorController::OnEventReceived);
         connect(bridge_, &EngineBridge::presetsChanged,
                 this, [this] { emit stackChanged(); });
+        connect(bridge_, &EngineBridge::reactiveChanged,
+                this, [this] {
+                    ++input_state_rev_;
+                    emit inputStateChanged();
+                });
         connect(bridge_, &EngineBridge::connectionStateChanged,
                 this, [this] {
                     emit readyChanged();
@@ -451,6 +457,10 @@ void EffectEditorController::OnWorkspaceDraftEdited()
     RefreshModel();
     emit stackChanged();
     emit draftInputsChanged();
+    /* A discard/load/remote move cancels an open layer gesture
+       inside the session (EditorController::CancelGestures) —
+       gestureActive may have flipped without this adapter. */
+    emit gestureChanged();
 }
 
 void EffectEditorController::OnWorkspaceDraftChanged()
@@ -459,6 +469,7 @@ void EffectEditorController::OnWorkspaceDraftChanged()
     emit readyChanged();
     emit stackChanged();
     emit draftInputsChanged();
+    emit gestureChanged();
 }
 
 /*---------------------------------------------------------*\
@@ -1272,7 +1283,11 @@ QVariantMap EffectEditorController::flowState() const
     for(int i = 0; i < (int)layers.size(); i++)
     {
         const studio::EffectLayer& l = layers[i];
-        if(first < 0 && l.enabled && l.primitive == "wave")
+        /* Same predicate and the same first layer as the core
+           SetFlow (enabled or not): the card is only offered when
+           it has a layer to drive, and shows the layer its colour
+           edits land on (audit C-4, C-5). */
+        if(first < 0 && studio::EditorController::IsFlowLayer(l))
         {
             first = i;
         }
@@ -1293,7 +1308,9 @@ QVariantMap EffectEditorController::flowState() const
     }
     const studio::EffectLayer& w = layers[first];
     m["direction"]  = VecMap(w.direction);
-    m["speed"]      = w.speed;
+    /* A magnitude, like the card's slider: SetFlow rescales by
+       |speed| and keeps a backwards layer's sign. */
+    m["speed"]      = std::fabs(w.speed);
     m["wavelength"] = w.scale;
     QStringList colors;
     for(const studio::PaletteStop& s : w.palette.stops)
@@ -1308,8 +1325,16 @@ QVariantMap EffectEditorController::flowState() const
 bool EffectEditorController::ApplyFlow(
     const studio::EditorController::FlowEdit& f)
 {
-    if(!ready() || gestureActive())
+    if(!ready())
     {
+        return false;
+    }
+    if(gestureActive())
+    {
+        /* A slider or drag elsewhere is still open; say why the
+           card did nothing instead of dropping the edit. */
+        emit statusMessage(QStringLiteral(
+            "finish the current edit before changing the wave"));
         return false;
     }
     auto e = Editor()->SetFlow(f);
@@ -1340,9 +1365,12 @@ bool EffectEditorController::setFlowColors(const QStringList& colors)
         }
         f.colors.push_back(ColorOf(c));
     }
-    if(f.colors.size() < 2 || f.colors.size() > 5)
+    /* Same range as the core SetFlow: every count flowState() can
+       show (one stop, six) is accepted back. */
+    if(f.colors.empty() || f.colors.size() > studio::EFFECT_MAX_STOPS)
     {
-        emit statusMessage(QStringLiteral("wave needs 2 to 5 colors"));
+        emit statusMessage(QStringLiteral("wave needs 1 to %1 colors")
+                               .arg(studio::EFFECT_MAX_STOPS));
         return false;
     }
     return ApplyFlow(f);

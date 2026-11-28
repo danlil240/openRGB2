@@ -64,12 +64,21 @@ struct IpcServerStats
     uint64_t responses_out     = 0;
     uint64_t events_sent       = 0;
     uint64_t events_dropped    = 0;   /* queue overflow/coalesce   */
+    uint64_t events_oversize   = 0;   /* over the body cap, never
+                                         sent (also in dropped)    */
     uint64_t resync_bytes      = 0;   /* skipped garbage           */
     uint64_t rejected_hellos   = 0;
     uint64_t rate_limited      = 0;
     uint64_t refused_busy      = 0;
     uint64_t queued_events     = 0;   /* currently queued          */
 };
+
+/* Frames one EVENT ({"data":...,"kind":...}, byte-identical to
+   encoding that object) serializing `data` at most once and
+   never copying it into an envelope: the producer's
+   pre-serialized data_json is used verbatim when present
+   (audit I-7). Empty when the body exceeds the cap. */
+std::vector<uint8_t> EncodeEventMessage(const IpcEvent& ev);
 
 class IpcServer
 {

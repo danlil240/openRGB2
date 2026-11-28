@@ -6,6 +6,7 @@
 
 #include "WorkspaceService.h"
 
+#include "config/JsonBounded.h"
 #include "config/StudioConfig.h"
 #include "presets/DevicePreset.h"
 #include "presets/PresetBundle.h"
@@ -814,6 +815,24 @@ WorkspaceService::ExternalCheck WorkspaceService::CheckExternal()
         }
         baseline = current_.external_sig;
     }
+    /* Stamp gate (audit I-6): the 2 s poll used to re-read and
+       hash document/manifest/original every time. Metadata is
+       taken BEFORE the scan, so a write racing the scan only
+       ever makes the cached stamp stale (next poll rescans),
+       never hides a change; a racy stamp is never cached. */
+    const WorkspaceStore::ExternalStampResult st =
+        store_.ExternalStamp(snap.id);
+    {
+        std::lock_guard<std::mutex> g(ext_mutex_);
+        if(!st.racy && ext_cache_.valid &&
+           ext_cache_.id == snap.id &&
+           ext_cache_.baseline == baseline &&
+           ext_cache_.stamp == st.stamp)
+        {
+            return ext_cache_.result;
+        }
+    }
+    ++ext_full_scans_;
     const WorkspaceStore::ExternalFingerprint fp =
         store_.ExternalScan(snap.id);
     {
@@ -830,20 +849,35 @@ WorkspaceService::ExternalCheck WorkspaceService::CheckExternal()
                that IS a deletion. */
             out.state  = "deleted";
             out.detail = "workspace directory removed";
-            return out;
         }
-        if(fp.signature == baseline)
+        else if(fp.signature == baseline)
         {
             out.state = "none";
-            return out;
         }
-        out.state  = fp.missing ? "deleted" : "modified";
-        out.detail = fp.detail.empty()
-            ? (fp.missing ? "workspace files were removed"
-                          : "workspace files changed on disk")
-            : fp.detail;
-        return out;
+        else
+        {
+            out.state  = fp.missing ? "deleted" : "modified";
+            out.detail = fp.detail.empty()
+                ? (fp.missing ? "workspace files were removed"
+                              : "workspace files changed on disk")
+                : fp.detail;
+        }
     }
+    if(!st.racy)
+    {
+        std::lock_guard<std::mutex> g(ext_mutex_);
+        ext_cache_.valid    = true;
+        ext_cache_.id       = snap.id;
+        ext_cache_.baseline = baseline;
+        ext_cache_.stamp    = st.stamp;
+        ext_cache_.result   = out;
+    }
+    return out;
+}
+
+uint64_t WorkspaceService::ExternalFullScans() const
+{
+    return ext_full_scans_.load();
 }
 
 WorkspaceService::Result WorkspaceService::RestoreBackup(
@@ -1072,11 +1106,14 @@ WorkspaceService::Result WorkspaceService::ImportFile(
                     "' (missing or oversized)";
         return res;
     }
-    const nlohmann::json j =
-        nlohmann::json::parse(bytes, nullptr, false);
+    /* Depth-capped (audit I-2): an imported file is
+       untrusted and the candidate parse deep-copies it. */
+    const nlohmann::json j = studio::ParseJsonBounded(bytes);
     if(j.is_discarded() || !j.is_object())
     {
-        res.error = path + " is not a valid workspace document";
+        res.error = path + " is not a valid workspace document"
+                           " (invalid JSON or nested deeper than " +
+                    std::to_string(studio::kMaxJsonDepth) + ")";
         return res;
     }
 
@@ -1160,7 +1197,27 @@ void WorkspaceService::PublishLocked()
         s.name        = current_.candidate->document.meta.name;
         s.source_form =
             WorkspaceSourceFormName(current_.candidate->source_form);
+        if(current_.candidate->resolved)
+        {
+            /* Serialized once per adopted candidate, on the
+               publishing thread (audit I-6). snap_ is written
+               only under mutex_ (held here), so reading its
+               bytes without snap_mutex_ is race-free. */
+            if(published_cand_ == current_.candidate &&
+               snap_.document_bytes)
+            {
+                s.document_bytes = snap_.document_bytes;
+            }
+            else
+            {
+                s.document_bytes =
+                    std::make_shared<const std::string>(
+                        studio::ToJson(current_.candidate->document)
+                            .dump(2));
+            }
+        }
     }
+    published_cand_ = s.document_bytes ? current_.candidate : nullptr;
     std::lock_guard<std::mutex> g(snap_mutex_);
     /* Diff-driven like the connection signature — a publish
        that changed nothing (an idempotent re-publish) must not
@@ -1731,7 +1788,10 @@ WorkspaceService::JobStatus WorkspaceService::RunJob(
         {
             return err.empty() ? "staged_unknown" : err;
         }
-        doc = nlohmann::json::parse(raw, nullptr, false);
+        /* Same nesting cap as wire bodies (audit I-2): staged
+           bytes are untrusted, and the candidate parse,
+           bundle unpack and dump(2) all recurse per level. */
+        doc = studio::ParseJsonBounded(raw);
         if(doc.is_discarded() || !doc.is_object())
         {
             return "invalid_document";
@@ -3206,12 +3266,12 @@ bool WorkspaceService::DocumentBytes(const std::string& id,
        marker will point at, so the publish/download/hash trio
        stays self-consistent through the recovery window. */
     {
-        std::lock_guard<std::mutex> g(mutex_);
-        if(current_.id == id && current_.candidate &&
-           current_.candidate->resolved)
+        /* Published by the committing thread (audit I-6) —
+           no serialization here, and no commit-mutex wait. */
+        std::lock_guard<std::mutex> g(snap_mutex_);
+        if(snap_.managed && snap_.id == id && snap_.document_bytes)
         {
-            bytes = studio::ToJson(current_.candidate->document)
-                        .dump(2);
+            bytes = *snap_.document_bytes;
             return true;
         }
     }

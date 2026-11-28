@@ -11,6 +11,7 @@
 #include "../effects/Presets.h"
 #include "../effects/EffectJson.h"
 
+#include <cmath>
 #include <set>
 #include <vector>
 
@@ -561,9 +562,18 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
                                         "effects", errs);
         out.effect.seed      = FieldU32(*s, "seed", 0, "effects", errs);
         const double speed = FieldNum(*s, "speed", 1.0, "effects", errs);
-        if(speed <= 0.0)
+        /* Audit C-12: re-test at the stored float width — 1e39
+           narrows to inf and 1e-50 to 0, both of which pass a
+           double-only > 0 check and poison every layer's speed
+           through ApplyGlobalParams. */
+        const float speed_f = (float)speed;
+        if(speed <= 0.0 || speed_f <= 0.0f)
         {
             AddErr(errs, "effects.speed", "expected number > 0");
+        }
+        else if(!std::isfinite(speed_f))
+        {
+            AddErr(errs, "effects.speed", "expected float-finite number");
         }
         else
         {
@@ -969,7 +979,7 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
         }
     }
     if(!out.effect.preset.empty()
-       && FindPreset(out.effect.preset) == nullptr)
+       && !FindPreset(out.effect.preset))
     {
         warns.push_back("effects.preset: unknown preset '"
                         + out.effect.preset + "'");

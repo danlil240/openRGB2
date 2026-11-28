@@ -1010,12 +1010,146 @@ int main()
         const std::string tid = r["transfer_id"].get<std::string>();
         CHECK(!tid.empty());
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        /* any command lazily sweeps; the dead transfer is gone */
+        /* any command lazily sweeps; the dead transfer is gone —
+           and says so with the documented token (audit I-5), not
+           as an id the server never issued */
         WsCall(c, seq, json::object({{ "verb", "list" }}));
         WsCallErr(c, seq, json::object({
             { "verb", "transfer_chunk" }, { "transfer_id", tid },
             { "offset", 0 }, { "data", Base64Encode("1234", 4) },
+        }), ErrCode::BadRequest, "transfer_expired");
+        /* a never-issued id stays unknown_transfer */
+        WsCallErr(c, seq, json::object({
+            { "verb", "transfer_finish" },
+            { "transfer_id", "tr-999-0000000000000000" },
         }), ErrCode::BadRequest, "unknown_transfer");
+    }
+
+    /*---- finished upload token lifetime (audit I-5) ----------*/
+    {
+        /* A finish-verified token is what an import dialog holds
+           between import_inspect and import_commit while the user
+           reviews conflicts — it must outlive the 60 s OPEN-stream
+           idle bound, stay alive while it is being used, and say
+           transfer_expired when it finally lapses. */
+        Rig rig(g_tmp / "staged-expiry");
+        rig.eopts.transfers.idle_expiry_ms   = 80;
+        rig.eopts.transfers.staged_expiry_ms = 1500;
+        rig.Start();
+        TestClient c;
+        Welcome(c, *rig.server);
+        const std::string tok = Upload(c, seq, "document",
+            WorkspaceDoc("staged-life").dump(2));
+        CHECK(!tok.empty());
+        auto run = [&](const char* verb, uint64_t base) -> json
+        {
+            const json r = WsCall(c, seq, json::object({
+                { "verb",              verb   },
+                { "id",                "sl1"  },
+                { "base_revision",     base   },
+                { "resource_revision", 0      },
+                { "staged",            tok    },
+            }));
+            if(!r.value("accepted", false))
+            {
+                return r;
+            }
+            return WaitJob(c, seq, r["job_id"].get<uint64_t>());
+        };
+        /* well past the open-stream idle bound */
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        WsCall(c, seq, json::object({{ "verb", "list" }}));
+        CHECK(run("validate", 0).value("state", "") == "succeeded");
+        /* ~1.2 s after finish, but only ~0.9 s after the last
+           use: refresh-on-use keeps it alive */
+        std::this_thread::sleep_for(std::chrono::milliseconds(900));
+        WsCall(c, seq, json::object({{ "verb", "list" }}));
+        CHECK(run("commit", 0).value("state", "") == "succeeded");
+        /* idle past the staged bound -> transfer_expired */
+        std::this_thread::sleep_for(std::chrono::milliseconds(1800));
+        WsCall(c, seq, json::object({{ "verb", "list" }}));
+        WsCallErr(c, seq, json::object({
+            { "verb",              "commit" },
+            { "id",                "sl1"    },
+            { "base_revision",     1        },
+            { "resource_revision", 0        },
+            { "staged",            tok      },
+        }), ErrCode::BadRequest, "transfer_expired");
+        WsCallErr(c, seq, json::object({
+            { "verb",   "preview_begin" },
+            { "staged", tok             },
+        }), ErrCode::BadRequest, "transfer_expired");
+    }
+
+    /*---- a queued job pins its staged token (audit I-5) -------*/
+    {
+        Rig rig(g_tmp / "staged-pin");
+        rig.eopts.transfers.idle_expiry_ms   = 80;
+        rig.eopts.transfers.staged_expiry_ms = 300;
+        std::atomic<bool> release{ false };
+        rig.ws->SetPreJobHookForTesting(
+            [&release](const std::string& verb)
+            {
+                if(verb != "validate")
+                {
+                    return;
+                }
+                for(int i = 0; i < 500 && !release.load(); ++i)
+                {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(10));
+                }
+            });
+        rig.Start();
+        TestClient c;
+        Welcome(c, *rig.server);
+        const std::string tok = Upload(c, seq, "document",
+            WorkspaceDoc("pinned").dump(2));
+        CHECK(!tok.empty());
+        /* a blocker holds the single worker ... */
+        const json b = WsCall(c, seq, json::object({
+            { "verb",              "validate" },
+            { "id",                "pin1"     },
+            { "base_revision",     0          },
+            { "resource_revision", 0          },
+            { "document",          WorkspaceDoc("blocker") },
+        }));
+        CHECK(b.value("accepted", false));
+        /* ... so the commit referencing `tok` sits queued */
+        const json q = WsCall(c, seq, json::object({
+            { "verb",              "commit" },
+            { "id",                "pin1"   },
+            { "base_revision",     0        },
+            { "resource_revision", 0        },
+            { "staged",            tok      },
+        }));
+        CHECK(q.value("accepted", false));
+        /* queued longer than the staged bound, sweeps running */
+        for(int i = 0; i < 7; ++i)
+        {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(100));
+            WsCall(c, seq, json::object({{ "verb", "list" }}));
+        }
+        release.store(true);
+        const json st = WaitJob(c, seq, q["job_id"].get<uint64_t>());
+        CHECK(st.value("state", "") == "succeeded");
+        if(st.value("state", "") != "succeeded")
+        {
+            std::printf("  (pinned commit: %s / %s)\n",
+                        st.value("error", "").c_str(),
+                        st.value("detail", "").c_str());
+        }
+        /* the terminal job released the pin: the token lapses */
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        WsCall(c, seq, json::object({{ "verb", "list" }}));
+        WsCallErr(c, seq, json::object({
+            { "verb",              "validate" },
+            { "id",                "pin1"     },
+            { "base_revision",     1          },
+            { "resource_revision", 0          },
+            { "staged",            tok        },
+        }), ErrCode::BadRequest, "transfer_expired");
     }
 
     /*---- >1 MiB document through chunked transfer -----------*/
@@ -1086,6 +1220,101 @@ int main()
         WsCall(c, seq, json::object({
             { "verb", "transfer_finish" }, { "transfer_id", tid },
         }));
+    }
+
+    /*---- download kind must match the content (audit I-12) --*/
+    {
+        /* The download path only ever serves a workspace
+           DOCUMENT: a declared kind of bundle/asset/... would
+           stage it under the wrong cap and label. */
+        Rig& rig = *mainrig;
+        TestClient c;
+        Welcome(c, *rig.server);
+        for(const char* k : { "bundle", "asset", "type", "export" })
+        {
+            WsCallErr(c, seq, json::object({
+                { "verb", "transfer_begin" }, { "direction", "download" },
+                { "kind", k }, { "id", "w1" },
+            }), ErrCode::BadRequest, "bad_request");
+        }
+        /* kind omitted still means document */
+        const json r = WsCall(c, seq, json::object({
+            { "verb", "transfer_begin" }, { "direction", "download" },
+            { "id", "w1" },
+        }));
+        CHECK(!r.value("transfer_id", "").empty());
+        if(!r.value("transfer_id", "").empty())
+        {
+            WsCall(c, seq, json::object({
+                { "verb", "transfer_finish" },
+                { "transfer_id", r["transfer_id"] },
+            }));
+        }
+    }
+
+    /*---- resource_get never inlines past the cap (I-12) ------*/
+    {
+        /* A library type whose serialized document exceeds the
+           reply budget is served through a staged download
+           (document_omitted + transfer fields) instead of an
+           over-cap reply that fails as a generic too_large. */
+        Rig rig(g_tmp / "resget");
+        const fs::path lib = g_tmp / "resget" / "library" / "devices";
+        fs::create_directories(lib);
+        std::stringstream tss;
+        tss << std::ifstream(g_tmp / "types" /
+                             "test-fan.device.json").rdbuf();
+        json big = json::parse(tss.str(), nullptr, false);
+        CHECK(big.is_object());
+        big["id"]   = "big-fan";
+        big["name"] = std::string(1200 * 1024, 'n');
+        std::ofstream(lib / "big-fan.device.json") << big.dump();
+        rig.Start();
+        TestClient c;
+        Welcome(c, *rig.server);
+        const json small = WsCall(c, seq, json::object({
+            { "verb", "resource_get" }, { "kind", "device_type" },
+            { "id", "test-fan" },
+        }));
+        CHECK(small["document"].is_object());
+        CHECK(!small.value("document_omitted", false));
+
+        const json r = WsCall(c, seq, json::object({
+            { "verb", "resource_get" }, { "kind", "device_type" },
+            { "id", "big-fan" },
+        }));
+        CHECK(r.value("id", "") == "big-fan");
+        CHECK(!r.contains("document"));
+        CHECK(r.value("document_omitted", false));
+        const std::string tid = r.value("transfer_id", std::string());
+        CHECK(!tid.empty());
+        std::string got;
+        uint64_t off = 0;
+        bool eof = tid.empty();
+        for(int i = 0; i < 64 && !eof; ++i)
+        {
+            const json cr = WsCall(c, seq, json::object({
+                { "verb", "transfer_chunk" }, { "transfer_id", tid },
+                { "offset", off },
+            }));
+            std::vector<uint8_t> dec;
+            CHECK(Base64Decode(cr.value("data", ""), dec,
+                               200 * 1024));
+            got.append((const char*)dec.data(), dec.size());
+            off += dec.size();
+            eof = cr.value("eof", false);
+        }
+        CHECK(got.size() == r.value("length", 0ull));
+        CHECK(Sha256Hex(got) == r.value("sha256", std::string()));
+        const json doc = json::parse(got, nullptr, false);
+        CHECK(doc.is_object() &&
+              doc.value("name", "").size() == 1200 * 1024);
+        if(!tid.empty())
+        {
+            WsCall(c, seq, json::object({
+                { "verb", "transfer_finish" }, { "transfer_id", tid },
+            }));
+        }
     }
 
     /*---- lost completion event: reconcile by job_status -----*/
@@ -1830,6 +2059,17 @@ int main()
         WsCallErr(c, seq, json::object({
             { "verb", "calibration_show" },
             { "token", tok }, { "led", 6 },
+        }), ErrCode::Unavailable, "out_of_range");
+        /* Audit I-13: a 64-bit led must not narrow into range —
+           2^32 + 2 truncated to int is 2, a valid LED; -2^32 + 1
+           truncates to 1. Both are out of range, not a show. */
+        WsCallErr(c, seq, json::object({
+            { "verb", "calibration_show" },
+            { "token", tok }, { "led", 4294967298ll },
+        }), ErrCode::Unavailable, "out_of_range");
+        WsCallErr(c, seq, json::object({
+            { "verb", "calibration_show" },
+            { "token", tok }, { "led", -4294967295ll },
         }), ErrCode::Unavailable, "out_of_range");
         const size_t writes = submits.size();
         std::this_thread::sleep_for(

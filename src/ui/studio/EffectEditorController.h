@@ -105,6 +105,11 @@ class EffectEditorController : public QObject
     Q_PROPERTY(int decayPct READ decayPct NOTIFY draftInputsChanged)
     Q_PROPERTY(QString statusText READ statusText
                    NOTIFY statusChanged)
+    /* Bumps whenever the engine's reactive-input state changes —
+       a QML binding that calls inputSourceState() reads this too
+       so the source badge re-evaluates (audit Q-10). */
+    Q_PROPERTY(int inputStateRevision READ inputStateRevision
+                   NOTIFY inputStateChanged)
 
 public:
     explicit EffectEditorController(EngineBridge* bridge,
@@ -123,6 +128,7 @@ public:
     bool         savingLook() const      { return saving_look_; }
     int          decayPct() const;
     QString      statusText() const      { return status_text_; }
+    int          inputStateRevision() const { return input_state_rev_; }
 
     /*---- reads -------------------------------------------------*/
     /* Full detail row for the inspector — {index, primitive,
@@ -191,7 +197,8 @@ public:
                                        const QColor& color);
 
     /*---- directional flow (Wave card) ---------------------------
-       Drives every enabled `wave` layer of the effective stack
+       Drives every untargeted world-space `wave` layer
+       (EditorController::IsFlowLayer) of the effective stack
        together (core EditorController::SetFlow — one undo record
        per call). flowState() = {available, direction{x,y,z},
        colors[hex], speed (m/s), wavelength (m), keyboardLayer
@@ -261,6 +268,7 @@ signals:
     void draftInputsChanged();
     void statusChanged();
     void statusMessage(const QString& text);
+    void inputStateChanged();
 
 private:
     WorkspaceEditSession*      Session() const;
@@ -319,6 +327,7 @@ private:
     QVariantList looks_;
     QString      status_text_;
     int          selected_layer_ = -1;
+    int          input_state_rev_ = 0;
 
     /* saveLookAs in flight — the request correlator, then the
        job id once the engine accepts; the requested name rides

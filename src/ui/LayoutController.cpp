@@ -793,10 +793,23 @@ void LayoutController::QueueViewNotify(bool history)
        item still being delivered to. Posting the batch lets
        the dispatch unwind first; QML sees the same ordering,
        one frame later (F02). */
-    QMetaObject::invokeMethod(this, [this, history] {
+    /* Coalesced (audit U-10): store updates landing in one pass
+       (scene + topology pushes, a poll burst) each asked for a
+       full Repeater rebuild; they now share ONE posted notify,
+       with history OR-ed in. */
+    view_notify_history_ = view_notify_history_ || history;
+    if(view_notify_queued_)
+    {
+        return;
+    }
+    view_notify_queued_ = true;
+    QMetaObject::invokeMethod(this, [this] {
+        const bool with_history = view_notify_history_;
+        view_notify_queued_  = false;
+        view_notify_history_ = false;
         emit itemsChanged();
         emit selectedChanged();
-        if(history)
+        if(with_history)
         {
             emit historyChanged();
         }

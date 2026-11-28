@@ -153,6 +153,16 @@ struct WsEngine
     nlohmann::json doc      = CompactDoc();
     uint64_t      next_job  = 1;
     bool          auto_complete_jobs = true;
+    /* The real engine publishes the fresh `get` snapshot BEFORE
+       a commit's terminal job event (WorkspaceService flushes
+       the snapshot hook first). Off by default: most cases
+       script the event-only ordering. */
+    bool          snapshot_before_terminal = false;
+    /* Audit U-7: the terminal job event can overtake the accept
+       reply on the wire (the job runs on a worker thread). */
+    bool          terminal_before_accept = false;
+    /* job_status answers {found:false} (record evicted). */
+    bool          job_status_not_found   = false;
     bool          fail_next_commit   = false;
     std::string   commit_fail_detail = "invalid_document";
     /* Count of import_commit jobs to fail before succeeding
@@ -177,6 +187,15 @@ struct WsEngine
     int           import_commits  = 0;
     int           reload_jobs     = 0;
     std::string   upload_bytes;
+    /* Upload chunk size the scripted engine grants, and the kind
+       the last upload declared. */
+    uint64_t      upload_chunk = 400;
+    std::string   upload_kind;
+    /* The document bytes a download was staged with — like the
+       real engine (StageDownload copies the cached bytes), a
+       transfer serves ONE consistent snapshot even if the
+       workspace moves mid-transfer. */
+    std::string   dl_bytes;
     std::map<std::string, std::string> staged_uploads;
     std::vector<uint64_t>         terminal_jobs;
     int           set_scene_calls = 0;
@@ -253,6 +272,21 @@ struct WsEngine
             held_verb == "import_commit"))
         {
             ++ws_rev;
+            if(snapshot_before_terminal)
+            {
+                if(held_verb == "commit")
+                {
+                    /* adopt the submitted document the way the
+                       auto-complete path does */
+                    studio::StudioDocument d;
+                    std::vector<std::string> errs;
+                    if(studio::FromJson(last_commit_doc, d, &errs))
+                    {
+                        doc = studio::ToJson(d);
+                    }
+                }
+                SendEvent(Snapshot());
+            }
         }
         SendEvent(JobRecord(held_job, held_verb, state, detail));
         terminal_jobs.push_back(held_job);
@@ -404,12 +438,13 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
             if(dir == "download")
             {
                 ++e.download_begins;
-                const std::string bytes = e.DocBytesFor();
+                e.dl_bytes = e.DocBytesFor();
+                const std::string& bytes = e.dl_bytes;
                 e.srv.SendMsg(MsgType::Ok, m.request_id,
                     nlohmann::json::object({
                         { "transfer_id",     "dl1" },
                         { "length",          (uint64_t)bytes.size() },
-                        { "sha256",          e.DocSha() },
+                        { "sha256",          Sha256(bytes) },
                         { "max_chunk_bytes", (uint64_t)400 },
                     }));
             }
@@ -417,10 +452,11 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
             {
                 ++e.upload_begins;
                 e.upload_bytes.clear();
+                e.upload_kind = body.value("kind", std::string());
                 e.srv.SendMsg(MsgType::Ok, m.request_id,
                     nlohmann::json::object({
                         { "transfer_id",     "ul1" },
-                        { "max_chunk_bytes", (uint64_t)400 },
+                        { "max_chunk_bytes", e.upload_chunk },
                     }));
             }
         }
@@ -451,7 +487,7 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
             else
             {
                 /* download chunk */
-                const std::string bytes = e.DocBytesFor();
+                const std::string bytes = e.dl_bytes;
                 const uint64_t mx =
                     body.value("max_bytes", (uint64_t)400);
                 const uint64_t n =
@@ -493,6 +529,15 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
             {
                 e.last_commit_doc = body.value("document",
                                                nlohmann::json());
+                /* A staged commit (document over the inline IPC
+                   bound) carries the upload token instead. */
+                const auto st_it = e.staged_uploads.find(
+                    body.value("staged", std::string()));
+                if(st_it != e.staged_uploads.end())
+                {
+                    e.last_commit_doc = nlohmann::json::parse(
+                        st_it->second, nullptr, false);
+                }
                 e.last_base_rev   =
                     body.value("base_revision", (uint64_t)0);
                 e.last_res_rev    =
@@ -514,11 +559,20 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
             {
                 ++e.reload_jobs;
             }
-            e.srv.SendMsg(MsgType::Ok, m.request_id,
-                nlohmann::json::object({
-                    { "accepted", true },
-                    { "job_id",   job  },
-                }));
+            const uint32_t accept_req = m.request_id;
+            auto send_accept = [&e, accept_req, job] {
+                e.srv.SendMsg(MsgType::Ok, accept_req,
+                    nlohmann::json::object({
+                        { "accepted", true },
+                        { "job_id",   job  },
+                    }));
+            };
+            const bool late_accept =
+                e.terminal_before_accept && e.auto_complete_jobs;
+            if(!late_accept)
+            {
+                send_accept();
+            }
             if(e.auto_complete_jobs)
             {
                 if(verb == "commit" && e.fail_next_commit)
@@ -550,6 +604,10 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
                             e.doc = studio::ToJson(d);
                         }
                         ++e.ws_rev;
+                        if(e.snapshot_before_terminal)
+                        {
+                            e.SendEvent(e.Snapshot());
+                        }
                     }
                     else if(verb == "save_copy")
                     {
@@ -565,11 +623,22 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
                 e.held_job  = job;
                 e.held_verb = verb;
             }
+            if(late_accept)
+            {
+                send_accept();
+            }
         }
         else if(verb == "job_status")
         {
             const uint64_t j =
                 body.value("job_id", (uint64_t)0);
+            if(e.job_status_not_found)
+            {
+                e.srv.SendMsg(MsgType::Ok, m.request_id,
+                    nlohmann::json::object({
+                        { "found", false }, { "job_id", j } }));
+                break;
+            }
             nlohmann::json st = e.JobRecord(
                 j, e.held_verb.empty() ? "commit" : e.held_verb,
                 e.held_job == j ? "running" : "succeeded");
@@ -713,6 +782,82 @@ int main(int argc, char** argv)
               0.1f);
     }
 
+    std::printf("-- session: a live layer gesture blocks undo and "
+                "dies with the document (audit C-6)\n");
+    {
+        /* An authored stack so layer ops need no resolver. */
+        auto with_layer = [](const std::string& name, float speed)
+        {
+            studio::StudioDocument d = ParseCompact(CompactDoc(name));
+            studio::EffectLayer l;
+            l.primitive = "wave";
+            l.speed     = speed;
+            d.effect.layers = { l };
+            return d;
+        };
+        using LF = studio::EditorController::LayerField;
+
+        /* Hold a slider, press Ctrl+Z, release: the undo is
+           refused while the gesture is open, so the release
+           records only the scrub and one undo takes it back. */
+        WorkspaceEditSession s;
+        s.LoadApplied(with_layer("desk", 1.0f), 1, 1);
+        auto op = s.Editor().SetLayerOpacity(0, 0.5f);
+        CHECK(op.has_value() && s.CommitEdit(*op));
+        CHECK(s.Editor().BeginLayerGesture());
+        s.Editor().SetLayerField(0, LF::Speed, 3.0);
+        CHECK(!s.Undo());
+        CHECK(!s.Redo());
+        CHECK(s.Editor().LayerGestureActive());
+        CHECK(s.UndoCount() == 1);
+        auto g = s.Editor().CommitLayerGesture("scrub");
+        CHECK(g.has_value() && s.CommitEdit(*g));
+        CHECK(s.UndoCount() == 2);
+        CHECK(s.Undo());
+        CHECK(s.Working().effect.layers[0].speed == 1.0f);
+        CHECK(s.Working().effect.layers[0].opacity == 0.5f);
+        CHECK(s.Undo());
+        CHECK(s.Working().effect.layers[0].opacity == 1.0f);
+
+        /* Every document swap cancels an open layer gesture
+           BEFORE the swap, so its begin snapshot can never be
+           restored over (or recorded against) the new document. */
+        struct Swap { const char* what; std::function<void(
+            WorkspaceEditSession&)> run; };
+        const studio::StudioDocument other = with_layer("other", 7.0f);
+        const std::vector<Swap> swaps = {
+            { "LoadApplied", [&](WorkspaceEditSession& x) {
+                  x.LoadApplied(other, 2, 2); } },
+            { "ApplyRemote", [&](WorkspaceEditSession& x) {
+                  x.ApplyRemote(other, 2, 2); } },
+            { "LoadDraft",   [&](WorkspaceEditSession& x) {
+                  x.LoadDraft(other); } },
+            { "Discard",     [&](WorkspaceEditSession& x) {
+                  x.Discard(); } },
+            { "StageWorking", [&](WorkspaceEditSession& x) {
+                  x.StageWorking(other, "load profile"); } },
+        };
+        for(const Swap& sw : swaps)
+        {
+            WorkspaceEditSession x;
+            x.LoadApplied(with_layer("desk", 1.0f), 1, 1);
+            CHECK(x.Editor().BeginLayerGesture());
+            x.Editor().SetLayerField(0, LF::Speed, 3.0);
+            sw.run(x);
+            const bool cancelled = !x.Editor().LayerGestureActive();
+            if(!cancelled)
+            {
+                std::printf("  gesture survived %s\n", sw.what);
+            }
+            CHECK(cancelled);
+            CHECK(!x.Editor().CommitLayerGesture("late").has_value());
+            const float want =
+                std::string(sw.what) == "Discard" ? 1.0f : 7.0f;
+            CHECK(x.Working().effect.layers.size() == 1
+                  && x.Working().effect.layers[0].speed == want);
+        }
+    }
+
     std::printf("-- session: doc edits + discard\n");
     {
         WorkspaceEditSession s;
@@ -852,6 +997,39 @@ int main(int argc, char** argv)
             CHECK(!store2.Read(QStringLiteral("ws0")).exists);
         }
 
+        /* Audit U-8: continuous editing restarts the debounce on
+           every Stage — the maximum wait still writes the
+           record while the edits keep coming. */
+        {
+            QTemporaryDir mdir;
+            WorkspaceDraftStore store4;
+            store4.setRootForTesting(mdir.path());
+            store4.setDebounceForTesting(150);
+            store4.setMaxWaitForTesting(400);
+            bool written_while_editing = false;
+            const auto t0 = std::chrono::steady_clock::now();
+            while(std::chrono::steady_clock::now() - t0 <
+                  std::chrono::milliseconds(1500))
+            {
+                store4.Stage(QStringLiteral("ws4"), 1, 1,
+                             QString(), studio::ToJson(doc));
+                const auto t1 = std::chrono::steady_clock::now();
+                while(std::chrono::steady_clock::now() - t1 <
+                      std::chrono::milliseconds(40))
+                {
+                    QCoreApplication::processEvents(
+                        QEventLoop::AllEvents, 5);
+                }
+                if(QFileInfo::exists(mdir.path() +
+                       QStringLiteral("/ws4.draft.json")))
+                {
+                    written_while_editing = true;
+                    break;
+                }
+            }
+            CHECK(written_while_editing);
+        }
+
         /* Corrupt record: reported + set aside, never guessed. */
         {
             WorkspaceDraftStore store3;
@@ -954,6 +1132,43 @@ int main(int argc, char** argv)
                    !rig.ctl.error().isEmpty(); }));
         CHECK(rig.ctl.dirty());
         CHECK(rig.ctl.Session().Working().meta.name == "kept");
+    }
+
+    /* Audit U-9: a download staged at revision N that finishes
+       after the snapshot moved to N+1 holds N's bytes; adopting
+       it labelled N+1 is a lost update (the next save would
+       overwrite N+1 with no conflict). The transfer hash must
+       match the current content hash, or the doc is refetched. */
+    std::printf("-- controller: a download overtaken by a newer "
+                "revision is refetched (U-9)\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        CHECK(rig.ctl.Session().Working().meta.name == "desk");
+
+        /* Foreign commit -> rev 2: the UI starts a download. */
+        const int begins = rig.engine.download_begins;
+        rig.engine.doc = CompactDoc("second");
+        rig.engine.ws_rev = 2;
+        rig.engine.SendEvent(rig.engine.Snapshot());
+        CHECK(rig.PumpUntil([&] {
+            return rig.engine.download_begins == begins + 1; }));
+        /* Mid-transfer, another commit lands as rev 3. */
+        rig.engine.doc = CompactDoc("third");
+        rig.engine.ws_rev = 3;
+        rig.engine.SendEvent(rig.engine.Snapshot());
+        CHECK(rig.PumpUntil([&] {
+            return !rig.ctl.loading() &&
+                   rig.ctl.Session().BaseRevision() == 3 &&
+                   rig.ctl.Session().Baseline().meta.name ==
+                       "third"; }, 4000));
+        CHECK(rig.ctl.Session().Baseline().meta.name == "third");
+        CHECK(!rig.ctl.dirty());
+        CHECK(!rig.ctl.conflict());
     }
 
     std::printf("-- controller: revision_conflict -> conflict\n");
@@ -1163,6 +1378,43 @@ int main(int argc, char** argv)
         CHECK(rig.ctl.dirty());
     }
 
+    /* Audit U-13: a document whose inline commit body would
+       exceed the 1 MiB IPC bound used to fail locally with a
+       misleading "connection" error. The commit verb accepts a
+       staged upload token — the save routes through it. */
+    std::printf("-- controller: a document over the IPC bound "
+                "saves via a staged upload (U-13)\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.engine.upload_chunk = 192 * 1024;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        const std::string big(kMaxBodyBytes + 256 * 1024, 'n');
+        CHECK(rig.ctl.Session().CommitDocEdit("rename",
+            [&](studio::StudioDocument& d) {
+                d.meta.name = big; return true; }));
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        int finished = 0;
+        bool finished_ok = false;
+        QObject::connect(&rig.ctl, &WorkspaceController::saveFinished,
+                         [&](bool ok) { ++finished; finished_ok = ok; });
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] { return finished > 0; }, 20000));
+        CHECK(finished_ok);
+        CHECK(rig.ctl.error().isEmpty());
+        CHECK(!rig.ctl.saving());
+        CHECK(!rig.ctl.dirty());
+        CHECK(rig.engine.commits == 1);
+        CHECK(rig.engine.upload_kind == "document");
+        CHECK(rig.engine.last_commit_doc.is_object() &&
+              rig.engine.last_commit_doc.value("name", std::string())
+                  == big);
+        CHECK(rig.ctl.Session().BaseRevision() == 2);
+    }
+
     std::printf("-- controller: foreign-open latch blocks a "
                 "stale-id fetch\n");
     {
@@ -1234,6 +1486,101 @@ int main(int argc, char** argv)
                        "shelf-doc"; }));
         CHECK(rig.ctl.Drafts().Read(
             QStringLiteral("ws0")).exists);
+    }
+
+    /* Audit U-3: the UI's own commit is not a foreign change.
+       The real engine publishes the post-commit snapshot before
+       the terminal job event; that snapshot names OUR committed
+       bytes, so it must neither re-download the document nor,
+       with edits made meanwhile, raise "changed on the engine". */
+    std::printf("-- controller: own commit echo is not "
+                "refetched (U-3)\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.engine.snapshot_before_terminal = true;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "mine"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        const int begins = rig.engine.download_begins;
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] { return rig.ctl.saving(); }));
+        CHECK(rig.PumpUntil([&] { return !rig.ctl.saving(); }));
+        rig.PumpUntil([&] { return false; }, 300);   /* drain */
+        CHECK(rig.engine.download_begins == begins);
+        CHECK(!rig.ctl.dirty());
+        CHECK(!rig.ctl.conflict());
+        CHECK(!rig.ctl.loading());
+        CHECK(rig.ctl.workspaceRevision() == 2);
+        CHECK(rig.ctl.Session().BaseRevision() == 2);
+    }
+    std::printf("-- controller: editing while the own commit "
+                "lands raises no conflict (U-3)\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.engine.snapshot_before_terminal = true;
+        rig.engine.auto_complete_jobs = false;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("first",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "v1"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        const int begins = rig.engine.download_begins;
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] { return rig.engine.held_job != 0; }));
+        rig.engine.CompleteHeld("succeeded");
+        /* Keep editing while the snapshot + terminal land. */
+        rig.ctl.Session().CommitDocEdit("second",
+            [](studio::StudioDocument& d) {
+                d.brightness = 0.25f; return true; });
+        rig.ctl.NoteDraftEdited();
+        CHECK(rig.PumpUntil([&] { return !rig.ctl.saving(); }));
+        rig.PumpUntil([&] { return false; }, 300);   /* drain */
+        CHECK(rig.engine.download_begins == begins);
+        CHECK(!rig.ctl.conflict());
+        CHECK(rig.ctl.dirty());
+        CHECK(rig.ctl.Session().Working().brightness == 0.25f);
+        CHECK(rig.ctl.Session().Baseline().meta.name == "v1");
+        CHECK(rig.ctl.workspaceRevision() == 2);
+    }
+    std::printf("-- controller: terminal-first revision move "
+                "notifies (U-3)\n");
+    {
+        /* Event-only ordering: the terminal record moves the
+           revision; QML binds workspaceRevision to
+           workspaceChanged, so the move must notify. */
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "notify"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        int ws_signals = 0;
+        quint64 seen_rev = 0;
+        QObject::connect(&rig.ctl,
+            &WorkspaceController::workspaceChanged, [&] {
+                ++ws_signals;
+                seen_rev = rig.ctl.workspaceRevision();
+            });
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] { return rig.ctl.saving(); }));
+        CHECK(rig.PumpUntil([&] { return !rig.ctl.saving(); }));
+        CHECK(rig.ctl.workspaceRevision() == 2);
+        CHECK(ws_signals >= 1);
+        CHECK(seen_rev == 2);
     }
 
     std::printf("-- controller: edits during save stay dirty\n");
@@ -1310,6 +1657,88 @@ int main(int argc, char** argv)
         CHECK(rig.ctl.Session().Working().meta.name ==
               "landed");
         CHECK(!rig.ctl.conflict());
+    }
+
+    /* Audit U-7: a terminal event that overtakes the accept
+       reply (unknown job id at the time) must still resolve the
+       save once the reply names it — never latch saving. */
+    std::printf("-- controller: terminal before accept "
+                "resolves the save (U-7)\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.engine.terminal_before_accept = true;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "early"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        const int begins = rig.engine.download_begins;
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] { return rig.engine.commits == 1; }));
+        CHECK(rig.PumpUntil([&] { return !rig.ctl.saving(); }, 3000));
+        rig.PumpUntil([&] { return false; }, 200);   /* drain */
+        CHECK(!rig.ctl.dirty());
+        CHECK(rig.ctl.error().isEmpty());
+        CHECK(rig.ctl.Session().BaseRevision() == 2);
+        /* Our own job: never treated as a foreign commit. */
+        CHECK(rig.engine.download_begins == begins);
+    }
+    std::printf("-- controller: lost terminal event — the "
+                "watchdog polls job_status (U-7)\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.ctl.setJobWatchdogForTesting(60);
+        rig.engine.auto_complete_jobs = false;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "lost"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] { return rig.engine.held_job != 0; }));
+        /* The job completes but its event never arrives. */
+        ++rig.engine.ws_rev;
+        rig.engine.held_job = 0;
+        CHECK(rig.PumpUntil([&] { return !rig.ctl.saving(); }, 4000));
+        CHECK(!rig.ctl.dirty());
+        CHECK(rig.ctl.Session().BaseRevision() == 2);
+        CHECK(rig.ctl.Session().Baseline().meta.name == "lost");
+    }
+    std::printf("-- controller: a job the engine no longer "
+                "knows fails honestly (U-7)\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.ctl.setJobWatchdogForTesting(60);
+        rig.engine.auto_complete_jobs = false;
+        rig.engine.job_status_not_found = true;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        rig.ctl.Session().CommitDocEdit("rename",
+            [](studio::StudioDocument& d) {
+                d.meta.name = "gone"; return true; });
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        bool finished_ok = true;
+        int  finished    = 0;
+        QObject::connect(&rig.ctl, &WorkspaceController::saveFinished,
+                         [&](bool ok) { finished_ok = ok; ++finished; });
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] { return rig.engine.held_job != 0; }));
+        CHECK(rig.PumpUntil([&] { return !rig.ctl.saving(); }, 4000));
+        CHECK(finished == 1);
+        CHECK(!finished_ok);
+        CHECK(!rig.ctl.error().isEmpty());
+        CHECK(rig.ctl.dirty());   /* the draft is kept */
     }
 
     std::printf("-- controller: stale snapshot echo ignored\n");

@@ -75,6 +75,7 @@ qt_add_qml_module(openrgb2_ui
         components/FrameStrip.qml
         components/GroupChip.qml
         components/NavButton.qml
+        components/PageFlickable.qml
         components/PageHeader.qml
         components/PaletteSwatch.qml
         components/StatusPill.qml

@@ -523,24 +523,7 @@ PlaybackController::Deps EngineHost::BuildPlaybackDeps()
     pdeps.wired_targets =
         [this]() -> std::vector<DeviceSnapshot>
         {
-            std::vector<DeviceSnapshot> out;
-            if(!sdk_)
-            {
-                return out;
-            }
-            const std::vector<DeviceKey> bound =
-                mapper_.BoundControllers();
-            for(const DeviceSnapshot& s : sdk_->Snapshots())
-            {
-                if(!IsWirelessGroupController(s) &&
-                   s.connection == ConnectionState::Connected &&
-                   std::find(bound.begin(), bound.end(), s.key) !=
-                       bound.end())
-                {
-                    out.push_back(s);
-                }
-            }
-            return out;
+            return WiredTargets();
         };
     pdeps.select_mode =
         [this](const DeviceKey& k, const std::string& name,
@@ -805,6 +788,18 @@ bool EngineHost::Start(std::string& err)
     }
     start_attempted_ = true;
 
+    /* Audit E-2: a 1 ms timer resolution for the engine's
+       lifetime, before any worker starts — the 60 Hz scene
+       clock, the lanes' budget waits and the owner loop all
+       wake on the system timer tick (15.6 ms by default).
+       Released at the end of Stop(). A refusal is logged, not
+       fatal: the engine still runs, just coarser. */
+    if(!timer_resolution_.Acquire(1, opts_.timer_api))
+    {
+        Log("timer resolution: 1 ms request refused — frame "
+            "pacing stays on the default system tick");
+    }
+
     /* 1. Single instance (plan section 4): exactly one engine
        owns the managed configuration. Refusing to start is the
        honest answer to a double-own attempt — the holder is
@@ -833,6 +828,7 @@ bool EngineHost::Start(std::string& err)
        SDK transport below; with no transport configured its
        lanes simply idle. */
     pipeline_ = std::make_shared<DeliveryPipeline>();
+    pipeline_->SetKeyframeInterval(opts_.delivery_keyframe);
     engine_.SetFrameSink(pipeline_);
 
     /* 4. Backend attach: the backend is launched EXTERNALLY
@@ -1063,29 +1059,45 @@ bool EngineHost::Start(std::string& err)
     /* Every evaluated scene frame is split into per-controller
        complete-controller frames and handed to the pipeline via
        the engine's submitLatest sink. While an uploaded loop
-       owns the output, live submissions to OTHER controllers
-       are skipped (Tick produces the matching baked frames);
-       submissions to the suppressed wireless group still run
-       so the lane's rejection — never a silent drop — is
-       exercised on every tick. */
+       owns the output the evaluate gate below skips evaluation
+       and mapping (Tick produces the wired baked frames; the
+       owned group's suppressed lane would refuse a live frame).
+       A tick that read the gate just before ownership began is
+       still mapped: submissions to OTHER controllers are then
+       skipped, and one to the suppressed wireless group is
+       refused by its lane with a reason — never a silent
+       drop. */
     /* While the power lifecycle gates output (display off /
        suspend) every mapped frame would only be rejected at the
        pipeline: skip evaluation + mapping instead of running
        them at 60 Hz just to inflate the `rejected` counters. */
     engine_.Worker().SetOutputGate(
         [this]() { return pipeline_->OutputPaused(); });
+    /* E-6: while the uploaded loop owns the output every mapped
+       frame would be skipped (wired) or refused by the
+       suppressed lane (the owned group) — so skip evaluation
+       and mapping entirely. The clock still ticks: Tick bakes
+       the wired frames on it. A frame the gate skipped is never
+       mapped even if ownership ended mid-tick (its colors are
+       empty); the next tick evaluates normally. */
+    engine_.Worker().SetEvaluateGate(
+        [this]() { return playback_->PlaybackOwnsWired(); });
     engine_.Worker().SetFrameCallback(
         [this](const EvaluatedFrame& eval)
         {
             ++frames_;
-            const bool owns = playback_->PlaybackOwnsWired();
-            for(RgbFrame& frame : mapper_.MapFrame(eval))
+            if(!eval.evaluate_gated)
             {
-                if(owns && !playback_->OwnsGroup(frame.controller))
+                const bool owns = playback_->PlaybackOwnsWired();
+                for(RgbFrame& frame : mapper_.MapFrame(eval))
                 {
-                    continue;
+                    if(owns &&
+                       !playback_->OwnsGroup(frame.controller))
+                    {
+                        continue;
+                    }
+                    engine_.SubmitLatest(std::move(frame));
                 }
-                engine_.SubmitLatest(std::move(frame));
             }
             playback_->Tick(eval.sample_time);
         });
@@ -1195,43 +1207,19 @@ bool EngineHost::Start(std::string& err)
            the OK reply can honestly report the handoff decision
            — "closing" means a verified-own pid was resolved and
            WM_CLOSE will be posted during teardown, never that
-           the process already exited. */
+           the process already exited. The pid is stored
+           BEFORE the stop flag (audit E-11): Run() returns as
+           soon as stop_ is set and Stop() registers the
+           backend-handoff step only for a pid it can already
+           see, so the old flag-first order could skip the
+           handoff while the reply said "closing". */
         ipc_deps.request_shutdown =
             [this](bool stop_backend) -> nlohmann::json
             {
+                const nlohmann::json reply =
+                    ArmBackendHandoff(stop_backend);
                 stop_.store(true);
-                if(!stop_backend)
-                {
-                    return nlohmann::json::object();
-                }
-                if(opts_.backend_exe.empty())
-                {
-                    Log("quit-all: backend teardown requested but "
-                        "no --backend-exe was declared — nothing "
-                        "can be verified as ours; left running");
-                    return nlohmann::json::object({
-                        { "backend", "not_configured" } });
-                }
-#ifdef _WIN32
-                const BackendResolution r =
-                    ResolveManagedBackend(opts_.backend_exe,
-                                          opts_.sdk_port);
-                if(r.pid == 0)
-                {
-                    Log(std::string("quit-all: no verifiably-"
-                        "managed backend to close (") +
-                        r.decision + ")");
-                    return nlohmann::json::object({
-                        { "backend", r.decision } });
-                }
-                pending_backend_pid_.store(r.pid);
-                return nlohmann::json::object({
-                    { "backend",     r.decision },
-                    { "backend_pid", r.pid      } });
-#else
-                return nlohmann::json::object({
-                    { "backend", "unverifiable" } });
-#endif
+                return reply;
             };
         /* Task 4.7: the startup ownership scan surfaced
            read-only in STATE/DIAGNOSTICS. ownership_ is
@@ -1313,12 +1301,38 @@ bool EngineHost::Start(std::string& err)
        engine continues unmanaged — a stale pointer is never
        a startup failure. The guard leaves a client-driven
        adopt alone if one raced ahead (IPC listeners are
-       already up). */
-    if(workspaces_ && !engine_state_.active_workspace.empty() &&
+       already up). Because they are, the persisted id is
+       copied under state_mutex_: a client adopt writes it
+       from a workspace job through active_workspace_changed
+       at the same time (audit E-9). */
+    std::string wsid;
+    {
+        std::lock_guard<std::mutex> g(state_mutex_);
+        wsid = engine_state_.active_workspace;
+    }
+    if(workspaces_ && !wsid.empty() &&
        !workspaces_->ManagedActive())
     {
-        const std::string wsid = engine_state_.active_workspace;
-        const WorkspaceService::Result wr = workspaces_->Open(wsid);
+        /* Open reads records off disk; the store type-checks
+           them, but anything that still throws (a damaged
+           file, a filesystem error, allocation) must cost the
+           managed state only — never the process, and never
+           every subsequent launch (audit I-11). */
+        WorkspaceService::Result wr;
+        try
+        {
+            wr = workspaces_->Open(wsid);
+        }
+        catch(const std::exception& e)
+        {
+            wr       = WorkspaceService::Result{};
+            wr.error = std::string("re-adopt threw: ") + e.what();
+        }
+        catch(...)
+        {
+            wr       = WorkspaceService::Result{};
+            wr.error = "re-adopt threw a non-standard exception";
+        }
         if(wr.ok)
         {
             Log("re-adopted managed workspace '" + wsid +
@@ -1537,6 +1551,57 @@ void EngineHost::OnReactiveChanged()
     {
         Log("profile save failed: " + serr);
     }
+}
+
+std::vector<DeviceSnapshot> EngineHost::WiredTargets()
+{
+    if(!sdk_)
+    {
+        return {};
+    }
+    /* Generation FIRST, then the snapshots: a re-enumeration
+       between the two leaves newer snapshots under an older
+       key, which simply rebuilds next call — the reverse order
+       could cache old snapshots under the new generation. */
+    const uint64_t        generation = sdk_->TopologyGeneration();
+    const ConnectionState state      = sdk_->State();
+    std::vector<DeviceKey> bound     = mapper_.BoundControllers();
+    std::lock_guard<std::mutex> lock(wired_cache_mutex_);
+    if(wired_cache_.valid &&
+       wired_cache_.generation == generation &&
+       wired_cache_.state == state &&
+       wired_cache_.bound == bound)
+    {
+        return wired_cache_.targets;
+    }
+    std::vector<DeviceSnapshot> out;
+    for(DeviceSnapshot& s : sdk_->Snapshots())
+    {
+        if(!IsWirelessGroupController(s) &&
+           s.connection == ConnectionState::Connected &&
+           std::find(bound.begin(), bound.end(), s.key) !=
+               bound.end())
+        {
+            s.colors.clear();
+            s.colors.shrink_to_fit();
+            s.led_names.clear();
+            s.led_names.shrink_to_fit();
+            s.modes.clear();
+            s.modes.shrink_to_fit();
+            for(ZoneSnapshot& z : s.zones)
+            {
+                z.matrix_map.clear();
+                z.matrix_map.shrink_to_fit();
+            }
+            out.push_back(std::move(s));
+        }
+    }
+    wired_cache_.valid      = true;
+    wired_cache_.generation = generation;
+    wired_cache_.state      = state;
+    wired_cache_.bound      = std::move(bound);
+    wired_cache_.targets    = out;
+    return out;
 }
 
 void EngineHost::PollOnce()
@@ -1805,7 +1870,8 @@ void EngineHost::Run()
        feed, so it cannot wait for PollOnce's cadence. The
        push rate stays bounded by frame_status_min_interval_ms;
        the tick only decides how soon a due push is noticed. */
-    TimePoint next_maint = Clock::now();
+    const TimePoint anchor = Clock::now();
+    TimePoint next_maint = anchor;
     while(!stop_.load())
     {
         const TimePoint now = Clock::now();
@@ -1827,8 +1893,25 @@ void EngineHost::Run()
             }
             service_->PollPreviews(tick);
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        /* Sleep to the next due time, not a fixed relative
+           interval (audit E-2): a slow iteration no longer
+           pushes every later tick back. */
+        std::this_thread::sleep_until(
+            NextOwnerWake(anchor, Clock::now(), next_maint));
     }
+}
+
+TimePoint EngineHost::NextOwnerWake(TimePoint anchor, TimePoint now,
+                                    TimePoint next_maint)
+{
+    TimePoint slot = anchor + kOwnerTick;
+    if(now >= anchor)
+    {
+        /* First slot strictly after now; integer slot index, so
+           the grid never drifts. */
+        slot = anchor + ((now - anchor) / kOwnerTick + 1) * kOwnerTick;
+    }
+    return next_maint < slot ? next_maint : slot;
 }
 
 /*---------------------------------------------------------*\
@@ -1889,6 +1972,15 @@ const OrderlyShutdown::Result& EngineHost::Stop()
                  std::chrono::milliseconds(2000),
                  [this]
                  { if(workspaces_) workspaces_->Shutdown(); });
+    /* No apply can arrive any more (IPC and workspace jobs are
+       down): land the last queued scene snapshot now, inside
+       a measured step, rather than implicitly in the service
+       destructor (audit I-6 moved the write off the request
+       thread). */
+    shutdown.Add("scene-snapshot",
+                 std::chrono::milliseconds(2000),
+                 [this]
+                 { if(service_) service_->FlushPersistedScene(); });
     shutdown.Add("scene-worker",
                  std::chrono::milliseconds(2000),
                  [this] { engine_.Stop(); });
@@ -1923,8 +2015,69 @@ const OrderlyShutdown::Result& EngineHost::Stop()
                      [this] { SignalPendingBackend(); });
     }
 
+    /* E-10: the bounds above are enforced, not only measured.
+       A step that throws is caught inside Run() (later owners
+       still stop); a step that never returns trips the
+       watchdog once the whole sequence outlives its total
+       bound. */
+    if(opts_.shutdown_watchdog)
+    {
+        shutdown.SetWatchdog(opts_.shutdown_watchdog_grace,
+            [this](const std::string& step)
+            {
+                Log("shutdown watchdog: step '" + step +
+                    "' still running past the total bound");
+                opts_.shutdown_watchdog(step);
+            });
+    }
     shutdown_result_ = shutdown.Run();
+    for(const OrderlyShutdown::StepResult& s : shutdown_result_.steps)
+    {
+        if(s.failed)
+        {
+            Log("shutdown step '" + s.name + "' threw: " + s.error +
+                " (later steps still ran)");
+        }
+    }
+    /* Every worker is joined: give the timer resolution back
+       (E-2). */
+    timer_resolution_.Release();
     return shutdown_result_;
+}
+
+nlohmann::json EngineHost::ArmBackendHandoff(bool stop_backend)
+{
+    if(!stop_backend)
+    {
+        return nlohmann::json::object();
+    }
+    if(opts_.backend_exe.empty())
+    {
+        Log("quit-all: backend teardown requested but "
+            "no --backend-exe was declared — nothing "
+            "can be verified as ours; left running");
+        return nlohmann::json::object({
+            { "backend", "not_configured" } });
+    }
+#ifdef _WIN32
+    const BackendResolution r =
+        ResolveManagedBackend(opts_.backend_exe, opts_.sdk_port);
+    if(r.pid == 0)
+    {
+        Log(std::string("quit-all: no verifiably-"
+            "managed backend to close (") +
+            r.decision + ")");
+        return nlohmann::json::object({
+            { "backend", r.decision } });
+    }
+    pending_backend_pid_.store(r.pid);
+    return nlohmann::json::object({
+        { "backend",     r.decision },
+        { "backend_pid", r.pid      } });
+#else
+    return nlohmann::json::object({
+        { "backend", "unverifiable" } });
+#endif
 }
 
 void EngineHost::SignalPendingBackend()

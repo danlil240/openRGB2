@@ -5,6 +5,7 @@
 \*---------------------------------------------------------*/
 
 #include "IpcProtocol.h"
+#include "config/JsonBounded.h"
 
 #include <algorithm>
 #include <chrono>
@@ -154,36 +155,10 @@ const char* ErrCodeName(ErrCode c)
 
 nlohmann::json ParseJsonBounded(const std::string& text, int max_depth)
 {
-    /* The callback sees every container start with its depth
-       (the number of enclosing containers). Past the cap the
-       container — and, once tripped, everything after it — is
-       discarded, so the over-deep part is never built; the
-       SAX parser itself is iterative. */
-    bool too_deep = false;
-    const nlohmann::json::parser_callback_t cb =
-        [&too_deep, max_depth](int depth,
-                               nlohmann::json::parse_event_t ev,
-                               nlohmann::json&) -> bool
-        {
-            if(too_deep)
-            {
-                return false;
-            }
-            if((ev == nlohmann::json::parse_event_t::object_start ||
-                ev == nlohmann::json::parse_event_t::array_start) &&
-               depth >= max_depth)
-            {
-                too_deep = true;
-                return false;
-            }
-            return true;
-        };
-    nlohmann::json j = nlohmann::json::parse(text, cb, false);
-    if(too_deep)
-    {
-        return nlohmann::json(nlohmann::json::value_t::discarded);
-    }
-    return j;
+    /* One implementation for the wire codec and the engine's
+       file/staged/bundle parses (audit I-2) — see
+       src/core/config/JsonBounded.h. */
+    return studio::ParseJsonBounded<nlohmann::json>(text, max_depth);
 }
 
 const nlohmann::json& FieldOrNull(const nlohmann::json& obj,
@@ -213,6 +188,13 @@ std::vector<uint8_t> EncodeMessage(MsgType type, uint32_t request_id,
 {
     const std::string raw = body.is_discarded() ? std::string()
                                               : body.dump();
+    return EncodeRawMessage(type, request_id, raw, version);
+}
+
+std::vector<uint8_t> EncodeRawMessage(MsgType type, uint32_t request_id,
+                                      const std::string& raw,
+                                      uint16_t version)
+{
     if(raw.size() > kMaxBodyBytes)
     {
         return {};

@@ -32,10 +32,12 @@
 
 #include "config/WorkspaceCandidate.h"
 #include "effects/EffectEngine.h"
+#include "scene/SceneGraph.h"
 #include "scene/SceneTypes.h"
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -137,7 +139,38 @@ public:
     uint64_t    Sequence() const;
     std::string Error() const;
 
+    /* How many times the per-draft sample cache was built —
+       once per APPLIED candidate, never per sample (audit
+       E-8; the regression observes it). Thread-safe. */
+    uint64_t    DraftCacheBuilds() const;
+
 private:
+    /* Everything a sample needs that depends only on the
+       applied draft — built once when the candidate applies
+       (audit E-8), shared immutably with each Sample so a
+       concurrent Stop() can drop it without tearing a frame:
+       the world matrices (ResolveWorldMatrices), and per
+       previewable object its emitter source (Linked ->
+       output owner, resolved once instead of three linear
+       OutputOwner scans per sample) plus its painted-color
+       fallback (EmitterColor per emitter, once). */
+    struct AppliedDraft
+    {
+        struct Entry
+        {
+            const studio::SceneObject*      obj = nullptr;
+            const studio::SceneObject*      src = nullptr;
+            const char*                     kind = "group";
+            std::vector<studio::SceneColor> painted;
+        };
+        PreparedStudioScene                 prepared;
+        std::map<std::string, studio::Mat4> world;
+        std::vector<Entry>                  entries;
+        size_t                              emitter_total = 0;
+    };
+    static std::shared_ptr<const AppliedDraft> BuildDraft(
+        PreparedStudioScene prepared);
+
     Deps    deps_;
     Options options_;
 
@@ -153,10 +186,11 @@ private:
 
     /* Applied state — Sample-only, prepared lazily so a stale
        pending candidate is never expanded. */
-    PreparedStudioScene   prepared_;
+    std::shared_ptr<const AppliedDraft> applied_;
     uint64_t              applied_revision_   = 0;
     std::string           error_;
     uint64_t              sequence_           = 0;
+    uint64_t              cache_builds_       = 0;
 
     studio::EffectEngine  engine_;
 };
