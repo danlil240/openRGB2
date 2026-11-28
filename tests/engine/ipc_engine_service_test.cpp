@@ -2558,6 +2558,83 @@ int main()
         CHECK(uint16_t(MsgType::OutputCommand) == 0x010f);
     }
 
+    /*---- R-9 supervisor surface -------------------------------
+           STATE.supervisor is the REAL EngineHost serializer
+           (never-started host); the "supervisor" event carries
+           each action, while the SUBSCRIBE snapshot carries the
+           status only — a reconnecting UI must not re-announce
+           an old restart. Unwired -> STATE null. */
+    {
+        EngineHostOptions ho;
+        ho.sdk_enabled        = true;
+        ho.backend_exe        = "C:\\nowhere\\backend\\OpenRGB.exe";
+        ho.backend_config_dir = "C:\\nowhere\\state\\backend";
+        ho.log                = [](const std::string&) {};
+        EngineHost host(ho);
+        const nlohmann::json sj = host.SupervisorJson();
+        CHECK(sj.is_object());
+        CHECK(sj.value("enabled", false) == true);
+        CHECK(sj.value("backend_restarts", -1) == 0);
+        CHECK(sj.value("wedge_restarts", -1) == 0);
+        CHECK(sj.contains("last_reason") && sj["last_reason"].is_null());
+        CHECK(sj.contains("last_at") && sj["last_at"].is_null());
+        CHECK(sj.value("budget_exhausted", true) == false);
+        CHECK(sj.value("seq", -1) == 0);
+        CHECK(sj.contains("history") && sj["history"].is_array() &&
+              sj["history"].empty());
+
+        /* Unmanaged (no --backend-exe/--backend-config): the
+           supervisor never acts and says so. */
+        EngineHostOptions uo;
+        uo.log = [](const std::string&) {};
+        EngineHost uhost(uo);
+        CHECK(uhost.SupervisorJson().value("enabled", true) == false);
+
+        Engine engine10;
+        EngineService::Deps d10;
+        d10.supervisor = [&host] { return host.SupervisorJson(); };
+        EngineService svc10(engine10, d10);
+        IpcReply r10 = svc10.Dispatch(MsgType::GetState,
+                                      nlohmann::json::object());
+        CHECK(r10.code == ErrCode::Ok);
+        CHECK(r10.body["supervisor"].is_object() &&
+              r10.body["supervisor"].value("enabled", false));
+
+        std::vector<IpcEvent> ev10;
+        svc10.SetEventSink([&ev10](const IpcEvent& e)
+                           { ev10.push_back(e); });
+        svc10.EmitSupervisor(nlohmann::json::object({
+            { "action", "backend_spawned" },
+            { "reason", "backend_dead" },
+            { "detail", "backend link down and no backend process" },
+            { "at",     "2026-11-28T10:00:00Z" },
+            { "seq",    1 },
+            { "status", host.SupervisorJson() } }));
+        CHECK(ev10.size() == 1 &&
+              ev10[0].kind == event_kind::kSupervisor &&
+              ev10[0].data.value("action", std::string()) ==
+                  "backend_spawned" &&
+              ev10[0].data["status"].is_object());
+        nlohmann::json ssnap;
+        CHECK(svc10.SnapshotEvent(event_kind::kSupervisor, ssnap));
+        CHECK(ssnap.is_object() && !ssnap.contains("action") &&
+              ssnap["status"].is_object());
+        CHECK(std::string(event_kind::kSupervisor) == "supervisor");
+        bool known = false;
+        for(const std::string& k : EventKinds())
+        {
+            known = known || k == event_kind::kSupervisor;
+        }
+        CHECK(known);
+
+        Engine engine11;
+        EngineService::Deps d11;
+        EngineService svc11u(engine11, d11);
+        r10 = svc11u.Dispatch(MsgType::GetState, nlohmann::json::object());
+        CHECK(r10.body.contains("supervisor") &&
+              r10.body["supervisor"].is_null());
+    }
+
     std::printf("ipc_engine_service_test: %d checks, %d failures\n",
                 checks, failures);
     return failures ? 1 : 0;

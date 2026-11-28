@@ -94,6 +94,7 @@ const std::vector<std::string>& EventKinds()
         event_kind::kCalibration,
         event_kind::kOwnership,
         event_kind::kOutput,
+        event_kind::kSupervisor,
     };
     return kinds;
 }

@@ -86,6 +86,13 @@ constexpr const char* kOwnership   = "ownership";     /* R-10: competing-writer
 constexpr const char* kOutput      = "output";        /* R-1: runtime output
                                                          control changed — data =
                                                          the OUTPUT body */
+constexpr const char* kSupervisor  = "supervisor";    /* R-9: the backend
+                                                         supervisor acted —
+                                                         data = {action, reason,
+                                                         detail, at, seq,
+                                                         status}; the SUBSCRIBE
+                                                         snapshot is {seq,
+                                                         status} (no action) */
 }
 
 /* The set SnapshotEvent/SUBSCRIBE validation knows. */
