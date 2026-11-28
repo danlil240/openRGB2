@@ -1058,12 +1058,83 @@ std::string WorkspaceStore::DefaultRoot()
     return "profiles/local/workspaces";
 }
 
+namespace
+{
+
+std::string AsciiLower(std::string s)
+{
+    for(char& c : s)
+    {
+        if(c >= 'A' && c <= 'Z')
+        {
+            c = (char)(c - 'A' + 'a');
+        }
+    }
+    return s;
+}
+
+/* An existing entry under `root` whose name equals `id` only
+   case-insensitively ("" when none, or when the exact name
+   exists). NTFS resolves both spellings to ONE directory, so
+   such an id would read and write another workspace. */
+std::string CaseAliasOf(const fs::path& root, const std::string& id)
+{
+    const std::string want = AsciiLower(id);
+    std::string alias;
+    std::error_code iec;
+    fs::directory_iterator it(root, iec), end;
+    for(; !iec && it != end; it.increment(iec))
+    {
+        const std::string n = it->path().filename().string();
+        if(n == id)
+        {
+            return std::string();
+        }
+        if(alias.empty() && AsciiLower(n) == want)
+        {
+            alias = n;
+        }
+    }
+    return alias;
+}
+
+std::string CaseAliasError(const std::string& id,
+                           const std::string& alias)
+{
+    return "workspace id '" + id + "' differs only in letter "
+           "case from existing '" + alias + "' — ids are "
+           "case-insensitive on disk";
+}
+
+} /* anonymous namespace */
+
 bool WorkspaceStore::IsWorkspaceId(const std::string& id)
 {
     /* Portable single-segment charset — the same rule the
-       resource ids follow; "library" is the shared managed
-       library dir, never a workspace. */
-    return studio::IsPresetId(id) && id != "library";
+       resource ids follow — minus every name that cannot be a
+       workspace directory (audit I-13), compared
+       case-insensitively because the filesystem is:
+         - the store's own root-level dirs (the shared managed
+           library, its assets, the transfer staging root);
+         - the Windows reserved device names, which never name
+           a directory (CON, PRN, AUX, NUL, COM1-9, LPT1-9). */
+    if(!studio::IsPresetId(id))
+    {
+        return false;
+    }
+    const std::string l = AsciiLower(id);
+    if(l == "library" || l == "assets" || l == "transfers" ||
+       l == "con" || l == "prn" || l == "aux" || l == "nul")
+    {
+        return false;
+    }
+    if(l.size() == 4 &&
+       (l.compare(0, 3, "com") == 0 || l.compare(0, 3, "lpt") == 0) &&
+       l[3] >= '1' && l[3] <= '9')
+    {
+        return false;
+    }
+    return true;
 }
 
 std::string WorkspaceStore::WorkspaceDir(const std::string& id) const
@@ -1152,6 +1223,12 @@ WorkspaceStore::Revisions WorkspaceStore::LoadRevisions(
         r.error = "invalid workspace id '" + id + "'";
         return r;
     }
+    if(const std::string alias = CaseAliasOf(root_, id);
+       !alias.empty())
+    {
+        r.error = CaseAliasError(id, alias);
+        return r;    /* exists:false — not THIS id's workspace */
+    }
     const fs::path wsdir = WorkspaceDir(id);
     std::error_code ec;
     if(!fs::is_directory(wsdir, ec))
@@ -1196,6 +1273,12 @@ bool WorkspaceStore::ReadActiveDocumentBytes(
     if(!IsWorkspaceId(id))
     {
         err = "invalid workspace id '" + id + "'";
+        return false;
+    }
+    if(const std::string alias = CaseAliasOf(root_, id);
+       !alias.empty())
+    {
+        err = CaseAliasError(id, alias);
         return false;
     }
     const fs::path wsdir = WorkspaceDir(id);
@@ -1334,6 +1417,13 @@ WorkspaceStore::LoadResult WorkspaceStore::Load(
     {
         res.status = LoadStatus::Failed;
         res.error  = "invalid workspace id '" + id + "'";
+        return res;
+    }
+    if(const std::string alias = CaseAliasOf(root_, id);
+       !alias.empty())
+    {
+        res.status = LoadStatus::Failed;
+        res.error  = CaseAliasError(id, alias);
         return res;
     }
     const fs::path wsdir = WorkspaceDir(id);
@@ -1481,6 +1571,13 @@ WorkspaceStore::LoadResult WorkspaceStore::LoadBackup(
     {
         res.status = LoadStatus::Failed;
         res.error  = "invalid workspace id '" + id + "'";
+        return res;
+    }
+    if(const std::string alias = CaseAliasOf(root_, id);
+       !alias.empty())
+    {
+        res.status = LoadStatus::Failed;
+        res.error  = CaseAliasError(id, alias);
         return res;
     }
     const fs::path wsdir = WorkspaceDir(id);
@@ -1769,6 +1866,12 @@ WorkspaceStore::CommitResult WorkspaceStore::Commit(
     {
         return fail("workspace dir '" + wsdir.string() +
                     "' escapes the managed root — refused");
+    }
+    /* "Desk" must never write into "desk" (audit I-13). */
+    if(const std::string alias = CaseAliasOf(root_, id);
+       !alias.empty())
+    {
+        return fail(CaseAliasError(id, alias));
     }
 
     /*---- Revision gate: a stale writer is rejected before
@@ -2167,6 +2270,12 @@ WorkspaceStore::ResourceInstallResult WorkspaceStore::InstallEffectResource(
         return fail("workspace dir '" + wsdir.string() +
                     "' escapes the managed root — refused");
     }
+    /* "Desk" must never write into "desk" (audit I-13). */
+    if(const std::string alias = CaseAliasOf(root_, id);
+       !alias.empty())
+    {
+        return fail(CaseAliasError(id, alias));
+    }
 
     /*---- Revision gate — same primary/backup discipline as
     ||   Commit: an unreadable marker is never guessed at.
@@ -2363,6 +2472,12 @@ bool LoadResourceGate(const WorkspaceStore& store,
     {
         err = "workspace dir '" + wsdir.string() +
               "' escapes the managed root — refused";
+        return false;
+    }
+    if(const std::string alias = CaseAliasOf(store.Root(), id);
+       !alias.empty())
+    {
+        err = CaseAliasError(id, alias);
         return false;
     }
     const Marker primary = ReadMarker(wsdir / "active");

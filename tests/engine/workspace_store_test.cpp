@@ -1565,6 +1565,68 @@ static void TestFailedCommitLeavesNoLibraryFiles()
     CHECK(fs::exists(lib / "gizmo.device.json"));
 }
 
+/*---------------------------------------------------------*\n|||| I-13: workspace ids that Windows cannot hold as a      ||
+|||| directory (CON, NUL, COM1, ...) or that alias the      ||
+|||| store's own dirs (library/assets/transfers, any case)  ||
+|||| are refused; an id differing from an existing one only ||
+|||| in letter case never writes into (or reads) that       ||
+|||| workspace — NTFS would resolve both to one directory.  ||
+\*---------------------------------------------------------*/
+static void TestWorkspaceIdRules()
+{
+    for(const char* bad : { "CON", "con", "Nul", "PRN", "aux",
+                            "COM1", "com9", "LPT1", "lpt9",
+                            "library", "Library", "ASSETS",
+                            "transfers", "Transfers" })
+    {
+        CHECK(!WorkspaceStore::IsWorkspaceId(bad));
+        if(WorkspaceStore::IsWorkspaceId(bad))
+        {
+            std::printf("  (accepted reserved id '%s')\n", bad);
+        }
+    }
+    for(const char* ok : { "desk", "Desk-2", "console", "com10",
+                           "lpt", "nul_1", "my-assets" })
+    {
+        CHECK(WorkspaceStore::IsWorkspaceId(ok));
+    }
+
+    const fs::path types = g_tmp / "types-i13";
+    fs::create_directories(types);
+    WriteText((types / "mini-fan.device.json").string(),
+              TypeJson("mini-fan", 8, "base"));
+    WorkspaceStore::Deps deps;
+    deps.devices = RegistryWith(types.string());
+    const fs::path root = g_tmp / "ws-i13";
+    WorkspaceStore store(root.string(), deps);
+
+    WorkspaceCandidate cand;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("lower", "mini-fan")),
+                        deps.devices, deps.effects, cand));
+    CHECK(store.Commit("desk", cand, std::string(), 0).ok);
+
+    /* "Desk" at desk's revision would commit INTO desk. */
+    WorkspaceCandidate cand2;
+    CHECK(MakeCandidate(json::parse(WorkspaceJson("upper", "mini-fan")),
+                        deps.devices, deps.effects, cand2));
+    const WorkspaceStore::CommitResult cr =
+        store.Commit("Desk", cand2, std::string(), 1);
+    CHECK(!cr.ok);
+    CHECK(cr.error.find("case") != std::string::npos);
+    const WorkspaceStore::LoadResult lr = store.Load("desk");
+    CHECK(lr.status == WorkspaceStore::LoadStatus::Loaded);
+    CHECK(lr.workspace_revision == 1);
+    CHECK(lr.candidate &&
+          lr.candidate->document.meta.name == "lower");
+    /* Reads under the other case do not alias desk either. */
+    const WorkspaceStore::LoadResult la = store.Load("DESK");
+    CHECK(la.status != WorkspaceStore::LoadStatus::Loaded);
+    CHECK(la.candidate == nullptr);
+    CHECK(!store.LoadRevisions("DESK").exists);
+    const std::vector<std::string> ids = store.List();
+    CHECK(ids.size() == 1 && ids[0] == "desk");
+}
+
 int main()
 {
     g_tmp = fs::temp_directory_path() /
@@ -1592,6 +1654,7 @@ int main()
     TestFailedCommitRetry();
     TestWrongTypedManifestNeverThrows();
     TestFailedCommitLeavesNoLibraryFiles();
+    TestWorkspaceIdRules();
 
     fs::remove_all(g_tmp, ec);
     std::printf("%d checks, %d failures\n", checks, failures);
