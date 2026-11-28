@@ -338,6 +338,11 @@ EngineService::EngineService(Engine& engine, Deps deps,
         deps_.workspace->SetJobEventHook(
             [this](const WorkspaceService::JobStatus& st)
             {
+                /* the job no longer needs its staged token */
+                if(ws_commands_)
+                {
+                    ws_commands_->OnJobFinished(st.job_id);
+                }
                 /* keyed per job: a terminal record never
                    replaces — or is replaced by — the published
                    snapshot queued just before it, or another

@@ -99,6 +99,11 @@ public:
        a ticking caller. */
     void           SweepExpired();
 
+    /* A workspace job reached a terminal state — release the
+       staged-token pin its acceptance took (audit I-5).
+       EngineService calls it from the job-event hook. */
+    void           OnJobFinished(uint64_t job_id);
+
     /*-----------------------------------------------------*\
     || studio-import Task 7 — bounded draft preview.        ||
     ||                                                      ||
@@ -264,6 +269,15 @@ private:
     WorkspaceService*        service_;
     WorkspaceTransfer        transfers_;
     std::function<SceneSource()> scene_source_;
+
+    /* job id -> the staged token its acceptance pinned */
+    struct JobPin
+    {
+        uint64_t    session_id = 0;
+        std::string token;
+    };
+    std::mutex                    pins_mutex_;
+    std::map<uint64_t, JobPin>    job_pins_;
 
     mutable std::mutex       cache_mutex_;
     mutable uint64_t         lib_dev_mtime_ = 0;

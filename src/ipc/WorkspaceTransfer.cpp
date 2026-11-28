@@ -525,7 +525,9 @@ WorkspaceTransfer::ChunkResult WorkspaceTransfer::WriteChunk(
     auto it = transfers_.find(transfer_id);
     if(it == transfers_.end() || it->second.session_id != session_id)
     {
-        r.error = "unknown transfer"; r.detail = "unknown_transfer";
+        r.detail = MissingDetailLocked(session_id, transfer_id);
+        r.error  = r.detail == "transfer_expired"
+            ? "transfer expired" : "unknown transfer";
         return r;
     }
     Transfer& t = it->second;
@@ -583,7 +585,9 @@ WorkspaceTransfer::ChunkResult WorkspaceTransfer::ReadChunk(
     auto it = transfers_.find(transfer_id);
     if(it == transfers_.end() || it->second.session_id != session_id)
     {
-        r.error = "unknown transfer"; r.detail = "unknown_transfer";
+        r.detail = MissingDetailLocked(session_id, transfer_id);
+        r.error  = r.detail == "transfer_expired"
+            ? "transfer expired" : "unknown transfer";
         return r;
     }
     Transfer& t = it->second;
@@ -640,7 +644,9 @@ WorkspaceTransfer::FinishResult WorkspaceTransfer::Finish(
     auto it = transfers_.find(transfer_id);
     if(it == transfers_.end() || it->second.session_id != session_id)
     {
-        r.error = "unknown transfer"; r.detail = "unknown_transfer";
+        r.detail = MissingDetailLocked(session_id, transfer_id);
+        r.error  = r.detail == "transfer_expired"
+            ? "transfer expired" : "unknown transfer";
         return r;
     }
     Transfer& t = it->second;
@@ -704,10 +710,12 @@ bool WorkspaceTransfer::ReadStaged(const std::string& staged_token,
     const auto it = transfers_.find(staged_token);
     if(it == transfers_.end() || !it->second.staged)
     {
-        err = "unknown_transfer";
+        err = it == transfers_.end()
+            ? MissingDetailLocked(staged_token) : "unknown_transfer";
         return false;
     }
     const Transfer& t = it->second;
+    t.last_ms = NowMs();    /* refresh-on-use */
     std::ifstream f(t.path, std::ios::binary);
     if(!f.is_open())
     {
@@ -728,11 +736,81 @@ bool WorkspaceTransfer::ReadStaged(const std::string& staged_token,
 bool WorkspaceTransfer::StagedFor(uint64_t session_id,
                                   const std::string& staged_token) const
 {
+    return CheckStaged(session_id, staged_token).empty();
+}
+
+std::string WorkspaceTransfer::CheckStaged(
+    uint64_t session_id, const std::string& staged_token) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     const auto it = transfers_.find(staged_token);
-    return it != transfers_.end() && it->second.staged &&
-           it->second.upload &&
-           it->second.session_id == session_id;
+    if(it == transfers_.end())
+    {
+        return MissingDetailLocked(session_id, staged_token);
+    }
+    const Transfer& t = it->second;
+    if(!t.staged || !t.upload || t.session_id != session_id)
+    {
+        return "unknown_transfer";
+    }
+    t.last_ms = NowMs();    /* refresh-on-use */
+    return std::string();
+}
+
+std::string WorkspaceTransfer::PinStaged(uint64_t session_id,
+                                         const std::string& staged_token)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    /* Sweep first: a token already past its bound expires
+       honestly here instead of being resurrected by the pin. */
+    SweepExpiredLocked();
+    const auto it = transfers_.find(staged_token);
+    if(it == transfers_.end())
+    {
+        return MissingDetailLocked(session_id, staged_token);
+    }
+    Transfer& t = it->second;
+    if(!t.staged || !t.upload || t.session_id != session_id)
+    {
+        return "unknown_transfer";
+    }
+    ++t.pins;
+    t.last_ms = NowMs();
+    return std::string();
+}
+
+void WorkspaceTransfer::UnpinStaged(const std::string& staged_token)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = transfers_.find(staged_token);
+    if(it == transfers_.end())
+    {
+        return;
+    }
+    Transfer& t = it->second;
+    if(t.pins > 0)
+    {
+        --t.pins;
+    }
+    t.last_ms = NowMs();
+}
+
+std::string WorkspaceTransfer::MissingDetailLocked(
+    uint64_t session_id, const std::string& id) const
+{
+    const auto it = expired_.find(id);
+    return it != expired_.end() && it->second == session_id
+        ? "transfer_expired" : "unknown_transfer";
+}
+
+std::string WorkspaceTransfer::MissingDetailLocked(
+    const std::string& id) const
+{
+    /* Session-less form for the job worker's staged read: the
+       command layer already bound the token to its session
+       when the job was accepted. */
+    return expired_.count(id) ? "transfer_expired"
+                              : "unknown_transfer";
 }
 
 void WorkspaceTransfer::CancelSession(uint64_t session_id)
@@ -764,8 +842,25 @@ void WorkspaceTransfer::SweepExpiredLocked()
     const uint64_t now = NowMs();
     for(auto it = transfers_.begin(); it != transfers_.end();)
     {
-        if(now - it->second.last_ms > options_.idle_expiry_ms)
+        const Transfer& t = it->second;
+        /* A finish-verified upload is a consumable token, not
+           an open stream: it gets the long bound, and a job
+           holding it (pins) keeps it regardless. */
+        const uint64_t bound = (t.upload && t.staged)
+            ? options_.staged_expiry_ms : options_.idle_expiry_ms;
+        if(t.pins == 0 && now - t.last_ms > bound)
         {
+            /* Tombstone the id so a later use answers
+               transfer_expired; bounded FIFO. */
+            if(expired_.emplace(t.id, t.session_id).second)
+            {
+                expired_order_.push_back(t.id);
+                while(expired_order_.size() > kMaxTombstones)
+                {
+                    expired_.erase(expired_order_.front());
+                    expired_order_.pop_front();
+                }
+            }
             Transfer dead = std::move(it->second);
             it = transfers_.erase(it);
             Drop(dead);

@@ -787,7 +787,19 @@ stays durable (the reconnecting client reconciles by
 revision/content_sha256). The per-session transfer bound counts OPEN
 (streaming) transfers — a `transfer_finish`-verified upload keeps
 serving its `staged` token to this session's jobs without holding a
-stream slot (idle expiry and `transfer_cancel` still reclaim it). Document/type/look content moves ONLY
+stream slot (idle expiry and `transfer_cancel` still reclaim it).
+Expiry: an OPEN transfer (upload still streaming, any download) dies
+after 60 s without a begin/chunk/finish on it; a finish-verified
+`staged` token dies after 15 min without use. Every use refreshes it
+(a job verb or `preview_*` naming it, the job's read of it), and a
+job that references it pins it from acceptance until the job reaches
+a terminal state — a job queued behind slow work never finds its
+token gone. Using a lapsed id (chunk, finish, a job verb's or
+`preview_*`'s `staged`) fails `ERROR bad_request` with
+`detail:"transfer_expired"`; an id this session never held stays
+`unknown_transfer` (tombstones are bounded, so a very old id may also
+read `unknown_transfer`). Either way the client uploads again.
+Document/type/look content moves ONLY
 through transfers — the 1 MiB envelope bound is never expanded to fit
 a scene or a binary asset. The one inline exception is a SMALL applied
 scene document in SCENE bodies (≤ 256 KiB, kept for legacy clients);
