@@ -205,21 +205,27 @@ int main(int argc, char** argv)
             }
 
             /* Layout page: the canvas instruction must live
-               INSIDE the arrangement card's reserved area —
-               anchored below a fixed-height canvas it painted
-               past the card edge and the next card hid it. */
+               INSIDE the stage. Anchored below a fixed-height
+               canvas it once painted past the card edge and the
+               next card hid it; the editor workspace (UX audit
+               2026-11-28) puts it in the stage footer that the
+               canvas/viewport anchor ABOVE, so it can't be
+               covered — and the editor no longer scrolls as a
+               page (viewport + rail fill the view). */
             if(std::strcmp(f, "pages/LayoutPage.qml") == 0)
             {
                 QQuickItem* hint = qobject_cast<QQuickItem*>(
                     obj->findChild<QObject*>("canvasInstructions"));
                 CHECK(hint != nullptr);
-                if(hint && hint->parentItem())
-                {
-                    /* wrapper reserves the hint below the
-                       ~430px canvas — not a fixed 430 total */
-                    CHECK(hint->parentItem()->height()
-                          >= hint->implicitHeight() + 400);
-                }
+                CHECK(hint && hint->parentItem()
+                      && hint->parentItem()->objectName()
+                         == QStringLiteral("stageFooter"));
+                CHECK(obj->findChild<QObject*>("layoutScroll")
+                      == nullptr);
+                CHECK(obj->findChild<QObject*>("layoutEditorSplit")
+                      != nullptr);
+                CHECK(obj->findChild<QObject*>("inspectorPane")
+                      != nullptr);
             }
         }
 

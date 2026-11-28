@@ -745,6 +745,17 @@ int main(int argc, char** argv)
         p.insert("color",         "#00FF00");
         p.insert("touched_speed", true);
         s.SetSceneParams(QStringLiteral("desk"), p);
+        /* Layout editor splitter sizes: 0 = "use the page
+           default"; nonsense sizes clamp instead of opening a
+           rail wider than any screen. */
+        CHECK(s.layoutRailWidth() == 0);
+        CHECK(s.layoutInspectorHeight() == 0);
+        s.setLayoutRailWidth(412);
+        s.setLayoutInspectorHeight(-50);
+        CHECK(s.layoutInspectorHeight() == 0);
+        s.setLayoutInspectorHeight(99999);
+        CHECK(s.layoutInspectorHeight() == 4000);
+        s.setLayoutInspectorHeight(260);
 
         /* A second instance on the same file = a restarted UI. */
         ui::UiSettings s2;
@@ -754,6 +765,8 @@ int main(int argc, char** argv)
         CHECK(s2.windowX() == 11 && s2.windowY() == 22);
         CHECK(s2.windowWidth() == 1024 && s2.windowHeight() == 700);
         CHECK(s2.paletteHue() == 0.25);
+        CHECK(s2.layoutRailWidth() == 412);
+        CHECK(s2.layoutInspectorHeight() == 260);
         const QVariantMap p2 = s2.SceneParams(QStringLiteral("desk"));
         CHECK(p2.value("speed").toInt() == 150);
         CHECK(p2.value("touched_speed").toBool());
@@ -800,6 +813,8 @@ int main(int argc, char** argv)
         s3.setPathForTesting(path);
         CHECK(s3.lastView() == 0);
         CHECK(s3.restoreLastView());   /* default returns */
+        CHECK(s3.layoutRailWidth() == 0);
+        CHECK(s3.layoutInspectorHeight() == 0);
         CHECK(s3.SceneParams(QStringLiteral("desk")).isEmpty());
     }
 

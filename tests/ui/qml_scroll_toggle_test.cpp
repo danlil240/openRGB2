@@ -137,7 +137,26 @@ int main(int argc, char** argv)
     {
         const auto bars = win_obj->findChildren<QObject*>(
             QStringLiteral("pageScrollBar"));
-        CHECK(bars.size() == 5);
+        /* Layout is an editor workspace (UX audit 2026-11-28):
+           the page itself never scrolls — its three rail panes
+           (Devices, Identify, Inspector) do. The other four
+           pages each scroll as a page. */
+        int in_layout = 0;
+        for(QObject* b : bars)
+        {
+            for(QObject* p = b; p != nullptr; p = p->parent())
+            {
+                if(p->objectName() == QStringLiteral("layoutPage"))
+                {
+                    ++in_layout;
+                    break;
+                }
+            }
+        }
+        CHECK(in_layout == 3);
+        CHECK(bars.size() - in_layout == 4);
+        CHECK(win_obj->findChild<QObject*>(
+                  QStringLiteral("layoutScroll")) == nullptr);
     }
 
     /*---- 2. focus scrolls into view ------------------------*/

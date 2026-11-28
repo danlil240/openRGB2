@@ -456,6 +456,18 @@ int main(int argc, char** argv)
     }
     page->setProperty("width", 1440);
     page->setProperty("height", 1200);
+    /* The page is an editor workspace (UX audit 2026-11-28):
+       the canvas is sized by Qt Quick Layouts + SplitView, which
+       only polish inside a window — host it in one, as the app
+       does, so the painted footprints have a real canvas. */
+    QQuickWindow host;
+    host.resize(1440, 1200);
+    if(auto* page_item = qobject_cast<QQuickItem*>(page.get()))
+    {
+        page_item->setParentItem(host.contentItem());
+        host.show();
+        PumpBoth(s, [&] { return host.isExposed(); }, 3000);
+    }
 
     QQuickItem* kbd = nullptr;
     CHECK(PumpBoth(s, [&] {

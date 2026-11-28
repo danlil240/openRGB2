@@ -26,6 +26,10 @@ Rectangle {
 
     property var ctl: null
     property var cam: null
+    /* The panel's own Undo/Redo. A host whose toolbar already
+       drives the same shared timeline turns them off — one pair
+       per screen (UX audit 2026-11-28). */
+    property bool showHistory: true
     /* Test seam — production supplies `objectCtl`; tests inject a
        stub. */
     property var bridgeOverride: null
@@ -299,13 +303,15 @@ Rectangle {
                    onClicked: if (ctl) ctl.tool = 1 }
             TBtn { text: qsTr("Paint");  w: 52; active: ctl && ctl.tool === 2
                    onClicked: if (ctl) ctl.tool = 2 }
-            Item { width: 8; height: 1 }
+            Item { width: 8; height: 1; visible: inspector.showHistory }
             TBtn { text: qsTr("Undo"); w: 44
+                   visible: inspector.showHistory
                    opacity: (inspector.hasBr() && inspector.br().canUndo) ? 1 : 0.4
                    onClicked: if (inspector.hasBr()
                                   && !inspector.br().gestureActive())
                                   inspector.br().undo() }
             TBtn { text: qsTr("Redo"); w: 44
+                   visible: inspector.showHistory
                    opacity: (inspector.hasBr() && inspector.br().canRedo) ? 1 : 0.4
                    onClicked: if (inspector.hasBr()
                                   && !inspector.br().gestureActive())
