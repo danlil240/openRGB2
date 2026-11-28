@@ -308,6 +308,12 @@ void EngineBridge::ApplyWelcome(const nlohmann::json& welcome)
             reactive_ = JsonToVariant(state["reactive"]).toMap();
             emit reactiveChanged();
         }
+        if(state.contains("ownership") &&
+           state["ownership"].is_object())
+        {
+            AdoptOwnership(
+                JsonToVariant(state["ownership"]).toMap());
+        }
         state_report_ = JsonToVariant(state).toMap();
         emit stateReportChanged();
     }
@@ -404,6 +410,15 @@ void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
     {
         reactive_ = data_map;
         emit reactiveChanged();
+    }
+    else if(kind == ipc::event_kind::kOwnership)
+    {
+        /* R-10: the engine's re-scan push (and the SUBSCRIBE
+           snapshot) — a null body means "not wired". */
+        if(data.is_object())
+        {
+            AdoptOwnership(data_map);
+        }
     }
     else if(kind == ipc::event_kind::kWorkspace)
     {
@@ -504,6 +519,12 @@ void EngineBridge::ApplyReply(uint32_t request_id, ipc::MsgType type,
                 body_map.value(QStringLiteral("reactive")).toMap(),
                 &EngineBridge::reactiveChanged);
         }
+        if(body.contains("ownership") &&
+           body["ownership"].is_object())
+        {
+            AdoptOwnership(
+                body_map.value(QStringLiteral("ownership")).toMap());
+        }
         break;
     case ipc::MsgType::Presets:
         SetIfChanged(this, presets_,
@@ -515,6 +536,12 @@ void EngineBridge::ApplyReply(uint32_t request_id, ipc::MsgType type,
     case ipc::MsgType::Diagnostics:
         SetIfChanged(this, diagnostics_, QVariantMap(body_map),
                      &EngineBridge::diagnosticsChanged);
+        if(body.contains("ownership") &&
+           body["ownership"].is_object())
+        {
+            AdoptOwnership(
+                body_map.value(QStringLiteral("ownership")).toMap());
+        }
         break;
     case ipc::MsgType::Error:
         setLastError(QString::fromStdString(
@@ -1203,6 +1230,19 @@ QVariantList EngineBridge::presets() const        { return presets_; }
 QVariantMap EngineBridge::diagnostics() const     { return diagnostics_; }
 QVariantMap EngineBridge::stateReport() const     { return state_report_; }
 QVariantMap EngineBridge::reactive() const        { return reactive_; }
+QVariantMap EngineBridge::ownership() const       { return ownership_; }
+
+void EngineBridge::AdoptOwnership(const QVariantMap& m)
+{
+    /* Every source is the engine's current report at the time
+       it was built, so the last arrival wins. */
+    if(m.isEmpty() || m == ownership_)
+    {
+        return;
+    }
+    ownership_ = m;
+    emit ownershipChanged();
+}
 bool        EngineBridge::hasWorkspace() const    { return has_workspace_; }
 QVariantMap EngineBridge::workspace() const       { return workspace_; }
 

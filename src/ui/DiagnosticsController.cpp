@@ -245,6 +245,23 @@ QString EventDetail(const QString& kind, const QVariantMap& data)
         }
         return parts.join(QStringLiteral(", "));
     }
+    if(kind == QLatin1String(ipc::event_kind::kOwnership))
+    {
+        /* R-10: name the writers, not a JSON dump. */
+        QStringList owners;
+        for(const QVariant& v :
+            data.value(QStringLiteral("conflicts")).toList())
+        {
+            owners << v.toMap()
+                          .value(QStringLiteral("owner"))
+                          .toString();
+        }
+        return owners.isEmpty()
+            ? QStringLiteral("no competing writers")
+            : QStringLiteral("%1 competing: %2")
+                  .arg(owners.size())
+                  .arg(owners.join(QStringLiteral(", ")));
+    }
     /* Unknown/future kinds: a bounded compact dump beats a
        blank row. */
     QString s = QString::fromUtf8(
@@ -293,6 +310,8 @@ DiagnosticsController::DiagnosticsController(EngineBridge* bridge,
                 this, [this]
                 { RecomputeOwnership(); RecomputeRates(); });
         connect(bridge_, &EngineBridge::stateReportChanged,
+                this, [this] { RecomputeOwnership(); });
+        connect(bridge_, &EngineBridge::ownershipChanged,
                 this, [this] { RecomputeOwnership(); });
         connect(bridge_, &EngineBridge::frameStatusChanged,
                 this, [this] { OnFrameStatus(); });
@@ -671,14 +690,21 @@ void DiagnosticsController::RecomputeControllers()
 
 void DiagnosticsController::RecomputeOwnership()
 {
-    /* DIAGNOSTICS carries the freshest pull; STATE (welcome +
-       refresh) is the fallback. Null/absent -> reported:false,
-       the honest "nothing published" surface. */
+    /* R-10: the bridge's ownership store is freshest-wins
+       across the pushed "ownership" event and the STATE/
+       DIAGNOSTICS pulls, so a change shows up while this page
+       is hidden. The pulled bodies stay the fallback.
+       Null/absent -> reported:false, the honest "nothing
+       published" surface. */
     QVariantMap own;
     if(bridge_)
     {
-        own = bridge_->diagnostics()
-                  .value(QStringLiteral("ownership")).toMap();
+        own = bridge_->ownership();
+        if(own.isEmpty())
+        {
+            own = bridge_->diagnostics()
+                      .value(QStringLiteral("ownership")).toMap();
+        }
         if(own.isEmpty())
         {
             own = bridge_->stateReport()

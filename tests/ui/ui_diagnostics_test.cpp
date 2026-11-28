@@ -482,6 +482,80 @@ int main(int argc, char** argv)
                    .isEmpty());
     }
 
+    /*---- R-10: a pushed "ownership" event lands while the page
+           is hidden — no Diagnostics poll involved -------------*/
+    std::printf("-- ownership push (page hidden)\n");
+    {
+        CHECK(!diag.active());
+        nlohmann::json pushed = OwnershipBody();
+        pushed["conflicts"] = nlohmann::json::array({
+            nlohmann::json::object({
+                { "owner", "LampArray service (Dynamic Lighting)" },
+                { "key",   "lamparray" },
+                { "exe",   "logi_lamparray_service.AMD64.exe" },
+                { "pid",   4243 },
+                { "detail","Windows Dynamic Lighting bridge" } }),
+            nlohmann::json::object({
+                { "owner", "Windows Dynamic Lighting" },
+                { "key",   "dynamic_lighting" },
+                { "exe",   "" },
+                { "pid",   0 },
+                { "detail","Dynamic Lighting is on" } }) });
+        diag.clearEventLog();
+        s.srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "ownership" }, { "data", pushed } }));
+        CHECK(PumpBoth(s, [&] {
+            return diag.ownership()
+                       .value(QStringLiteral("conflictCount"))
+                       .toInt() == 2; }));
+        const QVariantList bc = bridge.ownership()
+            .value(QStringLiteral("conflicts")).toList();
+        CHECK(bc.size() == 2);
+        CHECK(bc.size() == 2 &&
+              bc[1].toMap().value(QStringLiteral("key")).toString()
+                  == QStringLiteral("dynamic_lighting"));
+        /* the journal row names the writers, not a JSON dump */
+        bool journaled = false;
+        for(const QVariant& e : diag.eventLog())
+        {
+            const QVariantMap m = e.toMap();
+            if(m.value(QStringLiteral("kind")).toString() ==
+               QStringLiteral("ownership"))
+            {
+                journaled = m.value(QStringLiteral("detail"))
+                                .toString()
+                                .contains(QStringLiteral(
+                                    "Windows Dynamic Lighting"));
+            }
+        }
+        CHECK(journaled);
+
+        /* the clear arrives the same way */
+        nlohmann::json cleared = OwnershipBody();
+        cleared["conflicts"] = nlohmann::json::array();
+        s.srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "ownership" }, { "data", cleared } }));
+        CHECK(PumpBoth(s, [&] {
+            return diag.ownership()
+                       .value(QStringLiteral("conflictCount"))
+                       .toInt() == 0 &&
+                   diag.ownership()
+                       .value(QStringLiteral("reported")).toBool();
+        }));
+
+        /* restore the scripted report for the cases below */
+        s.srv.SendMsg(MsgType::Event, 0,
+            nlohmann::json::object({
+                { "kind", "ownership" },
+                { "data", OwnershipBody() } }));
+        CHECK(PumpBoth(s, [&] {
+            return diag.ownership()
+                       .value(QStringLiteral("conflictCount"))
+                       .toInt() == 1; }));
+    }
+
     /*---- per-controller rows + binding resolution -------------*/
     std::printf("-- controllers\n");
     {

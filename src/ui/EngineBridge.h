@@ -127,6 +127,13 @@ class EngineBridge : public QObject
        reason — never a fabricated toggle set. */
     Q_PROPERTY(QVariantMap reactive READ reactive
                    NOTIFY reactiveChanged)
+    /* R-10: the engine's OWNERSHIP report (competing RGB
+       writers), freshest-wins across WELCOME state, the STATE
+       and DIAGNOSTICS replies and the pushed "ownership"
+       event — so the shell can surface a conflict on any page
+       without polling. Empty = no report published yet. */
+    Q_PROPERTY(QVariantMap ownership READ ownership
+                   NOTIFY ownershipChanged)
     /* studio-import Task 3: true exactly when WELCOME advertised
        "studio_workspace_v1". A false bridge falls back to the
        legacy scene verbs — workspaceCommand still sends (the
@@ -213,6 +220,7 @@ public:
     QVariantMap diagnostics() const;
     QVariantMap stateReport() const;
     QVariantMap reactive() const;
+    QVariantMap ownership() const;
     bool        hasWorkspace() const;
     QVariantMap workspace() const;
 
@@ -228,6 +236,10 @@ public:
        does (offline tests can't drive the engine's inputs). */
     void setReactiveForTesting(const QVariantMap& m)
         { reactive_ = m; emit reactiveChanged(); }
+    /* R-10: feed an OWNERSHIP body the way the "ownership"
+       event does. */
+    void setOwnershipForTesting(const QVariantMap& m)
+        { AdoptOwnership(m); }
 
     void setPipeName(const QString& name);
 
@@ -251,6 +263,7 @@ signals:
     void diagnosticsChanged();
     void stateReportChanged();
     void reactiveChanged();
+    void ownershipChanged();
     void hasWorkspaceChanged();
     void workspaceChanged();
 
@@ -282,6 +295,9 @@ private:
     void ApplySessionEnd(EngineWireClient::EndReason reason,
                          const std::string& detail);
     void RecomputeDegraded();
+    /* R-10: store an OWNERSHIP body when it is an object
+       (null = nothing wired — keep what we have). */
+    void AdoptOwnership(const QVariantMap& m);
 
     /* Audit I-4: a SCENE body (WELCOME state, scene EVENT,
        GET_SCENE reply) may announce a large document by
@@ -374,6 +390,7 @@ private:
     QVariantMap diagnostics_;
     QVariantMap state_report_;
     QVariantMap reactive_;
+    QVariantMap ownership_;
     bool        has_workspace_ = false;
     QVariantMap workspace_;
 };
