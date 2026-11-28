@@ -224,7 +224,11 @@ public:
        Disconnected until Connect()/ReconnectNow(). Poll and
        ReconnectNow are the ONLY reconnect drivers — the send
        path (SubmitLatest, lane threads) never attempts one
-       (E-3); the owner loop polls. */
+       (E-3); the owner loop polls. While Connected, Poll also
+       reads unsolicited backend packets: DEVICE_LIST_UPDATED
+       (packet 100 — the backend sends it to every client at
+       any protocol version when its controller list changes)
+       re-enumerates here, on the owner loop (P-5). */
     bool            Poll(TimePoint now = Clock::now());
     bool            ReconnectNow();
     uint32_t        ReconnectAttempt() const;
@@ -355,6 +359,17 @@ private:
     void NoteWirelessReplyIo();
     void MarkBrokenIo(const std::string& reason, TimePoint now);
     void PollIo(TimePoint now);
+    /* P-5: non-blocking read of unsolicited packets while
+       Connected (RecvPacket flags DEVICE_LIST_UPDATED). A
+       transport fault marks the connection broken. */
+    void ReadAsyncIo(TimePoint now);
+    /* RecvPacket saw DEVICE_LIST_UPDATED: the positional
+       controller indices may have shifted. Bumps the topology
+       generation WITHOUT re-stamping the snapshots (the
+       ResizeZone rule), so every frame stamped on the old
+       topology is refused as stale until the re-enumeration
+       Poll() runs. */
+    void NoteDeviceListUpdatedIo();
 
     mutable std::mutex   io_mutex_;  /* wire serialization      */
     /* Frame sends waiting for io_mutex_ (E-3). std::mutex is not
@@ -397,6 +412,12 @@ private:
     /* Packet-4000 requests sent whose replies have not been
        read yet. io_mutex_ only (wire-side bookkeeping). */
     uint32_t               wireless_pending_ = 0;
+
+    /* DEVICE_LIST_UPDATED seen since the last enumeration
+       (P-5). io_mutex_ only; EnumerateIo clears it before its
+       count request, so a notice that lands mid-enumeration
+       triggers one more. */
+    bool                   device_list_updated_ = false;
 };
 
 } /* namespace sdk */

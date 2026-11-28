@@ -185,6 +185,12 @@ RecvResult OpenRgbClient::RecvPacket(Packet& pkt)
     {
         NoteWirelessReplyIo();
     }
+    else if(pkt.header.pkt_id == kPktDeviceListUpdated)
+    {
+        /* Wherever it lands — a Request() reply wait,
+           DrainPending, a probe — the notice is never lost. */
+        NoteDeviceListUpdatedIo();
+    }
     return RecvResult::Ok;
 }
 
@@ -229,7 +235,8 @@ std::vector<uint8_t> OpenRgbClient::Request(uint32_t dev_id, uint32_t pkt_id,
 void OpenRgbClient::DrainPending()
 {
     /* Consume unsolicited packets so the socket never backs up.
-       Below protocol 6 the server sends none; this is defensive. */
+       Below protocol 6 the only one is DEVICE_LIST_UPDATED,
+       which RecvPacket flags (P-5) before it is dropped. */
     Packet pkt;
     for(;;)
     {
@@ -297,6 +304,10 @@ bool OpenRgbClient::EnumerateIo(std::string& err)
         pv = protocol_version_;
     }
 
+    /* This enumeration answers every DEVICE_LIST_UPDATED read
+       so far; one that arrives while it runs sets the flag
+       again (P-5). */
+    device_list_updated_ = false;
     const std::vector<uint8_t> count_reply =
         Request(0, kPktControllerCount, {}, kPktControllerCount);
     if(count_reply.size() != 4)
@@ -1090,6 +1101,40 @@ void OpenRgbClient::MarkBrokenIo(const std::string& reason,
     next_attempt_      = now + options_.backoff.DelayFor(0);
 }
 
+void OpenRgbClient::NoteDeviceListUpdatedIo()
+{
+    device_list_updated_ = true;
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++topology_generation_;
+}
+
+void OpenRgbClient::ReadAsyncIo(TimePoint now)
+{
+    /* Caller holds io_mutex_. Only meaningful on a live
+       connection; DrainPending reads whatever is readable
+       right now (a zero-timeout select first — no wait when
+       the socket is quiet). */
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(state_ != ConnectionState::Connected)
+        {
+            return;
+        }
+    }
+    if(!stream_->IsOpen())
+    {
+        return;
+    }
+    try
+    {
+        DrainPending();
+    }
+    catch(const TransportError& e)
+    {
+        MarkBrokenIo(e.what(), now);
+    }
+}
+
 void OpenRgbClient::PollIo(TimePoint now)
 {
     /* stream_->IsOpen()/PeerClosed() are wire-side probes —
@@ -1150,6 +1195,32 @@ bool OpenRgbClient::Poll(TimePoint now)
 {
     std::lock_guard<std::mutex> io(io_mutex_);
     PollIo(now);
+    ReadAsyncIo(now);
+    /* P-5: the backend's controller list changed — re-enumerate
+       here, on the owner loop, never on a lane thread (the
+       send path only reads the notice and stops stale-index
+       writes through the generation bump). */
+    bool connected = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        connected = state_ == ConnectionState::Connected;
+    }
+    if(connected && device_list_updated_)
+    {
+        std::string err;
+        try
+        {
+            if(!EnumerateIo(err))
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                last_error_ = err;
+            }
+        }
+        catch(const TransportError& e)
+        {
+            MarkBrokenIo(e.what(), now);
+        }
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     return state_ == ConnectionState::Connected;
 }
@@ -1246,6 +1317,10 @@ SubmitResult OpenRgbClient::SubmitLatest(const RgbFrame& frame)
         ++stats_.rejected;
         return SubmitResult::Reject("backend not connected");
     }
+    /* P-5: read a pending DEVICE_LIST_UPDATED before validating
+       — its generation bump refuses this frame instead of
+       sending it to a positional index that may have moved. */
+    ReadAsyncIo(now);
 
     /* Validate against committed state in one state-lock hold.
        Holding io_mutex_ means nothing can re-enumerate or

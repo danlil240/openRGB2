@@ -1132,6 +1132,71 @@ static void TestUnparsableControllerSkipped()
           != std::string::npos);
 }
 
+/*---------------------------------------------------------*\
+||| Audit P-5: the backend announces a changed controller  |||
+||| list with DEVICE_LIST_UPDATED (packet 100) to every     |||
+||| client, at any protocol version. The client must read  |||
+||| it promptly: until it re-enumerates, a frame resolved  |||
+||| against the old positional index would land on a       |||
+||| shifted controller.                                    |||
+\*---------------------------------------------------------*/
+
+static void TestDeviceListUpdatedInvalidatesTopology()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup(), Dimm() };
+
+    FakeStream* stream = nullptr;
+    auto client = MakeClient(server, &stream);
+    CHECK(client->Connect());
+    std::vector<DeviceSnapshot> snaps = client->Snapshots();
+    CHECK(snaps.size() == 2);
+    const DeviceSnapshot* dimm = nullptr;
+    for(const DeviceSnapshot& s : snaps)
+    {
+        if(s.key.serial == "D1") dimm = &s;
+    }
+    CHECK(dimm != nullptr);
+    if(!dimm) return;
+    const uint64_t gen0 = dimm->topology_generation;
+    const RgbFrame stale = MakeFrame(*dimm, { 5, 5, 5 });
+
+    /* The backend rescans: the wireless group is gone, the
+       DIMM moves from index 1 to index 0, and the server
+       tells every client. */
+    server.RemoveController(0);
+    stream->InjectServerBytes(EncodePacket(0, kPktDeviceListUpdated, {}));
+    server.ClearEvents();
+
+    /* The very next frame on the old topology is refused —
+       never sent to the stale index 1. */
+    const SubmitResult r = client->SubmitLatest(stale);
+    CHECK(r.status == SubmitStatus::Rejected);
+    CHECK(server.CountEvents(kPktUpdateLEDs) == 0);
+    CHECK(client->State() == ConnectionState::Connected);
+
+    /* The owner loop's Poll re-enumerates: one controller, a
+       new generation, and frames route to the new index. */
+    CHECK(client->Poll());
+    snaps = client->Snapshots();
+    CHECK(snaps.size() == 1);
+    CHECK(!snaps.empty() && snaps[0].key.serial == "D1");
+    CHECK(!snaps.empty() && snaps[0].topology_generation > gen0);
+    if(!snaps.empty())
+    {
+        CHECK(client->SubmitLatest(MakeFrame(snaps[0], { 6, 6, 6 }))
+                  .status == SubmitStatus::Accepted);
+        CHECK(server.CountEvents(kPktUpdateLEDs, 0) == 1);
+        CHECK(server.CountEvents(kPktUpdateLEDs, 1) == 0);
+    }
+
+    /* Read by Poll alone too (no frame in between). */
+    server.AddController(WirelessGroup());
+    stream->InjectServerBytes(EncodePacket(0, kPktDeviceListUpdated, {}));
+    CHECK(client->Poll());
+    CHECK(client->Snapshots().size() == 2);
+}
+
 int main()
 {
     TestHandshakeCapsAt4();
@@ -1160,6 +1225,7 @@ int main()
     TestRefreshDoesNotStallFrames();
     TestSubmitNeverReconnects();
     TestUnparsableControllerSkipped();
+    TestDeviceListUpdatedInvalidatesTopology();
     std::printf("sdk client: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
