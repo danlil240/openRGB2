@@ -276,6 +276,8 @@ void EngineBridge::ApplyWelcome(const nlohmann::json& welcome)
     /* R-1: no capability -> no output surface (the store is
        cleared so a downgraded engine never shows stale state). */
     setHasOutputControl(wire_.HasCapability("output_control_v1"));
+    /* R-2: same rule for the automation surface. */
+    setHasAutomation(wire_.HasCapability("automation_v1"));
     setConnectionState("connected");
     setRetryInMs(0);
     setLastError(QString());
@@ -321,6 +323,12 @@ void EngineBridge::ApplyWelcome(const nlohmann::json& welcome)
            state["output"].is_object())
         {
             AdoptOutput(JsonToVariant(state["output"]).toMap());
+        }
+        if(has_automation_ && state.contains("automation") &&
+           state["automation"].is_object())
+        {
+            AdoptAutomation(
+                JsonToVariant(state["automation"]).toMap());
         }
         state_report_ = JsonToVariant(state).toMap();
         emit stateReportChanged();
@@ -437,6 +445,15 @@ void EngineBridge::ApplyEvent(const nlohmann::json& event_body)
             AdoptOutput(data_map);
         }
     }
+    else if(kind == ipc::event_kind::kAutomation)
+    {
+        /* R-2: any session's change (and the SUBSCRIBE
+           snapshot); null = not wired, keep what we have. */
+        if(data.is_object() && has_automation_)
+        {
+            AdoptAutomation(data_map);
+        }
+    }
     else if(kind == ipc::event_kind::kWorkspace)
     {
         /* Initial snapshot = `get` metadata; terminal job
@@ -548,9 +565,18 @@ void EngineBridge::ApplyReply(uint32_t request_id, ipc::MsgType type,
             AdoptOutput(
                 body_map.value(QStringLiteral("output")).toMap());
         }
+        if(has_automation_ && body.contains("automation") &&
+           body["automation"].is_object())
+        {
+            AdoptAutomation(
+                body_map.value(QStringLiteral("automation")).toMap());
+        }
         break;
     case ipc::MsgType::Output:
         AdoptOutput(body_map);
+        break;
+    case ipc::MsgType::Automation:
+        AdoptAutomation(body_map);
         break;
     case ipc::MsgType::Presets:
         SetIfChanged(this, presets_,
@@ -1039,6 +1065,22 @@ int EngineBridge::outputCommand(const QString& verb,
     return Issue(ipc::MsgType::OutputCommand, b);
 }
 
+int EngineBridge::automationCommand(const QString& verb,
+                                    const QVariantMap& args)
+{
+    if(!has_automation_)
+    {
+        return 0;   /* unadvertised surface — never sent */
+    }
+    nlohmann::json b = VariantToJson(args);
+    if(!b.is_object())
+    {
+        b = nlohmann::json::object();
+    }
+    b["verb"] = verb.toStdString();
+    return Issue(ipc::MsgType::AutomationCommand, b);
+}
+
 int EngineBridge::workspaceCommand(const QString& verb,
                                    const QVariantMap& args)
 {
@@ -1275,6 +1317,33 @@ QVariantMap EngineBridge::reactive() const        { return reactive_; }
 QVariantMap EngineBridge::ownership() const       { return ownership_; }
 QVariantMap EngineBridge::output() const          { return output_; }
 bool        EngineBridge::hasOutputControl() const { return has_output_control_; }
+QVariantMap EngineBridge::automation() const       { return automation_; }
+bool        EngineBridge::hasAutomation() const    { return has_automation_; }
+
+void EngineBridge::AdoptAutomation(const QVariantMap& m)
+{
+    if(m.isEmpty() || m == automation_)
+    {
+        return;
+    }
+    automation_ = m;
+    emit automationChanged();
+}
+
+void EngineBridge::setHasAutomation(bool h)
+{
+    if(has_automation_ == h)
+    {
+        return;
+    }
+    has_automation_ = h;
+    if(!h && !automation_.isEmpty())
+    {
+        automation_.clear();
+        emit automationChanged();
+    }
+    emit hasAutomationChanged();
+}
 
 void EngineBridge::AdoptOutput(const QVariantMap& m)
 {

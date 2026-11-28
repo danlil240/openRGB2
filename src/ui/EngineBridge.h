@@ -145,6 +145,16 @@ class EngineBridge : public QObject
        the tray hides its quick controls otherwise. */
     Q_PROPERTY(bool hasOutputControl READ hasOutputControl
                    NOTIFY hasOutputControlChanged)
+    /* R-2: engine-side automation (AUTOMATION body: {hotkeys:
+       [{action, chord, state, detail?}], actions, proposed,
+       cycle, brightness_step, registrar}) — WELCOME state,
+       STATE replies, AUTOMATION replies and the "automation"
+       event. Empty = not published / no capability. */
+    Q_PROPERTY(QVariantMap automation READ automation
+                   NOTIFY automationChanged)
+    /* True exactly when WELCOME advertised "automation_v1". */
+    Q_PROPERTY(bool hasAutomation READ hasAutomation
+                   NOTIFY hasAutomationChanged)
     /* studio-import Task 3: true exactly when WELCOME advertised
        "studio_workspace_v1". A false bridge falls back to the
        legacy scene verbs â€” workspaceCommand still sends (the
@@ -200,6 +210,13 @@ public:
        output_control_v1. */
     Q_INVOKABLE int outputCommand(const QString& verb,
                                   const QVariantMap& args);
+    /* R-2 AUTOMATION_COMMAND {verb,...args} — "get",
+       "set_hotkeys" {bindings:[{action, chord}], cycle?,
+       brightness_step?}. The AUTOMATION reply lands in the
+       automation store. Returns 0 (nothing sent) when the
+       engine did not advertise automation_v1. */
+    Q_INVOKABLE int automationCommand(const QString& verb,
+                                      const QVariantMap& args);
     /* WORKSPACE_COMMAND {verb,...args} â€” section 3.3 verbs
        (get/list/catalog/validate/commit/save_copy, the
        transfer_* trio, job_status/job_cancel, preview_*). The
@@ -241,6 +258,8 @@ public:
     QVariantMap ownership() const;
     QVariantMap output() const;
     bool        hasOutputControl() const;
+    QVariantMap automation() const;
+    bool        hasAutomation() const;
     bool        hasWorkspace() const;
     QVariantMap workspace() const;
 
@@ -267,6 +286,11 @@ public:
         { AdoptOutput(m); }
     void setOutputControlForTesting(bool on)
         { setHasOutputControl(on); }
+    /* R-2: same pair for the automation store. */
+    void setAutomationForTesting(const QVariantMap& m)
+        { automation_ = m; emit automationChanged(); }
+    void setAutomationCapabilityForTesting(bool on)
+        { setHasAutomation(on); }
 
     void setPipeName(const QString& name);
 
@@ -293,6 +317,8 @@ signals:
     void ownershipChanged();
     void outputChanged();
     void hasOutputControlChanged();
+    void automationChanged();
+    void hasAutomationChanged();
     void hasWorkspaceChanged();
     void workspaceChanged();
 
@@ -330,6 +356,9 @@ private:
     /* R-1: store an OUTPUT body (empty = keep what we have). */
     void AdoptOutput(const QVariantMap& m);
     void setHasOutputControl(bool h);
+    /* R-2: store an AUTOMATION body (empty = keep). */
+    void AdoptAutomation(const QVariantMap& m);
+    void setHasAutomation(bool h);
 
     /* Audit I-4: a SCENE body (WELCOME state, scene EVENT,
        GET_SCENE reply) may announce a large document by
@@ -425,6 +454,8 @@ private:
     QVariantMap ownership_;
     QVariantMap output_;
     bool        has_output_control_ = false;
+    QVariantMap automation_;
+    bool        has_automation_ = false;
     bool        has_workspace_ = false;
     QVariantMap workspace_;
 };
