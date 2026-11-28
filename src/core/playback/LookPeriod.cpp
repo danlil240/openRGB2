@@ -333,10 +333,20 @@ LookPeriod AnalyzeLookPeriod(const std::vector<EffectLayer>& layers,
     if(!fit.found)
     {
         char buf[160];
-        std::snprintf(buf, sizeof(buf),
-                      "layer speeds do not share a short common cycle "
-                      "(<= %g s; the closest needs a %.1f%% speed change)",
-                      opts.max_cycle_s, fit.best_change * 100.0);
+        if(periods.size() == 1)
+        {
+            std::snprintf(buf, sizeof(buf),
+                          "the look's cycle (%.2f s) is longer than the %g s limit "
+                          "(fitting it needs a %.1f%% speed change)",
+                          periods[0], opts.max_cycle_s, fit.best_change * 100.0);
+        }
+        else
+        {
+            std::snprintf(buf, sizeof(buf),
+                          "layer speeds do not share a short common cycle "
+                          "(<= %g s; the closest needs a %.1f%% speed change)",
+                          opts.max_cycle_s, fit.best_change * 100.0);
+        }
         out.reason = buf;
         return out;
     }

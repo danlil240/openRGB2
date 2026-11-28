@@ -258,7 +258,7 @@ static void TestSnapping()
     const std::vector<EffectLayer> slow = { Layer("gradient", 1.0f / 25.0f, 1.0f) };
     const LookPeriod sl = AnalyzeLookPeriod(slow, doc, SnapOptions());
     CHECK(!sl.compilable);
-    CHECK(sl.reason.find("20") != std::string::npos);
+    CHECK(sl.reason.find("longer than the 20 s limit") != std::string::npos);
     /* ...but 20.5 s snaps to 20 s at 2.5%. */
     const LookPeriod s2 = AnalyzeLookPeriod({ Layer("gradient", 1.0f / 20.5f, 1.0f) },
                                             doc, SnapOptions());
