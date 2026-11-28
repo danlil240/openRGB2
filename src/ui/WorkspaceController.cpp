@@ -23,6 +23,7 @@
 #include "WorkspaceController.h"
 
 #include "EngineBridge.h"
+#include "IpcProtocol.h"
 #include "JsonVariant.h"
 #include "ProfileLibrary.h"
 
@@ -58,6 +59,12 @@ quint64 JU64(const QVariantMap& m, const char* key)
 {
     return m.value(QLatin1String(key)).toULongLong();
 }
+
+/* Headroom for the inline commit envelope (verb, id, the two
+   revisions, framing) around the compact document — a document
+   within this of the 1 MiB IPC bound goes up as a staged
+   upload instead (audit U-13). */
+constexpr size_t kInlineCommitSlack = 4096;
 
 } /* anonymous namespace */
 
@@ -1028,6 +1035,39 @@ void WorkspaceController::save()
     pending_doc_sha_   = Sha256Hex(pending_doc_.dump(2));
     SetSaving(true);
     SetError(QString(), QString());
+    /* Audit U-13: an inline commit body is bounded by the 1 MiB
+       IPC frame — a bigger document used to fail locally as a
+       misleading "connection" error. The commit verb accepts a
+       staged upload token instead (docs/ipc-protocol.md), so a
+       document that cannot ride inline goes up through the
+       bounded transfer (kind "document", the engine's 4 MiB
+       document cap) and commits by token. */
+    const std::string compact = pending_doc_.dump();
+    if(compact.size() + kInlineCommitSlack > ipc::kMaxBodyBytes)
+    {
+        const QVariantMap args({
+            { QStringLiteral("id"),                ws_id_ },
+            { QStringLiteral("base_revision"),
+              QVariant::fromValue<qulonglong>(
+                  session_.BaseRevision()) },
+            { QStringLiteral("resource_revision"),
+              QVariant::fromValue<qulonglong>(
+                  session_.ResourceRevision()) },
+        });
+        if(!BeginUpload(QStringLiteral("commit"),
+                        QByteArray::fromStdString(compact),
+                        QStringLiteral("commit"), args,
+                        QStringLiteral("document")))
+        {
+            FailStagedSave(ul_.has_value()
+                ? QStringLiteral("another transfer is in progress "
+                                 "— try the save again when it "
+                                 "finishes")
+                : QStringLiteral("the document upload for this "
+                                 "save could not be started"));
+        }
+        return;
+    }
     const int id = SendCommand(
         QStringLiteral("commit"),
         QVariantMap({
@@ -2426,7 +2466,8 @@ void WorkspaceController::FinishDownload()
 bool WorkspaceController::BeginUpload(const QString& purpose,
                                       const QByteArray& bytes,
                                       const QString& verb,
-                                      const QVariantMap& args)
+                                      const QVariantMap& args,
+                                      const QString& kind)
 {
     if(ul_.has_value() || !available_)
     {
@@ -2442,7 +2483,7 @@ bool WorkspaceController::BeginUpload(const QString& purpose,
         QStringLiteral("transfer_begin"),
         QVariantMap({
             { QStringLiteral("direction"), QStringLiteral("upload") },
-            { QStringLiteral("kind"),      QStringLiteral("bundle") },
+            { QStringLiteral("kind"),      kind },
             { QStringLiteral("length"),
               QVariant::fromValue<qulonglong>(
                   (qulonglong)bytes.size()) },
@@ -2488,6 +2529,15 @@ void WorkspaceController::OnUploadReply(const QString& stage,
                       ? QStringLiteral("upload failed")
                       : error_ } },
             }));
+        }
+        else if(purpose == QLatin1String("commit"))
+        {
+            /* e.g. the engine refused the declared length: the
+               document is over its transfer cap too. */
+            FailStagedSave(QStringLiteral("the workspace document "
+                                          "could not be uploaded "
+                                          "for saving: %1")
+                               .arg(error_));
         }
         return;
     }
@@ -2570,6 +2620,13 @@ void WorkspaceController::OnUploadReply(const QString& stage,
                 SetError(QStringLiteral("staged upload could "
                                         "not be committed"),
                          QStringLiteral("connection"));
+                if(u.purpose == QLatin1String("commit"))
+                {
+                    FailStagedSave(QStringLiteral("save request "
+                                                  "could not be "
+                                                  "sent"),
+                                   QStringLiteral("connection"));
+                }
             }
             else if(u.verb == QLatin1String("import_commit"))
             {
@@ -2577,6 +2634,12 @@ void WorkspaceController::OnUploadReply(const QString& stage,
                     u.args.value(QStringLiteral("name"))
                         .toString();
             }
+        }
+        else if(u.purpose == QLatin1String("commit"))
+        {
+            FailStagedSave(QStringLiteral("the engine staged no "
+                                          "document for this "
+                                          "save"));
         }
         PumpImportQueue();
         return;
@@ -2596,6 +2659,20 @@ void WorkspaceController::OnUploadReply(const QString& stage,
               QString::fromLatin1(slice.toBase64()) },
         }),
         QStringLiteral("ul_chunk"));
+}
+
+void WorkspaceController::FailStagedSave(const QString& why,
+                                         const QString& source)
+{
+    if(!saving_)
+    {
+        return;
+    }
+    SetSaving(false);
+    pending_doc_     = nullptr;
+    pending_doc_sha_ = QString();
+    SetError(why, source);
+    emit saveFinished(false);
 }
 
 void WorkspaceController::AbortTransfers()

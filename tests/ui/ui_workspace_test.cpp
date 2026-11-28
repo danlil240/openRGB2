@@ -177,6 +177,10 @@ struct WsEngine
     int           import_commits  = 0;
     int           reload_jobs     = 0;
     std::string   upload_bytes;
+    /* Upload chunk size the scripted engine grants, and the kind
+       the last upload declared. */
+    uint64_t      upload_chunk = 400;
+    std::string   upload_kind;
     std::map<std::string, std::string> staged_uploads;
     std::vector<uint64_t>         terminal_jobs;
     int           set_scene_calls = 0;
@@ -417,10 +421,11 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
             {
                 ++e.upload_begins;
                 e.upload_bytes.clear();
+                e.upload_kind = body.value("kind", std::string());
                 e.srv.SendMsg(MsgType::Ok, m.request_id,
                     nlohmann::json::object({
                         { "transfer_id",     "ul1" },
-                        { "max_chunk_bytes", (uint64_t)400 },
+                        { "max_chunk_bytes", e.upload_chunk },
                     }));
             }
         }
@@ -493,6 +498,15 @@ static bool ServeWs(WsEngine& e, uint32_t wait_ms = 15)
             {
                 e.last_commit_doc = body.value("document",
                                                nlohmann::json());
+                /* A staged commit (document over the inline IPC
+                   bound) carries the upload token instead. */
+                const auto st_it = e.staged_uploads.find(
+                    body.value("staged", std::string()));
+                if(st_it != e.staged_uploads.end())
+                {
+                    e.last_commit_doc = nlohmann::json::parse(
+                        st_it->second, nullptr, false);
+                }
                 e.last_base_rev   =
                     body.value("base_revision", (uint64_t)0);
                 e.last_res_rev    =
@@ -1237,6 +1251,43 @@ int main(int argc, char** argv)
         CHECK(rig.ctl.error().contains(
             QStringLiteral("reopen 'ws0'")));
         CHECK(rig.ctl.dirty());
+    }
+
+    /* Audit U-13: a document whose inline commit body would
+       exceed the 1 MiB IPC bound used to fail locally with a
+       misleading "connection" error. The commit verb accepts a
+       staged upload token — the save routes through it. */
+    std::printf("-- controller: a document over the IPC bound "
+                "saves via a staged upload (U-13)\n");
+    {
+        WsRig rig;
+        QTemporaryDir dir;
+        rig.ctl.setDraftDirForTesting(dir.path());
+        rig.engine.upload_chunk = 192 * 1024;
+        rig.bridge.start();
+        CHECK(rig.PumpUntil([&] {
+            return rig.ctl.managed() && rig.ctl.ready(); }));
+        const std::string big(kMaxBodyBytes + 256 * 1024, 'n');
+        CHECK(rig.ctl.Session().CommitDocEdit("rename",
+            [&](studio::StudioDocument& d) {
+                d.meta.name = big; return true; }));
+        rig.PumpUntil([&] { return rig.ctl.dirty(); });
+        int finished = 0;
+        bool finished_ok = false;
+        QObject::connect(&rig.ctl, &WorkspaceController::saveFinished,
+                         [&](bool ok) { ++finished; finished_ok = ok; });
+        rig.ctl.save();
+        CHECK(rig.PumpUntil([&] { return finished > 0; }, 20000));
+        CHECK(finished_ok);
+        CHECK(rig.ctl.error().isEmpty());
+        CHECK(!rig.ctl.saving());
+        CHECK(!rig.ctl.dirty());
+        CHECK(rig.engine.commits == 1);
+        CHECK(rig.engine.upload_kind == "document");
+        CHECK(rig.engine.last_commit_doc.is_object() &&
+              rig.engine.last_commit_doc.value("name", std::string())
+                  == big);
+        CHECK(rig.ctl.Session().BaseRevision() == 2);
     }
 
     std::printf("-- controller: foreign-open latch blocks a "
