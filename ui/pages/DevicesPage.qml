@@ -51,6 +51,21 @@ Item {
     function fmt(v, suffix) {
         return (v === undefined || v === null) ? "—" : v + (suffix || "");
     }
+    /* The live STATE report (refreshed every 2 s here) wins over
+       WELCOME, which is captured once at connect: a UI that
+       connects while the engine is still starting got
+       running:false and showed "not running" all session. */
+    function engineStateText(connected, serverInfo, stateReport) {
+        if(!connected)
+            return qsTr("offline");
+        const live = stateReport && stateReport.engine
+                     ? stateReport.engine.running : undefined;
+        const running = (live !== undefined)
+                        ? live
+                        : !(serverInfo && serverInfo.running === false);
+        return running ? qsTr("running") : qsTr("not running");
+    }
+
     function rateText(hz, measured, suffix) {
         return measured ? hz.toFixed(1) + (suffix || " /s")
                         : qsTr("unmeasured");
@@ -361,10 +376,9 @@ Item {
                         spacing: Theme.spaceS
                         Text {
                             text: qsTr("state: %1").arg(
-                                root.engineUp
-                                    ? (bridge.serverInfo.running === false
-                                       ? qsTr("not running") : qsTr("running"))
-                                    : qsTr("offline"))
+                                root.engineStateText(root.engineUp,
+                                                     bridge.serverInfo,
+                                                     bridge.stateReport))
                             color: Theme.textPrimary
                             font.pixelSize: Theme.fontSizeBody
                         }
