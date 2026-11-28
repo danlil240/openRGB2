@@ -953,6 +953,21 @@ int main()
                 CHECK(r.code == ipc::ErrCode::Ok);
                 CHECK(host4.GetEngine().Worker().Held());
                 CHECK(host4.GetOutput().EffectiveScale() == 0.0f);
+                /* E-12b x R-1: the production wiring of set_policy
+                   reaches EngineHost::SetOutputPolicy */
+                r = svc->Dispatch(MsgType::OutputCommand,
+                    nlohmann::json::object({{ "verb", "set_policy" },
+                                            { "on_idle", "black" }}));
+                CHECK(r.code == ipc::ErrCode::Ok);
+                CHECK(host4.GetOutputPolicy().on_idle ==
+                      OutputAction::Black);
+                CHECK(host4.GetOutputPolicy().on_exit ==
+                      OutputAction::Hold);
+                /* back to the default so later restarts in this
+                   suite see hold/hold */
+                r = svc->Dispatch(MsgType::OutputCommand,
+                    nlohmann::json::object({{ "verb", "set_policy" }}));
+                CHECK(r.code == ipc::ErrCode::Ok);
             }
             host4.RequestStop();
             host4.Stop();

@@ -1360,6 +1360,9 @@ const std::vector<EngineService::OutputVerb>& EngineService::OutputVerbs()
         { "set_master",   &EngineService::OutputSetMaster   },
         { "set_blackout", &EngineService::OutputSetBlackout },
         { "set_hold",     &EngineService::OutputSetHold     },
+        /* E-12b exit/idle policy: own dependency, OK reply. */
+        { "get_policy",   &EngineService::OutputGetPolicy, false },
+        { "set_policy",   &EngineService::OutputSetPolicy, false },
     };
     return verbs;
 }
@@ -1381,12 +1384,53 @@ IpcReply EngineService::HandleOutputCommand(const std::string& verb,
         return IpcReply::Fail(ErrCode::BadRequest,
             "unknown output verb '" + verb + "'");
     }
-    if(!deps_.output)
+    if(found->needs_output_control && !deps_.output)
     {
         return IpcReply::Fail(ErrCode::Unavailable,
             "runtime output control is not wired on this engine");
     }
     return (this->*(found->fn))(body);
+}
+
+IpcReply EngineService::OutputGetPolicy(const nlohmann::json&)
+{
+    if(!deps_.output_policy)
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "the exit/idle output policy is not wired on this engine");
+    }
+    const nlohmann::json p = deps_.output_policy();
+    if(!p.is_object())
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "the exit/idle output policy is not available");
+    }
+    return IpcReply::Success(MsgType::Ok,
+        nlohmann::json::object({{ "output_policy", p }}));
+}
+
+IpcReply EngineService::OutputSetPolicy(const nlohmann::json& body)
+{
+    if(!deps_.set_output_policy || !deps_.output_policy)
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "the exit/idle output policy is not wired on this engine");
+    }
+    /* The flat body IS the policy ({verb, on_exit?, on_idle?,
+       per_controller?}); the parser ignores "verb". The policy
+       is REPLACED: an absent field returns to its default. */
+    OutputPolicy p;
+    std::string err;
+    if(!OutputPolicyFromJson(body, p, err))
+    {
+        return IpcReply::Fail(ErrCode::BadRequest, "set_policy: " + err);
+    }
+    if(!deps_.set_output_policy(p, err))
+    {
+        return IpcReply::Fail(ErrCode::Internal,
+            "set_policy: could not save the policy: " + err);
+    }
+    return OutputGetPolicy(body);
 }
 
 IpcReply EngineService::OutputGet(const nlohmann::json&)

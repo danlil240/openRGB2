@@ -388,8 +388,8 @@ ends it) — over the connected controllers the scene binds or the
 engine switched to Direct this run. Both are skipped while the power
 gate is on (display off / suspend). `idle` is true from the idle entry
 until the next applied scene. The policy is persisted in the engine
-profile; the `get_policy`/`set_policy` verbs that change it are not
-on the wire yet (they belong on `OUTPUT_COMMAND`, plan R-1).
+profile and read or replaced with the `OUTPUT_COMMAND` verbs
+`get_policy` / `set_policy` (below).
 
 **OWNERSHIP** (STATE/DIAGNOSTICS field, `null` when no ownership
 report is wired) — the Task-3.9 startup scan's verbatim,
@@ -596,8 +596,9 @@ tray's master brightness, "Off" and pause. They never touch the
 applied scene or a workspace draft (nothing goes dirty, nothing is
 committed). Every request carries `{verb:"<name>", ...args}`; an
 unknown verb → `bad_request`; an engine without the control →
-`unavailable`. Every verb replies **OUTPUT** (`0x8107`) with the full
-body below:
+`unavailable`. The four output verbs reply **OUTPUT** (`0x8107`) with
+the full body below; the two policy verbs reply `OK` (see the end of
+the table):
 
 | verb | body | effect |
 | --- | --- | --- |
@@ -605,6 +606,8 @@ body below:
 | `set_master` | `{value: number in [0, 1]}` | master scale (out of range / non-number → `bad_request`) |
 | `set_blackout` | `{on: bool}` | "Off": effective scale 0; `master` is kept for the release |
 | `set_hold` | `{on: bool}` | pause: live scene clock frozen at the current frame (no input pull); an uploaded loop gets control `paused`. Release resumes from the paused frame and drops input queued across the hold |
+| `get_policy` | `{}` | E-12b: reply `OK {output_policy}` (the STATE OUTPUT_POLICY body). Works without the runtime output control; `unavailable` when no policy is wired |
+| `set_policy` | `{on_exit?, on_idle?, per_controller?}` | E-12b: **replaces** the whole policy (an absent field returns to `hold` / no rules) and persists it in the engine profile; reply `OK {output_policy}`. Invalid shape → `bad_request` (policy unchanged); a failed profile save → `internal` (policy unchanged). Takes effect at the next exit / idle entry |
 
 Arbitration (decided once, engine-side):
 `effective = blackout ? 0 : master × min(contributors)`. Contributors

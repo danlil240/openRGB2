@@ -41,6 +41,7 @@
 #include "Engine.h"
 #include "OpenRgbClient.h"
 #include "OutputControl.h"
+#include "OutputPolicy.h"
 #include "PlaybackController.h"
 #include "PowerLifecycle.h"
 #include "ReactiveInputs.h"
@@ -221,6 +222,13 @@ public:
            can say "lights will turn off". Empty -> STATE null,
            QUIT omits the field. */
         std::function<nlohmann::json()> output_policy;
+        /* E-12b x R-1: OUTPUT_COMMAND set_policy persists through
+           this (EngineHost::SetOutputPolicy: false + err when the
+           profile save fails, state unchanged). The service
+           validates the body with OutputPolicyFromJson first.
+           Empty -> set_policy is Unavailable. */
+        std::function<bool(const OutputPolicy&, std::string& err)>
+            set_output_policy;
 
         /* studio-import Task 3: the managed-workspace commit
            surface (engine side). When set, the WORKSPACE_COMMAND
@@ -486,6 +494,10 @@ private:
     {
         const char*  name;
         OutputVerbFn fn;
+        /* false: the verb has its own dependency (the E-12b
+           policy verbs) and works without the runtime output
+           control wired. */
+        bool         needs_output_control = true;
     };
     static const std::vector<OutputVerb>& OutputVerbs();
     IpcReply       HandleOutputCommand(const std::string& verb,
@@ -494,6 +506,10 @@ private:
     IpcReply       OutputSetMaster(const nlohmann::json& body);
     IpcReply       OutputSetBlackout(const nlohmann::json& body);
     IpcReply       OutputSetHold(const nlohmann::json& body);
+    /* E-12b: reply OK {output_policy} — not the OUTPUT body, so a
+       client's OUTPUT store is never overwritten by a policy. */
+    IpcReply       OutputGetPolicy(const nlohmann::json& body);
+    IpcReply       OutputSetPolicy(const nlohmann::json& body);
     IpcReply       HandleIdentify(const nlohmann::json& body);
     /* studio-import Task 3 gate: HandleLayoutMutate refuses
        lossy legacy edits while a managed workspace is active

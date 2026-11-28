@@ -558,6 +558,55 @@ int main()
         CHECK(r.body["output_policy"]["on_idle"] == "restore");
         CHECK(r.body["output_policy"]["per_controller"].size() == 1);
 
+        /* E-12b x R-1: get_policy / set_policy on OUTPUT_COMMAND.
+           They work without the runtime output control wired (this
+           service has none), reply OK {output_policy}, and
+           set_policy REPLACES the whole policy. */
+        {
+            EngineService::Deps d9b = d9;
+            d9b.set_output_policy =
+                [&host](const OutputPolicy& np, std::string& e)
+                { return host.SetOutputPolicy(np, e); };
+            Engine engine9b;
+            EngineService svc9b(engine9b, d9b);
+            r = svc9b.Dispatch(MsgType::OutputCommand,
+                nlohmann::json::object({{ "verb", "get_policy" }}));
+            CHECK(r.code == ErrCode::Ok);
+            CHECK(r.reply_type == MsgType::Ok);
+            CHECK(r.body["output_policy"]["on_exit"] == "black");
+
+            r = svc9b.Dispatch(MsgType::OutputCommand,
+                nlohmann::json::object({{ "verb", "set_policy" },
+                                        { "on_exit", "restore" }}));
+            CHECK(r.code == ErrCode::Ok);
+            CHECK(r.body["output_policy"]["on_exit"] == "restore");
+            CHECK(r.body["output_policy"]["on_idle"] == "hold");
+            CHECK(r.body["output_policy"]["per_controller"].empty());
+            CHECK(host.GetOutputPolicy().on_exit == OutputAction::Restore);
+
+            /* invalid -> bad_request, policy untouched */
+            r = svc9b.Dispatch(MsgType::OutputCommand,
+                nlohmann::json::object({{ "verb", "set_policy" },
+                                        { "on_exit", "sparkle" }}));
+            CHECK(r.code == ErrCode::BadRequest);
+            CHECK(host.GetOutputPolicy().on_exit == OutputAction::Restore);
+
+            /* a failed save is reported, not swallowed */
+            EngineService::Deps d9c = d9;
+            d9c.set_output_policy =
+                [](const OutputPolicy&, std::string& e)
+                { e = "disk full"; return false; };
+            Engine engine9c;
+            EngineService svc9c(engine9c, d9c);
+            r = svc9c.Dispatch(MsgType::OutputCommand,
+                nlohmann::json::object({{ "verb", "set_policy" },
+                                        { "on_exit", "black" }}));
+            CHECK(r.code != ErrCode::Ok);
+
+            /* put the earlier policy back for the QUIT case below */
+            CHECK(host.SetOutputPolicy(p, perr));
+        }
+
         r = svc9.Dispatch(MsgType::Quit, nlohmann::json::object());
         CHECK(r.code == ErrCode::Ok);
         CHECK(quit_called);
@@ -580,6 +629,14 @@ int main()
         r = svc10.Dispatch(MsgType::Quit, nlohmann::json::object());
         CHECK(r.code == ErrCode::Ok);
         CHECK(!r.body.contains("exit_policy"));
+        /* policy verbs unwired -> unavailable, never a fake body */
+        r = svc10.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "get_policy" }}));
+        CHECK(r.code == ErrCode::Unavailable);
+        r = svc10.Dispatch(MsgType::OutputCommand,
+            nlohmann::json::object({{ "verb", "set_policy" },
+                                    { "on_exit", "black" }}));
+        CHECK(r.code == ErrCode::Unavailable);
 
         /* a non-object provider result answers null, never a
            bogus shape */

@@ -1271,6 +1271,9 @@ bool EngineHost::Start(std::string& err)
            the QUIT reply's exit_policy. */
         ipc_deps.output_policy =
             [this] { return OutputPolicyJson(); };
+        ipc_deps.set_output_policy =
+            [this](const OutputPolicy& p, std::string& e)
+            { return SetOutputPolicy(p, e); };
         /* Task 3.8 offline bindings: a persisted resolved
            identity completes name-only scene bindings before
            apply — the same binding id keeps pointing at the

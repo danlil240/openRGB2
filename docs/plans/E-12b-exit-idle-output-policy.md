@@ -1,6 +1,6 @@
 # E-12b: Exit/idle output policy
 
-Status: implemented on `feat/e-12b-exit-idle-policy` (not merged; OUTPUT_COMMAND verbs pending R-1) · Size: M · Source: audit 2026-11-28 E-12 (part b) · Related: E-10, P-11, R-1
+Status: implemented on `feat/e-12b-exit-idle-policy`; the `get_policy` / `set_policy` verbs were added on `integration/plans-batch-2` when it was combined with R-1 (not merged to main). Step 6 (Settings combos) is not done · Size: M · Source: audit 2026-11-28 E-12 (part b) · Related: E-10, P-11, R-1
 
 ## Goal
 
