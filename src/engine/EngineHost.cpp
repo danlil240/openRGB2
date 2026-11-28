@@ -1284,6 +1284,15 @@ bool EngineHost::Start(std::string& err)
                 }
                 return true;
             };
+        /* The AUTOMATION body moved (bindings, states). */
+        adeps.changed =
+            [this]
+            {
+                if(service_)
+                {
+                    service_->EmitAutomation();
+                }
+            };
         adeps.log = [this](const std::string& l) { Log(l); };
         automation_ = std::make_unique<Automation>(std::move(adeps));
     }
@@ -1311,6 +1320,9 @@ bool EngineHost::Start(std::string& err)
         /* R-1: OUTPUT_COMMAND + the "output" event + the
            output_control_v1 capability. */
         ipc_deps.output = &output_;
+        /* R-2: AUTOMATION_COMMAND + the "automation" event +
+           the automation_v1 capability. */
+        ipc_deps.automation = automation_.get();
         /* Task 4.4 layout verbs: identify and the set_binding
            create path resolve against live topology — the
            same source the mapper syncs from. */

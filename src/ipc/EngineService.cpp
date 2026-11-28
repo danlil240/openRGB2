@@ -1480,6 +1480,142 @@ IpcReply EngineService::OutputSetHold(const nlohmann::json& body)
     return IpcReply::Success(MsgType::Output, OutputJson());
 }
 
+/*---------------------------------------------------------*\
+||| AUTOMATION_COMMAND handlers (R-2)                         ||
+|||                                                            ||
+|||   get                                — the AUTOMATION body ||
+|||   set_hotkeys {bindings:[{action,chord}], cycle?:[id],     ||
+|||                brightness_step?:0.01..0.5}                 ||
+|||       — validate -> persist -> register; a chord the OS    ||
+|||         refuses reports state in_use / invalid in the body ||
+|||         (never a verb failure)                             ||
+|||   The "automation" event for other subscribers comes from  ||
+|||   Automation's changed hook (EngineHost -> EmitAutomation).||
+\*---------------------------------------------------------*/
+const std::vector<EngineService::AutomationVerb>&
+EngineService::AutomationVerbs()
+{
+    static const std::vector<AutomationVerb> verbs = {
+        { "get",         &EngineService::AutomationGet        },
+        { "set_hotkeys", &EngineService::AutomationSetHotkeys },
+    };
+    return verbs;
+}
+
+IpcReply EngineService::HandleAutomationCommand(
+    const std::string& verb, const nlohmann::json& body)
+{
+    const AutomationVerb* found = nullptr;
+    for(const AutomationVerb& v : AutomationVerbs())
+    {
+        if(verb == v.name)
+        {
+            found = &v;
+            break;
+        }
+    }
+    if(!found)
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "unknown automation verb '" + verb + "'");
+    }
+    if(!deps_.automation)
+    {
+        return IpcReply::Fail(ErrCode::Unavailable,
+            "automation is not wired on this engine");
+    }
+    return (this->*(found->fn))(body);
+}
+
+nlohmann::json EngineService::AutomationJson() const
+{
+    if(!deps_.automation)
+    {
+        return nullptr;
+    }
+    return deps_.automation->ToJson();
+}
+
+void EngineService::EmitAutomation()
+{
+    if(!deps_.automation)
+    {
+        return;
+    }
+    Emit(event_kind::kAutomation, AutomationJson());
+}
+
+IpcReply EngineService::AutomationGet(const nlohmann::json&)
+{
+    return IpcReply::Success(MsgType::Automation, AutomationJson());
+}
+
+IpcReply EngineService::AutomationSetHotkeys(const nlohmann::json& body)
+{
+    const nlohmann::json& list = FieldOrNull(body, "bindings");
+    if(!list.is_array())
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "set_hotkeys requires {bindings:[{action, chord}]}");
+    }
+    std::vector<HotkeyBinding> bindings;
+    for(const nlohmann::json& e : list)
+    {
+        if(!e.is_object() ||
+           !FieldOrNull(e, "action").is_string() ||
+           !FieldOrNull(e, "chord").is_string())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "set_hotkeys: every binding is {action:string, "
+                "chord:string}");
+        }
+        bindings.push_back({ e["action"].get<std::string>(),
+                             e["chord"].get<std::string>() });
+    }
+    std::optional<std::vector<std::string>> cycle;
+    const nlohmann::json& cj = FieldOrNull(body, "cycle");
+    if(!cj.is_null())
+    {
+        if(!cj.is_array())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "set_hotkeys: cycle is an array of workspace ids");
+        }
+        std::vector<std::string> ids;
+        for(const nlohmann::json& id : cj)
+        {
+            if(!id.is_string())
+            {
+                return IpcReply::Fail(ErrCode::BadRequest,
+                    "set_hotkeys: cycle is an array of workspace ids");
+            }
+            ids.push_back(id.get<std::string>());
+        }
+        cycle = std::move(ids);
+    }
+    std::optional<double> step;
+    const nlohmann::json& sj = FieldOrNull(body, "brightness_step");
+    if(!sj.is_null())
+    {
+        if(!sj.is_number())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "set_hotkeys: brightness_step is a number");
+        }
+        step = sj.get<double>();
+    }
+    std::string err;
+    if(!deps_.automation->SetHotkeys(bindings, cycle, step, err))
+    {
+        /* A save failure is the engine's, not the request's. */
+        const bool save = err.find("could not save") == 0;
+        return IpcReply::Fail(save ? ErrCode::Internal
+                                   : ErrCode::BadRequest,
+                              "set_hotkeys: " + err);
+    }
+    return IpcReply::Success(MsgType::Automation, AutomationJson());
+}
+
 nlohmann::json EngineService::OwnershipJson() const
 {
     /* Task 4.7: no provider wired -> honest null (the IPC
@@ -1551,6 +1687,7 @@ nlohmann::json EngineService::StateJson() const
         { "output",     OutputJson()                         },
         { "ipc",        IpcStatsJson()                       },
         { "output_policy", OutputPolicyJson()                },
+        { "automation", AutomationJson()                     },
     });
 }
 
@@ -1672,6 +1809,11 @@ nlohmann::json EngineService::OnWelcome()
            that doesn't see it hides the tray quick controls. */
         caps.push_back("output_control_v1");
     }
+    if(deps_.automation)
+    {
+        /* R-2: AUTOMATION_COMMAND + the "automation" event. */
+        caps.push_back("automation_v1");
+    }
     return nlohmann::json::object({
         { "engine",       "openrgb2-engine" },
         { "running",      engine_.Running() },
@@ -1724,6 +1866,12 @@ bool EngineService::SnapshotEvent(const std::string& kind,
     {
         /* R-1: the current OUTPUT body (null when not wired). */
         out = OutputJson();
+        return true;
+    }
+    if(kind == event_kind::kAutomation)
+    {
+        /* R-2: the current AUTOMATION body (null when not wired). */
+        out = AutomationJson();
         return true;
     }
     if(kind == event_kind::kWorkspace)
@@ -2175,6 +2323,21 @@ IpcReply EngineService::Dispatch(MsgType type,
                 "OUTPUT_COMMAND requires {verb:<string>}");
         }
         return HandleOutputCommand(verb, body);
+    }
+
+    case MsgType::AutomationCommand:
+    {
+        const std::string verb =
+            (body.is_object()
+             && FieldOrNull(body, "verb").is_string())
+                ? body["verb"].get<std::string>()
+                : std::string();
+        if(verb.empty())
+        {
+            return IpcReply::Fail(ErrCode::BadRequest,
+                "AUTOMATION_COMMAND requires {verb:<string>}");
+        }
+        return HandleAutomationCommand(verb, body);
     }
 
     case MsgType::Quit:

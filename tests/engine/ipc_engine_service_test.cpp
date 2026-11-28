@@ -39,6 +39,155 @@ static int failures = 0;
 #define CHECK(x) do { ++checks; if(!(x)) { ++failures; \
     std::printf("FAIL line %d: %s\n", __LINE__, #x); } } while(0)
 
+/*---- R-2 AUTOMATION_COMMAND / "automation" event --------------*/
+
+/* Reports in_use for Ctrl+Alt+B, ok for everything else. */
+struct BusyRegistrar : IHotkeyRegistrar
+{
+    size_t applies = 0;
+    std::vector<HotkeyResult>
+        Apply(const std::vector<HotkeyRequest>& set) override
+    {
+        ++applies;
+        std::vector<HotkeyResult> out;
+        for(const HotkeyRequest& r : set)
+        {
+            const bool busy = r.mods == (kModCtrl | kModAlt) &&
+                              r.vk == 'B';
+            out.push_back({ r.id,
+                            busy ? HotkeyState::InUse : HotkeyState::Ok,
+                            busy ? "in use by another app" : "" });
+        }
+        return out;
+    }
+};
+
+static void TestAutomationCommand()
+{
+    /* Not wired: honest Unavailable, no capability. */
+    {
+        Engine        e0;
+        EngineService s0(e0, EngineService::Deps{});
+        IpcReply r = s0.Dispatch(MsgType::AutomationCommand,
+            nlohmann::json::object({{ "verb", "get" }}));
+        CHECK(r.code == ErrCode::Unavailable);
+        bool has = false;
+        for(const auto& c : s0.OnWelcome()["capabilities"])
+        {
+            has = has || c == "automation_v1";
+        }
+        CHECK(!has);
+        CHECK(s0.OnWelcome()["state"]["automation"].is_null());
+    }
+
+    OutputControl oc;
+    auto reg = std::make_shared<BusyRegistrar>();
+    Automation::Deps ad;
+    ad.output    = &oc;
+    ad.registrar = reg;
+    std::vector<AutomationConfig> saved;
+    ad.persist = [&saved](const AutomationConfig& c, std::string&)
+                 { saved.push_back(c); return true; };
+    Automation automation(std::move(ad));
+
+    Engine engine;
+    EngineService::Deps d;
+    d.automation = &automation;
+    EngineService svc(engine, d);
+    std::vector<IpcEvent> ev;
+    svc.SetEventSink([&ev](const IpcEvent& e) { ev.push_back(e); });
+
+    const nlohmann::json w = svc.OnWelcome();
+    bool has = false;
+    for(const auto& c : w["capabilities"])
+    {
+        has = has || c == "automation_v1";
+    }
+    CHECK(has);
+    CHECK(w["state"]["automation"].is_object());
+    CHECK(w["state"]["automation"]["hotkeys"].empty());
+
+    IpcReply r = svc.Dispatch(MsgType::AutomationCommand,
+        nlohmann::json::object({{ "verb", "get" }}));
+    CHECK(r.code == ErrCode::Ok);
+    CHECK(r.reply_type == MsgType::Automation);
+    CHECK(r.body["hotkeys"].is_array() && r.body["hotkeys"].empty());
+    CHECK(r.body["registrar"] == true);
+    CHECK(r.body["proposed"]["lights_toggle"] == "Ctrl+Alt+Shift+End");
+
+    r = svc.Dispatch(MsgType::AutomationCommand, nlohmann::json{
+        { "verb", "set_hotkeys" },
+        { "bindings", nlohmann::json::array({
+            { { "action", "lights_toggle" }, { "chord", "ctrl+alt+b" } },
+            { { "action", "brightness_up" }, { "chord", "Ctrl+Alt+Up" } },
+        }) },
+        { "cycle", nlohmann::json::array({ "a", "b" }) },
+        { "brightness_step", 0.2 },
+    });
+    CHECK(r.code == ErrCode::Ok && r.reply_type == MsgType::Automation);
+    CHECK(r.body["hotkeys"].size() == 2);
+    CHECK(r.body["hotkeys"][0]["chord"] == "Ctrl+Alt+B");
+    CHECK(r.body["hotkeys"][0]["state"] == "in_use");
+    CHECK(r.body["hotkeys"][0]["detail"].is_string());
+    CHECK(r.body["hotkeys"][1]["state"] == "ok");
+    CHECK(r.body["cycle"].size() == 2);
+    CHECK(r.body["brightness_step"].get<double>() == 0.2);
+    CHECK(saved.size() == 1 && reg->applies == 1);
+
+    /* Every malformed body is bad_request; nothing changes. */
+    for(const nlohmann::json& bad : {
+            nlohmann::json{ { "verb", "set_hotkeys" } },
+            nlohmann::json{ { "verb", "set_hotkeys" },
+                            { "bindings", "Ctrl+Alt+K" } },
+            nlohmann::json{ { "verb", "set_hotkeys" },
+                            { "bindings", nlohmann::json::array({
+                                { { "action", "lights_toggle" } } }) } },
+            nlohmann::json{ { "verb", "set_hotkeys" },
+                            { "bindings", nlohmann::json::array({
+                                { { "action", "lights_toggle" },
+                                  { "chord", "Shift+K" } } }) } },
+            nlohmann::json{ { "verb", "set_hotkeys" },
+                            { "bindings", nlohmann::json::array() },
+                            { "cycle", "a" } },
+            nlohmann::json{ { "verb", "set_hotkeys" },
+                            { "bindings", nlohmann::json::array() },
+                            { "cycle", nlohmann::json::array({ 1 }) } },
+            nlohmann::json{ { "verb", "set_hotkeys" },
+                            { "bindings", nlohmann::json::array() },
+                            { "brightness_step", 3 } },
+            nlohmann::json{ { "verb", "fly" } },
+            nlohmann::json{ { "verb", 3 } },
+            nlohmann::json::object() })
+    {
+        r = svc.Dispatch(MsgType::AutomationCommand, bad);
+        CHECK(r.code == ErrCode::BadRequest);
+    }
+    CHECK(saved.size() == 1 && reg->applies == 1);
+    CHECK(automation.Config().hotkeys.size() == 2);
+
+    /* STATE carries the body; the event + snapshot serve it. */
+    r = svc.Dispatch(MsgType::GetState, nlohmann::json::object());
+    CHECK(r.body["automation"]["hotkeys"].size() == 2);
+    ev.clear();
+    svc.EmitAutomation();
+    CHECK(ev.size() == 1 && ev[0].kind == event_kind::kAutomation &&
+          ev[0].data["hotkeys"].size() == 2);
+    nlohmann::json snap;
+    CHECK(svc.SnapshotEvent(event_kind::kAutomation, snap));
+    CHECK(snap["hotkeys"][0]["state"] == "in_use");
+
+    bool known = false;
+    for(const std::string& k : EventKinds())
+    {
+        known = known || k == event_kind::kAutomation;
+    }
+    CHECK(known);
+    CHECK(std::string(MsgTypeName(MsgType::AutomationCommand)) ==
+          "AUTOMATION_COMMAND");
+    CHECK(std::string(MsgTypeName(MsgType::Automation)) == "AUTOMATION");
+    CHECK(uint16_t(MsgType::AutomationCommand) == 0x0110);
+}
+
 int main()
 {
     /* unbuffered so a hard failure still shows progress */
@@ -2557,6 +2706,8 @@ int main()
         CHECK(std::string(MsgTypeName(MsgType::Output)) == "OUTPUT");
         CHECK(uint16_t(MsgType::OutputCommand) == 0x010f);
     }
+
+    TestAutomationCommand();
 
     std::printf("ipc_engine_service_test: %d checks, %d failures\n",
                 checks, failures);

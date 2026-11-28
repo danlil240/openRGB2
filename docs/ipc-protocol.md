@@ -128,6 +128,7 @@ Defined values:
 | --- | --- |
 | `studio_workspace_v1` | `WORKSPACE_COMMAND` (managed workspace jobs, revisions, transfers — §5) |
 | `output_control_v1` | `OUTPUT_COMMAND` + the `output` event (R-1 runtime master brightness, Off, pause — §5, §7). Clients that do not see it hide those controls |
+| `automation_v1` | `AUTOMATION_COMMAND` + the `automation` event (R-2 engine-side global hotkeys — §5, §7). Clients that do not see it hide the Hotkeys card |
 
 After the handshake every message's header `version` MUST equal
 `negotiated_version`. A mismatched message gets `ERROR(version_mismatch)`;
@@ -204,11 +205,13 @@ Request → reply. `request_id` echoes.
 | 0x010D | REACTIVE_COMMAND | `{verb, ...args}` | OK `<reactive body>` / ERROR |
 | 0x010E | WORKSPACE_COMMAND | `{verb, ...args}` | OK `<verb body>` / ERROR |
 | 0x010F | OUTPUT_COMMAND | `{verb, ...args}` (requires `output_control_v1`) | OUTPUT / ERROR |
+| 0x0110 | AUTOMATION_COMMAND | `{verb, ...args}` (requires `automation_v1`) | AUTOMATION / ERROR |
 | 0x0300 | DIAG_GET | `{}` | DIAGNOSTICS (valid on both pipes) |
 
 Reply types: WELCOME 0x8001, OK 0x8002, ERROR 0x8003, SNAPSHOTS 0x8100,
 SCENE 0x8101, PLAYBACK 0x8102, DELIVERY_STATS 0x8103, STATE 0x8104,
-PONG 0x8105, PRESETS 0x8106, OUTPUT 0x8107, EVENT 0x8200,
+PONG 0x8105, PRESETS 0x8106, OUTPUT 0x8107, AUTOMATION 0x8108,
+EVENT 0x8200,
 DIAGNOSTICS 0x8300.
 
 ## 5. Body schemas
@@ -355,7 +358,8 @@ counters alone cannot distinguish from "nothing submitted".
 sdk:{...}, playback:{...}, power:{...}, reactive:{...}, ownership:{...}|null,
 output:{...}|null, ipc:{sessions_active, sessions_total, messages_in, responses_out, events_sent,
 events_dropped, events_oversize, queued_events, resync_bytes, rejected_hellos,
-rate_limited, refused_busy}, output_policy:{...}|null}` (`sessions_total`
+rate_limited, refused_busy}, output_policy:{...}|null,
+automation:{...}|null}` (`automation` is the R-2 AUTOMATION body; `sessions_total`
 counts every accepted session since start; `events_oversize` counts events
 whose body exceeded the 1 MiB cap and were never sent — they are in
 `events_dropped` too).
@@ -637,6 +641,53 @@ control is wired — and `output` event body) —
 Numbers are rounded to four decimals. `uploaded_unscaled` is true
 while an uploaded loop is requested or applied: the UI should say
 that brightness does not reach it (Off and pause still do).
+
+**AUTOMATION_COMMAND** (`0x0110`, requires `automation_v1`) — R-2
+engine-side automation. System-wide hotkeys are registered by the
+**engine** (`RegisterHotKey` on its own thread), so they work in any
+foreground app and while the UI is closed. Nothing is bound by default
+(opt-in); `proposed` only suggests chords. Every request carries
+`{verb:"<name>", ...args}`; an unknown verb → `bad_request`; an engine
+without automation → `unavailable`. Every verb replies **AUTOMATION**
+(`0x8108`) with the full body below:
+
+| verb | body | effect |
+| --- | --- | --- |
+| `get` | `{}` | read only |
+| `set_hotkeys` | `{bindings:[{action, chord}], cycle?:[workspace id], brightness_step?: 0.01..0.5}` | **replaces** the binding set, persists it (`engine-state.json` member `automation`) and registers it. `action` ∈ `next_workspace`, `prev_workspace`, `brightness_up`, `brightness_down`, `lights_toggle`, `pause_toggle`. `chord` is `"Ctrl+Alt+Shift+PgDn"`-style text (modifiers Ctrl/Alt/Shift/Win, case-insensitive; canonicalized in the reply). At least one of Ctrl/Alt/Win, no duplicate chord, at most 16 bindings; any violation → `bad_request` (nothing changes). `cycle` / `brightness_step` replace the stored value only when given. A failed profile save → `internal` (nothing changes) |
+
+A chord the OS refuses is **not** a verb failure: its entry reports
+`state:"in_use"` (held by another app or reserved by Windows) or
+`"invalid"`, with a `detail`, and never fires. Actions run on the
+engine's owner loop: `brightness_up/down` step the R-1 master by
+`brightness_step` (clamped to [0, 1]); `lights_toggle` toggles blackout;
+`pause_toggle` toggles hold; `next/prev_workspace` cycle `cycle` (ids
+that no longer exist are skipped) or every managed workspace in `list`
+order, enqueueing the `reload {id}` workspace job under internal
+session 0 — its terminal job record and the published-snapshot
+`workspace` event reach every subscriber. Presses within 1 s of the
+previous one collapse: the first press reloads at once, the burst ends
+with one reload of the latest target (none if it is the one already
+loading).
+
+**AUTOMATION** (AUTOMATION_COMMAND reply, STATE field — `null` when no
+automation is wired — and `automation` event body) —
+
+```json
+{ "hotkeys": [ { "action": "lights_toggle", "chord": "Ctrl+Alt+Shift+End",
+                 "state": "ok" },
+               { "action": "next_workspace", "chord": "Ctrl+Alt+Shift+PgDn",
+                 "state": "in_use", "detail": "in use by another app or reserved by Windows" } ],
+  "actions": ["next_workspace", "prev_workspace", "brightness_up",
+              "brightness_down", "lights_toggle", "pause_toggle"],
+  "proposed": { "next_workspace": "Ctrl+Alt+Shift+PgDn", "...": "..." },
+  "cycle": [], "brightness_step": 0.1, "registrar": true,
+  "max_hotkeys": 16 }
+```
+
+`state` ∈ `ok`, `in_use`, `invalid` (also a persisted binding that no
+longer validates), `unavailable` (`registrar:false` — no hotkey
+registrar on this engine). R-3 and R-4 add sections to this body.
 
 **REACTIVE** (STATE/DIAGNOSTICS field and `reactive` event body) —
 
@@ -963,6 +1014,7 @@ matches the corresponding pull body:
 | `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |
 | `ownership` | OWNERSHIP body (§ STATE) | R-10: the periodic competitor re-scan (~5 s) found a writer appear or clear; SUBSCRIBE initial push carries the current report (`null` when none is wired) |
 | `output` | OUTPUT body (§5) | R-1: once per OUTPUT_COMMAND change (any session), and when `uploaded_unscaled` flips with the playback mode; SUBSCRIBE initial push carries the current body (`null` when no control is wired) |
+| `automation` | AUTOMATION body (§5) | R-2: once per AUTOMATION_COMMAND change (any session) and at engine start when persisted bindings register; SUBSCRIBE initial push carries the current body (`null` when not wired). A hotkey press itself is reported through the event of what it changed (`output`, `workspace`) |
 | `frame_status` | `{aggregate, wireless, controllers:[{key,delivered,lane,wireless,suppressed,owned,pending,sequence,colors,stats}]}` | ≤ ~30 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses. `wireless` is the wireless lane's own `{key,stats,suppressed,pending,owned}` summary (`null` when no wireless lane exists — the `aggregate` mixes wired lanes and is never a wireless measure). Every enumerated controller produces a `controllers` row: a lane that never delivered reports `delivered:false` + zeroed `stats` + empty `colors` (`lane:false` when the pipeline has no lane for it) — a "bound but never delivered" controller is a visible row, not an absent one |
 | `workspace` | `get` body (initial snapshot AND published-state change) / job status record (terminal job event) | SUBSCRIBE initial push; every published-state change (adopt, commit, restore, resource install/remove) — so a session whose snapshot raced boot re-adoption re-converges; a workspace job reaching a terminal state |
 | `preview` | `{type:"status"\|"frame", ...}` (below) | ≤ 30 Hz, **session-targeted** — delivered only to the session that owns the preview, never broadcast |
