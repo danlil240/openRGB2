@@ -45,6 +45,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1249,6 +1250,70 @@ int main()
         CHECK(WsCall(b, seq, json::object({
             { "verb", "preview_begin" }, { "document", doc },
             { "draft_revision", 4 } })).value("active", false));
+    }
+
+    /*---- frame coalesce key spans sequences (audit I-8) -----*/
+    {
+        /* Latest-wins only works if a newer frame's chunk lands
+           in the SAME queue slot as the older frame's: the key
+           must be frame/<chunk>, not frame/<sequence>/<chunk>
+           (which never matched, so a slow client's queue filled
+           with stale frames and overflow evicted other kinds). */
+        std::printf("-- ipc: frame key is frame/<chunk>\n");
+        Rig rig(g_tmp / "r-key");
+        rig.eopts.preview.chunk_bytes = 4 * 1024;
+        rig.Start();
+        std::mutex km;
+        std::vector<std::string> keys;
+        rig.svc->SetSessionEventSink(
+            [&](uint64_t sid, const IpcEvent& ev,
+                const std::string& key)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(km);
+                    if(ev.kind == "preview")
+                    {
+                        keys.push_back(key);
+                    }
+                }
+                rig.server->EmitTo(sid, ev, key);
+            });
+        TestClient c;
+        Welcome(c, *rig.server);
+        c.SendMsg(MsgType::Subscribe, ++seq,
+                  json::object({{ "events", json::array({ "preview" }) }}));
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(WsCall(c, seq, json::object({
+            { "verb", "preview_begin" },
+            { "document", CompactDoc(24, 0, 1.0) },
+            { "draft_revision", 1 } })).value("active", false));
+        TimePoint now = Clock::now();
+        for(int i = 0; i < 10; ++i)
+        {
+            now += std::chrono::milliseconds(40);
+            rig.Tick(now);
+        }
+        std::set<std::string> frame_keys;
+        size_t frames = 0;
+        {
+            std::lock_guard<std::mutex> lock(km);
+            for(const std::string& k : keys)
+            {
+                if(k.rfind("frame/", 0) == 0)
+                {
+                    ++frames;
+                    frame_keys.insert(k);
+                }
+            }
+        }
+        CHECK(frames > frame_keys.size());  /* >1 sequence seen */
+        for(const std::string& k : frame_keys)
+        {
+            /* frame/<chunk> — one slot per chunk index */
+            CHECK(k.find('/', 6) == std::string::npos);
+        }
+        CHECK(frame_keys.count("frame/0") == 1);
     }
 
     /*---- chunking below the IPC cap -------------------------*/

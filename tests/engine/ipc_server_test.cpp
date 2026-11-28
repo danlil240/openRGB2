@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -123,10 +124,20 @@ public:
     bool SnapshotEvent(const std::string& kind,
                        nlohmann::json& out) override
     {
+        /* Taken BEFORE the hook: models a state read that a
+           live change (emitted by the hook) then supersedes. */
         out = nlohmann::json::object(
             {{"kind", kind}, {"initial", true}});
+        if(on_snapshot)
+        {
+            on_snapshot(kind);
+        }
         return true;
     }
+
+    /* Runs inside SnapshotEvent on the session reader thread —
+       lets a test emit a newer live event mid-snapshot. */
+    std::function<void(const std::string&)> on_snapshot;
 
     int DispatchedCount()
     {
@@ -609,6 +620,148 @@ int main()
             }
         }
         CHECK(events > 0);
+    }
+
+    /*---- overflow keeps low-rate events (audit I-8) --------*/
+    {
+        /* A full queue evicts high-rate telemetry (preview
+           frames, frame_status) before anything else, and a
+           workspace job-terminal record (coalesce key
+           "job/<id>") neither replaces nor is replaced by the
+           published snapshot queued just before it. Before the
+           fix the job record overwrote the snapshot (latest-
+           wins per KIND) and then a burst of preview chunks
+           evicted the queue head — the job record. */
+        IpcServerOptions opts;
+        opts.max_queued_events = 4;
+        ScriptedService svc;
+        IpcServer server(svc, opts);
+        TestClient c;
+        server.Serve(c.MakeChannel(), ChannelKind::Command);
+        c.Hello();
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        c.SendMsg(MsgType::Subscribe, 61,
+                  nlohmann::json::object({{"events",
+                      nlohmann::json::array({
+                          event_kind::kTopology,
+                          event_kind::kWorkspace,
+                          event_kind::kPreview,
+                          event_kind::kFrameStatus })}}));
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Ok);
+        while(c.RecvMsg(m, 500)) {}   /* initial snapshots */
+
+        {
+            std::lock_guard<std::mutex> lock(c.State()->m);
+            c.State()->send_paused = true;
+        }
+        /* Wedge the writer on one event so everything after it
+           stays queued. */
+        server.Emit(IpcEvent{ event_kind::kTopology,
+                              nlohmann::json::object({{"wedge", 1}}) });
+        for(int i = 0; i < 200 && server.Stats().queued_events; ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        server.Emit(IpcEvent{ event_kind::kWorkspace,
+                              nlohmann::json::object({{"snap", 1}}) });
+        server.Emit(IpcEvent{ event_kind::kWorkspace,
+                              nlohmann::json::object({{"job_id", 7}}),
+                              "job/7" });
+        for(int i = 0; i < 20; ++i)
+        {
+            server.Emit(IpcEvent{ event_kind::kFrameStatus,
+                                  nlohmann::json::object({{"n", i}}) });
+            /* old-style per-sequence keys: distinct slots */
+            server.EmitTo(1, IpcEvent{ event_kind::kPreview,
+                              nlohmann::json::object({{"n", i}}) },
+                          "frame/" + std::to_string(i) + "/0");
+        }
+        CHECK(server.Stats().queued_events <= 4);
+        {
+            std::lock_guard<std::mutex> lock(c.State()->m);
+            c.State()->send_paused = false;
+        }
+        c.State()->cv_out.notify_all();
+        bool snap = false, job = false;
+        int  last_preview = -1;
+        while(c.RecvMsg(m, 1000))
+        {
+            if(m.type != MsgType::Event)
+            {
+                continue;
+            }
+            const nlohmann::json b = m.Body();
+            const nlohmann::json& d = b["data"];
+            if(b.value("kind", "") == "workspace")
+            {
+                snap |= d.value("snap", 0) == 1;
+                job  |= d.value("job_id", 0) == 7;
+            }
+            if(b.value("kind", "") == "preview")
+            {
+                last_preview = d.value("n", -1);
+            }
+        }
+        CHECK(snap);
+        CHECK(job);
+        CHECK(last_preview == 19);   /* the newest frame survives */
+    }
+
+    /*---- SUBSCRIBE snapshot never lands after a newer event
+           (audit I-13) -------------------------------------*/
+    {
+        /* The subscription is live before the initial snapshot
+           is built, so a change emitted meanwhile is queued
+           FIRST — the older snapshot pushed behind it would be
+           the last word the client sees. The hook emits that
+           newer event from inside the snapshot read. */
+        ScriptedService svc;
+        IpcServer server(svc);
+        svc.on_snapshot = [&server](const std::string& kind)
+        {
+            if(kind == event_kind::kScene)
+            {
+                server.Emit(IpcEvent{ event_kind::kScene,
+                    nlohmann::json::object({{"live", 2}}) });
+            }
+        };
+        TestClient c;
+        server.Serve(c.MakeChannel(), ChannelKind::Command);
+        c.Hello();
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        c.SendMsg(MsgType::Subscribe, 62,
+                  nlohmann::json::object({{"events",
+                      nlohmann::json::array({
+                          event_kind::kTopology,
+                          event_kind::kScene })}}));
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Ok);
+        nlohmann::json last_scene, last_topology;
+        while(c.RecvMsg(m, 700))
+        {
+            if(m.type != MsgType::Event)
+            {
+                continue;
+            }
+            const nlohmann::json b = m.Body();
+            if(b.value("kind", "") == "scene")
+            {
+                last_scene = b["data"];
+            }
+            if(b.value("kind", "") == "topology")
+            {
+                last_topology = b["data"];
+            }
+        }
+        /* the live change is the final scene state ... */
+        CHECK(last_scene.is_object() &&
+              last_scene.value("live", 0) == 2);
+        /* ... and an undisturbed kind still gets its snapshot */
+        CHECK(last_topology.is_object() &&
+              last_topology.value("initial", false));
     }
 
     /*---- diagnostics channel: read-only by construction ---*/
