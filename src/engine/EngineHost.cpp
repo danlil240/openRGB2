@@ -469,6 +469,7 @@ nlohmann::json EngineHost::OwnershipJson() const
     {
         nlohmann::json e = nlohmann::json::object({
             { "owner",  f.owner  },
+            { "key",    f.key    },   /* R-10: stable guidance key */
             { "exe",    f.exe    },
             { "pid",    f.pid    },
             { "detail", f.detail },

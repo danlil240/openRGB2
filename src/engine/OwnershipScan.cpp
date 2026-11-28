@@ -210,6 +210,7 @@ std::vector<OwnerFinding> ClassifyOwners(
             if(p.pid == backend_pid && backend_pid != 0)
             {
                 f.owner    = "OpenRGB (managed backend)";
+                f.key      = "openrgb";
                 f.conflict = false;
                 f.detail   = "owns the SDK listener — the "
                              "expected sole hardware owner";
@@ -217,6 +218,7 @@ std::vector<OwnerFinding> ClassifyOwners(
             else
             {
                 f.owner    = "OpenRGB (other instance)";
+                f.key      = "openrgb";
                 f.conflict = true;
                 f.detail   = "a second OpenRGB may own RGB "
                              "hardware or host the legacy "
@@ -229,6 +231,7 @@ std::vector<OwnerFinding> ClassifyOwners(
                 Contains(compact, "lianli"))
         {
             f.owner    = "L-Connect";
+            f.key      = "lianli";
             f.conflict = true;
             f.detail   = "competing RGB owner (Lian Li)";
             out.push_back(f);
@@ -239,6 +242,7 @@ std::vector<OwnerFinding> ClassifyOwners(
                 Contains(compact, "aorusengine"))
         {
             f.owner    = "Gigabyte Control Center / RGB Fusion";
+            f.key      = "gigabyte";
             f.conflict = true;
             f.detail   = "competing RGB owner (motherboard/GPU)";
             out.push_back(f);
@@ -249,6 +253,7 @@ std::vector<OwnerFinding> ClassifyOwners(
                   Contains(name, "cortex"))))
         {
             f.owner    = "Razer Synapse";
+            f.key      = "razer";
             f.conflict = true;
             f.detail   = "competing RGB owner (Razer "
                          "peripherals)";
@@ -260,6 +265,7 @@ std::vector<OwnerFinding> ClassifyOwners(
                Windows Update installs — Dynamic Lighting's
                bridge to the device; it repaints on its own. */
             f.owner    = "LampArray service (Dynamic Lighting)";
+            f.key      = "lamparray";
             f.conflict = true;
             f.detail   = "Windows Dynamic Lighting bridge — "
                          "repaints its devices (e.g. Logitech "
@@ -271,6 +277,7 @@ std::vector<OwnerFinding> ClassifyOwners(
                 Contains(compact, "logioptions"))
         {
             f.owner    = "Logitech G Hub / Options";
+            f.key      = "logitech";
             f.conflict = true;
             f.detail   = "competing RGB owner (Logitech "
                          "peripherals)";
@@ -280,6 +287,7 @@ std::vector<OwnerFinding> ClassifyOwners(
                 name == "corsair.service.exe")
         {
             f.owner    = "Corsair iCUE";
+            f.key      = "corsair";
             f.conflict = true;
             f.detail   = "competing RGB owner (Corsair)";
             out.push_back(f);
@@ -287,6 +295,7 @@ std::vector<OwnerFinding> ClassifyOwners(
         else if(Contains(name, "signalrgb"))
         {
             f.owner    = "SignalRGB";
+            f.key      = "signalrgb";
             f.conflict = true;
             f.detail   = "competing RGB owner";
             out.push_back(f);
@@ -297,6 +306,7 @@ std::vector<OwnerFinding> ClassifyOwners(
                cooling, never RGB. A notice so the report shows
                it was checked, not a conflict. */
             f.owner    = "FanControl";
+            f.key      = "fancontrol";
             f.conflict = false;
             f.detail   = "cooling owner — expected; must keep "
                          "running untouched";
@@ -552,6 +562,7 @@ bool ClassifyDynamicLighting(int state, OwnerFinding& out)
     out          = OwnerFinding{};
     out.conflict = true;
     out.owner    = "Windows Dynamic Lighting";
+    out.key      = "dynamic_lighting";
     out.detail   = "Settings > Personalization > Dynamic Lighting "
                    "is on — Windows drives LampArray devices "
                    "(keyboard, mouse, ARGB) over the backend";

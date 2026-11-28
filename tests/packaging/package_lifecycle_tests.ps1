@@ -227,6 +227,23 @@ Check ($cppTokens.Count -gt 0 -and $tokDiff.Count -eq 0) `
 foreach($d in $tokDiff) {
     Write-Host "    drift: $($d.SideIndicator) $($d.InputObject)"
 }
+# R-10: the stable machine key rides with every finding on both
+# sides -- the UI picks guidance by key, so a drift would show the
+# wrong steps.
+$cppKeys = @([regex]::Matches($cppBody, 'key\s*=\s*"([^"]+)"') |
+    ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+$psKeys  = @([regex]::Matches($psBody, 'key\s*=\s*"([^"]+)"') |
+    ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+$keyDiff = @(Compare-Object $cppKeys $psKeys)
+Check ($cppKeys.Count -gt 0 -and $keyDiff.Count -eq 0) `
+      "owner-key parity with OwnershipScan.cpp ($($cppKeys.Count) keys)"
+foreach($d in $keyDiff) {
+    Write-Host "    drift: $($d.SideIndicator) $($d.InputObject)"
+}
+Check (@($f | Where-Object { [string]::IsNullOrEmpty($_.key) }).Count -eq 0) `
+      "every script finding carries a key"
+Check (@($f | Where-Object { $_.exe -ieq "logi_lamparray_service.AMD64.exe" -and $_.key -eq "lamparray" }).Count -eq 1) `
+      "LampArray finding keyed lamparray"
 $ownDiff = @(Compare-Object $cppOwners $psOwners)
 Check ($ownDiff.Count -eq 0) "owner-label parity with OwnershipScan.cpp"
 foreach($d in $ownDiff) {

@@ -21,6 +21,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -360,6 +361,20 @@ int main()
                   .get<std::string>() == "on");
         CHECK(log_has("new CONFLICT: LampArray service"));
         CHECK(log_has("new CONFLICT: Windows Dynamic Lighting"));
+        /* R-10: the wire carries the engine's stable key — the
+           UI picks guidance by it, never by the label. */
+        {
+            const nlohmann::json oj = host.OwnershipJson();
+            std::vector<std::string> keys;
+            for(const nlohmann::json& c : oj["conflicts"])
+            {
+                keys.push_back(c.value("key", std::string()));
+            }
+            CHECK(std::find(keys.begin(), keys.end(), "lamparray")
+                  != keys.end());
+            CHECK(std::find(keys.begin(), keys.end(),
+                            "dynamic_lighting") != keys.end());
+        }
 
         {
             std::lock_guard<std::mutex> g(scan_mutex);
