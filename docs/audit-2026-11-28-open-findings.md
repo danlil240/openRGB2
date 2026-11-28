@@ -52,8 +52,11 @@ file lists everything that is still open.
 Every bug finding below was worked by a subagent on its own `fix/*`
 branch from `bf51423`, with a regression test seen failing first
 (exceptions noted). Features and other non-bug items got plans in
-[`docs/plans/`](plans/README.md). **Nothing here is merged into `main`
-yet.** Each branch ran the full suite with only the known P-6 failure;
+[`docs/plans/`](plans/README.md). All of it is combined on
+`integration/audit-fixes` (every branch plus this doc, conflicts resolved
+as described below): a clean Release build, and CTest 91/91 on two
+consecutive runs, `package_lifecycle_test` included, with the elevated
+install running. It is not merged into `main` yet. Each branch ran the full suite with only the known P-6 failure;
 `fix/p-6-lifecycle-test-isolation` makes that test pass too. No branch
 was checked in the running app or on hardware.
 
@@ -110,7 +113,14 @@ was checked in the running app or on hardware.
 | Roadmap gaps, hygiene | plans ROADMAP-gaps, HYG-1 … HYG-5 | planned |
 
 **Merging.** Merging all 80 branches in turn, 67 apply cleanly and 13
-conflict: `c-15-gradient-wave-convention`, `e-2-timer-resolution`,
+conflict (in the order used on `integration/audit-fixes`, a few more
+test files collided too: `workspace_store_test.cpp`,
+`ipc_engine_service_test.cpp`, `sdk_client_test.cpp`,
+`ui_workspace_test.cpp`; each was two new tests at the same spot, kept
+both). P-14's unparsable-controller handling was folded into E-3's new
+`RefreshStatus` loop (mark structural and re-enumerate). I-4's
+`kind:"scene"` download sits before I-12's kind check, so both hold.
+Originally conflicting: `c-15-gradient-wave-convention`, `e-2-timer-resolution`,
 `e-8-preview-sample-cache`, `i-11-manifest-type-check`,
 `i-13-workspace-id-rules`, `i-4-scene-out-of-band`,
 `i-5-transfer-token-expiry`, `i-6-reader-thread-io`,
