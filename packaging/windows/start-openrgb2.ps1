@@ -643,6 +643,41 @@ function Invoke-ManagedStart {
         $ep.Refresh()
         if($ep.HasExited) {
             Write-Host "ERROR: engine exited during startup (code $($ep.ExitCode)) -- see its console output" -ForegroundColor Red
+            # The backend THIS run spawned used to stay up with no
+            # engine and no run file (audit P-14). Close it the
+            # graceful way stop-openrgb2.ps1 does (its PID-scoped
+            # shutdown event -- never a kill); a backend without the
+            # event is recorded in the run file instead so the managed
+            # stop can close it.
+            if($startedBackend -and $backendProcId -ne 0) {
+                $bkGone = $false
+                try {
+                    $ev = [System.Threading.EventWaitHandle]::OpenExisting(
+                        "Local\OpenRGB2-Backend-Shutdown-$backendProcId")
+                    $ev.Set() | Out-Null
+                    $ev.Dispose()
+                    $bkGone = $bp.WaitForExit(15000)
+                } catch { $bkGone = $false }
+                if($bkGone) {
+                    Write-Host "  the backend this start launched (pid $backendProcId) was closed"
+                } else {
+                    New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+                    [ordered]@{
+                        install_dir     = $InstallDir
+                        started_utc     = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+                        engine_pid      = 0
+                        backend_pid     = $backendProcId
+                        backend_spawned = $true
+                        foreign_port    = $foreignPortOwner
+                        takeover        = $TakeOver
+                        engine_exe      = $EngineExe
+                        backend_exe     = $BackendExe
+                    } | ConvertTo-Json | Set-Content -Encoding UTF8 $RunFile
+                    Write-Host ("  the backend this start launched (pid $backendProcId) " +
+                        "is still running -- recorded in state\openrgb2.run.json; " +
+                        "stop it with scripts\stop-openrgb2.ps1") -ForegroundColor Yellow
+                }
+            }
             return 1
         }
     }
