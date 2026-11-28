@@ -117,6 +117,8 @@ struct Harness
     FakeBackend       backend;
     TimePoint         now{};
     bool              capture_paused = false;
+    /* Every output-gate write, in order (E-7). */
+    std::vector<bool> gate_log;
 
     std::shared_ptr<const studio::SceneDocument> scene;
 
@@ -204,7 +206,10 @@ struct Harness
         PowerLifecycle::Deps l;
         l.set_output_paused =
             [this](bool p, const std::string& r)
-            { pipeline.SetOutputPaused(p, r); };
+            {
+                gate_log.push_back(p);
+                pipeline.SetOutputPaused(p, r);
+            };
         l.lane_keys =
             [this] { return pipeline.LaneKeys(); };
         l.drop_pending =
@@ -897,6 +902,75 @@ static void TestGateOrdering()
     CHECK(h.life->OutputPaused());
 }
 
+/*---------------------------------------------------------*\
+|| T7: suspend gates output at PostEvent time (E-7)         ||
+\*---------------------------------------------------------*/
+
+static void TestSuspendGatesAtPost()
+{
+    {
+        Harness h;
+        const DeviceSnapshot ws = WirelessSnap();
+        const DeviceSnapshot wd = WiredSnap();
+        h.backend.snaps = { ws, wd };
+        h.pipeline.RegisterDevice(ws);
+        h.pipeline.RegisterDevice(wd);
+        h.Step();
+        h.pipeline.SubmitLatest(FrameFor(wd, 1, h.Red()));
+        CHECK(h.pipeline.PendingCount(wd.key) == 1);
+
+        /* PBT_APMSUSPEND: the monitor thread posts Suspend and
+           returns to Windows, which may sleep right away. The
+           owner loop's Poll is up to 500 ms off (or stuck in a
+           blocking SDK call), so the gate must be down and
+           pending work gone when PostEvent returns. */
+        h.life->PostEvent(PowerLifecycle::Event::Suspend);
+        CHECK(h.pipeline.OutputPaused());
+        CHECK(h.life->OutputPaused());
+        CHECK(h.pipeline.PendingCount() == 0);
+        const SubmitResult r =
+            h.pipeline.SubmitLatest(FrameFor(wd, 2, h.Red()));
+        CHECK(r.status == SubmitStatus::Rejected);
+
+        /* The queued event still runs the full transition. */
+        h.Step();
+        CHECK(h.life->Suspended());
+        CHECK(h.pipeline.OutputPaused());
+        CHECK(h.ctl->PowerGate());
+
+        /* Resume runs the normal revalidated path. */
+        h.life->PostEvent(PowerLifecycle::Event::Resume);
+        h.Step();
+        CHECK(!h.life->Suspended());
+        h.Step();
+        CHECK(!h.life->OutputPaused());
+        CHECK(!h.pipeline.OutputPaused());
+    }
+    {
+        /* A DisplayOn still queued ahead of the Suspend is
+           applied first in the next Poll: it must not lift the
+           gate the suspend already put down. */
+        Harness h;
+        const DeviceSnapshot wd = WiredSnap();
+        h.backend.snaps = { wd };
+        h.pipeline.RegisterDevice(wd);
+        h.life->PostEvent(PowerLifecycle::Event::DisplayOff);
+        h.Step();
+        h.life->PostEvent(PowerLifecycle::Event::DisplayOn);
+        h.gate_log.clear();
+        h.life->PostEvent(PowerLifecycle::Event::Suspend);
+        h.Step();
+        CHECK(h.life->Suspended());
+        CHECK(h.pipeline.OutputPaused());
+        bool lifted = false;
+        for(const bool g : h.gate_log)
+        {
+            lifted |= !g;
+        }
+        CHECK(!lifted);
+    }
+}
+
 int main()
 {
     TestDisplayOffGate();
@@ -909,6 +983,7 @@ int main()
     TestParkedPauseKeepsHold();
     TestMaintenanceNeverStopped();
     TestGateOrdering();
+    TestSuspendGatesAtPost();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
