@@ -1272,7 +1272,10 @@ QVariantMap EffectEditorController::flowState() const
     for(int i = 0; i < (int)layers.size(); i++)
     {
         const studio::EffectLayer& l = layers[i];
-        if(first < 0 && l.enabled && l.primitive == "wave")
+        /* Same predicate as the core SetFlow: the card is only
+           offered when it has a layer to drive (audit C-4). */
+        if(first < 0 && l.enabled
+           && studio::EditorController::IsFlowLayer(l))
         {
             first = i;
         }

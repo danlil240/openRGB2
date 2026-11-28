@@ -445,6 +445,25 @@ int main(int argc, char** argv)
         CHECK(!rig2.ctl.remix());
     }
 
+    std::printf("-- flowState: the Wave card only drives untargeted "
+                "world-space waves\n");
+    {
+        /* Reactor's waves are a local-space RAM wave and a
+           keyboard-targeted wave: a desk direction written onto
+           either turns it into a uniform flash, so the card is
+           not offered (audit C-4). */
+        Rig rig;
+        rig.LoadDoc(CompactDoc("reactor"));
+        CHECK(rig.ctl.flowState().value("available").toBool() == false);
+        CHECK(!rig.ctl.setFlowDirection(0, 0, -1));
+        CHECK(rig.UndoCount() == 0);
+        CHECK(!rig.ctl.hasInlineLayers());
+
+        Rig rig2;
+        rig2.LoadDoc(CompactDoc("aurora"));
+        CHECK(rig2.ctl.flowState().value("available").toBool());
+    }
+
     std::printf("-- persisted input settings (draft inputs.*)\n");
     {
         Rig rig;
