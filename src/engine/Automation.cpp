@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
 #include <set>
 
 namespace openrgb2
@@ -380,6 +382,344 @@ bool ValidateHotkeys(const std::vector<HotkeyBinding>& in,
 }
 
 /*---------------------------------------------------------*\
+||| R-4 dimming rules                                        ||
+\*---------------------------------------------------------*/
+
+LocalTime SystemLocalTime()
+{
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &now);
+#else
+    localtime_r(&now, &tm);
+#endif
+    LocalTime t;
+    t.year    = tm.tm_year + 1900;
+    t.month   = tm.tm_mon + 1;
+    t.day     = tm.tm_mday;
+    t.weekday = tm.tm_wday;
+    t.hour    = tm.tm_hour;
+    t.minute  = tm.tm_min;
+    t.second  = tm.tm_sec;
+    return t;
+}
+
+bool ScheduleWindowActive(const DimWindow& w, const LocalTime& t)
+{
+    auto on_day = [&w](int wd)
+    {
+        return w.days.empty() ||
+               std::find(w.days.begin(), w.days.end(), wd) !=
+                   w.days.end();
+    };
+    const int m = t.hour * 60 + t.minute;
+    const int today = ((t.weekday % 7) + 7) % 7;
+    if(w.start_min < w.end_min)
+    {
+        return on_day(today) && m >= w.start_min && m < w.end_min;
+    }
+    if(w.start_min > w.end_min)
+    {
+        /* Evening half belongs to today; the morning half to
+           the window that started yesterday. */
+        const int yesterday = (today + 6) % 7;
+        return (on_day(today) && m >= w.start_min) ||
+               (on_day(yesterday) && m < w.end_min);
+    }
+    return false;   /* empty window */
+}
+
+DimResult EvaluateDimRules(const DimmingConfig& c, const DimInputs& in)
+{
+    DimResult r;
+    for(const DimWindow& w : c.schedule)
+    {
+        if(ScheduleWindowActive(w, in.wall))
+        {
+            r.schedule = r.schedule ? std::min(*r.schedule, w.level)
+                                    : w.level;
+        }
+    }
+    if(c.lock.enabled && in.locked)
+    {
+        r.lock = c.lock.level;
+    }
+    if(c.idle.enabled && in.idle_s >= 0.0 &&
+       in.idle_s >= double(c.idle.after_s) &&
+       !(c.idle.skip_fullscreen && in.fullscreen))
+    {
+        r.idle = c.idle.level;
+    }
+    return r;
+}
+
+namespace
+{
+
+constexpr uint32_t kMinIdleS  = 30;
+constexpr uint32_t kMaxIdleS  = 86400;
+constexpr uint32_t kMaxRampMs = 10000;
+
+std::string HhMm(int minutes)
+{
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "%02d:%02d", minutes / 60,
+                  minutes % 60);
+    return buf;
+}
+
+bool ParseHhMm(const nlohmann::json& v, int& out)
+{
+    if(!v.is_string())
+    {
+        return false;
+    }
+    const std::string s = v.get<std::string>();
+    if(s.size() != 5 || s[2] != ':' ||
+       !std::isdigit((unsigned char)s[0]) ||
+       !std::isdigit((unsigned char)s[1]) ||
+       !std::isdigit((unsigned char)s[3]) ||
+       !std::isdigit((unsigned char)s[4]))
+    {
+        return false;
+    }
+    const int h = (s[0] - '0') * 10 + (s[1] - '0');
+    const int m = (s[3] - '0') * 10 + (s[4] - '0');
+    if(h > 23 || m > 59)
+    {
+        return false;
+    }
+    out = h * 60 + m;
+    return true;
+}
+
+bool Level(const nlohmann::json& v, float& out)
+{
+    if(!v.is_number())
+    {
+        return false;
+    }
+    const double d = v.get<double>();
+    if(!(d >= 0.0 && d <= 1.0))
+    {
+        return false;
+    }
+    out = float(d);
+    return true;
+}
+
+double Round4(double v)
+{
+    return std::round(v * 10000.0) / 10000.0;
+}
+
+} /* anonymous namespace */
+
+nlohmann::json DimmingConfigToJson(const DimmingConfig& c)
+{
+    nlohmann::json sched = nlohmann::json::array();
+    for(const DimWindow& w : c.schedule)
+    {
+        sched.push_back({
+            { "days",  w.days },
+            { "start", HhMm(w.start_min) },
+            { "end",   HhMm(w.end_min) },
+            { "level", Round4(w.level) },
+        });
+    }
+    return nlohmann::json::object({
+        { "schedule", std::move(sched) },
+        { "lock", { { "enabled", c.lock.enabled },
+                    { "level",   Round4(c.lock.level) } } },
+        { "idle", { { "enabled",         c.idle.enabled },
+                    { "after_s",         c.idle.after_s },
+                    { "level",           Round4(c.idle.level) },
+                    { "skip_fullscreen", c.idle.skip_fullscreen } } },
+        { "ramp_ms",    c.ramp_ms },
+        { "restore_ms", c.restore_ms },
+    });
+}
+
+bool DimmingConfigFromJson(const nlohmann::json& j, DimmingConfig& out,
+                           std::string& err)
+{
+    if(!j.is_object())
+    {
+        err = "dimming must be an object";
+        return false;
+    }
+    DimmingConfig c;
+    const auto sit = j.find("schedule");
+    if(sit != j.end() && !sit->is_null())
+    {
+        if(!sit->is_array())
+        {
+            err = "schedule must be an array of windows";
+            return false;
+        }
+        if(sit->size() > kMaxDimWindows)
+        {
+            err = "at most " + std::to_string(kMaxDimWindows) +
+                  " schedule windows";
+            return false;
+        }
+        for(size_t i = 0; i < sit->size(); ++i)
+        {
+            const nlohmann::json& e = (*sit)[i];
+            const std::string where =
+                "schedule[" + std::to_string(i) + "]";
+            if(!e.is_object())
+            {
+                err = where + " must be an object";
+                return false;
+            }
+            DimWindow w;
+            if(!ParseHhMm(e.contains("start") ? e["start"]
+                                              : nlohmann::json(),
+                          w.start_min) ||
+               !ParseHhMm(e.contains("end") ? e["end"]
+                                            : nlohmann::json(),
+                          w.end_min))
+            {
+                err = where + ": start and end are \"HH:MM\" "
+                      "(00:00 .. 23:59)";
+                return false;
+            }
+            if(w.start_min == w.end_min)
+            {
+                err = where + ": start and end must differ";
+                return false;
+            }
+            if(!Level(e.contains("level") ? e["level"]
+                                          : nlohmann::json(),
+                      w.level))
+            {
+                err = where + ": level is a number in [0, 1]";
+                return false;
+            }
+            if(e.contains("days") && !e["days"].is_null())
+            {
+                if(!e["days"].is_array())
+                {
+                    err = where + ": days is an array of 0..6 "
+                          "(Sunday = 0)";
+                    return false;
+                }
+                for(const nlohmann::json& d : e["days"])
+                {
+                    if(!d.is_number_integer() || d.get<int>() < 0 ||
+                       d.get<int>() > 6)
+                    {
+                        err = where + ": days is an array of 0..6 "
+                              "(Sunday = 0)";
+                        return false;
+                    }
+                    const int v = d.get<int>();
+                    if(std::find(w.days.begin(), w.days.end(), v) ==
+                       w.days.end())
+                    {
+                        w.days.push_back(v);
+                    }
+                }
+                std::sort(w.days.begin(), w.days.end());
+            }
+            c.schedule.push_back(std::move(w));
+        }
+    }
+
+    const auto lit = j.find("lock");
+    if(lit != j.end() && !lit->is_null())
+    {
+        if(!lit->is_object())
+        {
+            err = "lock must be {enabled, level}";
+            return false;
+        }
+        if(lit->contains("enabled"))
+        {
+            if(!(*lit)["enabled"].is_boolean())
+            {
+                err = "lock.enabled is a bool";
+                return false;
+            }
+            c.lock.enabled = (*lit)["enabled"].get<bool>();
+        }
+        if(lit->contains("level") &&
+           !Level((*lit)["level"], c.lock.level))
+        {
+            err = "lock.level is a number in [0, 1]";
+            return false;
+        }
+    }
+
+    const auto iit = j.find("idle");
+    if(iit != j.end() && !iit->is_null())
+    {
+        if(!iit->is_object())
+        {
+            err = "idle must be {enabled, after_s, level, "
+                  "skip_fullscreen}";
+            return false;
+        }
+        const nlohmann::json& o = *iit;
+        if(o.contains("enabled"))
+        {
+            if(!o["enabled"].is_boolean())
+            {
+                err = "idle.enabled is a bool";
+                return false;
+            }
+            c.idle.enabled = o["enabled"].get<bool>();
+        }
+        if(o.contains("after_s"))
+        {
+            if(!o["after_s"].is_number_integer() ||
+               o["after_s"].get<int64_t>() < kMinIdleS ||
+               o["after_s"].get<int64_t>() > kMaxIdleS)
+            {
+                err = "idle.after_s is whole seconds in [30, 86400]";
+                return false;
+            }
+            c.idle.after_s = uint32_t(o["after_s"].get<int64_t>());
+        }
+        if(o.contains("level") && !Level(o["level"], c.idle.level))
+        {
+            err = "idle.level is a number in [0, 1]";
+            return false;
+        }
+        if(o.contains("skip_fullscreen"))
+        {
+            if(!o["skip_fullscreen"].is_boolean())
+            {
+                err = "idle.skip_fullscreen is a bool";
+                return false;
+            }
+            c.idle.skip_fullscreen = o["skip_fullscreen"].get<bool>();
+        }
+    }
+
+    for(const char* k : { "ramp_ms", "restore_ms" })
+    {
+        const auto it = j.find(k);
+        if(it == j.end() || it->is_null())
+        {
+            continue;
+        }
+        if(!it->is_number_integer() || it->get<int64_t>() < 0 ||
+           it->get<int64_t>() > kMaxRampMs)
+        {
+            err = std::string(k) + " is milliseconds in [0, 10000]";
+            return false;
+        }
+        (std::string(k) == "ramp_ms" ? c.ramp_ms : c.restore_ms) =
+            uint32_t(it->get<int64_t>());
+    }
+    out = std::move(c);
+    return true;
+}
+
+/*---------------------------------------------------------*\
 ||| AutomationConfig <-> JSON                               ||
 \*---------------------------------------------------------*/
 
@@ -403,6 +743,10 @@ nlohmann::json AutomationConfigToJson(const AutomationConfig& c)
     j["cycle"]           = c.cycle;
     j["brightness_step"] =
         std::round(c.brightness_step * 10000.0) / 10000.0;
+    if(c.dimming)
+    {
+        j["dimming"] = DimmingConfigToJson(*c.dimming);
+    }
     return j;
 }
 
@@ -483,6 +827,19 @@ AutomationConfig AutomationConfigFromJson(
             {
                 warn("brightness_step: expected 0.01 .. 0.5 — "
                      "default kept");
+            }
+        }
+        else if(k == "dimming")
+        {
+            DimmingConfig d;
+            std::string derr;
+            if(DimmingConfigFromJson(v, d, derr))
+            {
+                c.dimming = std::move(d);
+            }
+            else
+            {
+                warn("dimming: " + derr + " — ignored (no dimming)");
             }
         }
         else

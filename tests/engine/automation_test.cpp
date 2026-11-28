@@ -510,6 +510,225 @@ static void TestWorkspaceCycle()
     CHECK(rig.reloads.size() == before + 1);
 }
 
+/*---- R-4 step 1: dimming rules (pure) ----------------------*/
+
+/* Plain local wall time — no clock, no time zone. weekday is
+   0 = Sunday .. 6 = Saturday. */
+static LocalTime At(int weekday, int hour, int minute)
+{
+    LocalTime t;
+    t.year    = 2026;
+    t.month   = 11;
+    t.day     = 1 + weekday;
+    t.weekday = weekday;
+    t.hour    = hour;
+    t.minute  = minute;
+    return t;
+}
+
+static DimWindow Window(std::vector<int> days, int sh, int sm,
+                        int eh, int em, float level)
+{
+    DimWindow w;
+    w.days      = std::move(days);
+    w.start_min = sh * 60 + sm;
+    w.end_min   = eh * 60 + em;
+    w.level     = level;
+    return w;
+}
+
+static void TestScheduleWindows()
+{
+    /* Same-day window, weekdays only. */
+    const DimWindow day = Window({ 1, 2, 3, 4, 5 }, 9, 0, 17, 30, 0.5f);
+    CHECK(!ScheduleWindowActive(day, At(1, 8, 59)));
+    CHECK(ScheduleWindowActive(day, At(1, 9, 0)));
+    CHECK(ScheduleWindowActive(day, At(5, 17, 29)));
+    CHECK(!ScheduleWindowActive(day, At(5, 17, 30)));   /* end exclusive */
+    CHECK(!ScheduleWindowActive(day, At(6, 12, 0)));    /* Saturday */
+
+    /* Across midnight: 23:30 -> 07:00, started on Friday. The
+       morning half belongs to the START day (Saturday morning
+       is Friday's night). */
+    const DimWindow night = Window({ 5 }, 23, 30, 7, 0, 0.3f);
+    CHECK(!ScheduleWindowActive(night, At(5, 23, 29)));
+    CHECK(ScheduleWindowActive(night, At(5, 23, 30)));
+    CHECK(ScheduleWindowActive(night, At(6, 0, 0)));
+    CHECK(ScheduleWindowActive(night, At(6, 6, 59)));
+    CHECK(!ScheduleWindowActive(night, At(6, 7, 0)));
+    CHECK(!ScheduleWindowActive(night, At(6, 23, 45)));  /* not Sat */
+    CHECK(!ScheduleWindowActive(night, At(5, 3, 0)));    /* Thu's night */
+    /* Sunday start wraps the week: Saturday->Sunday morning is
+       Saturday's night; Sunday->Monday is Sunday's. */
+    const DimWindow sun = Window({ 0 }, 22, 0, 6, 0, 0.3f);
+    CHECK(ScheduleWindowActive(sun, At(1, 5, 0)));
+    CHECK(!ScheduleWindowActive(sun, At(0, 5, 0)));
+    const DimWindow sat = Window({ 6 }, 22, 0, 6, 0, 0.3f);
+    CHECK(ScheduleWindowActive(sat, At(0, 5, 0)));
+    /* Empty days = every day. */
+    const DimWindow every = Window({}, 23, 30, 7, 0, 0.3f);
+    for(int d = 0; d < 7; ++d)
+    {
+        CHECK(ScheduleWindowActive(every, At(d, 2, 0)));
+        CHECK(!ScheduleWindowActive(every, At(d, 12, 0)));
+    }
+
+    /* DST, as plain local times: spring forward skips 02:00 ->
+       03:00, so a 02:30 start is first seen at 03:00 — the next
+       valid minute — and the window is on. Fall back repeats
+       01:00-02:00: an 01:30 end is simply crossed twice (off at
+       the first 01:30, back on at the repeated 01:00 until the
+       second 01:30). */
+    const DimWindow dst = Window({}, 2, 30, 5, 0, 0.3f);
+    CHECK(!ScheduleWindowActive(dst, At(0, 1, 59)));
+    CHECK(ScheduleWindowActive(dst, At(0, 3, 0)));
+    const DimWindow fb = Window({}, 0, 30, 1, 30, 0.3f);
+    CHECK(ScheduleWindowActive(fb, At(0, 1, 0)));
+    CHECK(!ScheduleWindowActive(fb, At(0, 1, 30)));
+    CHECK(ScheduleWindowActive(fb, At(0, 1, 0)));        /* repeated hour */
+}
+
+static void TestDimRules()
+{
+    DimmingConfig cfg;
+    DimInputs in;
+    in.wall = At(3, 12, 0);
+    /* Nothing enabled: nothing active, whatever the inputs. */
+    in.locked = true;
+    in.idle_s = 1e6;
+    DimResult r = EvaluateDimRules(cfg, in);
+    CHECK(!r.schedule && !r.lock && !r.idle);
+
+    cfg.schedule = { Window({}, 11, 0, 13, 0, 0.5f),
+                     Window({ 3 }, 11, 30, 12, 30, 0.2f) };
+    cfg.lock.enabled = true;
+    cfg.lock.level   = 0.0f;
+    cfg.idle.enabled = true;
+    cfg.idle.after_s = 300;
+    cfg.idle.level   = 0.4f;
+
+    /* Overlapping windows: the strongest dim, not a product. */
+    r = EvaluateDimRules(cfg, in);
+    CHECK(r.schedule && Near(*r.schedule, 0.2));
+    CHECK(r.lock && Near(*r.lock, 0.0));
+    CHECK(r.idle && Near(*r.idle, 0.4));
+    in.wall = At(3, 12, 45);
+    r = EvaluateDimRules(cfg, in);
+    CHECK(r.schedule && Near(*r.schedule, 0.5));
+
+    /* Lock lifts at once on unlock. */
+    in.locked = false;
+    r = EvaluateDimRules(cfg, in);
+    CHECK(!r.lock);
+
+    /* Idle: threshold inclusive; input lifts it. */
+    in.idle_s = 299.9;
+    CHECK(!EvaluateDimRules(cfg, in).idle);
+    in.idle_s = 300.0;
+    CHECK(EvaluateDimRules(cfg, in).idle.has_value());
+    in.idle_s = 0.2;
+    CHECK(!EvaluateDimRules(cfg, in).idle);
+
+    /* A fullscreen app never triggers idle (unless the rule
+       opts out of the skip). */
+    in.idle_s     = 4000;
+    in.fullscreen = true;
+    CHECK(!EvaluateDimRules(cfg, in).idle);
+    cfg.idle.skip_fullscreen = false;
+    CHECK(EvaluateDimRules(cfg, in).idle.has_value());
+    /* Unknown idle (a source failure reports < 0): never idle. */
+    in.idle_s = -1.0;
+    CHECK(!EvaluateDimRules(cfg, in).idle);
+}
+
+static void TestDimmingJson()
+{
+    DimmingConfig c;
+    c.schedule = { Window({ 5, 6 }, 23, 30, 7, 0, 0.3f) };
+    c.lock.enabled = true;
+    c.lock.level   = 0.0f;
+    c.idle.enabled = true;
+    c.idle.after_s = 120;
+    c.idle.level   = 0.25f;
+    c.ramp_ms    = 800;
+    c.restore_ms = 0;
+    const nlohmann::json j = DimmingConfigToJson(c);
+    CHECK(j["schedule"][0]["start"] == "23:30");
+    CHECK(j["schedule"][0]["end"] == "07:00");
+    CHECK(j["schedule"][0]["days"] == nlohmann::json::array({ 5, 6 }));
+    CHECK(j["lock"]["enabled"] == true);
+    CHECK(j["idle"]["after_s"] == 120);
+    CHECK(j["idle"]["skip_fullscreen"] == true);
+    DimmingConfig back;
+    std::string err;
+    CHECK(DimmingConfigFromJson(j, back, err));
+    CHECK(back == c);
+
+    /* Absent members take their defaults (all off). */
+    CHECK(DimmingConfigFromJson(nlohmann::json::object(), back, err));
+    CHECK(back == DimmingConfig{});
+    CHECK(!back.lock.enabled && !back.idle.enabled &&
+          back.schedule.empty() && back.ramp_ms == 600 &&
+          back.restore_ms == 0);
+
+    /* Strict: every malformed shape is refused with a reason. */
+    for(const nlohmann::json& bad : {
+            nlohmann::json::array(),
+            nlohmann::json{ { "schedule", "nightly" } },
+            nlohmann::json{ { "schedule", { { { "start", "25:00" },
+                                              { "end", "07:00" },
+                                              { "level", 0.3 } } } } },
+            nlohmann::json{ { "schedule", { { { "start", "23:30" },
+                                              { "end", "23:30" },
+                                              { "level", 0.3 } } } } },
+            nlohmann::json{ { "schedule", { { { "start", "7:5" },
+                                              { "end", "08:00" },
+                                              { "level", 0.3 } } } } },
+            nlohmann::json{ { "schedule", { { { "start", "23:30" },
+                                              { "end", "07:00" },
+                                              { "level", 1.5 } } } } },
+            nlohmann::json{ { "schedule", { { { "start", "23:30" },
+                                              { "end", "07:00" },
+                                              { "days", { 7 } },
+                                              { "level", 0.3 } } } } },
+            nlohmann::json{ { "lock", { { "enabled", "yes" } } } },
+            nlohmann::json{ { "lock", { { "level", -0.1 } } } },
+            nlohmann::json{ { "idle", { { "after_s", 5 } } } },
+            nlohmann::json{ { "idle", { { "after_s", 100000 } } } },
+            nlohmann::json{ { "ramp_ms", 60000 } } })
+    {
+        err.clear();
+        CHECK(!DimmingConfigFromJson(bad, back, err));
+        CHECK(!err.empty());
+    }
+    /* At most 8 windows. */
+    nlohmann::json many = { { "schedule", nlohmann::json::array() } };
+    for(int i = 0; i < 9; ++i)
+    {
+        many["schedule"].push_back({ { "start", "01:00" },
+                                     { "end", "02:00" },
+                                     { "level", 0.5 } });
+    }
+    CHECK(!DimmingConfigFromJson(many, back, err));
+
+    /* AutomationConfig carries it under "dimming" (absent until
+       set), round-trips it, and a malformed persisted section is
+       dropped with a warning. */
+    AutomationConfig ac;
+    CHECK(AutomationConfigToJson(ac).count("dimming") == 0);
+    ac.dimming = c;
+    std::vector<std::string> warn;
+    AutomationConfig ab =
+        AutomationConfigFromJson(AutomationConfigToJson(ac), &warn);
+    CHECK(ab.dimming && *ab.dimming == c);
+    CHECK(warn.empty());
+    nlohmann::json bad = AutomationConfigToJson(ac);
+    bad["dimming"]["idle"]["after_s"] = "soon";
+    ab = AutomationConfigFromJson(bad, &warn);
+    CHECK(!ab.dimming);
+    CHECK(!warn.empty());
+}
+
 int main()
 {
     TestParseChord();
@@ -519,6 +738,9 @@ int main()
     TestRegistration();
     TestOutputActions();
     TestWorkspaceCycle();
+    TestScheduleWindows();
+    TestDimRules();
+    TestDimmingJson();
     std::printf("automation: %d checks, %d failures\n",
                 checks, failures);
     return failures ? 1 : 0;

@@ -128,6 +128,134 @@ bool ValidateHotkeys(const std::vector<HotkeyBinding>& in,
                      std::string& err);
 
 /*---------------------------------------------------------*\
+||| R-4 dimming rules (pure)                                 ||
+|||                                                           ||
+|||   Three OutputControl contributors — "schedule", "lock",  ||
+|||   "idle" — each a scale in [0, 1] (0 = off) while its     ||
+|||   condition holds. OutputControl arbitrates min(), so     ||
+|||   overlapping rules give the strongest dim. Wall time is  ||
+|||   an injected LOCAL time (no clock, no time zone here):   ||
+|||   a window is plain HH:MM on the wall clock, so a DST     ||
+|||   spring-forward start inside the skipped hour begins at  ||
+|||   the next valid minute and a fall-back end is crossed    ||
+|||   twice.                                                  ||
+\*---------------------------------------------------------*/
+
+/* Local wall time. weekday: 0 = Sunday .. 6 = Saturday
+   (struct tm's tm_wday). */
+struct LocalTime
+{
+    int year    = 2026;
+    int month   = 1;
+    int day     = 1;
+    int weekday = 4;
+    int hour    = 0;
+    int minute  = 0;
+    int second  = 0;
+};
+
+/* The process's local time (localtime_s) — the production
+   wall_now source. */
+LocalTime SystemLocalTime();
+
+/* {days, start, end, level}: active from start (inclusive) to
+   end (exclusive) on the wall clock. start > end crosses
+   midnight; the window then belongs to its START day (Friday
+   23:30-07:00 covers Saturday morning). Empty days = every
+   day. start == end is refused (validation). */
+struct DimWindow
+{
+    std::vector<int> days;          /* 0..6, Sunday = 0 */
+    int              start_min = 0; /* minute of day     */
+    int              end_min   = 0;
+    float            level     = 0.3f;
+
+    bool operator==(const DimWindow& o) const
+    {
+        return days == o.days && start_min == o.start_min &&
+               end_min == o.end_min && level == o.level;
+    }
+};
+
+struct LockDim
+{
+    bool  enabled = false;
+    /* Conservative default: dim, not off (a level-0 rule also
+       stops an uploaded loop — see the R-4 plan). */
+    float level   = 0.3f;
+
+    bool operator==(const LockDim& o) const
+    { return enabled == o.enabled && level == o.level; }
+};
+
+struct IdleDim
+{
+    bool     enabled         = false;
+    uint32_t after_s         = 600;   /* 30 .. 86400 */
+    float    level           = 0.3f;
+    /* A fullscreen app (game, presentation) never counts as
+       idle — gamepad play does not move GetLastInputInfo. */
+    bool     skip_fullscreen = true;
+
+    bool operator==(const IdleDim& o) const
+    {
+        return enabled == o.enabled && after_s == o.after_s &&
+               level == o.level &&
+               skip_fullscreen == o.skip_fullscreen;
+    }
+};
+
+constexpr size_t kMaxDimWindows = 8;
+
+struct DimmingConfig
+{
+    std::vector<DimWindow> schedule;
+    LockDim                lock;
+    IdleDim                idle;
+    /* Dimming ramps down over ramp_ms; lifting ramps up over
+       restore_ms (0 = immediate). Both 0 .. 10000. */
+    uint32_t               ramp_ms    = 600;
+    uint32_t               restore_ms = 0;
+
+    bool operator==(const DimmingConfig& o) const
+    {
+        return schedule == o.schedule && lock == o.lock &&
+               idle == o.idle && ramp_ms == o.ramp_ms &&
+               restore_ms == o.restore_ms;
+    }
+    bool operator!=(const DimmingConfig& o) const
+    { return !(*this == o); }
+};
+
+struct DimInputs
+{
+    LocalTime wall;
+    bool      locked     = false;
+    double    idle_s     = 0.0;   /* < 0 = unknown -> never idle */
+    bool      fullscreen = false;
+};
+
+/* One level per active contributor (nullopt = inactive). */
+struct DimResult
+{
+    std::optional<float> schedule;
+    std::optional<float> lock;
+    std::optional<float> idle;
+};
+
+bool      ScheduleWindowActive(const DimWindow& w, const LocalTime& t);
+DimResult EvaluateDimRules(const DimmingConfig& c, const DimInputs& in);
+
+/* Wire/profile form: {schedule:[{days, start:"HH:MM",
+   end:"HH:MM", level}], lock:{enabled, level}, idle:{enabled,
+   after_s, level, skip_fullscreen}, ramp_ms, restore_ms}. */
+nlohmann::json DimmingConfigToJson(const DimmingConfig& c);
+/* Strict: absent members default, any malformed one fails
+   with a reason (`out` untouched). */
+bool DimmingConfigFromJson(const nlohmann::json& j,
+                           DimmingConfig& out, std::string& err);
+
+/*---------------------------------------------------------*\
 ||| AutomationConfig — EngineState.automation               ||
 \*---------------------------------------------------------*/
 struct AutomationConfig
@@ -138,14 +266,17 @@ struct AutomationConfig
     std::vector<std::string>   cycle;
     /* Master step per brightness press (0.01 .. 0.5). */
     double                     brightness_step = 0.10;
-    /* Unknown members (R-3/R-4 sections a newer build wrote)
-       ride here and are written back verbatim. */
+    /* R-4: absent until set_dimming stored something. */
+    std::optional<DimmingConfig> dimming;
+    /* Unknown members (R-3 sections a newer build wrote) ride
+       here and are written back verbatim. */
     nlohmann::json             extensions = nlohmann::json::object();
 
     bool operator==(const AutomationConfig& o) const
     {
         return hotkeys == o.hotkeys && cycle == o.cycle &&
                brightness_step == o.brightness_step &&
+               dimming == o.dimming &&
                extensions == o.extensions;
     }
     bool operator!=(const AutomationConfig& o) const
