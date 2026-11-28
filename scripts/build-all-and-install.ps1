@@ -40,12 +40,19 @@
          (creates OpenRGB2.lnk via create-desktop-shortcut.ps1 when
          none does), as the invoking user.
 
-    Default InstallDir = %LOCALAPPDATA%\Programs\OpenRGB2 -- the target
-    of the OpenRGB2 desktop icon. The optional Windows sign-in task
-    refuses that location (its parent folder is yours, so the install
-    could be swapped out from above): for the sign-in task install
-    under an admin-only folder, e.g. -InstallDir
-    "$env:ProgramFiles\OpenRGB2" -- the elevated Deploy step creates it.
+    Default InstallDir = %ProgramFiles%\OpenRGB2 -- an admin-only
+    location, the only kind the optional Windows sign-in task accepts
+    (a folder under your profile could be swapped out from above). The
+    elevated Deploy step creates it on a first install.
+
+    One install only: before anything is built or stopped, the script
+    refuses when OpenRGB2 is already installed somewhere other than
+    InstallDir (the known install roots, the desktop shortcut's target,
+    the sign-in task's target). A second install starts with an empty
+    profiles\local\ -- no workspace, so no layout and no effects -- and
+    the desktop icon and sign-in task end up launching different
+    builds. Re-run with -InstallDir <that install>, or remove it first.
+    -AllowSecondInstall overrides the check.
 
     Started from an already-elevated shell, every step runs in that
     shell (no UAC prompts; the build then runs elevated too).
@@ -54,17 +61,17 @@
     powershell -ExecutionPolicy Bypass -File scripts\build-all-and-install.ps1
 
 .EXAMPLE
-    # admin-only location (required for the Windows sign-in task)
-    powershell -ExecutionPolicy Bypass -File scripts\build-all-and-install.ps1 -InstallDir "$env:ProgramFiles\OpenRGB2"
-
-.EXAMPLE
     scripts\build-all-and-install.cmd          (double-clickable)
 #>
 [CmdletBinding()]
 param(
     # Install root the desktop icon launches. Default:
-    # %LOCALAPPDATA%\Programs\OpenRGB2.
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\OpenRGB2"),
+    # %ProgramFiles%\OpenRGB2 (admin-only; the sign-in task needs that).
+    [string]$InstallDir = (Join-Path $env:ProgramFiles "OpenRGB2"),
+
+    # Install even though OpenRGB2 is already installed elsewhere
+    # (normally refused: one install location only).
+    [switch]$AllowSecondInstall,
 
     # App build configuration (engine/UI/tools; staged inputs too).
     [string]$Configuration = "Release",
@@ -188,6 +195,68 @@ function Find-LockedRepoExes {
     return ,$locked
 }
 
+# Other OpenRGB2 installs on this machine: folders holding an
+# openrgb2-ui.exe that are not $InstallDir and not inside the repo
+# (build\package\ staging is not an install). Candidates: the known
+# install roots, the desktop shortcuts' targets, the sign-in task's.
+function Find-OtherInstalls {
+    $candidates = @(
+        (Join-Path $env:ProgramFiles "OpenRGB2"),
+        (Join-Path $env:LOCALAPPDATA "Programs\OpenRGB2"))
+    try {
+        $wshell  = New-Object -ComObject WScript.Shell
+        $desktop = [Environment]::GetFolderPath("Desktop")
+        foreach($lnk in @(Get-ChildItem $desktop -Filter *.lnk `
+                            -ErrorAction SilentlyContinue)) {
+            $t = $wshell.CreateShortcut($lnk.FullName).TargetPath
+            if($t -and (Split-Path -Leaf $t) -ieq "openrgb2-ui.exe") {
+                $candidates += (Split-Path -Parent $t)
+            }
+        }
+    } catch { }
+    try {
+        foreach($task in @(Get-ScheduledTask -TaskName "OpenRGB2-*" `
+                              -ErrorAction SilentlyContinue)) {
+            foreach($a in @($task.Actions)) {
+                $t = [string]$a.Execute
+                if($t -and (Split-Path -Leaf $t) -ieq "openrgb2-ui.exe") {
+                    $candidates += (Split-Path -Parent $t)
+                }
+            }
+        }
+    } catch { }
+
+    $self  = $InstallDir.TrimEnd('\')
+    $found = @()
+    foreach($c in $candidates) {
+        $dir = $c.TrimEnd('\')
+        if($dir -ieq $self) { continue }
+        if(Test-UnderRoot $dir $RepoRoot) { continue }
+        if($found -icontains $dir) { continue }
+        if(Test-Path -LiteralPath (Join-Path $dir "openrgb2-ui.exe") -PathType Leaf) {
+            $found += $dir
+        }
+    }
+    return ,$found
+}
+
+function Assert-SingleInstall {
+    $others = Find-OtherInstalls
+    if($others.Count -eq 0) { return }
+    foreach($o in $others) { Info "existing install: $o" }
+    if($AllowSecondInstall) {
+        Info "-AllowSecondInstall: installing to $InstallDir anyway"
+        return
+    }
+    $first = $others[0]
+    throw ("OpenRGB2 is already installed at $first -- refusing a second " +
+           "install at $InstallDir (it would start with no workspace, and " +
+           "the desktop icon and sign-in task would launch different builds). " +
+           "Update that install instead: -InstallDir `"$first`". To move " +
+           "it, stop it, copy its profiles\local\ to the new location, " +
+           "delete the old folder, then re-run. -AllowSecondInstall overrides.")
+}
+
 function Get-InstallRoot {
     $r = Resolve-Path -LiteralPath $InstallDir -ErrorAction SilentlyContinue
     if($r -and -not (Test-UnderRoot $r.Path $RepoRoot)) { return $r.Path }
@@ -273,6 +342,10 @@ function Invoke-Main {
     Info "repo:    $RepoRoot"
     Info "install: $InstallDir"
     Info "config:  $Configuration"
+
+    # 0. one install location only -- checked before anything is
+    #    stopped or built.
+    Assert-SingleInstall
 
     #----------------------------------------------------------------#
     # 1. free the repo's build outputs                                #

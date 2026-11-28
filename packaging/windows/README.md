@@ -131,7 +131,7 @@ per-file `signed` flag and a `signing` block when a package was signed.
 - `startup-task.ps1` — manages the optional current-user, highest-privilege
   sign-in task controlled by Settings → Windows startup. Refuses to
   enable over a user-writable install, or one inside a folder the user
-  could rename it out of (the default `%LOCALAPPDATA%\Programs` — use
+  could rename it out of (e.g. `%LOCALAPPDATA%\Programs` — use
   `%ProgramFiles%\OpenRGB2`); reports a `stale` task left by a moved
   install, which disable removes.
 - `OpenRGB2.vbs` — retained compatibility launcher for older shortcuts.

@@ -280,8 +280,16 @@ and be started elevated at the next launch or sign-in.
   update leaves the ACL unchanged (and, over a protected install, is
   refused: re-run it elevated).
 - `scripts\build-all-and-install.ps1` builds as you and runs only the
-  stop + deploy step elevated, so the default install
-  (`%LOCALAPPDATA%\Programs\OpenRGB2`) ends up protected.
+  stop + deploy step elevated, so the install ends up protected. Its
+  default is `%ProgramFiles%\OpenRGB2`, and it keeps **one install
+  location**: it refuses (before building or stopping anything) when
+  OpenRGB2 is already installed elsewhere -- a known install root, the
+  desktop shortcut's target or the sign-in task's target. A second
+  install starts with an empty `profiles\local\` (no workspace: no
+  layout, no effects) while the icon and the sign-in task launch
+  different builds. Update the existing install with `-InstallDir`, or
+  move it (stop it, copy `profiles\local\`, delete the old folder);
+  `-AllowSecondInstall` overrides.
 - The sign-in task refuses to enable over a user-writable install.
 - The sign-in task **also refuses an install inside a folder you
   control**. A protected folder can still be swapped out from above:
@@ -295,8 +303,8 @@ and be started elevated at the next launch or sign-in.
   grants delete-child / change permissions / take ownership or is
   owned by you. (Add-subfolder rights alone, like the one
   Authenticated Users hold on `C:\`, are harmless: the name is
-  taken.) The default `%LOCALAPPDATA%\Programs\OpenRGB2` always fails
-  this — your profile is yours. For the sign-in task, install under an
+  taken.) A per-user location such as `%LOCALAPPDATA%\Programs\OpenRGB2`
+  always fails this — your profile is yours. For the sign-in task, install under an
   admin-only location such as `%ProgramFiles%\OpenRGB2`:
 
   ```powershell
