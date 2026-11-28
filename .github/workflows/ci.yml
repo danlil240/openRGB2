@@ -1,0 +1,264 @@
+# HYG-1 (docs/plans/HYG-1-ci.md): build the Release tree and run the
+# offline CTest suite on a clean, GitHub-hosted Windows machine.
+#
+#   build-test  every push / pull request: configure + build Release,
+#               then CTest by label -- core/engine/sdk/backend (Qt-free)
+#               and ui (offscreen QPA, Quick3D viewport included).
+#               packaging is excluded here (plan: nightly).
+#   packaging   nightly + manual dispatch: same build, plus the qmake
+#               backend (cached on vendor/OpenRGB/**), the `packaging`
+#               CTest label and stage-release.ps1. Signing stays local:
+#               this workflow holds no secrets.
+#
+# Report-only: nothing here is a required status check yet (plan:
+# decide on branch protection after a green week of build-test).
+#
+# The asan matrix leg and the /W4 warnings-count job wait for P-13
+# (CMake presets); they are deliberately not here.
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  schedule:
+    # Nightly packaging run (02:17 UTC, off the top of the hour).
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+    inputs:
+      packaging:
+        description: 'Also run the packaging job (backend build + stage-release)'
+        type: boolean
+        default: true
+      timing_repeats:
+        description: 'Also re-run the timing-sensitive suites 3x (e2e_responsiveness_test, ipc_server_test)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+
+env:
+  # Pinned toolchain (AGENTS.md "Toolchain"). Qt lands at the same
+  # C:\Qt\6.8.3\msvc2022_64 as Daniel's PC, so the configure command
+  # line, stage-release.ps1's default -QtDir and the backend recipe
+  # (build-windows.bat) need no CI-only paths.
+  QT_VERSION: '6.8.3'
+  QT_ARCH: 'win64_msvc2022_64'
+  QT_MODULES: 'qtquick3d qtshadertools'
+  QT_PREFIX: 'C:/Qt/6.8.3/msvc2022_64'
+  # UI suites run headless (most also force it in-process; the
+  # qmltestrunner suite relies on this).
+  QT_QPA_PLATFORM: offscreen
+
+jobs:
+  build-test:
+    name: build-test (Release, offline CTest)
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt ${{ env.QT_VERSION }} (${{ env.QT_ARCH }}, cached)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: ${{ env.QT_ARCH }}
+          modules: ${{ env.QT_MODULES }}
+          dir: 'C:\'
+          cache: true
+          cache-key-prefix: qt-${{ env.QT_VERSION }}-${{ env.QT_ARCH }}-q3d
+
+      - name: Put Qt bin on PATH
+        run: |
+          $bin = Join-Path $env:QT_PREFIX 'bin'
+          if(-not (Test-Path (Join-Path $bin 'Qt6Core.dll'))) { throw "Qt not at $bin" }
+          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          "-DCMAKE_PREFIX_PATH=${{ env.QT_PREFIX }}"
+
+      - name: Build (Release)
+        id: build
+        run: cmake --build build --config Release -- -m -v:minimal
+
+      # Plan step 3: the Quick3D viewport suite must be registered, not
+      # silently dropped by the optional-Quick3D fallback.
+      - name: Assert the Quick3D viewport suite is registered
+        run: |
+          $out = ctest --test-dir build -C Release -N -R '^qml_studio_viewport_test$'
+          $out
+          if(-not ($out -match 'Total Tests: 1')) {
+            throw 'qml_studio_viewport_test is not registered: Qt Quick3D was not found at configure time'
+          }
+
+      - name: CTest core / engine / sdk / backend
+        id: test_qtfree
+        run: >
+          ctest --test-dir build -C Release --output-on-failure -j 4
+          -L "^(core|engine|sdk|backend)$"
+
+      - name: CTest ui (offscreen)
+        id: test_ui
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: >
+          ctest --test-dir build -C Release --output-on-failure -j 4
+          -L "^ui$"
+
+      # Plan "Tests": run the timing-sensitive suites three times on the
+      # shared runner. Nightly / manual only, to spare minutes.
+      - name: Timing suites x3 (e2e_responsiveness_test, ipc_server_test)
+        if: >-
+          ${{ !cancelled() && steps.build.outcome == 'success' &&
+              (github.event_name == 'schedule' ||
+               (github.event_name == 'workflow_dispatch' && inputs.timing_repeats)) }}
+        run: >
+          ctest --test-dir build -C Release --output-on-failure
+          -R "^(e2e_responsiveness_test|ipc_server_test)$"
+          --repeat until-fail:3
+
+      - name: Upload CTest logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-build-test
+          path: build/Testing/Temporary/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  packaging:
+    name: packaging (backend + stage-release)
+    if: >-
+      ${{ github.event_name == 'schedule' ||
+          (github.event_name == 'workflow_dispatch' && inputs.packaging) }}
+    runs-on: windows-2022
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      BACKEND_DIR: 'vendor/OpenRGB/OpenRGB Windows 64-bit'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt ${{ env.QT_VERSION }} (${{ env.QT_ARCH }}, cached)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: ${{ env.QT_ARCH }}
+          modules: ${{ env.QT_MODULES }}
+          dir: 'C:\'
+          cache: true
+          cache-key-prefix: qt-${{ env.QT_VERSION }}-${{ env.QT_ARCH }}-q3d
+
+      - name: Put Qt bin on PATH
+        run: |
+          $bin = Join-Path $env:QT_PREFIX 'bin'
+          if(-not (Test-Path (Join-Path $bin 'Qt6Core.dll'))) { throw "Qt not at $bin" }
+          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      # build-windows.bat (vendored, unmodified) calls vcvarsall from the
+      # BuildTools path and stage-release.ps1 looks for the CRT redist
+      # there; the hosted image ships VS 2022 Enterprise instead. A
+      # junction gives both their pinned path without editing either.
+      - name: Expose the VS 2022 install at the pinned BuildTools path
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -version '[17.0,18.0)' -products * `
+                  -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+                  -property installationPath
+          if(-not $vs) { throw 'no VS 2022 with the x64 C++ tools found' }
+          $pinned = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools"
+          if(-not (Test-Path $pinned)) {
+            New-Item -ItemType Directory -Force (Split-Path $pinned) | Out-Null
+            New-Item -ItemType Junction -Path $pinned -Target $vs | Out-Null
+          }
+          Write-Host "BuildTools -> $vs"
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          "-DCMAKE_PREFIX_PATH=${{ env.QT_PREFIX }}"
+
+      - name: Build (Release)
+        run: cmake --build build --config Release -- -m -v:minimal
+
+      - name: Restore the qmake backend build
+        id: backend_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BACKEND_DIR }}
+          key: backend-qt${{ env.QT_VERSION }}-${{ env.QT_ARCH }}-${{ hashFiles('vendor/OpenRGB/**') }}
+
+      - name: Install jom (backend cache miss)
+        if: steps.backend_cache.outputs.cache-hit != 'true'
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'jom.zip'
+          Invoke-WebRequest -Uri 'https://download.qt.io/official_releases/jom/jom.zip' -OutFile $zip
+          Expand-Archive -Force $zip 'C:\Qt\jom'
+          if(-not (Test-Path 'C:\Qt\jom\jom.exe')) { throw 'jom.exe missing after unzip' }
+
+      - name: Build the backend with its own recipe (backend cache miss)
+        if: steps.backend_cache.outputs.cache-hit != 'true'
+        working-directory: vendor/OpenRGB
+        shell: cmd
+        run: call scripts\build-windows.bat ${{ env.QT_VERSION }} 2022 64
+
+      - name: Save the qmake backend build
+        if: steps.backend_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.BACKEND_DIR }}
+          key: ${{ steps.backend_cache.outputs.cache-primary-key }}
+
+      - name: CTest packaging
+        id: test_packaging
+        run: >
+          ctest --test-dir build -C Release --output-on-failure
+          -L "^packaging$"
+
+      - name: Stage the release (unsigned)
+        if: ${{ !cancelled() }}
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass
+          -File packaging/windows/stage-release.ps1 -BuildDir build
+
+      - name: Upload the staged manifest
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: staged-manifest
+          path: build/package/*/manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload CTest logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-packaging
+          path: build/Testing/Temporary/
+          if-no-files-found: ignore
+          retention-days: 14
