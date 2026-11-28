@@ -956,6 +956,129 @@ static void TestDuplicateKeysNoReenumeration()
               before[0].topology_generation);
 }
 
+/*---------------------------------------------------------*\
+||| Audit E-3: the 2 s topology refresh must not stall the  |||
+||| frame path. RefreshStatus used to hold the wire lock    |||
+||| across one round trip per controller, so every lane's   |||
+||| SubmitLatest waited for the whole sweep; reconnect      |||
+||| attempts also ran inside SubmitLatest (lane threads).   |||
+\*---------------------------------------------------------*/
+
+static FakeController NamedDimm(const std::string& serial)
+{
+    FakeController c = Dimm();
+    c.serial   = serial;
+    c.location = "i2c:" + serial;
+    return c;
+}
+
+static void TestRefreshDoesNotStallFrames()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup(), NamedDimm("D1"),
+                           NamedDimm("D2"), NamedDimm("D3"),
+                           NamedDimm("D4") };
+
+    FakeStream* stream = nullptr;
+    auto client = MakeClient(server, &stream);
+    CHECK(client->Connect());
+    const std::vector<DeviceSnapshot> snaps = client->Snapshots();
+    CHECK(snaps.size() == 5);
+
+    /* 60 ms per receive: count + 5 controller replies, two
+       receives each — ~720 ms of status traffic. Sends (the
+       frame path) are never delayed by the fake. */
+    stream->recv_delay_ms.store(60);
+
+    std::atomic<bool> refresh_running{ false };
+    std::atomic<bool> refresh_done{ false };
+    std::atomic<bool> refresh_ok{ false };
+    std::thread th([&]
+    {
+        refresh_running = true;
+        refresh_ok      = client->RefreshStatus();
+        refresh_done    = true;
+    });
+    while(!refresh_running.load())
+    {
+        std::this_thread::yield();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    /* Frames keep flowing while the refresh runs: each send
+       may wait for at most one status round trip (~120 ms),
+       never for the whole sweep. */
+    double worst_ms = 0.0;
+    int    sent_during = 0;
+    while(!refresh_done.load())
+    {
+        const auto t0 = Clock::now();
+        const SubmitResult r =
+            client->SubmitLatest(MakeFrame(snaps[1], { 1, 2, 3 }));
+        const double ms = std::chrono::duration<double, std::milli>(
+            Clock::now() - t0).count();
+        CHECK(r.status == SubmitStatus::Accepted);
+        if(!refresh_done.load())
+        {
+            ++sent_during;
+        }
+        if(ms > worst_ms)
+        {
+            worst_ms = ms;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    th.join();
+    stream->recv_delay_ms.store(0);
+    std::printf("refresh stall: worst send wait %.0f ms, %d sends "
+                "during the refresh\n", worst_ms, sent_during);
+    CHECK(refresh_ok.load());
+    CHECK(worst_ms < 350.0);
+    CHECK(sent_during >= 3);
+
+    /* Still an in-place refresh: generation unchanged. */
+    const std::vector<DeviceSnapshot> after = client->Snapshots();
+    CHECK(after.size() == 5);
+    CHECK(!after.empty() && after[0].topology_generation == 1);
+}
+
+/* Reconnect attempts belong to the owner loop (Poll), never
+   to the frame path: a SubmitLatest while Reconnecting is
+   refused at once, without a connect attempt. */
+static void TestSubmitNeverReconnects()
+{
+    FakeSdkServer server;
+    server.controllers = { WirelessGroup() };
+
+    FakeStream* stream = nullptr;
+    auto client = MakeClient(server, &stream);
+    CHECK(client->Connect());
+    const DeviceSnapshot snap = client->Snapshots()[0];
+
+    stream->SetSendFails(true);
+    CHECK(client->SubmitLatest(MakeFrame(snap, { 1, 0, 0 })).status ==
+          SubmitStatus::Rejected);
+    CHECK(client->State() == ConnectionState::Reconnecting);
+    stream->SetSendFails(false);
+    server.listening = false;
+
+    for(int i = 0; i < 4; ++i)
+    {
+        CHECK(client->SubmitLatest(MakeFrame(snap, { 1, 0, 0 })).status ==
+              SubmitStatus::Rejected);
+    }
+    /* No attempt was made from the send path. */
+    CHECK(client->ReconnectAttempt() == 0);
+    CHECK(client->State() == ConnectionState::Reconnecting);
+
+    /* The owner loop's Poll drives the schedule. */
+    CHECK(!client->Poll());
+    CHECK(client->ReconnectAttempt() == 1);
+    server.listening = true;
+    CHECK(client->Poll());
+    CHECK(client->State() == ConnectionState::Connected);
+}
+
 int main()
 {
     TestHandshakeCapsAt4();
@@ -981,6 +1104,8 @@ int main()
     TestUnsupportedReprobeSchedule();
     TestDetectingReplyIsNotData();
     TestDuplicateKeysNoReenumeration();
+    TestRefreshDoesNotStallFrames();
+    TestSubmitNeverReconnects();
     std::printf("sdk client: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
