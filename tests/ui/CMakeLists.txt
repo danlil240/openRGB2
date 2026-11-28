@@ -80,6 +80,14 @@ ui_suite(ui_reactive_test)
 # + DiagnosticsController over the in-process pipe.
 ui_suite(ui_diagnostics_test)
 
+# R-1: tray quick controls — the TrayController menu model as
+# data (Workspaces submenu, Brightness presets + Off,
+# Pause/Resume), disabled while disconnected, hidden without
+# output_control_v1, the exact OUTPUT_COMMAND per action over a
+# real EngineBridge + in-process pipe, and a dirty-draft
+# workspace pick asking for the window.
+ui_suite(ui_tray_test)
+
 # Task 4.8: the hardening suite — Quit-All issues IPC QUIT and
 # reads the ordered reply; an engine restart mid-edit keeps
 # the working copy while the restored session reports ENGINE
