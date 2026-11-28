@@ -342,6 +342,9 @@ private:
     std::unique_ptr<WorkspaceCommands> ws_commands_;
 
     mutable std::mutex  mutex_;
+    /* Serializes scene read-copy-modify-apply edits (layout
+       verbs) and SET_SCENE replaces across sessions. */
+    std::mutex          scene_edit_mutex_;
     std::shared_ptr<const studio::SceneDocument> scene_;
     uint64_t            scene_revision_  = 0;
     PlaybackMode        requested_mode_  = PlaybackMode::LiveEffects;

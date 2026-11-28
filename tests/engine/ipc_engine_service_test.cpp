@@ -19,8 +19,10 @@
 
 #include "../sdk/fake_sdk_server.h"
 
+#include <atomic>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace openrgb2;
@@ -2025,6 +2027,84 @@ int main()
         CHECK(r.body["detail"].is_string());
         CHECK(r.body["detail"].get<std::string>()
                   .find("wireless") != std::string::npos);
+    }
+
+    /*---- concurrent layout verbs never lose an update -----
+           (audit I-13). Each verb is read-copy-modify-apply on
+           the current scene; two sessions (two reader threads)
+           editing DIFFERENT objects must both stick. Thread A
+           only ever moves "a", thread B only "b": after A's own
+           apply, a.x must still be A's value — a revert means
+           B applied a copy taken before A's apply. */
+    {
+        Engine           engine12;
+        DeliveryPipeline pipe12;
+        DeviceMapper     mapper12;
+        EngineService::Deps d12;
+        d12.pipeline = &pipe12;
+        d12.mapper   = &mapper12;
+        EngineService svc12(engine12, d12);
+        const nlohmann::json two = nlohmann::json::object({
+            { "version", 2 }, { "name", "two" },
+            { "bindings", nlohmann::json::array() },
+            { "objects", nlohmann::json::array({
+                nlohmann::json::object({
+                    { "id", "a" }, { "kind", "decor" } }),
+                nlohmann::json::object({
+                    { "id", "b" }, { "kind", "decor" } }) }) },
+        });
+        IpcReply r = svc12.Dispatch(MsgType::SetScene,
+            nlohmann::json::object({{ "document", two }}));
+        CHECK(r.code == ErrCode::Ok);
+
+        std::atomic<int> lost{ 0 }, failed{ 0 };
+        auto mover = [&](const char* oid)
+        {
+            for(int i = 1; i <= 300; ++i)
+            {
+                const double x = (double)i;
+                const IpcReply m = svc12.Dispatch(
+                    MsgType::LayoutCommand,
+                    nlohmann::json::object({
+                        { "verb", "set_position" },
+                        { "object_id", oid },
+                        { "position", nlohmann::json::object(
+                            {{"x", x}, {"y", 0.0}, {"z", 0.0}}) },
+                    }));
+                if(m.code != ErrCode::Ok)
+                {
+                    ++failed;
+                    continue;
+                }
+                const IpcReply g = svc12.Dispatch(MsgType::GetScene,
+                    nlohmann::json::object());
+                for(const nlohmann::json& o :
+                        g.body["document"]["objects"])
+                {
+                    if(o.value("id", "") == oid &&
+                       o["position"].value("x", -1.0) != x)
+                    {
+                        ++lost;
+                    }
+                }
+            }
+        };
+        std::thread ta(mover, "a");
+        std::thread tb(mover, "b");
+        ta.join();
+        tb.join();
+        CHECK(failed.load() == 0);
+        CHECK(lost.load() == 0);
+        if(lost.load() != 0)
+        {
+            std::printf("  (lost layout updates: %d)\n",
+                        lost.load());
+        }
+        r = svc12.Dispatch(MsgType::GetScene, nlohmann::json::object());
+        for(const nlohmann::json& o : r.body["document"]["objects"])
+        {
+            CHECK(o["position"].value("x", -1.0) == 300.0);
+        }
     }
 
     std::printf("ipc_engine_service_test: %d checks, %d failures\n",
