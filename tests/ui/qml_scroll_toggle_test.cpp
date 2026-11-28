@@ -137,11 +137,12 @@ int main(int argc, char** argv)
     {
         const auto bars = win_obj->findChildren<QObject*>(
             QStringLiteral("pageScrollBar"));
-        /* Layout is an editor workspace (UX audit 2026-11-28):
-           the page itself never scrolls — its three rail panes
-           (Devices, Identify, Inspector) do. The other four
-           pages each scroll as a page. */
-        int in_layout = 0;
+        /* Layout and Lighting are workspaces (UX audit
+           2026-11-28): neither scrolls as a page. Layout's three
+           rail panes (Devices, Identify, Inspector) scroll, and
+           Lighting's five control tabs + its preview pane do.
+           Dashboard, Devices and Settings each scroll as a page. */
+        int in_layout = 0, in_lighting = 0;
         for(QObject* b : bars)
         {
             for(QObject* p = b; p != nullptr; p = p->parent())
@@ -151,10 +152,16 @@ int main(int argc, char** argv)
                     ++in_layout;
                     break;
                 }
+                if(p->objectName() == QStringLiteral("lightingPage"))
+                {
+                    ++in_lighting;
+                    break;
+                }
             }
         }
         CHECK(in_layout == 3);
-        CHECK(bars.size() - in_layout == 4);
+        CHECK(in_lighting == 6);
+        CHECK(bars.size() - in_layout - in_lighting == 3);
         CHECK(win_obj->findChild<QObject*>(
                   QStringLiteral("layoutScroll")) == nullptr);
     }
@@ -163,10 +170,21 @@ int main(int argc, char** argv)
     std::printf("-- focus below the fold scrolls the page\n");
     {
         win_obj->setProperty("currentView", 1);
+        /* Lighting's Look tab is no longer a many-screen page —
+           a short window guarantees content below its fold so the
+           PageFlickable focus-follow (what this checks) has
+           something to scroll to. Restored after. */
+        win->resize(1180, 480);
         QCoreApplication::processEvents();
         auto* flick = qobject_cast<QQuickItem*>(
             win_obj->findChild<QObject*>(
                 QStringLiteral("lightingScroll")));
+        if(flick)
+        {
+            std::printf("   lightingScroll: content %.0f px in %.0f px\n",
+                        flick->property("contentHeight").toReal(),
+                        flick->height());
+        }
         qreal best = -1e9;
         QQuickItem* target = flick
             ? LowestFocusable(flick, flick, best) : nullptr;
@@ -187,6 +205,8 @@ int main(int argc, char** argv)
             CHECK(flick->property("contentY").toReal() > 0);
             CHECK(y >= 0 && y + target->height() <= flick->height());
         }
+        win->resize(1180, 760);
+        QCoreApplication::processEvents();
     }
 
     /*---- 3. the 2D/3D toggle shows and keeps its state ------*/

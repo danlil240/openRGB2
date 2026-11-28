@@ -322,6 +322,39 @@ which doesn't change geometry):
   banners already take 29 % of that window. The remaining gains are in the shell
   (step 5: one status strip, collapsible sidebar).
 
+## 6b. Follow-up: Lighting rework (branch `feat/lighting-workspace`)
+
+Lighting is now two panes. On the left are tabbed controls: **Look** (preset tiles that
+fill the row, then the playback mode), **Colors**, **Motion** (scene controls, uploaded
+preset, effect layers), **Reactive**, and **Library** (profiles). On the right is a
+**sticky preview** with a **Draft / Applied** toggle (it follows the draft feed until
+you pick one) and the playback state below it. The preview width is resizable and
+persists (`uiPrefs.lightingPreviewWidth`). The scene name moved into the page header,
+so it and the Save bar are always visible.
+
+Colors replaces the two duplicate lists (40 Devices chips + 40 Palette swatches) with
+**one checkable group list**. Each row shows its current color, and `x/body`
+sub-parts indent under their parent. The picker and **Apply to selected** are pinned
+above the list; only the list scrolls.
+
+Re-measured live (engine connected, 43 groups), in screens of scrolling:
+
+| | Before | After (1366×768) | After (1600×1000) |
+|---|---|---|---|
+| Lighting page | 8.45 (one column) | **no page scroll** | **no page scroll** |
+| Look tab | — | 2.34 | 1.20 |
+| Colors group list (picker pinned) | — | 5.85 | 3.20 |
+| Motion tab | — | 2.54 | 1.64 |
+| Reactive / Library | — | 0.73 / 0.62 | 0.50 / 0.43 |
+| Distance from a palette edit to its preview | ~3 screens | 0 (side by side) | 0 |
+| Apply to selected | at y ≈ 1,800 | in view at every size | in view |
+
+- Clipped text and control overlaps are 0 on every tab at every size. Elided text is 0
+  at ≥ 1366 px; at 960 px some group-row details elide, by design.
+- At the 960×620 minimum each pane is narrow (controls 384 px, preview 300 px).
+  **Hide preview** (next to the tabs) gives the controls the full width, like Layout's
+  *Hide panel*.
+
 ## 7. Not covered
 
 - I didn't exercise the modal dialogs (Import/Export, Workspace, preset editor) or the

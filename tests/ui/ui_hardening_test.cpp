@@ -756,6 +756,11 @@ int main(int argc, char** argv)
         s.setLayoutInspectorHeight(99999);
         CHECK(s.layoutInspectorHeight() == 4000);
         s.setLayoutInspectorHeight(260);
+        /* Lighting's preview pane width — same 0/clamp rules. */
+        CHECK(s.lightingPreviewWidth() == 0);
+        s.setLightingPreviewWidth(-1);
+        CHECK(s.lightingPreviewWidth() == 0);
+        s.setLightingPreviewWidth(520);
 
         /* A second instance on the same file = a restarted UI. */
         ui::UiSettings s2;
@@ -767,6 +772,7 @@ int main(int argc, char** argv)
         CHECK(s2.paletteHue() == 0.25);
         CHECK(s2.layoutRailWidth() == 412);
         CHECK(s2.layoutInspectorHeight() == 260);
+        CHECK(s2.lightingPreviewWidth() == 520);
         const QVariantMap p2 = s2.SceneParams(QStringLiteral("desk"));
         CHECK(p2.value("speed").toInt() == 150);
         CHECK(p2.value("touched_speed").toBool());
@@ -815,6 +821,7 @@ int main(int argc, char** argv)
         CHECK(s3.restoreLastView());   /* default returns */
         CHECK(s3.layoutRailWidth() == 0);
         CHECK(s3.layoutInspectorHeight() == 0);
+        CHECK(s3.lightingPreviewWidth() == 0);
         CHECK(s3.SceneParams(QStringLiteral("desk")).isEmpty());
     }
 

@@ -108,6 +108,9 @@ class UiSettings : public QObject
                    WRITE setLayoutRailWidth NOTIFY prefsChanged)
     Q_PROPERTY(int layoutInspectorHeight READ layoutInspectorHeight
                    WRITE setLayoutInspectorHeight NOTIFY prefsChanged)
+    /* Lighting's sticky preview pane width, px. 0 = never set. */
+    Q_PROPERTY(int lightingPreviewWidth READ lightingPreviewWidth
+                   WRITE setLightingPreviewWidth NOTIFY prefsChanged)
 
 public:
     explicit UiSettings(QObject* parent = nullptr);
@@ -151,6 +154,8 @@ public:
     void     setLayoutRailWidth(int px);
     int      layoutInspectorHeight() const;
     void     setLayoutInspectorHeight(int px);
+    int      lightingPreviewWidth() const;
+    void     setLightingPreviewWidth(int px);
 
     /* Drop every stored preference — the next launch reads
        defaults. Engine state is untouched (it was never
