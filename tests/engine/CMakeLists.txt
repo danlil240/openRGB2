@@ -17,6 +17,22 @@ engine_suite(scene_worker_test)
 engine_suite(delivery_pipeline_test)
 engine_suite(device_mapping_test)
 
+# R-9 — crash dumps: a stand-in child installs the shared
+# handler and crashes for real (access violation, stack
+# overflow, abort); the suite checks the dump and the keep-5
+# pruning.
+add_executable(crash_dump_helper crash_dump_helper.cpp)
+target_link_libraries(crash_dump_helper PRIVATE openrgb2_supervise)
+add_executable(crash_dump_test crash_dump_test.cpp)
+target_link_libraries(crash_dump_test PRIVATE openrgb2_supervise)
+target_compile_definitions(crash_dump_test PRIVATE NDEBUG)
+add_test(NAME crash_dump_test
+    COMMAND crash_dump_test $<TARGET_FILE:crash_dump_helper>)
+set_tests_properties(crash_dump_test PROPERTIES
+    LABELS engine
+    TIMEOUT 120
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # R-1 — tray quick controls: the runtime output overrides (master,
 # blackout, hold, contributor arbitration, persistence types).
 engine_suite(output_control_test)

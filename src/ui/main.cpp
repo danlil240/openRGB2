@@ -11,6 +11,7 @@
 |||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 |\*---------------------------------------------------------*/
 
+#include "CrashDump.h"
 #include "DiagnosticsController.h"
 #include "EngineBridge.h"
 #include "LaunchHardening.h"
@@ -144,6 +145,17 @@ void RenderTrayEntries(QMenu* menu, const QVariantList& entries,
 
 int main(int argc, char** argv)
 {
+    /* R-9: crash dumps first (<install>\state\crash, newest 5).
+       A failure only costs the dump. */
+    {
+        std::string cerr;
+        if(!openrgb2::supervise::InstallCrashDumpHandler(
+               std::string(), "openrgb2-ui", 5, &cerr))
+        {
+            std::fprintf(stderr, "crash dumps disabled: %s\n",
+                         cerr.c_str());
+        }
+    }
     /* An elevated UI must not load modules from locations a
        medium-integrity process controls: Qt's plugin / QML-import
        / style search vars are inherited from the (non-elevated)
