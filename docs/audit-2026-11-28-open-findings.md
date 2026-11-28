@@ -330,6 +330,27 @@ Severity: low. **read**
   on the LEDs.
 - Tick-cadence and per-lane latency histograms in `DeliveryStats`.
 
+### E-13
+**A frame reaches the wire after `DisplayOff` under ASan.** Severity:
+low (test or gate timing). Found by the P-13 ASan run (2026-11-28);
+reproduced at runtime, cause **speculative**.
+
+- **Where.** `e2e_lifecycle_test.cpp:924`: "frames leaked to the wire
+  while display off". `UPDATELEDS` count is one higher than
+  `all_leds0 + 1` (the snapshot taken just before
+  `PostEvent(DisplayOff)`, plus the one sampled-hold frame).
+- **Seen.** 3 of 14 runs of the `asan` preset build (RelWithDebInfo,
+  `/fsanitize=address`); 0 of 6 Release runs on the same machine. No
+  AddressSanitizer report in any run: this is a timing failure, not a
+  memory error.
+- **Guess.** A lane frame already in flight when `DisplayOff` is posted
+  is sent after the snapshot but before the gate
+  (`DeliveryPipeline::SetOutputPaused`) takes effect on the host loop;
+  the ASan slowdown widens that window. Either the test should snapshot
+  after the gate is asserted, or the gate has a real one-frame gap.
+  Decide which before changing anything.
+- **Test.** `ctest --preset asan -R ^e2e_lifecycle_test$` a dozen times.
+
 ## IPC and persistence (`src/ipc/`, `src/engine/Workspace*`)
 
 ### I-2
@@ -936,6 +957,12 @@ Severity: med (multi-group). **read**
 - No test runs `stage-release.ps1`.
 - The build uses `/W3` only, with no `/W4` or ASan preset; the standard is
   C++17.
+- **Status.** All five closed on branch `test/p-13-test-and-build-gaps`
+  (not merged): `sdk_tcp_socket_test`, unsolicited-packet cases in
+  `sdk_client_test`, `lianli_transport_test` over `fake_libusb`,
+  `package_stage_release_test`, and `CMakePresets.json` (`default`,
+  `w4`, `asan`). The ASan run of the Qt-free labels found no memory
+  error; it surfaced the timing failure [E-13](#e-13).
 
 ### P-14
 **Unranked.**

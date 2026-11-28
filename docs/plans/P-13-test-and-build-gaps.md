@@ -128,3 +128,38 @@ needs a built backend on the machine.
   1.0.27 header so drift fails the compile.
 - Port-0 listeners can still be blocked by local firewall policy (guess). The
   test should report "skipped" and not fail if `bind` is refused.
+
+## Results (2026-11-28, branch `test/p-13-test-and-build-gaps`)
+
+- **New tests.** `sdk_tcp_socket_test` (`sdk`, exits 77 if the loopback
+  bind is refused), four unsolicited-packet cases in `sdk_client_test`,
+  `lianli_transport_test` (`backend`; the stub API is the header comment
+  of `tests/backend/fake_libusb.h`), `package_stage_release_test`
+  (`packaging`, exits 77 without a built backend or in Debug). Each was
+  shown to fail against a deliberately broken product file, then
+  restored.
+- **Current state was ahead of this plan.** P-5 (`DEVICE_LIST_UPDATED`
+  bumps the topology generation), P-2 and P-14 had already landed, so the
+  unsolicited-packet cases pin the P-5 behaviour, and the real-tree stage
+  test sits next to the existing fake-input stage tests.
+- **`default` preset.** Identical build: all 141 generated `.vcxproj`
+  files match the pre-change configure, except the regeneration-input
+  lists of 7 utility projects (they now list the new `.cmake` file).
+- **`w4` preset.** 102 first-party targets at `/W4 /permissive-`; builds
+  clean and passes the full suite (94 tests, the stage test skipped
+  without a backend). 77 unique warnings:
+  - 33 first-party: 15 that `/W3` also reports, plus C4456 x6, C4505 x3,
+    C4189 x2, C4127, C4458 and more C4996;
+  - 31 vendor: the unchanged `/W3` set (vendor sources stay at `/W3`);
+  - 13 C4702 in Qt headers (`qmetatype.h`, `qvariant.h`, `qjsengine.h`).
+    C4702 is a code-generation warning that `/external:W0` does not
+    silence.
+- **`asan` preset.** Qt-free (`OPENRGB2_BUILD_UI=OFF`), RelWithDebInfo.
+  The four labels (51 tests) ran with no AddressSanitizer report. A
+  canary heap overflow built with the same flags is reported, so the
+  runtime is live. One timing failure: `e2e_lifecycle_test:924`, 3 of 14
+  ASan runs against 0 of 6 Release runs, filed as audit
+  [E-13](../audit-2026-11-28-open-findings.md#e-13). Not fixed here.
+- **Open for Daniel.** Whether to add a `/W4` burn-down target before
+  `/WX` per target; whether to suppress C4702 from Qt headers (for
+  example with `#pragma warning` around the includes) or leave it.
