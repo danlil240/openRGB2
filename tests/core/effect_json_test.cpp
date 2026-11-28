@@ -7,7 +7,10 @@
 |||   resolved layer stacks + evaluated frames are         |
 |||   compared against tests/fixtures/effects/<id>.fixture.|
 |||   json (captured from BuildPreset BEFORE the           |
-|||   representation changed — the parity oracle).         |
+|||   representation changed — the parity oracle). Wave,   |
+|||   added later as a JSON-only look, has a fixture       |
+|||   captured from its JSON (audit C-11): a regression    |
+|||   lock rather than migration parity.                   |
 |||                                                           |
 |||   Also covers: document round-trips, the remix-spec    |
 |||   grammar (including out-of-document-order misuse),    |
@@ -305,7 +308,7 @@ static void TestFixtureParity()
 {
     static const char* const ids[] = {
         "aurora", "reactor", "comet", "chrome", "portal",
-        "embers", "shockwave", "keyripple", "ambient",
+        "embers", "shockwave", "keyripple", "ambient", "wave",
     };
     const std::string dir = FindFixtureDir();
     const SceneDocument doc = BuildDefaultDesk();
@@ -425,7 +428,10 @@ static void TestFixtureParity()
         }
     }
     std::printf("parity: %d frame cases checked\n", cases_total);
-    CHECK(cases_total == 144, "144 fixture cases");
+    /* 7 non-reactive looks x 12 + 3 reactive x 24. Audit C-11:
+       wave, the tenth shipped look, joined the oracle (its
+       fixture was captured with tests/core/effect_fixture_gen). */
+    CHECK(cases_total == 156, "156 fixture cases");
 }
 
 /*---------------------------------------------------------*\
@@ -436,7 +442,7 @@ static void TestPackagedDocs()
     const std::string dir = FindPackagedDir();
     static const char* const ids[] = {
         "aurora", "reactor", "comet", "chrome", "portal",
-        "embers", "shockwave", "keyripple", "ambient",
+        "embers", "shockwave", "keyripple", "ambient", "wave",
     };
     for(const char* id : ids)
     {
