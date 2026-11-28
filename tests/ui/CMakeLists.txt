@@ -465,6 +465,38 @@ set_tests_properties(ui_workspace_recovery_test PROPERTIES
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${QT_BIN_DIR}")
 
+# Audit I-4: scene content out of band. The real EngineService +
+# WorkspaceService + IpcServer serve a scene whose document is past
+# the 1 MiB body cap (and, with a tiny inline bound, every scene):
+# WELCOME/STATE/SCENE carry revision/name/hash, the EngineBridge
+# fetches the document through a `scene` download transfer and
+# paints bridge.scene() with it.
+add_executable(ui_scene_transfer_test
+    ui_scene_transfer_test.cpp)
+target_link_libraries(ui_scene_transfer_test PRIVATE
+    openrgb2_ui
+    openrgb2_ipc_wire
+    openrgb2_ipc
+    openrgb2_engine
+    openrgb2_studio_core
+    Qt6::Gui)
+target_include_directories(ui_scene_transfer_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ui
+    ${CMAKE_SOURCE_DIR}/src/ipc
+    ${CMAKE_SOURCE_DIR}/src/engine)
+target_compile_definitions(ui_scene_transfer_test
+    PRIVATE NDEBUG)
+set_target_properties(ui_scene_transfer_test PROPERTIES
+    AUTOMOC ON)
+add_test(NAME ui_scene_transfer_test
+         COMMAND ui_scene_transfer_test)
+set_tests_properties(ui_scene_transfer_test PROPERTIES
+    LABELS ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${QT_BIN_DIR}")
+
 # studio-import Task 8: the Quick3D Layout viewport — the real
 # WorkspaceController/ObjectEditorController offline drive the
 # adapted SelectionController/CameraController (gesture routing,

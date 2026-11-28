@@ -407,6 +407,24 @@ EngineService::EngineService(Engine& engine, Deps deps,
                 }
             };
         ws_commands_->SetCalibrationDeps(std::move(cd));
+
+        /* Audit I-4: the applied scene document is served out
+           of band — transfer_begin {direction:"download",
+           kind:"scene"} stages the same bytes document_sha256
+           names. */
+        ws_commands_->SetSceneSource(
+            [this]()
+            {
+                WorkspaceCommands::SceneSource src;
+                if(const std::shared_ptr<const SceneDocForms> f =
+                       SceneForms())
+                {
+                    src.revision = f->revision;
+                    src.bytes    = f->bytes;
+                    src.sha256   = f->sha256;
+                }
+                return src;
+            });
     }
 }
 
@@ -695,22 +713,73 @@ std::shared_ptr<const studio::SceneDocument> EngineService::Scene() const
 || Payload builders                                          ||
 \*---------------------------------------------------------*/
 
+std::shared_ptr<const EngineService::SceneDocForms>
+EngineService::SceneForms() const
+{
+    std::shared_ptr<const studio::SceneDocument> doc;
+    uint64_t rev = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(!scene_)
+        {
+            return nullptr;
+        }
+        if(scene_forms_ && scene_forms_->doc == scene_ &&
+           scene_forms_->revision == scene_revision_)
+        {
+            return scene_forms_;
+        }
+        doc = scene_;
+        rev = scene_revision_;
+    }
+    /* Serialized once per revision, off the service mutex. */
+    auto f = std::make_shared<SceneDocForms>();
+    f->revision = rev;
+    f->doc      = doc;
+    f->json     = std::make_shared<const nlohmann::json>(
+                      studio::ToJson(*doc));
+    f->bytes    = std::make_shared<const std::string>(f->json->dump());
+    f->sha256   = Sha256Hex(*f->bytes);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(scene_ == doc && scene_revision_ == rev)
+    {
+        scene_forms_ = f;
+    }
+    return f;
+}
+
 nlohmann::json EngineService::SceneJsonLocked() const
 {
     nlohmann::json out;
+    const std::shared_ptr<const SceneDocForms> forms = SceneForms();
+    out["loaded"] = forms != nullptr;
+    if(forms)
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        out["loaded"]   = scene_ != nullptr;
-        out["revision"] = scene_revision_;
-        if(scene_)
+        out["revision"]        = forms->revision;
+        out["name"]            = forms->doc->name;
+        out["document_sha256"] = forms->sha256;
+        out["document_bytes"]  = (uint64_t)forms->bytes->size();
+        /* Audit I-4: a large document never rides inline — the
+           1 MiB body cap must hold for WELCOME/STATE/SCENE/
+           DIAGNOSTICS whatever the scene size. Clients fetch it
+           with transfer_begin {direction:"download",
+           kind:"scene"} and verify document_sha256. */
+        if(!ws_commands_ ||
+           forms->bytes->size() <= options_.scene_inline_max_bytes)
         {
-            out["name"]     = scene_->name;
-            out["document"] = studio::ToJson(*scene_);
+            out["document"] = *forms->json;
         }
         else
         {
-            out["document"] = nullptr;
+            out["document"]         = nullptr;
+            out["document_omitted"] = true;
         }
+    }
+    else
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        out["revision"] = scene_revision_;
+        out["document"] = nullptr;
     }
     out["applied_revision"] = engine_.Worker().AppliedRevision();
     out["playing"]          = engine_.Worker().HasScene();
@@ -1116,6 +1185,7 @@ nlohmann::json EngineService::IpcStatsJson() const
         { "responses_out",    st.responses_out    },
         { "events_sent",      st.events_sent      },
         { "events_dropped",   st.events_dropped   },
+        { "events_oversize",  st.events_oversize  },
         { "queued_events",    st.queued_events    },
         { "resync_bytes",     st.resync_bytes     },
         { "rejected_hellos",  st.rejected_hellos  },

@@ -204,9 +204,21 @@ the SDK link:
                  "protocol_version":4,"reconnect_attempt":0,"last_error":""} }
 ```
 
-**SCENE** — `{loaded, revision, applied_revision, playing, name, document}`
+**SCENE** — `{loaded, revision, applied_revision, playing, name, document,
+document_sha256?, document_bytes?, document_omitted?}`
 where `document` is the core SceneDocument JSON (same schema `--scene`
-accepts) or `null`. SET_SCENE applies the same path as `--scene` (inline
+accepts) or `null`. A loaded scene always carries `document_sha256` (SHA-256
+hex of the document's compact serialization) and `document_bytes` (its
+length). The document rides inline only up to 256 KiB serialized
+(`EngineServiceOptions::scene_inline_max_bytes`); a larger one is sent as
+`document:null, document_omitted:true` — so WELCOME, STATE, the `scene`
+EVENT and DIAGNOSTICS stay under the 1 MiB body cap whatever the scene
+size — and the client fetches it with
+`WORKSPACE_COMMAND transfer_begin {direction:"download", kind:"scene"}`
+(then `transfer_chunk`/`transfer_finish`) and verifies the bytes against
+`document_sha256`. Omission only happens when the transfer surface exists
+(`studio_workspace_v1`); the diagnostics pipe cannot transfer, so a
+diagnostics reader sees metadata only for a large scene. SET_SCENE applies the same path as `--scene` (inline
 `effect.layers`, else the named `effect.preset` through the registry —
 unknown presets → `bad_request`), takes effect on the next 60 Hz tick, and
 emits a `scene` event.
@@ -309,7 +321,9 @@ counters alone cannot distinguish from "nothing submitted".
 **STATE** — `{engine:{running,scene_clock_hz,scene_sequence}, scene:{...},
 sdk:{...}, playback:{...}, power:{...}, reactive:{...}, ownership:{...}|null,
 ipc:{sessions_active, messages_in, responses_out, events_sent, events_dropped,
-queued_events, resync_bytes, rejected_hellos, rate_limited, refused_busy}}`.
+events_oversize, queued_events, resync_bytes, rejected_hellos, rate_limited,
+refused_busy}}`. `events_oversize` counts events whose body exceeded the
+1 MiB cap and were never sent (they are in `events_dropped` too).
 
 **OWNERSHIP** (STATE/DIAGNOSTICS field, `null` when no ownership
 report is wired) — the Task-3.9 startup scan's verbatim,
@@ -615,7 +629,7 @@ telemetry stay live — the plan only gates document mutation.
 | `resource_get` | `{kind:device_type|effect, id:<preset id>}` | `{kind,id,found,document?,from_file?,packaged_default?}` — synchronous read of the effective resource (file-layer override over the packaged default); `found:false` when no layer resolves |
 | `job_status` | `{job_id}` | job status record (below) |
 | `job_cancel` | `{job_id}` | `{cancelled:true,job_id}` / ERROR |
-| `transfer_begin` | `{direction:"upload",kind,length,sha256}` / `{direction:"download",kind,id}` | upload: `{transfer_id,max_chunk_bytes}`; download: `{transfer_id,length,sha256,max_chunk_bytes}` — client-supplied paths are never accepted; staging is server-named inside the managed root |
+| `transfer_begin` | `{direction:"upload",kind,length,sha256}` / `{direction:"download",kind,id}` / `{direction:"download",kind:"scene"}` | upload: `{transfer_id,max_chunk_bytes}`; download: `{transfer_id,length,sha256,max_chunk_bytes}` (`kind:"scene"` stages the APPLIED scene document — the bytes SCENE's `document_sha256` names — and adds `revision`; `unavailable`+`no_scene` when none is loaded) — client-supplied paths are never accepted; staging is server-named inside the managed root |
 | `transfer_chunk` | `{transfer_id,offset,data:<base64>}` (upload) / `{transfer_id,offset,max_bytes?}` (download) | upload: `{offset,received}`; download: `{offset,data:<base64>,eof}` — ordered, ≤192 KiB decoded per chunk |
 | `transfer_finish` | `{transfer_id}` | `{finished:true,staged?,bytes?}` — upload verifies declared length + SHA-256 before minting the `staged` token |
 | `transfer_cancel` | `{transfer_id}` | `{cancelled:true}` |
@@ -755,7 +769,10 @@ revision/content_sha256). The per-session transfer bound counts OPEN
 serving its `staged` token to this session's jobs without holding a
 stream slot (idle expiry and `transfer_cancel` still reclaim it). Document/type/look content moves ONLY
 through transfers — the 1 MiB envelope bound is never expanded to fit
-a scene or a binary asset.
+a scene or a binary asset. The one inline exception is a SMALL applied
+scene document in SCENE bodies (≤ 256 KiB, kept for legacy clients);
+anything larger is announced by `document_sha256` and fetched with a
+`kind:"scene"` download.
 
 ## 6. Diagnostics channel (read-only by construction)
 
@@ -781,7 +798,7 @@ matches the corresponding pull body:
 | kind | data | emitted |
 | --- | --- | --- |
 | `topology` | SNAPSHOTS body | snapshot list / generation / connection change |
-| `scene` | SCENE body | scene applied (SET_SCENE or --scene) |
+| `scene` | SCENE body (a large `document` is omitted — fetch it by `document_sha256`, §5) | scene applied (SET_SCENE or --scene) |
 | `playback` | PLAYBACK body | requested-mode or applied-status change |
 | `connection` | `sdk` object | SDK link state change |
 | `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |

@@ -780,6 +780,38 @@ IpcReply WorkspaceCommands::HandleTransferBegin(
         }));
     }
 
+    if(direction == "download" && kind == "scene")
+    {
+        /* Audit I-4: the APPLIED scene document — SCENE/STATE/
+           WELCOME announce it by revision + document_sha256
+           and never inline a large one. Staged as a document
+           download (same bounds); the reply echoes the
+           revision so a client can match it to the SCENE body
+           it is completing. */
+        const SceneSource src =
+            scene_source_ ? scene_source_() : SceneSource{};
+        if(!src.bytes)
+        {
+            return FailDetail(ErrCode::Unavailable,
+                              "no scene is loaded", "no_scene");
+        }
+        const WorkspaceTransfer::BeginResult r =
+            transfers_.StageDownload(session_id, "document",
+                                     *src.bytes);
+        if(!r.ok)
+        {
+            return FailDetail(ErrCode::BadRequest, r.error, r.detail);
+        }
+        return IpcReply::Success(MsgType::Ok, nlohmann::json::object({
+            { "transfer_id",     r.transfer_id                    },
+            { "length",          r.length                         },
+            { "sha256",          r.sha256                         },
+            { "revision",        src.revision                     },
+            { "max_chunk_bytes", transfers_.TransferOptions()
+                                     .max_chunk_decoded_bytes   },
+        }));
+    }
+
     if(direction == "download")
     {
         /* Bounded document read materialized for staged
@@ -1627,6 +1659,11 @@ void WorkspaceCommands::PollPreviews(TimePoint now)
 ||   src/engine/CalibrationSession.*; this layer only      ||
 ||   validates, binds, and reports the honest status.      ||
 \*---------------------------------------------------------*/
+
+void WorkspaceCommands::SetSceneSource(std::function<SceneSource()> fn)
+{
+    scene_source_ = std::move(fn);
+}
 
 void WorkspaceCommands::SetCalibrationDeps(CalibrationDeps deps)
 {

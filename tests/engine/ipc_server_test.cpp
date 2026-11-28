@@ -550,6 +550,29 @@ int main()
         CHECK(b["data"]["initial"].get<bool>() == true);
     }
 
+    /*---- audit I-4: an over-cap event is counted, never
+       silently lost ----------------------------------------*/
+    {
+        ScriptedService svc;
+        IpcServer server(svc);
+        TestClient c;
+        server.Serve(c.MakeChannel(), ChannelKind::Command);
+        c.Hello();
+        Message m;
+        CHECK(c.RecvMsg(m, 5000));
+        c.SendMsg(MsgType::Subscribe, 70,
+                  nlohmann::json::object({{"events", "all"}}));
+        CHECK(c.RecvMsg(m, 5000));
+        CHECK(m.type == MsgType::Ok);
+        const IpcServerStats before = server.Stats();
+        server.Emit(IpcEvent{ event_kind::kScene,
+            nlohmann::json::object({
+                { "pad", std::string(kMaxBodyBytes + 16, 'x') } }) });
+        const IpcServerStats after = server.Stats();
+        CHECK(after.events_oversize == before.events_oversize + 1);
+        CHECK(after.events_dropped  == before.events_dropped + 1);
+    }
+
     /*---- event queue bound ---------------------------------*/
     {
         IpcServerOptions opts;

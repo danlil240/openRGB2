@@ -87,6 +87,17 @@ struct EngineServiceOptions
         size_t   display_budget_leds = 4096;
     };
     PreviewOptions preview;
+
+    /* Audit I-4: the serialized scene document rides inline in
+       SCENE/STATE/WELCOME/DIAGNOSTICS bodies only up to this
+       many bytes. Larger documents are announced by revision,
+       name and document_sha256 (document:null +
+       document_omitted:true) and served through a `scene`
+       download transfer — a big scene can never push WELCOME
+       past the 1 MiB body cap again. Only applies when the
+       transfer surface exists (Deps::workspace wired); without
+       it the document stays inline. 0 = always out of band. */
+    size_t scene_inline_max_bytes = 256u * 1024u;
 };
 
 class EngineService final : public IIpcService
@@ -344,6 +355,22 @@ private:
     mutable std::mutex  mutex_;
     std::shared_ptr<const studio::SceneDocument> scene_;
     uint64_t            scene_revision_  = 0;
+    /* The applied document's serialized forms, built once per
+       scene revision (audit I-4): the JSON inlined into small
+       SCENE bodies, the bytes a `scene` download serves, and
+       their SHA-256 (document_sha256). Under mutex_; built
+       outside it. */
+    struct SceneDocForms
+    {
+        uint64_t revision = 0;
+        std::shared_ptr<const studio::SceneDocument> doc;
+        std::shared_ptr<const nlohmann::json>        json;
+        std::shared_ptr<const std::string>           bytes;
+        std::string                                  sha256;
+    };
+    mutable std::shared_ptr<const SceneDocForms> scene_forms_;
+    /* The current scene's forms (null when none is loaded). */
+    std::shared_ptr<const SceneDocForms> SceneForms() const;
     PlaybackMode        requested_mode_  = PlaybackMode::LiveEffects;
     TimePoint           started_;
 
