@@ -686,6 +686,149 @@ static void TestPauseStop()
 }
 
 /*---------------------------------------------------------*\
+|| R-1: the tray's hold/blackout routed to an uploaded loop ||
+|| (OutputControl -> SetUserOverride): uploaded loops are   ||
+|| never scaled, so hold = Paused and Off = Stopped (stop-  ||
+|| black); release restores the control the user had.       ||
+\*---------------------------------------------------------*/
+
+static void StartActiveLoop(Harness& h, const DeviceSnapshot& ws,
+                            const DeviceSnapshot& wd,
+                            const PlaybackParams& params)
+{
+    h.backend.snaps = { ws, wd };
+    h.pipeline.RegisterDevice(ws);
+    h.pipeline.RegisterDevice(wd);
+    h.scene = MakeScene("rainbow", "rainbow_wave");
+    h.backend.report.name  = "Direct";
+    h.backend.report.valid = true;
+    h.ctl->Request(PlaybackMode::AnimationPlayback,
+                   PlaybackControl::Playing, params);
+    h.ReportPending();
+    h.Poll();
+}
+
+static void TestUserOverride()
+{
+    PlaybackParams params;
+    params.speed = 100;
+
+    /* Live mode: nothing to route (the worker hold and the
+       mapper scale cover live output) — no backend traffic. */
+    {
+        Harness h;
+        h.backend.snaps = { WirelessSnap(), WiredSnap() };
+        h.scene = MakeScene("rainbow", "rainbow_wave");
+        PlaybackController::Result r = h.ctl->SetUserOverride(true, false);
+        CHECK(r.accepted);
+        CHECK(h.backend.selects.empty());
+        CHECK(h.backend.custom_calls == 0);
+        CHECK(h.ctl->UserOverrideActive());
+        r = h.ctl->SetUserOverride(false, false);
+        CHECK(r.accepted);
+        CHECK(!h.ctl->UserOverrideActive());
+        CHECK(h.backend.custom_calls == 0);
+    }
+
+    /* Uploaded loop: hold -> Paused, Off -> Stopped (black),
+       release -> Playing again (re-upload + ack). */
+    {
+        Harness h;
+        const DeviceSnapshot ws = WirelessSnap();
+        const DeviceSnapshot wd = WiredSnap();
+        StartActiveLoop(h, ws, wd, params);
+        CHECK(h.ctl->Status().upload == UploadState::Active);
+        const size_t persisted = h.ctl->PersistedScenes();
+
+        PlaybackController::Result r = h.ctl->SetUserOverride(true, false);
+        CHECK(r.accepted);
+        CHECK(h.ctl->Status().control == PlaybackControl::Paused);
+        CHECK(h.backend.direct.size() == 1);        /* hold frame */
+
+        h.pipeline.SubmitLatest(FrameFor(wd, 250, h.Red()));
+        CHECK(h.pipeline.DrainDue(wd.key, h.now) == 1);
+        r = h.ctl->SetUserOverride(true, true);     /* Off wins */
+        CHECK(r.accepted);
+        CHECK(h.ctl->Status().control == PlaybackControl::Stopped);
+        CHECK(AllBlack(h.backend.direct.back().colors));
+        h.pipeline.DrainDue(wd.key, h.now);
+        CHECK(AllBlack(h.transport.frames.back().colors));
+
+        /* Off released, hold still on -> back to Paused. */
+        r = h.ctl->SetUserOverride(true, false);
+        CHECK(r.accepted);
+        CHECK(h.ctl->RequestedMode() == PlaybackMode::AnimationPlayback);
+
+        /* Full release -> the prior control (Playing). */
+        r = h.ctl->SetUserOverride(false, false);
+        CHECK(r.accepted);
+        h.ReportPending();
+        h.Poll();
+        CHECK(h.ctl->Status().control == PlaybackControl::Playing);
+        CHECK(h.ctl->Status().upload == UploadState::Active);
+        CHECK(h.ctl->RequestedMode() == PlaybackMode::AnimationPlayback);
+        /* The per-scene selection (mode + params) is untouched —
+           the override is runtime state, never persisted. */
+        CHECK(h.ctl->PersistedScenes() == persisted);
+        CHECK(!h.ctl->UserOverrideActive());
+    }
+
+    /* A loop the user had paused: Off then release returns to
+       Paused, not Playing. */
+    {
+        Harness h;
+        const DeviceSnapshot ws = WirelessSnap();
+        const DeviceSnapshot wd = WiredSnap();
+        StartActiveLoop(h, ws, wd, params);
+        h.ctl->Request(PlaybackMode::AnimationPlayback,
+                       PlaybackControl::Paused, params);
+        CHECK(h.ctl->Status().control == PlaybackControl::Paused);
+        CHECK(h.ctl->SetUserOverride(false, true).accepted);
+        CHECK(h.ctl->Status().control == PlaybackControl::Stopped);
+        const size_t selects = h.backend.selects.size();
+        CHECK(h.ctl->SetUserOverride(false, false).accepted);
+        CHECK(h.ctl->Status().control == PlaybackControl::Paused);
+        CHECK(h.backend.selects.size() == selects); /* no re-upload */
+    }
+
+    /* The user took over while the override was engaged: the
+       release does not revert the user's own later choice. */
+    {
+        Harness h;
+        const DeviceSnapshot ws = WirelessSnap();
+        const DeviceSnapshot wd = WiredSnap();
+        StartActiveLoop(h, ws, wd, params);
+        CHECK(h.ctl->SetUserOverride(true, false).accepted);
+        CHECK(h.ctl->Status().control == PlaybackControl::Paused);
+        h.ctl->Request(PlaybackMode::AnimationPlayback,
+                       PlaybackControl::Stopped, params);
+        CHECK(h.ctl->Status().control == PlaybackControl::Stopped);
+        CHECK(h.ctl->SetUserOverride(false, false).accepted);
+        CHECK(h.ctl->Status().control == PlaybackControl::Stopped);
+    }
+
+    /* Busy: an override that lands while a transition is in
+       flight is retried by the next Poll, never lost. */
+    {
+        Harness h;
+        const DeviceSnapshot ws = WirelessSnap();
+        const DeviceSnapshot wd = WiredSnap();
+        StartActiveLoop(h, ws, wd, params);
+        CHECK(h.ctl->Status().upload == UploadState::Active);
+        /* Another thread's transition holds the serialization
+           flag (modelled through the test hook). */
+        h.ctl->SetTransitionBusyForTesting(true);
+        const PlaybackController::Result busy =
+            h.ctl->SetUserOverride(true, false);
+        CHECK(!busy.accepted);
+        CHECK(h.ctl->Status().control == PlaybackControl::Playing);
+        h.ctl->SetTransitionBusyForTesting(false);
+        h.Poll();
+        CHECK(h.ctl->Status().control == PlaybackControl::Paused);
+    }
+}
+
+/*---------------------------------------------------------*\
 || T6: clock wrap/reset/stale -> unavailable; bounded drift ||
 \*---------------------------------------------------------*/
 
@@ -1229,6 +1372,7 @@ int main()
     TestPersistence();
     TestRevisions();
     TestPauseStop();
+    TestUserOverride();
     TestClock();
     TestPipelineSuppression();
     TestFailedRestore();

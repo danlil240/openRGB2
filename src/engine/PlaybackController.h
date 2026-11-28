@@ -307,6 +307,28 @@ public:
     void   SetOutputHold(bool held);
     bool   OutputHold() const;
 
+    /*---- R-1 — the user's runtime output override -----------*\
+    || OutputControl's hold/blackout routed to an uploaded      ||
+    || loop. Uploaded loops are never scaled by the master       ||
+    || (PlaybackParams has no brightness), so:                   ||
+    ||   blackout -> control Stopped (stop-black)                ||
+    ||   hold     -> control Paused                              ||
+    ||   release  -> the control the user had when the override ||
+    ||               engaged — unless the user changed it while  ||
+    ||               engaged (their later choice is kept).       ||
+    || Live mode routes nothing (the worker hold and the mapper  ||
+    || scale own live output) and returns accepted. The request  ||
+    || goes through Request(), so the power gate / calibration   ||
+    || parking applies; it never touches the per-scene store     ||
+    || (control is not persisted). A request refused because a   ||
+    || transition is in flight is retried by the next Poll().    ||
+    \*---------------------------------------------------------*/
+    Result SetUserOverride(bool hold, bool blackout);
+    bool   UserOverrideActive() const;
+    /* Test hook: holds the transition-serialization flag as a
+       concurrent request would. */
+    void   SetTransitionBusyForTesting(bool busy);
+
     /* Suspend/reconnect recovery (plan section 3.4: recovery
        revalidates identity before restoring playback):
        Phase 1 — RefreshStatus + re-resolve the owned group's
@@ -461,6 +483,16 @@ private:
        revert it (Task 5.4). */
     bool               hold_overridden_  = false;
     uint64_t           epoch_            = 0;      /* request gen */
+    /* R-1 user override (SetUserOverride): the requested flags,
+       the control to restore on release, the control the
+       override last asked for, and a busy-retry latch. */
+    bool               ovr_hold_         = false;
+    bool               ovr_blackout_     = false;
+    bool               ovr_engaged_      = false;
+    PlaybackControl    ovr_prior_        = PlaybackControl::Playing;
+    PlaybackControl    ovr_applied_      = PlaybackControl::Playing;
+    bool               ovr_applied_valid_= false;
+    bool               ovr_retry_        = false;
 
     /* The owned wireless group + its upload geometry. */
     bool               has_wireless_    = false;
