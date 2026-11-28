@@ -41,10 +41,7 @@ void WorkspaceEditSession::LoadApplied(
     const studio::StudioDocument& doc,
     uint64_t workspace_revision, uint64_t resource_revision)
 {
-    if(editor_.GestureActive())
-    {
-        editor_.Cancel();
-    }
+    editor_.CancelGestures();
     baseline_     = doc;
     working_      = doc;
     has_baseline_ = true;
@@ -59,10 +56,7 @@ void WorkspaceEditSession::ApplyRemote(
     const studio::StudioDocument& doc,
     uint64_t workspace_revision, uint64_t resource_revision)
 {
-    if(editor_.GestureActive())
-    {
-        editor_.Cancel();
-    }
+    editor_.CancelGestures();
     /* Dirtiness is measured BEFORE the baseline moves — a
        clean draft tracks the new document; a dirty draft is
        preserved verbatim against the moved baseline. */
@@ -94,10 +88,7 @@ void WorkspaceEditSession::AdoptCommitted(
 void WorkspaceEditSession::LoadDraft(
     const studio::StudioDocument& draft)
 {
-    if(editor_.GestureActive())
-    {
-        editor_.Cancel();
-    }
+    editor_.CancelGestures();
     working_     = draft;
     has_working_ = true;
     /* Baseline + revisions unchanged — a recovered record is
@@ -173,10 +164,7 @@ bool WorkspaceEditSession::CommitDocEdit(
     {
         return false;
     }
-    if(editor_.GestureActive())
-    {
-        editor_.Cancel();
-    }
+    editor_.CancelGestures();
     const studio::StudioDocument before = working_;
     if(!mutate(working_))
     {
@@ -236,14 +224,14 @@ bool WorkspaceEditSession::SetMeta(
 
 bool WorkspaceEditSession::Undo()
 {
-    if(undo_.empty())
+    /* Refused while a layer gesture is open (slider held, stop
+       dragged): its begin snapshot predates the undo, so the
+       release would record the undone edit back (audit C-6). */
+    if(undo_.empty() || editor_.LayerGestureActive())
     {
         return false;
     }
-    if(editor_.GestureActive())
-    {
-        editor_.Cancel();
-    }
+    editor_.CancelGestures();
     HistoryEntry e = std::move(undo_.back());
     undo_.pop_back();
     history_bytes_ -= e.bytes;
@@ -254,14 +242,11 @@ bool WorkspaceEditSession::Undo()
 
 bool WorkspaceEditSession::Redo()
 {
-    if(redo_.empty())
+    if(redo_.empty() || editor_.LayerGestureActive())
     {
         return false;
     }
-    if(editor_.GestureActive())
-    {
-        editor_.Cancel();
-    }
+    editor_.CancelGestures();
     HistoryEntry e = std::move(redo_.back());
     redo_.pop_back();
     history_bytes_ -= e.bytes;
@@ -272,10 +257,7 @@ bool WorkspaceEditSession::Redo()
 
 void WorkspaceEditSession::Discard()
 {
-    if(editor_.GestureActive())
-    {
-        editor_.Cancel();
-    }
+    editor_.CancelGestures();
     if(has_baseline_)
     {
         working_    = baseline_;

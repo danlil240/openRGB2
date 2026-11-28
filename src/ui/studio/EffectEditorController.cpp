@@ -452,6 +452,10 @@ void EffectEditorController::OnWorkspaceDraftEdited()
     RefreshModel();
     emit stackChanged();
     emit draftInputsChanged();
+    /* A discard/load/remote move cancels an open layer gesture
+       inside the session (EditorController::CancelGestures) —
+       gestureActive may have flipped without this adapter. */
+    emit gestureChanged();
 }
 
 void EffectEditorController::OnWorkspaceDraftChanged()
@@ -460,6 +464,7 @@ void EffectEditorController::OnWorkspaceDraftChanged()
     emit readyChanged();
     emit stackChanged();
     emit draftInputsChanged();
+    emit gestureChanged();
 }
 
 /*---------------------------------------------------------*\

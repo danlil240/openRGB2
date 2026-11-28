@@ -1839,6 +1839,12 @@ void EditorController::CancelLayerGesture()
     layer_gesture = LayerGesture{};
 }
 
+void EditorController::CancelGestures()
+{
+    Cancel();
+    CancelLayerGesture();
+}
+
 /*---------------------------------------------------------*\
 || Stack-level ops                                          ||
 \*---------------------------------------------------------*/

@@ -713,6 +713,82 @@ int main(int argc, char** argv)
               0.1f);
     }
 
+    std::printf("-- session: a live layer gesture blocks undo and "
+                "dies with the document (audit C-6)\n");
+    {
+        /* An authored stack so layer ops need no resolver. */
+        auto with_layer = [](const std::string& name, float speed)
+        {
+            studio::StudioDocument d = ParseCompact(CompactDoc(name));
+            studio::EffectLayer l;
+            l.primitive = "wave";
+            l.speed     = speed;
+            d.effect.layers = { l };
+            return d;
+        };
+        using LF = studio::EditorController::LayerField;
+
+        /* Hold a slider, press Ctrl+Z, release: the undo is
+           refused while the gesture is open, so the release
+           records only the scrub and one undo takes it back. */
+        WorkspaceEditSession s;
+        s.LoadApplied(with_layer("desk", 1.0f), 1, 1);
+        auto op = s.Editor().SetLayerOpacity(0, 0.5f);
+        CHECK(op.has_value() && s.CommitEdit(*op));
+        CHECK(s.Editor().BeginLayerGesture());
+        s.Editor().SetLayerField(0, LF::Speed, 3.0);
+        CHECK(!s.Undo());
+        CHECK(!s.Redo());
+        CHECK(s.Editor().LayerGestureActive());
+        CHECK(s.UndoCount() == 1);
+        auto g = s.Editor().CommitLayerGesture("scrub");
+        CHECK(g.has_value() && s.CommitEdit(*g));
+        CHECK(s.UndoCount() == 2);
+        CHECK(s.Undo());
+        CHECK(s.Working().effect.layers[0].speed == 1.0f);
+        CHECK(s.Working().effect.layers[0].opacity == 0.5f);
+        CHECK(s.Undo());
+        CHECK(s.Working().effect.layers[0].opacity == 1.0f);
+
+        /* Every document swap cancels an open layer gesture
+           BEFORE the swap, so its begin snapshot can never be
+           restored over (or recorded against) the new document. */
+        struct Swap { const char* what; std::function<void(
+            WorkspaceEditSession&)> run; };
+        const studio::StudioDocument other = with_layer("other", 7.0f);
+        const std::vector<Swap> swaps = {
+            { "LoadApplied", [&](WorkspaceEditSession& x) {
+                  x.LoadApplied(other, 2, 2); } },
+            { "ApplyRemote", [&](WorkspaceEditSession& x) {
+                  x.ApplyRemote(other, 2, 2); } },
+            { "LoadDraft",   [&](WorkspaceEditSession& x) {
+                  x.LoadDraft(other); } },
+            { "Discard",     [&](WorkspaceEditSession& x) {
+                  x.Discard(); } },
+            { "StageWorking", [&](WorkspaceEditSession& x) {
+                  x.StageWorking(other, "load profile"); } },
+        };
+        for(const Swap& sw : swaps)
+        {
+            WorkspaceEditSession x;
+            x.LoadApplied(with_layer("desk", 1.0f), 1, 1);
+            CHECK(x.Editor().BeginLayerGesture());
+            x.Editor().SetLayerField(0, LF::Speed, 3.0);
+            sw.run(x);
+            const bool cancelled = !x.Editor().LayerGestureActive();
+            if(!cancelled)
+            {
+                std::printf("  gesture survived %s\n", sw.what);
+            }
+            CHECK(cancelled);
+            CHECK(!x.Editor().CommitLayerGesture("late").has_value());
+            const float want =
+                std::string(sw.what) == "Discard" ? 1.0f : 7.0f;
+            CHECK(x.Working().effect.layers.size() == 1
+                  && x.Working().effect.layers[0].speed == want);
+        }
+    }
+
     std::printf("-- session: doc edits + discard\n");
     {
         WorkspaceEditSession s;
