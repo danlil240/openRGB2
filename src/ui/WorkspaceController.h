@@ -322,6 +322,8 @@ public:
     /* Poll job_status for the tracked pending job — the
        lost-event reconcile path. */
     void PollPendingJobForTesting();
+    /* Job watchdog interval (ms) — default 5000. */
+    void setJobWatchdogForTesting(int ms);
 
 signals:
     void availabilityChanged();
@@ -390,6 +392,27 @@ private:
     /*---- job bookkeeping ------------------------------------*/
     void OnJobEvent(const QVariantMap& ev);
     void ResolveJob(const QVariantMap& st);
+    /* Audit U-7 — job terminals that can never latch:
+       NoteJobRevisions applies a terminal record's revisions
+       (our workspace only) and reports whether they moved;
+       ClaimJob takes `job` off the save/tracked bookkeeping
+       (false when it is not ours, or already resolved);
+       OnForeignJob is the not-ours path (rebase or refetch). */
+    bool NoteJobRevisions(const QVariantMap& ev);
+    bool ClaimJob(quint64 job);
+    void OnForeignJob(const QVariantMap& ev, bool revs_moved);
+    /* An accept reply for a job request is still in flight —
+       an unknown terminal may be that job's. */
+    bool AwaitingJobAccept() const;
+    /* Resolve a buffered early terminal for `job`, if any. */
+    void TakeEarlyTerminal(quint64 job);
+    /* No accept outstanding: the buffered terminals were
+       foreign after all. */
+    void DrainEarlyTerminals();
+    void OnJobStatusReply(quint64 job, const QVariantMap& body,
+                          bool ok);
+    void JobWatchdogTick();
+    void ArmJobWatchdog();
     void SetError(const QString& e, const QString& source);
     void SetStatus(const QString& s);
     void SetConflict(bool on, const QString& why = QString());
@@ -460,6 +483,26 @@ private:
     /* job_id -> purpose for terminal workspace events not part
        of the save flow (import/export/reload). */
     std::map<uint64_t, QString> tracked_jobs_;
+    /* Verb of pending_job_id_ (commit/save_copy) — a job the
+       engine no longer reports resolves as THAT verb failing. */
+    QString     pending_job_verb_;
+    /* Audit U-7: terminal events for job ids not known yet,
+       held while an accept reply is in flight (the event can
+       overtake it). Bounded; replayed as foreign once no accept
+       is outstanding. */
+    struct EarlyTerminal
+    {
+        QVariantMap ev;
+        bool        revs_moved = false;
+    };
+    std::map<quint64, EarlyTerminal> early_terminals_;
+    static constexpr size_t kMaxEarlyTerminals = 16;
+    /* Watchdog: while any job is outstanding, poll job_status
+       so a lost terminal event can never latch saving/import/
+       export. One in-flight poll per job. */
+    QTimer      job_watchdog_;
+    int         job_watchdog_ms_ = 5000;
+    std::set<quint64> job_polls_;
 
     /* Task 9 bundle import — the staged upload token + target
        name between import_inspect and confirmImport (the
@@ -602,7 +645,6 @@ private:
     void OnJobReply(int request_id, const QString& verb,
                     const QVariantMap& body, bool ok,
                     const QString& message);
-    void OnJobStatusReply(const QVariantMap& body, bool ok);
     void OnDownloadReply(const QString& stage,
                          const QVariantMap& body, bool ok,
                          const QString& message);
