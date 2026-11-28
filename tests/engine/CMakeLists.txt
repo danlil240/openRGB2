@@ -33,6 +33,14 @@ set_tests_properties(crash_dump_test PROPERTIES
     TIMEOUT 120
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# R-9 — the backend supervisor's pure decision table on a fake
+# clock (dead link, 8-min wedge, foreign_master never escalates,
+# budgets/backoff, foreign port/exe refusals) + the spawn-argument
+# parity with packaging/windows/start-openrgb2.ps1.
+engine_suite(supervisor_policy_test)
+target_compile_definitions(supervisor_policy_test PRIVATE
+    OPENRGB2_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
 # R-1 — tray quick controls: the runtime output overrides (master,
 # blackout, hold, contributor arbitration, persistence types).
 engine_suite(output_control_test)

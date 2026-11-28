@@ -47,6 +47,7 @@ add_library(openrgb2_engine STATIC
     WorkspaceService.cpp
     SingleInstance.cpp
     OwnershipScan.cpp
+    SupervisorPolicy.cpp
     Engine.cpp
     ${CORE_DIR}/playback/PlaybackLoop.cpp
     ${LLW_CTRL}/LianLiWirelessEffects.cpp
