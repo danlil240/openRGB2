@@ -30,7 +30,10 @@
 #include <QJSValue>
 #include <QQmlComponent>
 #include <QQmlEngine>
+#include <QKeyEvent>
+#include <QQuickItem>
 #include <QQuickStyle>
+#include <QQuickWindow>
 #include <QSignalSpy>
 
 #include <cstdio>
@@ -489,6 +492,87 @@ int main(int argc, char** argv)
                              QVariantMap({{ "old", "new" }}));
             const QVariant ch = callv(dlg, "collectChoices");
             CHECK(ch.toMap().value("old").toString() == "new");
+
+            /* Audit Q-13, in a window so the popup really opens
+               and closes. */
+            QQuickWindow win;
+            win.resize(800, 700);
+            dlg->setProperty("parent",
+                QVariant::fromValue(win.contentItem()));
+            win.show();
+            QMetaObject::invokeMethod(dlg, "open");
+            QCoreApplication::processEvents();
+            auto cancelled = [&] {
+                return stub.property("_calls").property("cancelled")
+                           .toInt();
+            };
+            /* (1) closing mid-operation (Escape, Close, outside)
+               releases the staged inspect — the Close button did,
+               Escape did not. */
+            if(pf)
+            {
+                pf->setProperty("text",
+                                "C:/bundles/desk.or2studio");
+                QMetaObject::invokeMethod(dlg, "readAndInspect");
+                CHECK(dlg->property("phase").toString()
+                      == "inspecting");
+                const int before = cancelled();
+                QMetaObject::invokeMethod(dlg, "close");
+                QCoreApplication::processEvents();
+                CHECK(cancelled() == before + 1);
+            }
+            QMetaObject::invokeMethod(dlg, "open");
+            QCoreApplication::processEvents();
+
+            /* (2) "done" is quiescent — another import and the
+               export path stay reachable without a reopen. */
+            QObject* ib = dlg->findChild<QObject*>("inspectBtn");
+            QObject* eb = dlg->findChild<QObject*>("exportBtn");
+            QObject* ef = dlg->findChild<QObject*>("exportPathField");
+            CHECK(ib && eb && ef && pf);
+            if(ib && eb && ef && pf)
+            {
+                pf->setProperty("text", "C:/bundles/next.or2studio");
+                ef->setProperty("text", "C:/out/desk.or2studio");
+                dlg->setProperty("phase", "done");
+                QCoreApplication::processEvents();
+                CHECK(pf->property("enabled").toBool());
+                CHECK(ib->property("enabled").toBool());
+                CHECK(ef->property("enabled").toBool());
+                CHECK(eb->property("enabled").toBool());
+                QMetaObject::invokeMethod(dlg, "readAndInspect");
+                CHECK(dlg->property("phase").toString()
+                      == "inspecting");
+            }
+
+            /* (3) "replace my layout" never carries over to the
+               next import. */
+            QObject* ob = dlg->findChild<QObject*>("overwriteBox");
+            CHECK(ob != nullptr);
+            if(ob)
+            {
+                ob->setProperty("checked", true);
+                QMetaObject::invokeMethod(dlg, "close");
+                QMetaObject::invokeMethod(dlg, "open");
+                QCoreApplication::processEvents();
+                CHECK(!ob->property("checked").toBool());
+            }
+
+            /* (4) paths can be browsed, and a picked file URL
+               becomes a plain local path */
+            CHECK(dlg->findChild<QObject*>("importBrowseBtn"));
+            CHECK(dlg->findChild<QObject*>("exportBrowseBtn"));
+            QVariant lp;
+            QMetaObject::invokeMethod(dlg, "localPath",
+                Q_RETURN_ARG(QVariant, lp),
+                Q_ARG(QVariant, QVariant(QStringLiteral(
+                    "file:///C:/my%20bundles/desk.or2studio"))));
+            CHECK(lp.toString()
+                  == QStringLiteral("C:/my bundles/desk.or2studio"));
+
+            QMetaObject::invokeMethod(dlg, "close");
+            QCoreApplication::processEvents();
+            dlg->setProperty("parent", QVariant());
         }
     }
 
