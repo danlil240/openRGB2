@@ -1489,6 +1489,9 @@ IpcReply EngineService::OutputSetHold(const nlohmann::json& body)
 |||       — validate -> persist -> register; a chord the OS    ||
 |||         refuses reports state in_use / invalid in the body ||
 |||         (never a verb failure)                             ||
+|||   set_dimming {schedule?, lock?, idle?, ramp_ms?,          ||
+|||                restore_ms?} — R-4: REPLACES the rules      ||
+|||       (absent sections reset to off) and persists them     ||
 |||   The "automation" event for other subscribers comes from  ||
 |||   Automation's changed hook (EngineHost -> EmitAutomation).||
 \*---------------------------------------------------------*/
@@ -1498,6 +1501,8 @@ EngineService::AutomationVerbs()
     static const std::vector<AutomationVerb> verbs = {
         { "get",         &EngineService::AutomationGet        },
         { "set_hotkeys", &EngineService::AutomationSetHotkeys },
+        /* R-4: the schedule / lock / idle dimming rules. */
+        { "set_dimming", &EngineService::AutomationSetDimming },
     };
     return verbs;
 }
@@ -1612,6 +1617,23 @@ IpcReply EngineService::AutomationSetHotkeys(const nlohmann::json& body)
         return IpcReply::Fail(save ? ErrCode::Internal
                                    : ErrCode::BadRequest,
                               "set_hotkeys: " + err);
+    }
+    return IpcReply::Success(MsgType::Automation, AutomationJson());
+}
+
+IpcReply EngineService::AutomationSetDimming(const nlohmann::json& body)
+{
+    /* The flat body IS the rule set ({verb, schedule?, lock?,
+       idle?, ramp_ms?, restore_ms?}); the parser ignores "verb". */
+    DimmingConfig d;
+    std::string err;
+    if(!DimmingConfigFromJson(body, d, err))
+    {
+        return IpcReply::Fail(ErrCode::BadRequest, "set_dimming: " + err);
+    }
+    if(!deps_.automation->SetDimming(d, err))
+    {
+        return IpcReply::Fail(ErrCode::Internal, "set_dimming: " + err);
     }
     return IpcReply::Success(MsgType::Automation, AutomationJson());
 }

@@ -536,6 +536,7 @@ private:
                                            const nlohmann::json& body);
     IpcReply       AutomationGet(const nlohmann::json& body);
     IpcReply       AutomationSetHotkeys(const nlohmann::json& body);
+    IpcReply       AutomationSetDimming(const nlohmann::json& body);  /* R-4 */
     /* Null when no Automation is wired. */
     nlohmann::json AutomationJson() const;
     IpcReply       HandleIdentify(const nlohmann::json& body);

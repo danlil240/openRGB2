@@ -186,6 +186,63 @@ static void TestAutomationCommand()
           "AUTOMATION_COMMAND");
     CHECK(std::string(MsgTypeName(MsgType::Automation)) == "AUTOMATION");
     CHECK(uint16_t(MsgType::AutomationCommand) == 0x0110);
+
+    /*---- R-4 set_dimming ---------------------------------------*/
+    r = svc.Dispatch(MsgType::AutomationCommand,
+        nlohmann::json::object({{ "verb", "get" }}));
+    CHECK(r.body["dimming"]["configured"] == false);
+    CHECK(r.body["dimming"]["config"]["lock"]["enabled"] == false);
+    CHECK(r.body["dimming"]["active"]["idle"].is_null());
+
+    const size_t saves = saved.size();
+    r = svc.Dispatch(MsgType::AutomationCommand, nlohmann::json{
+        { "verb", "set_dimming" },
+        { "schedule", nlohmann::json::array({
+            { { "days", { 5, 6 } }, { "start", "23:30" },
+              { "end", "07:00" }, { "level", 0.3 } } }) },
+        { "lock", { { "enabled", true }, { "level", 0.0 } } },
+        { "idle", { { "enabled", true }, { "after_s", 300 },
+                    { "level", 0.2 } } },
+    });
+    CHECK(r.code == ErrCode::Ok && r.reply_type == MsgType::Automation);
+    CHECK(r.body["dimming"]["configured"] == true);
+    CHECK(r.body["dimming"]["config"]["schedule"][0]["start"] == "23:30");
+    CHECK(r.body["dimming"]["config"]["lock"]["enabled"] == true);
+    CHECK(r.body["dimming"]["config"]["idle"]["after_s"] == 300);
+    CHECK(r.body["dimming"]["config"]["idle"]["skip_fullscreen"] == true);
+    CHECK(r.body["dimming"]["config"]["ramp_ms"] == 600);
+    CHECK(saved.size() == saves + 1 && saved.back().dimming &&
+          saved.back().dimming->lock.enabled);
+    /* The hotkeys stayed as they were. */
+    CHECK(r.body["hotkeys"].size() == 2);
+
+    /* The body REPLACES the rules: absent sections reset. */
+    r = svc.Dispatch(MsgType::AutomationCommand, nlohmann::json{
+        { "verb", "set_dimming" },
+        { "idle", { { "enabled", true }, { "after_s", 60 } } },
+    });
+    CHECK(r.code == ErrCode::Ok);
+    CHECK(r.body["dimming"]["config"]["schedule"].empty());
+    CHECK(r.body["dimming"]["config"]["lock"]["enabled"] == false);
+
+    for(const nlohmann::json& bad : {
+            nlohmann::json{ { "verb", "set_dimming" },
+                            { "schedule", "nightly" } },
+            nlohmann::json{ { "verb", "set_dimming" },
+                            { "lock", { { "level", 2 } } } },
+            nlohmann::json{ { "verb", "set_dimming" },
+                            { "idle", { { "after_s", 1 } } } },
+            nlohmann::json{ { "verb", "set_dimming" },
+                            { "schedule", nlohmann::json::array({
+                                { { "start", "08:00" },
+                                  { "end", "08:00" },
+                                  { "level", 0.5 } } }) } } })
+    {
+        r = svc.Dispatch(MsgType::AutomationCommand, bad);
+        CHECK(r.code == ErrCode::BadRequest);
+    }
+    CHECK(automation.Config().dimming &&
+          automation.Config().dimming->idle.after_s == 60);
 }
 
 int main()

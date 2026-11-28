@@ -615,8 +615,10 @@ the table):
 
 Arbitration (decided once, engine-side):
 `effective = blackout ? 0 : master × min(contributors)`. Contributors
-are named runtime slots (R-4 `schedule` / `lock` / `idle`); R-1 sets
-none. Live lanes apply `effective` on the next worker tick (it
+are named runtime slots, set by the R-4 dimming rules (`schedule` /
+`lock` / `idle`, AUTOMATION_COMMAND `set_dimming`); `contributors`
+reports each slot's TARGET level (a slot ramping back up to release is
+already gone) while `effective` is the live, ramped scale. Live lanes apply `effective` on the next worker tick (it
 multiplies the document `brightness`; unmapped LEDs keep their
 colors). **Uploaded loops are not scaled** (playback params carry no
 brightness): `set_blackout` sends them control `stopped` (stop-black)
@@ -654,6 +656,7 @@ without automation → `unavailable`. Every verb replies **AUTOMATION**
 | verb | body | effect |
 | --- | --- | --- |
 | `get` | `{}` | read only |
+| `set_dimming` | `{schedule?:[{days?:[0..6], start:"HH:MM", end:"HH:MM", level}], lock?:{enabled?, level?}, idle?:{enabled?, after_s?, level?, skip_fullscreen?}, ramp_ms?, restore_ms?}` | R-4: **replaces** the dimming rules (an absent section returns to its default: no windows, lock/idle off) and persists them (`automation.dimming`). Days are 0 = Sunday .. 6 = Saturday (absent/empty = every day); a window with `start` > `end` crosses midnight and belongs to its start day; `start` = `end` is refused. Levels are scales in [0, 1] (0 = off); at most 8 windows; `after_s` 30 .. 86400; `ramp_ms` / `restore_ms` 0 .. 10000 (defaults 600 / 0). Any violation → `bad_request` (nothing changes); a failed profile save → `internal` |
 | `set_hotkeys` | `{bindings:[{action, chord}], cycle?:[workspace id], brightness_step?: 0.01..0.5}` | **replaces** the binding set, persists it (`engine-state.json` member `automation`) and registers it. `action` ∈ `next_workspace`, `prev_workspace`, `brightness_up`, `brightness_down`, `lights_toggle`, `pause_toggle`. `chord` is `"Ctrl+Alt+Shift+PgDn"`-style text (modifiers Ctrl/Alt/Shift/Win, case-insensitive; canonicalized in the reply). At least one of Ctrl/Alt/Win, no duplicate chord, at most 16 bindings; any violation → `bad_request` (nothing changes). `cycle` / `brightness_step` replace the stored value only when given. A failed profile save → `internal` (nothing changes) |
 
 A chord the OS refuses is **not** a verb failure: its entry reports
@@ -687,7 +690,39 @@ automation is wired — and `automation` event body) —
 
 `state` ∈ `ok`, `in_use`, `invalid` (also a persisted binding that no
 longer validates), `unavailable` (`registrar:false` — no hotkey
-registrar on this engine). R-3 and R-4 add sections to this body.
+registrar on this engine). R-3 adds a section to this body.
+
+R-4 adds `dimming`:
+
+```json
+"dimming": {
+  "config": { "schedule": [ { "days": [5, 6], "start": "23:30",
+                              "end": "07:00", "level": 0.3 } ],
+              "lock": { "enabled": true, "level": 0.0 },
+              "idle": { "enabled": true, "after_s": 600, "level": 0.3,
+                        "skip_fullscreen": true },
+              "ramp_ms": 600, "restore_ms": 0 },
+  "configured": true,
+  "active": { "schedule": 0.3, "lock": null, "idle": null },
+  "effective": 0.3, "session_locked": false }
+```
+
+`config` is the stored rule set (defaults, `configured:false`, until a
+`set_dimming`). `active` names each rule that holds now with its level
+(`null` = not active). Each active rule is an OutputControl contributor
+(`schedule`, `lock`, `idle` — the OUTPUT body's `contributors`), so
+`effective = master × min(active levels)`: overlapping rules give the
+strongest dim, never a product. A dim ramps down over `ramp_ms`; a rule
+that lifts ramps back over `restore_ms` (0 = at once). The schedule
+reads the engine's local wall clock (plain HH:MM — on a DST
+spring-forward day a start inside the skipped hour begins at the next
+valid minute); lock follows the interactive session's lock/unlock; idle
+is the time since the last keyboard/mouse input (GetLastInputInfo) and
+never counts while a fullscreen app runs (`skip_fullscreen`). A
+level-0 rule stops an uploaded loop like `set_blackout`; any other
+level leaves it running, unscaled (`uploaded_unscaled`). The body moves
+— and the `automation` event fires — when the config changes or a rule
+starts or stops holding.
 
 **REACTIVE** (STATE/DIAGNOSTICS field and `reactive` event body) —
 
@@ -1014,7 +1049,7 @@ matches the corresponding pull body:
 | `reactive` | REACTIVE body | input enable/running/pause/status or display-list change |
 | `ownership` | OWNERSHIP body (§ STATE) | R-10: the periodic competitor re-scan (~5 s) found a writer appear or clear; SUBSCRIBE initial push carries the current report (`null` when none is wired) |
 | `output` | OUTPUT body (§5) | R-1: once per OUTPUT_COMMAND change (any session), and when `uploaded_unscaled` flips with the playback mode; SUBSCRIBE initial push carries the current body (`null` when no control is wired) |
-| `automation` | AUTOMATION body (§5) | R-2: once per AUTOMATION_COMMAND change (any session) and at engine start when persisted bindings register; SUBSCRIBE initial push carries the current body (`null` when not wired). A hotkey press itself is reported through the event of what it changed (`output`, `workspace`) |
+| `automation` | AUTOMATION body (§5) | R-2: once per AUTOMATION_COMMAND change (any session), at engine start when persisted bindings register, and (R-4) when a dimming rule starts or stops holding; SUBSCRIBE initial push carries the current body (`null` when not wired). A hotkey press itself is reported through the event of what it changed (`output`, `workspace`) |
 | `frame_status` | `{aggregate, wireless, controllers:[{key,delivered,lane,wireless,suppressed,owned,pending,sequence,colors,stats}]}` | ≤ ~30 Hz, only when delivery counters moved; `colors` are the last transport-accepted frame per controller — the same sampled colors output uses. `wireless` is the wireless lane's own `{key,stats,suppressed,pending,owned}` summary (`null` when no wireless lane exists — the `aggregate` mixes wired lanes and is never a wireless measure). Every enumerated controller produces a `controllers` row: a lane that never delivered reports `delivered:false` + zeroed `stats` + empty `colors` (`lane:false` when the pipeline has no lane for it) — a "bound but never delivered" controller is a visible row, not an absent one |
 | `workspace` | `get` body (initial snapshot AND published-state change) / job status record (terminal job event) | SUBSCRIBE initial push; every published-state change (adopt, commit, restore, resource install/remove) — so a session whose snapshot raced boot re-adoption re-converges; a workspace job reaching a terminal state |
 | `preview` | `{type:"status"\|"frame", ...}` (below) | ≤ 30 Hz, **session-targeted** — delivered only to the session that owns the preview, never broadcast |

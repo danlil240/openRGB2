@@ -1086,6 +1086,45 @@ static void TestAutomationPersistence()
     CHECK(saved["automation"]["profiles"][0]["exe"] == "game.exe");
     CHECK(saved["future_key"] == 42);
 
+    /* R-4: the dimming rules ride automation.dimming. */
+    {
+        AutomationConfig dc;
+        dc.hotkeys = { { "lights_toggle", "Ctrl+Alt+Shift+End" } };
+        DimmingConfig dim;
+        dim.lock.enabled = true;
+        dim.lock.level   = 0.0f;
+        DimWindow w;
+        w.days      = { 0, 6 };
+        w.start_min = 23 * 60 + 30;
+        w.end_min   = 7 * 60;
+        w.level     = 0.3f;
+        dim.schedule = { w };
+        dc.dimming = dim;
+        ProfileStore            ds(Path("automation-dimming.json"));
+        EngineState             st;
+        st.automation = dc;
+        CHECK(ds.Save(st, err));
+        ProfileStore::LoadResult dl = ds.Load();
+        CHECK(dl.status == ProfileStore::LoadStatus::Loaded);
+        CHECK(dl.state.automation && dl.state.automation->dimming &&
+              *dl.state.automation->dimming == dim);
+        /* A malformed dimming section is dropped with a warning;
+           the hotkeys beside it survive. */
+        WriteText(Path("automation-dimming-bad.json"),
+                  "{ \"schema_version\": 1, \"scenes\": [], "
+                  "\"bindings\": {}, \"automation\": { \"hotkeys\": "
+                  "[ { \"action\": \"lights_toggle\", \"chord\": "
+                  "\"Ctrl+Alt+End\" } ], \"dimming\": { \"idle\": "
+                  "{ \"after_s\": \"soon\" } } } }");
+        ProfileStore            db(Path("automation-dimming-bad.json"));
+        ProfileStore::LoadResult bl2 = db.Load();
+        CHECK(bl2.status == ProfileStore::LoadStatus::Loaded);
+        CHECK(bl2.state.automation &&
+              !bl2.state.automation->dimming &&
+              bl2.state.automation->hotkeys.size() == 1);
+        CHECK(!bl2.warnings.empty());
+    }
+
     /* Malformed: dropped with a warning, the document loads. */
     WriteText(Path("automation-bad.json"),
               "{ \"schema_version\": 1, \"scenes\": [], "
