@@ -414,6 +414,285 @@ static void TestEmpty()
     CHECK(LogitechPerKey8080Plan::ChunkGroups(empty_group, false).empty(), "an empty group sends nothing");
 }
 
+/*---------------------------------------------------------*\
+| Step 3: delta against sent_colors + forced full repaints. |
+\*---------------------------------------------------------*/
+static const RGBColor UNSENT = 0xFF000000;      /* HIDPP20_UNCOMMITTED */
+
+static std::vector<LogitechPerKey8080Frame> Delta(const std::vector<RGBColor>& snapshot, const LedMap& led_map,
+                                                  int brightness, bool kt40,
+                                                  const std::vector<RGBColor>& sent, bool force_full)
+{
+    return LogitechPerKey8080Plan::PlanLeds(snapshot, led_map, brightness, kt40, sent, force_full);
+}
+
+static std::vector<bool> AllWritten(const std::vector<LogitechPerKey8080Frame>& frames)
+{
+    return std::vector<bool>(frames.size(), true);
+}
+
+static size_t KeyCount(const std::vector<LogitechPerKey8080Frame>& frames)
+{
+    size_t n = 0;
+    for(const LogitechPerKey8080Frame& frame : frames)
+    {
+        n += frame.keys.size();
+    }
+    return n;
+}
+
+static void Board(size_t n, uint16_t key_type, std::vector<RGBColor>& snapshot, LedMap& led_map)
+{
+    snapshot.clear();
+    led_map.clear();
+    for(size_t i = 0; i < n; i++)
+    {
+        led_map.emplace_back(key_type, (uint8_t)(0x04 + i));
+        snapshot.push_back(ToRGBColor(i, 2 * i, 3 * i));
+    }
+}
+
+static void TestDeltaSendsOnlyChangedKeys()
+{
+    std::vector<RGBColor> snapshot;
+    LedMap                led_map;
+    Board(40, 0x0001, snapshot, led_map);
+
+    std::vector<RGBColor> sent;
+
+    /* First frame: sent is empty -> full repaint. */
+    std::vector<LogitechPerKey8080Frame> first = Delta(snapshot, led_map, 100, false, sent, false);
+    CHECK(LogitechPerKey8080Plan::IsFullRepaint(sent, snapshot.size(), false), "empty sent_colors is a full repaint");
+    CHECK(KeyCount(first) == 40, "first frame paints every key");
+
+    LogitechPerKey8080Plan::Settle(first, AllWritten(first), true, sent, snapshot.size(), UNSENT);
+    CHECK(sent == snapshot, "settle records what was committed");
+
+    /* Nothing changed: nothing to send. */
+    CHECK(Delta(snapshot, led_map, 100, false, sent, false).empty(), "an unchanged frame sends nothing");
+    CHECK(!LogitechPerKey8080Plan::IsFullRepaint(sent, snapshot.size(), false), "settled sent_colors is a delta");
+
+    /* Three keys change. */
+    snapshot[3]  = ToRGBColor(255, 0, 0);
+    snapshot[17] = ToRGBColor(0, 255, 0);
+    snapshot[39] = ToRGBColor(0, 0, 255);
+
+    std::vector<LogitechPerKey8080Frame> delta = Delta(snapshot, led_map, 100, false, sent, false);
+    CHECK(delta.size() == 1 && KeyCount(delta) == 3, "three changed keys -> one frame of three");
+
+    if(delta.size() == 1 && delta[0].keys.size() == 3)
+    {
+        CHECK(delta[0].key_type == 0x0001, "delta frame keeps the keyType");
+        CHECK(delta[0].keys[0].led == 3 && delta[0].keys[0].key_id == 0x04 + 3 &&
+              delta[0].keys[0].color == ToRGBColor(255, 0, 0), "changed key 3");
+        CHECK(delta[0].keys[1].led == 17 && delta[0].keys[2].led == 39, "changed keys 17 and 39, in LED order");
+    }
+
+    LogitechPerKey8080Plan::Settle(delta, AllWritten(delta), true, sent, snapshot.size(), UNSENT);
+    CHECK(sent == snapshot, "settled after the delta");
+    CHECK(Delta(snapshot, led_map, 100, false, sent, false).empty(), "settled delta sends nothing");
+
+    /* 20 changes of one keyType still chunk at 14. */
+    for(size_t i = 0; i < 20; i++)
+    {
+        snapshot[i * 2] = ToRGBColor(7, 7, 7);
+    }
+    std::vector<LogitechPerKey8080Frame> many = Delta(snapshot, led_map, 100, false, sent, false);
+    CHECK(many.size() == 2 && many[0].keys.size() == 14 && many[1].keys.size() == 6,
+          "20 changed keys -> 14 + 6");
+}
+
+static void TestDeltaFullRepaintTriggers()
+{
+    std::vector<RGBColor> snapshot;
+    LedMap                led_map;
+    Board(30, 0x0004, snapshot, led_map);
+    led_map[5] = std::make_pair((uint16_t)0, (uint8_t)0);   /* one unaddressable slot */
+
+    std::vector<Payload> legacy = LegacyFullUpdate(snapshot, led_map, 100, false);
+
+    std::vector<RGBColor> sent;
+    std::vector<LogitechPerKey8080Frame> first = Delta(snapshot, led_map, 100, false, sent, false);
+    LogitechPerKey8080Plan::Settle(first, AllWritten(first), true, sent, snapshot.size(), UNSENT);
+    CHECK(Delta(snapshot, led_map, 100, false, sent, false).empty(), "settled: nothing to send");
+
+    /* Refresh timer: force_full repaints everything, legacy bytes. */
+    CHECK(Encode(Delta(snapshot, led_map, 100, false, sent, true)) == legacy,
+          "a forced refresh is the pre-extraction full repaint");
+    CHECK(LogitechPerKey8080Plan::IsFullRepaint(sent, snapshot.size(), true), "force_full is a full repaint");
+
+    /* sent_colors.clear() (SetupZones, Direct, ReapplyActiveMode, reconnect). */
+    std::vector<RGBColor> cleared;
+    CHECK(Encode(Delta(snapshot, led_map, 100, false, cleared, false)) == legacy,
+          "after clear() the next frame is the full repaint");
+
+    /* Size mismatch (zones re-sized) -> full. */
+    std::vector<RGBColor> short_sent(sent.begin(), sent.begin() + 10);
+    CHECK(Encode(Delta(snapshot, led_map, 100, false, short_sent, false)) == legacy,
+          "a size mismatch is a full repaint");
+
+    /* Wake: OnRepaintRequest fills HIDPP20_UNCOMMITTED -> every key. */
+    std::vector<RGBColor> woken(sent.size(), UNSENT);
+    CHECK(Encode(Delta(snapshot, led_map, 100, false, woken, false)) == legacy,
+          "UNCOMMITTED entries are re-sent: wake repaints every key");
+
+    /* Dim: sent_colors holds the dimmed wire colors, so a brightness
+       change re-sends every key that is not black. */
+    std::vector<Payload> dimmed = LegacyFullUpdate(snapshot, led_map, 40, false);
+    std::vector<LogitechPerKey8080Frame> dim = Delta(snapshot, led_map, 40, false, sent, false);
+    size_t lit = 0;
+    for(size_t i = 0; i < snapshot.size(); i++)
+    {
+        if(i != 5 && LogitechPerKey8080Plan::ScaleBrightness(snapshot[i], 40) != snapshot[i])
+        {
+            lit++;
+        }
+    }
+    CHECK(KeyCount(dim) == lit, "a dim change re-sends every key whose wire color changed");
+    LogitechPerKey8080Plan::Settle(dim, AllWritten(dim), true, sent, snapshot.size(), UNSENT);
+    CHECK(Delta(snapshot, led_map, 40, false, sent, false).empty(), "settled at the dimmed level");
+    CHECK(Encode(Delta(snapshot, led_map, 40, false, sent, true)) == dimmed, "dimmed refresh matches legacy");
+
+    /* RefreshDue: the 2 s placeholder, 0 disables. */
+    CHECK(HIDPP20_8080_FULL_REFRESH_MS == 2000, "refresh period placeholder is 2 s");
+    CHECK(!LogitechPerKey8080Plan::RefreshDue(1999, 2000), "1999 ms: no refresh yet");
+    CHECK(LogitechPerKey8080Plan::RefreshDue(2000, 2000), "2000 ms: refresh");
+    CHECK(LogitechPerKey8080Plan::RefreshDue(60000, 2000), "long gap: refresh");
+    CHECK(!LogitechPerKey8080Plan::RefreshDue(60000, 0), "period 0 disables the refresh");
+}
+
+static void TestSettle()
+{
+    std::vector<RGBColor> snapshot;
+    LedMap                led_map;
+    Board(20, 0x0001, snapshot, led_map);
+
+    std::vector<RGBColor> sent;
+    std::vector<LogitechPerKey8080Frame> frames = Delta(snapshot, led_map, 100, false, sent, false);
+    CHECK(frames.size() == 2, "20 keys -> 2 frames");
+
+    /* Frame 1's write failed: its LEDs stay unsent. */
+    std::vector<bool> written = { true, false };
+    LogitechPerKey8080Plan::Settle(frames, written, true, sent, snapshot.size(), UNSENT);
+    CHECK(sent.size() == 20, "settle sizes sent_colors to the LED count");
+    CHECK(sent[0] == snapshot[0] && sent[13] == snapshot[13], "written frame advances");
+    CHECK(sent[14] == UNSENT && sent[19] == UNSENT, "failed write stays UNCOMMITTED");
+
+    std::vector<LogitechPerKey8080Frame> retry = Delta(snapshot, led_map, 100, false, sent, false);
+    CHECK(retry.size() == 1 && retry[0].keys.size() == 6 && retry[0].keys[0].led == 14,
+          "the failed frame's keys are re-sent next update");
+
+    /* FlushLEDS not acked: nothing in this update counts as committed. */
+    snapshot[0] = ToRGBColor(1, 1, 1);
+    std::vector<LogitechPerKey8080Frame> next = Delta(snapshot, led_map, 100, false, sent, false);
+    LogitechPerKey8080Plan::Settle(next, AllWritten(next), false, sent, snapshot.size(), UNSENT);
+    CHECK(sent[0] == UNSENT && sent[14] == UNSENT, "an unacked commit leaves its keys UNCOMMITTED");
+    CHECK(sent[1] == snapshot[1], "keys outside the update keep their committed color");
+
+    /* Keys not taken from an LED (Off path) are ignored. */
+    LogitechPerKey8080Groups groups = { { 0x0001, { { 0x04, ToRGBColor(0, 0, 0) } } } };
+    std::vector<LogitechPerKey8080Frame> off = LogitechPerKey8080Plan::ChunkGroups(groups, false);
+    std::vector<RGBColor> before = sent;
+    LogitechPerKey8080Plan::Settle(off, AllWritten(off), true, sent, snapshot.size(), UNSENT);
+    CHECK(sent == before, "led -1 keys do not touch sent_colors");
+
+    /* A short written vector counts missing entries as not written. */
+    std::vector<RGBColor> fresh;
+    LogitechPerKey8080Plan::Settle(frames, std::vector<bool>(), true, fresh, snapshot.size(), UNSENT);
+    CHECK(fresh == std::vector<RGBColor>(20, UNSENT), "no write results -> nothing advances");
+}
+
+static void TestDeltaKt40()
+{
+    LedMap led_map = { { 0x0040, 1 }, { 0x0040, 3 }, { 0x0001, 4 } };
+    std::vector<RGBColor> snapshot(3, ToRGBColor(5, 5, 5));
+    std::vector<RGBColor> sent;
+
+    std::vector<LogitechPerKey8080Frame> first = Delta(snapshot, led_map, 100, true, sent, false);
+    LogitechPerKey8080Plan::Settle(first, AllWritten(first), true, sent, snapshot.size(), UNSENT);
+    CHECK(KeyCount(first) == 2, "G410: keyType 0x40 keyId 3 is never sent");
+    CHECK(sent[1] == UNSENT, "G410: the filtered key is never recorded as sent");
+    CHECK(Delta(snapshot, led_map, 100, true, sent, false).empty(),
+          "G410: the never-sent filtered key does not cause a frame");
+
+    snapshot[1] = ToRGBColor(9, 9, 9);
+    CHECK(Delta(snapshot, led_map, 100, true, sent, false).empty(), "G410: a filtered key change sends nothing");
+
+    snapshot[0] = ToRGBColor(9, 9, 9);
+    std::vector<LogitechPerKey8080Frame> d = Delta(snapshot, led_map, 100, true, sent, false);
+    CHECK(d.size() == 1 && d[0].key_type == 0x40 && d[0].keys.size() == 1 && d[0].keys[0].key_id == 1,
+          "G410: a permitted keyType 0x40 key still updates");
+}
+
+static void TestDeltaRandomized()
+{
+    for(int iter = 0; iter < 300; iter++)
+    {
+        std::vector<RGBColor> snapshot;
+        LedMap                led_map;
+        RandomBoard(1 + Next() % 140, snapshot, led_map);
+
+        bool                  kt40 = (Next() & 1) != 0;
+        std::vector<RGBColor> sent;
+
+        for(int step = 0; step < 20; step++)
+        {
+            int  brightness = (Next() % 4 == 0) ? (int)(Next() % 101) : 100;
+            bool force      = (Next() % 7 == 0);
+
+            for(size_t i = 0; i < snapshot.size(); i++)
+            {
+                if(Next() % 5 == 0)
+                {
+                    snapshot[i] = ToRGBColor(Next() & 0xFF, Next() & 0xFF, Next() & 0xFF);
+                }
+            }
+
+            std::vector<LogitechPerKey8080Frame> full  = LogitechPerKey8080Plan::PlanLeds(snapshot, led_map, brightness, kt40);
+            std::vector<LogitechPerKey8080Frame> delta = Delta(snapshot, led_map, brightness, kt40, sent, force);
+
+            if(force || sent.size() != snapshot.size())
+            {
+                CHECK(Encode(delta) == Encode(full), "forced or first update == full repaint");
+            }
+
+            /* Every delta key is in the full plan with the same color. */
+            std::map<int, RGBColor> full_keys;
+            for(const LogitechPerKey8080Frame& f : full)
+            {
+                for(const LogitechPerKey8080Key& k : f.keys)
+                {
+                    full_keys[k.led] = k.color;
+                }
+            }
+
+            bool subset = true;
+            for(const LogitechPerKey8080Frame& f : delta)
+            {
+                subset = subset && f.keys.size() <= HIDPP20_8080_KEYS_PER_FRAME && !f.keys.empty();
+                for(const LogitechPerKey8080Key& k : f.keys)
+                {
+                    std::map<int, RGBColor>::iterator it = full_keys.find(k.led);
+                    subset = subset && it != full_keys.end() && it->second == k.color;
+                }
+            }
+            CHECK(subset, "delta keys are a subset of the full plan");
+
+            LogitechPerKey8080Plan::Settle(delta, AllWritten(delta), true, sent, snapshot.size(), UNSENT);
+
+            /* After settling, the device holds the full plan. */
+            bool holds = true;
+            for(std::map<int, RGBColor>::const_iterator it = full_keys.begin(); it != full_keys.end(); ++it)
+            {
+                holds = holds && sent[it->first] == it->second;
+            }
+            CHECK(holds, "after settle every planned key is recorded at its wire color");
+            CHECK(Delta(snapshot, led_map, brightness, kt40, sent, false).empty(),
+                  "an immediate repeat sends nothing");
+        }
+    }
+}
+
 int main()
 {
     TestMatchesLegacyRandomized();
@@ -423,6 +702,11 @@ int main()
     TestKt40Filter();
     TestBrightnessScaling();
     TestEmpty();
+    TestDeltaSendsOnlyChangedKeys();
+    TestDeltaFullRepaintTriggers();
+    TestSettle();
+    TestDeltaKt40();
+    TestDeltaRandomized();
 
     printf("logitech_8080_plan_test: %d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

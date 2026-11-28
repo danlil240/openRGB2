@@ -717,9 +717,11 @@ public:
     | keyId); fn3 rides the 0x12 report on dev_perkey_vl,   |
     | fn5 FlushLEDS commits on dev. The key set comes       |
     | from DiscoverPerKey8080: never hardcoded.             |
+    | SetPerKey8080 returns per-frame write success;        |
+    | PerKeyCommit8080 returns whether FlushLEDS acked.     |
     \*-----------------------------------------------------*/
-    void              SetPerKey8080(const std::vector<LogitechPerKey8080Frame>& frames);
-    void              PerKeyCommit8080();
+    std::vector<bool> SetPerKey8080(const std::vector<LogitechPerKey8080Frame>& frames);
+    bool              PerKeyCommit8080();
 
     /*-----------------------------------------------------*\
     | Zone effects (0x8071 / 0x8070)                        |

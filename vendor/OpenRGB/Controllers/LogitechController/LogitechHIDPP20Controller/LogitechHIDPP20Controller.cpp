@@ -5506,9 +5506,10 @@ PerKeyFrameResult LogitechHIDPP20Controller::PerKeyFrameEnd()
 | grouping, the G410 keyType 0x40 filter, the split into    |
 | <=14 keys and the payload encoding [keyType u16 BE,       |
 | count u16 BE, (keyId,R,G,B) x count]. Colors appear       |
-| only after fn5 FlushLEDS.                                 |
+| only after fn5 FlushLEDS. Returns, per frame, whether     |
+| the write went out (empty when nothing was sent).         |
 \*---------------------------------------------------------*/
-void LogitechHIDPP20Controller::SetPerKey8080
+std::vector<bool> LogitechHIDPP20Controller::SetPerKey8080
     (
     const std::vector<LogitechPerKey8080Frame>& frames
     )
@@ -5516,18 +5517,24 @@ void LogitechHIDPP20Controller::SetPerKey8080
     static_assert(LOGITECH_8080_FRAME_PAYLOAD_LEN == LOGITECH_VERY_LONG_MESSAGE_LEN - 4,
                   "a 0x8080 frame fills the very-long payload");
 
+    std::vector<bool> written;
+
     if(caps.idx_perkey_8080 == 0 || dev_perkey_vl == nullptr)
     {
-        return;
+        return written;
     }
+
+    written.reserve(frames.size());
 
     for(size_t f = 0; f < frames.size(); f++)
     {
         uint8_t payload[LOGITECH_8080_FRAME_PAYLOAD_LEN];
         size_t  len = LogitechPerKey8080Plan::EncodeSetKeyColors(frames[f], payload);
 
-        SendVeryLongFrame(caps.idx_perkey_8080, FN_8080_SET_KEY_COLORS,
-                          payload, len);
+        int result = SendVeryLongFrame(caps.idx_perkey_8080, FN_8080_SET_KEY_COLORS,
+                                       payload, len);
+
+        written.push_back(result >= 0);
 
         /*-------------------------------------------------*\
         | Pace back-to-back SetKeyColors frames. The        |
@@ -5541,17 +5548,20 @@ void LogitechHIDPP20Controller::SetPerKey8080
         std::this_thread::sleep_for(
             std::chrono::milliseconds(HIDPP20_8080_FRAME_GAP_MS));
     }
+
+    return written;
 }
 
 /*---------------------------------------------------------*\
 | fn5 FlushLEDS: commit. Empty body (persist = default),    |
-| sent on the 0x11 long report via dev.                     |
+| sent on the 0x11 long report via dev. Returns true when   |
+| the commit was acked.                                     |
 \*---------------------------------------------------------*/
-void LogitechHIDPP20Controller::PerKeyCommit8080()
+bool LogitechHIDPP20Controller::PerKeyCommit8080()
 {
     if(caps.idx_perkey_8080 == 0)
     {
-        return;
+        return false;
     }
 
     uint8_t recv[20] = {};
@@ -5562,7 +5572,10 @@ void LogitechHIDPP20Controller::PerKeyCommit8080()
     {
         LOG_DEBUG("%s 0x8080 FlushLEDS commit not acked (result=%d), "
                   "colors may not have latched", LOG_TAG, result);
+        return false;
     }
+
+    return true;
 }
 
 /*---------------------------------------------------------*\

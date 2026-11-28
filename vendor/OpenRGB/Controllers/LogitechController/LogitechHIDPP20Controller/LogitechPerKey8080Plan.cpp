@@ -112,11 +112,28 @@ std::vector<LogitechPerKey8080Frame> LogitechPerKey8080Plan::PlanLeds
     bool                                                kt40_id12_only
     )
 {
+    return PlanLeds(snapshot, led_map, brightness, kt40_id12_only,
+                    std::vector<RGBColor>(), true);
+}
+
+std::vector<LogitechPerKey8080Frame> LogitechPerKey8080Plan::PlanLeds
+    (
+    const std::vector<RGBColor>&                        snapshot,
+    const std::vector<std::pair<uint16_t, uint8_t>>&    led_map,
+    int                                                 brightness,
+    bool                                                kt40_id12_only,
+    const std::vector<RGBColor>&                        sent,
+    bool                                                force_full
+    )
+{
+    bool full = IsFullRepaint(sent, snapshot.size(), force_full);
+
     /*-----------------------------------------------------*\
     | Group painted LEDs by keyType, preserving keyType     |
     | order of first appearance. Skip unaddressable LEDs    |
     | (keyType 0 + keyId 0, present in the matrix but not   |
-    | enumerated on the device).                            |
+    | enumerated on the device). On a delta, skip LEDs      |
+    | whose wire color the device already holds.            |
     \*-----------------------------------------------------*/
     KeyGroups                   by_type;
     std::map<uint16_t, size_t>  type_slot;
@@ -127,6 +144,13 @@ std::vector<LogitechPerKey8080Frame> LogitechPerKey8080Plan::PlanLeds
         uint8_t  key_id   = led_map[i].second;
 
         if(key_type == 0 && key_id == 0)
+        {
+            continue;
+        }
+
+        RGBColor color = ScaleBrightness(snapshot[i], brightness);
+
+        if(!full && sent[i] == color)
         {
             continue;
         }
@@ -142,13 +166,56 @@ std::vector<LogitechPerKey8080Frame> LogitechPerKey8080Plan::PlanLeds
 
         LogitechPerKey8080Key key;
         key.key_id = key_id;
-        key.color  = ScaleBrightness(snapshot[i], brightness);
+        key.color  = color;
         key.led    = (int)i;
 
         by_type[slot->second].second.push_back(key);
     }
 
     return ChunkKeyGroups(by_type, kt40_id12_only);
+}
+
+bool LogitechPerKey8080Plan::IsFullRepaint(const std::vector<RGBColor>& sent, size_t n_leds, bool force_full)
+{
+    return force_full || sent.size() != n_leds;
+}
+
+bool LogitechPerKey8080Plan::RefreshDue(uint64_t elapsed_ms, uint32_t period_ms)
+{
+    return period_ms != 0 && elapsed_ms >= period_ms;
+}
+
+void LogitechPerKey8080Plan::Settle
+    (
+    const std::vector<LogitechPerKey8080Frame>&         frames,
+    const std::vector<bool>&                            written,
+    bool                                                committed,
+    std::vector<RGBColor>&                              sent,
+    size_t                                              n_leds,
+    RGBColor                                            unsent
+    )
+{
+    if(sent.size() != n_leds)
+    {
+        sent.assign(n_leds, unsent);
+    }
+
+    for(size_t f = 0; f < frames.size(); f++)
+    {
+        bool landed = committed && f < written.size() && written[f];
+
+        for(size_t k = 0; k < frames[f].keys.size(); k++)
+        {
+            int led = frames[f].keys[k].led;
+
+            if(led < 0 || (size_t)led >= sent.size())
+            {
+                continue;
+            }
+
+            sent[led] = landed ? frames[f].keys[k].color : unsent;
+        }
+    }
 }
 
 size_t LogitechPerKey8080Plan::EncodeSetKeyColors(const LogitechPerKey8080Frame& frame, uint8_t* payload)
