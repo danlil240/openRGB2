@@ -505,6 +505,49 @@ static void TestRename()
 }
 
 /*---------------------------------------------------------*\
+|| Rename re-keys effect-layer targets naming the instance ||
+|| subtree (audit C-7) inside the same undo record.        ||
+\*---------------------------------------------------------*/
+static void TestRenameTargets()
+{
+    using namespace studio;
+
+    StudioDocument w = Fixture();
+    EffectLayer l;
+    l.primitive = "static";
+    l.targets = { "fan0", "fan0/body", "fan0m", "fan_body", "fan1" };
+    EffectLayer other;
+    other.targets = { "fan1" };
+    w.effect.layers = { l, other };
+    EditorController ctl(w);
+
+    std::optional<EditorEdit> e = ctl.Rename("fan0", "fan0r");
+    CHECK(e.has_value() && e->has_effect,
+          "rename targets: effect delta recorded");
+    CHECK(w.effect.layers[0].targets
+              == std::vector<std::string>({ "fan0r", "fan0r/body",
+                                            "fan0m", "fan_body",
+                                            "fan1" }),
+          "rename targets: subtree targets re-keyed, others kept");
+    CHECK(w.effect.layers[1].targets
+              == std::vector<std::string>({ "fan1" }),
+          "rename targets: unrelated layer untouched");
+    RevertEditorEdit(w, *e);
+    CHECK(w.effect.layers[0].targets[0] == "fan0"
+          && w.effect.layers[0].targets[1] == "fan0/body"
+          && w.devices.count("fan0") == 1,
+          "rename targets: undo restores targets with the devices");
+    ApplyEditorEdit(w, *e);
+    CHECK(w.effect.layers[0].targets[0] == "fan0r",
+          "rename targets: redo re-applies");
+
+    /* No target names the instance: no effect delta. */
+    std::optional<EditorEdit> e2 = ctl.Rename("desk", "desk2");
+    CHECK(e2.has_value() && !e2->has_effect,
+          "rename targets: no delta when no target matches");
+}
+
+/*---------------------------------------------------------*\
 || Delete cascades descendants, strips dangling mirrors,  ||
 || and reverts to the byte-identical document.            ||
 \*---------------------------------------------------------*/
@@ -2513,6 +2556,7 @@ int main()
     TestSnap();
     TestRotate();
     TestRename();
+    TestRenameTargets();
     TestDeleteUndo();
     TestDuplicateMirrored();
     TestGroup();
