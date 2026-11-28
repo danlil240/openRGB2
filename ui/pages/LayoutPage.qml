@@ -83,13 +83,14 @@ Item {
             uiPrefs.layoutShow3d = on;
     }
 
-    function draftColorsFor(id) {
+    /* Audit Q-5: an O(1) id lookup in C++ — reading
+       viewport.objects here copied every object's colors into JS
+       once per delegate per frame (O(objects^2)). `n` densifies a
+       reduced frame's sparse samples per emitter. */
+    function draftColorsFor(id, n) {
         if(!root.previewUp) return [];
-        const objs = viewport.objects || [];
-        for(let i = 0; i < objs.length; ++i)
-            if(objs[i].id === id)
-                return objs[i].colors || [];
-        return [];
+        const c = viewport.colorsFor(id, n);
+        return c ? c : [];
     }
 
     /* items() / linkPairs() feed the canvas — both recompute
@@ -843,9 +844,15 @@ Item {
                                                 margins: 2
                                             }
                                             visible: root.previewUp
+                                            /* sequence: the per-
+                                               frame dependency */
                                             colors:
-                                                root.draftColorsFor(
-                                                    d.o.id)
+                                                root.previewUp
+                                                && viewport.sequence >= 0
+                                                ? root.draftColorsFor(
+                                                    d.o.id,
+                                                    d.o.emitter_count || 0)
+                                                : []
                                             maxSwatches: 12
                                         }
                                     }

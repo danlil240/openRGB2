@@ -30,6 +30,10 @@ StudioViewportModel::StudioViewportModel(
        full-document pushes that could fill the outbound queue. */
     push_timer_.setSingleShot(true);
     push_timer_.setInterval(debounce_ms_);
+    /* Every frame/clear path ends in previewChanged — derive the
+       colorless row list there, in one place. */
+    connect(this, &StudioViewportModel::previewChanged, this,
+            &StudioViewportModel::SyncObjectRows);
     connect(&push_timer_, &QTimer::timeout, this, [this]
             {
                 if(begin_sent_ && active_)
@@ -167,6 +171,30 @@ void StudioViewportModel::ClearFrame()
     objects_.clear();
     object_index_.clear();
     partials_.clear();
+}
+
+void StudioViewportModel::SyncObjectRows()
+{
+    QVariantList rows;
+    rows.reserve(objects_.size());
+    for(const QVariant& v : objects_)
+    {
+        const QVariantMap o = v.toMap();
+        QVariantMap r;
+        r.insert(QStringLiteral("id"), o.value(QStringLiteral("id")));
+        r.insert(QStringLiteral("kind"),
+                 o.value(QStringLiteral("kind")));
+        r.insert(QStringLiteral("bound"),
+                 o.value(QStringLiteral("bound")));
+        r.insert(QStringLiteral("emitter_total"),
+                 o.value(QStringLiteral("emitter_total")));
+        rows.append(r);
+    }
+    if(rows != object_rows_)
+    {
+        object_rows_ = rows;
+        emit objectRowsChanged();
+    }
 }
 
 QVariant StudioViewportModel::colorsFor(const QString& objectId,
