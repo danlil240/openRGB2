@@ -36,7 +36,10 @@
 ||     Shift mid-transform  temporary snap 10mm / 15°     ||
 ||     F / Home             frame selection / frame desk  ||
 ||     Escape               cancel gesture, restore state ||
-||     Ctrl+Z / Ctrl+Shift+Z undo / redo                  ||
+||     (keys above: only while the viewport is visible   ||
+||     and focused)                                       ||
+||     Ctrl+Z / Ctrl+Shift+Z undo / redo — the shell's    ||
+||                          (Main.qml), not declared here ||
 ||   Paint is an explicit tool: its drags paint emitters  ||
 ||   and can never move objects or orbit the camera.      ||
 ||                                                         ||
@@ -869,25 +872,44 @@ Rectangle {
         }
     }
 
-    Shortcut { sequence: "W";    enabled: !root.editingText()
+    /* Audit Q-2: these Shortcuts are window-wide and ignore
+       visibility, and LayoutPage keeps this viewport's Loader
+       alive while another page is current — so W/E/P/F/Home/
+       Escape used to fire from every page. They are scoped to
+       the visible viewport holding focus (a press in it takes
+       focus). Escape also stays live while a docked focus peer
+       edits text, to hand focus back here. Undo/redo are NOT
+       declared here: Main.qml owns Ctrl+Z / Ctrl+Shift+Z /
+       Ctrl+Y (the same shared workspace timeline), and a second
+       declaration made those keys ambiguous so neither fired. */
+    readonly property bool keyScope: {
+        if (!root.visible)
+            return false
+        for (var it = root.Window.activeFocusItem; it; it = it.parent)
+            if (it === root)
+                return true
+        return false
+    }
+    Shortcut { sequence: "W"
+               enabled: root.keyScope && !root.editingText()
                onActivated: selCtl.setTool(0) }
-    Shortcut { sequence: "E";    enabled: !root.editingText()
+    Shortcut { sequence: "E"
+               enabled: root.keyScope && !root.editingText()
                onActivated: selCtl.setTool(1) }
-    Shortcut { sequence: "P";    enabled: !root.editingText()
+    Shortcut { sequence: "P"
+               enabled: root.keyScope && !root.editingText()
                onActivated: selCtl.setTool(2) }
     /* Frame commands emit poseFinished under a live gesture's camera
        snapshot — gate them on the press window the same way. */
-    Shortcut { sequence: "F";    enabled: !root.editingText()
+    Shortcut { sequence: "F"
+               enabled: root.keyScope && !root.editingText()
                onActivated: if (!root.gestureBusy()) selCtl.frameSelection() }
-    Shortcut { sequence: "Home"; enabled: !root.editingText()
+    Shortcut { sequence: "Home"
+               enabled: root.keyScope && !root.editingText()
                onActivated: if (!root.gestureBusy()) selCtl.frameAll() }
-    Shortcut { sequence: "Ctrl+Z"; enabled: !root.editingText()
-               onActivated: root.undoOrRedo(false) }
-    Shortcut { sequence: "Ctrl+Shift+Z"; enabled: !root.editingText()
-               onActivated: root.undoOrRedo(true) }
-    Shortcut { sequence: "Ctrl+Y"; enabled: !root.editingText()
-               onActivated: root.undoOrRedo(true) }
     Shortcut { sequence: "Escape"
+               enabled: root.visible
+                        && (root.keyScope || !!root.editingText())
                onActivated: root.escapeAll() }
 
     Connections {

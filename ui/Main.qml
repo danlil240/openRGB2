@@ -231,8 +231,7 @@ ApplicationWindow {
                          && root.currentView === 2
                          && typeof layoutCtl !== "undefined"
                          && layoutCtl.canUndo))
-        onActivated: root.wsManaged ? workspace.undo()
-                                    : layoutCtl.undo()
+        onActivated: root.shellUndo(false)
     }
     Shortcut {
         sequence: "Ctrl+Shift+Z"
@@ -245,8 +244,7 @@ ApplicationWindow {
                          && root.currentView === 2
                          && typeof layoutCtl !== "undefined"
                          && layoutCtl.canRedo))
-        onActivated: root.wsManaged ? workspace.redo()
-                                    : layoutCtl.redo()
+        onActivated: root.shellUndo(true)
     }
     Shortcut {
         sequence: "Ctrl+Y"
@@ -259,8 +257,24 @@ ApplicationWindow {
                          && root.currentView === 2
                          && typeof layoutCtl !== "undefined"
                          && layoutCtl.canRedo))
-        onActivated: root.wsManaged ? workspace.redo()
-                                    : layoutCtl.redo()
+        onActivated: root.shellUndo(true)
+    }
+    /* The one owner of the undo keys (audit Q-2: the 3D viewport
+       declared them too, which made them ambiguous). The
+       viewport's mid-drag refusal moves here: an undo under a
+       live transform gesture would write beneath the snapshot
+       the drag previews against, so it is refused and the
+       status line says why. */
+    function shellUndo(redo) {
+        if(root.wsManaged && typeof objectCtl !== "undefined"
+           && objectCtl && objectCtl.gestureActive()) {
+            objectCtl.setStatusMessage(qsTr("finish the drag first"));
+            return;
+        }
+        if(root.wsManaged)
+            redo ? workspace.redo() : workspace.undo();
+        else
+            redo ? layoutCtl.redo() : layoutCtl.undo();
     }
 
     /* Workspace notices (foreign commits, import/export
