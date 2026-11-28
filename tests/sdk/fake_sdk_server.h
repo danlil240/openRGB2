@@ -90,6 +90,10 @@ struct FakeController
     std::vector<FakeZone> zones;
     std::vector<std::string> led_names;
     std::vector<uint32_t>  colors;
+    /* true serves a truncated CONTROLLER_DATA body (a whole,
+       well-framed packet whose description cannot parse) --
+       one bad controller among good ones. */
+    bool                 malformed_body = false;
 };
 
 struct ServerEvent
@@ -557,10 +561,15 @@ inline void FakeSdkServer::HandleSend(FakeStream& stream,
         {
             if(req.header.dev_id < controllers.size())
             {
+                std::vector<uint8_t> body = BuildControllerBody(
+                    controllers[req.header.dev_id]);
+                if(controllers[req.header.dev_id].malformed_body)
+                {
+                    body.resize(8);
+                }
                 reply(stream, req.header.dev_id,
                       openrgb2::sdk::kPktControllerData,
-                      BuildControllerBody(
-                          controllers[req.header.dev_id]));
+                      std::move(body));
             }
             break;
         }

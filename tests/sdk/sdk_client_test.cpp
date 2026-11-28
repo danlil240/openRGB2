@@ -1079,6 +1079,59 @@ static void TestSubmitNeverReconnects()
     CHECK(client->State() == ConnectionState::Connected);
 }
 
+/*---------------------------------------------------------*\
+||| One controller whose description cannot be parsed is   ||
+||| skipped -- the rest of the rig still enumerates and    ||
+||| keeps its enumeration indices (audit P-14). Only a     ||
+||| backend where EVERY description fails is an error.     ||
+\*---------------------------------------------------------*/
+
+static void TestUnparsableControllerSkipped()
+{
+    FakeSdkServer server;
+    FakeController bad = Dimm();
+    bad.serial         = "BAD";
+    bad.malformed_body = true;
+    server.controllers = { WirelessGroup(), bad, Keyboard() };
+
+    auto client = MakeClient(server);
+    CHECK(client->Connect());
+    CHECK(client->State() == ConnectionState::Connected);
+    CHECK(client->Snapshots().size() == 2);
+
+    const ConnectionSnapshotInfo info = client->ConnectionSnapshot();
+    CHECK(info.skipped_controllers.size() == 1);
+    CHECK(!info.skipped_controllers.empty() &&
+          info.skipped_controllers[0] == 1);
+
+    /* The keyboard after the bad entry keeps its server index:
+       its frames go to dev_id 2, not 1. */
+    DeviceSnapshot k;
+    CHECK(client->Snapshot(
+        DeviceKey{ "Corsair:Corsair K95", "K1", "hid:k1", "" }, k));
+    server.events.clear();
+    RgbFrame frame = MakeFrame(k, { 1, 2, 3 });
+    CHECK(client->SubmitLatest(frame).status == SubmitStatus::Accepted);
+    const ServerEvent* ev = FindEvent(server.events, kPktUpdateLEDs);
+    CHECK(ev != nullptr && ev->dev_id == 2);
+
+    /* The periodic refresh neither fails nor re-enumerates
+       (the server count still matches). */
+    const uint64_t gen = k.topology_generation;
+    CHECK(client->RefreshStatus());
+    DeviceSnapshot k2;
+    CHECK(client->Snapshot(k.key, k2) && k2.topology_generation == gen);
+
+    /* Every description unparsable: a protocol-level problem,
+       not one odd device -- the connection still fails. */
+    FakeSdkServer all_bad;
+    all_bad.controllers = { bad };
+    auto client2 = MakeClient(all_bad);
+    CHECK(!client2->Connect());
+    CHECK(client2->LastError().find("malformed controller data")
+          != std::string::npos);
+}
+
 int main()
 {
     TestHandshakeCapsAt4();
@@ -1106,6 +1159,7 @@ int main()
     TestDuplicateKeysNoReenumeration();
     TestRefreshDoesNotStallFrames();
     TestSubmitNeverReconnects();
+    TestUnparsableControllerSkipped();
     std::printf("sdk client: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
