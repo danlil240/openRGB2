@@ -343,6 +343,45 @@ every wired lane and must never be read as the wireless rate (a
 "wireless performance" consumer uses `wireless.stats`, and reports
 unmeasured while `interval_count` is 0).
 
+**Timing histograms** (audit E-12c). Every `stats` object (per
+controller, `aggregate`, `wireless.stats`) also carries `queue_hist`
+and `send_hist`:
+
+```json
+{ "edges_ms": [0.5,1,2,4,8,12,16,17,20,25,33,40,50,75,100,250],
+  "counts":   [0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0],
+  "total": 5, "p50": 33, "p95": 33, "p99": 33,
+  "provenance": "transport_measured" }
+```
+
+- `queue_hist` — frame `sample_time` → send start (pipeline queue plus
+  the lane's budget wait). Synthetic frames (playback bakes,
+  stop-black, resends) and unstamped frames are excluded: their
+  `sample_time` is not a scene sample.
+- `send_hist` — send start → transport completion (the SDK write).
+  The synchronous drain path stamps completion with the caller's
+  time, so it records 0 there; the production lane workers stamp it
+  after the send returns.
+- Both are recorded for transport-completed sends only (suppressed
+  and transport-rejected frames record nothing), from stamps the
+  pipeline already takes — no extra clock reads. `provenance` is the
+  stats' own (`transport_measured`): *accepted by the transport*,
+  never "displayed".
+- `counts` has `edges_ms.length + 1` entries. Bucket `i` holds values
+  in `(edges_ms[i-1], edges_ms[i]]` (bucket 0 is `[0, 0.5]`); the last
+  entry is the overflow (> 250 ms). The edges straddle 16.7 ms and
+  33.3 ms so 60 Hz tick slip and wireless pacing are visible.
+- `p50`/`p95`/`p99` are the **upper edge** of the bucket the
+  percentile falls in, in ms — bucket resolution, not interpolated.
+  `null` when `total` is 0, or (with `total` > 0) when the percentile
+  falls in the overflow bucket ("> 250 ms").
+- Cumulative since engine start or the last `reset_stats`
+  (OUTPUT_COMMAND), which clears every histogram but none of the
+  counters above.
+- `frame_status` carries the summary only (`{total, p50, p95, p99,
+  provenance}` — no `edges_ms`/`counts`) to keep the ~30 Hz feed
+  small.
+
 `map_stats` (`null` when no device mapper is wired) is the last
 scene→frame mapping pass:
 `{objects_total, objects_bound, objects_writable, objects_emitted,
@@ -359,6 +398,14 @@ rate_limited, refused_busy}, output_policy:{...}|null}` (`sessions_total`
 counts every accepted session since start; `events_oversize` counts events
 whose body exceeded the 1 MiB cap and were never sent — they are in
 `events_dropped` too).
+
+STATE's `scene` (the SCENE body above) also carries `tick_hist` (audit
+E-12c): the scene clock's actual tick-to-tick interval, the same
+histogram shape as `queue_hist` without `provenance` — it is the
+engine's own clock, not a transport measurement. Every tick counts,
+including gated (display-off), held and no-scene ticks; the first tick
+after a worker start only seeds the baseline. The SCENE reply and the
+`scene` event do not carry it. Cleared by `reset_stats`.
 
 **OUTPUT_POLICY** (STATE field, audit E-12b; `null` when no policy is
 wired) — what the LEDs show when the engine exits and while it has
@@ -597,7 +644,7 @@ applied scene or a workspace draft (nothing goes dirty, nothing is
 committed). Every request carries `{verb:"<name>", ...args}`; an
 unknown verb → `bad_request`; an engine without the control →
 `unavailable`. The four output verbs reply **OUTPUT** (`0x8107`) with
-the full body below; the two policy verbs reply `OK` (see the end of
+the full body below; the two policy verbs and `reset_stats` reply `OK` (see the end of
 the table):
 
 | verb | body | effect |
@@ -608,6 +655,7 @@ the table):
 | `set_hold` | `{on: bool}` | pause: live scene clock frozen at the current frame (no input pull); an uploaded loop gets control `paused`. Release resumes from the paused frame and drops input queued across the hold |
 | `get_policy` | `{}` | E-12b: reply `OK {output_policy}` (the STATE OUTPUT_POLICY body). Works without the runtime output control; `unavailable` when no policy is wired |
 | `set_policy` | `{on_exit?, on_idle?, per_controller?}` | E-12b: **replaces** the whole policy (an absent field returns to `hold` / no rules) and persists it in the engine profile; reply `OK {output_policy}`. Invalid shape → `bad_request` (policy unchanged); a failed profile save → `internal` (policy unchanged). Takes effect at the next exit / idle entry |
+| `reset_stats` | `{}` | E-12c: clears the timing histograms (STATE `scene.tick_hist`, every DELIVERY_STATS `queue_hist`/`send_hist`); counters and interval stats are kept. Measurement state only — no output effect. Reply `OK {reset:true}`; works without the runtime output control |
 
 Arbitration (decided once, engine-side):
 `effective = blackout ? 0 : master × min(contributors)`. Contributors

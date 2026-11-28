@@ -506,6 +506,9 @@ private:
     IpcReply       OutputSetMaster(const nlohmann::json& body);
     IpcReply       OutputSetBlackout(const nlohmann::json& body);
     IpcReply       OutputSetHold(const nlohmann::json& body);
+    /* E-12c: clears the timing histograms (scene tick + every
+       lane's queue/send). Reply OK {reset:true}. */
+    IpcReply       OutputResetStats(const nlohmann::json& body);
     /* E-12b: reply OK {output_policy} — not the OUTPUT body, so a
        client's OUTPUT store is never overwritten by a policy. */
     IpcReply       OutputGetPolicy(const nlohmann::json& body);
@@ -561,7 +564,11 @@ private:
        measured", never a wired number under a wireless
        label. */
     nlohmann::json WirelessLaneJson(
-        const std::vector<DeviceSnapshot>& snaps) const;
+        const std::vector<DeviceSnapshot>& snaps,
+        bool full_timing = true) const;
+    /* E-12c: the scene clock's tick-interval histogram (STATE
+       scene.tick_hist). */
+    nlohmann::json TickHistJson() const;
     /* IPC server counters (IpcServer::Stats provider) —
        shared by STATE and DIAGNOSTICS so DIAG never re-runs
        the whole StateJson for one field (QA F12). */
