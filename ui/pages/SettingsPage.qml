@@ -309,6 +309,11 @@ Item {
                 Layout.fillWidth: true
             }
 
+            /*---- Automatic dimming (R-4, engine-side) ---------*/
+            DimmingCard {
+                Layout.fillWidth: true
+            }
+
             /*---- Session --------------------------------------*/
             Card {
                 Layout.fillWidth: true

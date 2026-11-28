@@ -17,6 +17,7 @@
 
 #include <QCoreApplication>
 #include <QGuiApplication>
+#include <QJSValue>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -56,6 +57,16 @@ static QObject* FindItem(QObject* root, const QString& name)
         }
     }
     return nullptr;
+}
+
+/* A QML function's JS-object return arrives as a QJSValue. */
+static QVariantMap AsMap(const QVariant& v)
+{
+    if(v.metaType() == QMetaType::fromType<QJSValue>())
+    {
+        return v.value<QJSValue>().toVariant().toMap();
+    }
+    return v.toMap();
 }
 
 int main(int argc, char** argv)
@@ -302,6 +313,90 @@ int main(int argc, char** argv)
                 QObject* none = FindItem(obj,
                     "hotkeyState_pause_toggle");
                 CHECK(none && !none->property("visible").toBool());
+                bridge.setAutomationCapabilityForTesting(false);
+            }
+
+            /* R-4: the Dimming card — engine config seeds the
+               editor, buildConfig() is the set_dimming body. */
+            QObject* dim = FindItem(obj, "dimmingCard");
+            CHECK(dim != nullptr);
+            if(dim)
+            {
+                CHECK(!dim->property("up").toBool());
+                QVariantMap win;
+                win.insert(QStringLiteral("days"), QVariantList{ 5, 6 });
+                win.insert(QStringLiteral("start"), QStringLiteral("23:30"));
+                win.insert(QStringLiteral("end"), QStringLiteral("07:00"));
+                win.insert(QStringLiteral("level"), 0.3);
+                QVariantMap lock;
+                lock.insert(QStringLiteral("enabled"), true);
+                lock.insert(QStringLiteral("level"), 0.0);
+                QVariantMap idle;
+                idle.insert(QStringLiteral("enabled"), false);
+                idle.insert(QStringLiteral("after_s"), 600);
+                idle.insert(QStringLiteral("level"), 0.3);
+                idle.insert(QStringLiteral("skip_fullscreen"), true);
+                QVariantMap cfg;
+                cfg.insert(QStringLiteral("schedule"), QVariantList{ win });
+                cfg.insert(QStringLiteral("lock"), lock);
+                cfg.insert(QStringLiteral("idle"), idle);
+                cfg.insert(QStringLiteral("ramp_ms"), 600);
+                cfg.insert(QStringLiteral("restore_ms"), 0);
+                QVariantMap active;
+                active.insert(QStringLiteral("schedule"), 0.3);
+                active.insert(QStringLiteral("lock"), QVariant());
+                active.insert(QStringLiteral("idle"), QVariant());
+                QVariantMap dimming;
+                dimming.insert(QStringLiteral("config"), cfg);
+                dimming.insert(QStringLiteral("configured"), true);
+                dimming.insert(QStringLiteral("active"), active);
+                QVariantMap body;
+                body.insert(QStringLiteral("hotkeys"), QVariantList());
+                body.insert(QStringLiteral("dimming"), dimming);
+                bridge.setAutomationCapabilityForTesting(true);
+                bridge.setAutomationForTesting(body);
+                QCoreApplication::processEvents();
+                CHECK(dim->property("up").toBool());
+
+                QObject* lockBox = FindItem(obj, "dimLockEnabled");
+                CHECK(lockBox &&
+                      lockBox->property("checked").toBool());
+                QObject* start0 = FindItem(obj, "dimWindowStart_0");
+                CHECK(start0 && start0->property("text").toString() ==
+                      QLatin1String("23:30"));
+                QObject* activeText = FindItem(obj, "dimActive");
+                CHECK(activeText && activeText->property("text")
+                          .toString().contains(QLatin1String("schedule")));
+
+                QVariant built;
+                CHECK(QMetaObject::invokeMethod(dim, "buildConfig",
+                    Q_RETURN_ARG(QVariant, built)));
+                const QVariantMap bm = AsMap(built);
+                const QVariantList sched =
+                    bm.value(QStringLiteral("schedule")).toList();
+                CHECK(sched.size() == 1);
+                if(!sched.isEmpty())
+                {
+                    const QVariantMap w0 = sched[0].toMap();
+                    CHECK(w0.value("start").toString() == "23:30");
+                    CHECK(w0.value("end").toString() == "07:00");
+                    CHECK(w0.value("days").toList().size() == 2);
+                    CHECK(std::fabs(w0.value("level").toDouble() - 0.3)
+                          < 1e-6);
+                }
+                CHECK(bm.value("lock").toMap().value("enabled").toBool());
+                CHECK(!bm.value("idle").toMap().value("enabled").toBool());
+                CHECK(bm.value("idle").toMap().value("after_s").toInt()
+                      == 600);
+
+                /* Add a window: one more row, a valid default. */
+                CHECK(QMetaObject::invokeMethod(dim, "addWindow"));
+                QCoreApplication::processEvents();
+                CHECK(FindItem(obj, "dimWindowStart_1") != nullptr);
+                CHECK(QMetaObject::invokeMethod(dim, "buildConfig",
+                    Q_RETURN_ARG(QVariant, built)));
+                CHECK(AsMap(built).value("schedule").toList().size()
+                      == 2);
                 bridge.setAutomationCapabilityForTesting(false);
             }
         }

@@ -924,6 +924,25 @@ int main(int argc, char** argv)
         PumpUntil([] { return false; }, 200);
         CHECK(bridge.automation().value("hotkeys").toList().size() == 1);
 
+        /* R-4: set_dimming travels the same verb; the dimming
+           section of the reply lands in the store. */
+        const int did = bridge.automationCommand("set_dimming",
+            QVariantMap({{ "lock", QVariantMap({
+                { "enabled", true }, { "level", 0.0 } }) }}));
+        CHECK(did > 0);
+        CHECK(srv.RecvMsg(m, 4000));
+        CHECK(m.type == MsgType::AutomationCommand);
+        CHECK(m.Body().value("verb", std::string()) == "set_dimming");
+        CHECK(m.Body()["lock"]["enabled"] == true);
+        nlohmann::json a3 = a2;
+        a3["dimming"] = { { "configured", true },
+                          { "active", { { "lock", 0.0 } } } };
+        srv.SendMsg(MsgType::Automation, m.request_id, a3);
+        CHECK(PumpUntil([&] {
+            return bridge.automation().value("dimming").toMap()
+                       .value("configured").toBool();
+        }));
+
         bridge.setAutomationForTesting(QVariantMap({
             { "hotkeys", QVariantList() } }));
         CHECK(bridge.automation().value("hotkeys").toList().isEmpty());

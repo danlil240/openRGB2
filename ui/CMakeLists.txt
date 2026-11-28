@@ -72,6 +72,7 @@ qt_add_qml_module(openrgb2_ui
         components/Card.qml
         components/ChordCaptureField.qml
         components/ColorWell.qml
+        components/DimmingCard.qml
         components/EmptyState.qml
         components/FrameStrip.qml
         components/GroupChip.qml
