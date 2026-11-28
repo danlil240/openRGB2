@@ -444,8 +444,9 @@ loaded scene → `unavailable`. Fields:
   live snapshot — absent topology → `unavailable`; clients cannot
   fabricate controller identities.
 - `add_object` is how a scene is built FROM live hardware: each
-  entry in `controllers` is a `<DeviceKey>` whose `zone` names the
-  zone to place. Every key resolves against the current topology
+  entry in `controllers` (at most 256 per request — more is
+  `bad_request` before anything resolves) is a `<DeviceKey>` whose
+  `zone` names the zone to place. Every key resolves against the current topology
   snapshot (same lookup as `set_binding` — keys absent from
   topology can't be bound; a disconnected-but-enumerated device
   CAN, matching the offline-binding rule). Resolved keys get a

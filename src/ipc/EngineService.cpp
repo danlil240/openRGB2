@@ -2461,6 +2461,20 @@ IpcReply EngineService::HandleAddObjects(const nlohmann::json& body)
             "add_object requires "
             "{controllers:[<DeviceKey>...]}");
     }
+    /* Bounded batch (audit I-13): every added object runs the
+       smallest-free-id search over the whole document, so an
+       unbounded list (a 1 MiB body holds ~10k repeats of one
+       live zone) is super-quadratic work on this session's
+       reader thread and an equally large scene. A real rig
+       has far fewer zones than this per add. */
+    constexpr size_t kMaxAddControllers = 256;
+    if(body["controllers"].size() > kMaxAddControllers)
+    {
+        return IpcReply::Fail(ErrCode::BadRequest,
+            "add_object takes at most " +
+            std::to_string(kMaxAddControllers) +
+            " controllers per request");
+    }
 
     std::shared_ptr<const studio::SceneDocument> cur = Scene();
     if(!cur)
