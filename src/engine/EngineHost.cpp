@@ -1091,6 +1091,11 @@ bool EngineHost::Start(std::string& err)
        empty); the next tick evaluates normally. */
     engine_.Worker().SetEvaluateGate(
         [this]() { return playback_->PlaybackOwnsWired(); });
+    /* R-1: the runtime master scale — the mapper multiplies the
+       arbitrated OutputControl scale into every live write, so a
+       tray brightness/Off change lands on the next tick without
+       a document edit (uploaded loops are not scaled). */
+    mapper_.SetOutputScaleSource(&output_.EffectiveScaleSource());
     engine_.Worker().SetFrameCallback(
         [this](const EvaluatedFrame& eval)
         {

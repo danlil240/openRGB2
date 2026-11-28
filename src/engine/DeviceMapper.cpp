@@ -43,10 +43,14 @@ studio::ControllerSnapshot ToControllerSnapshot(const DeviceSnapshot& snap)
    documents validate it, but an out-of-range value must never
    wrap a channel (1.5 * 200 & 0xFF = 44) or hit the undefined
    float->unsigned conversion of a negative/huge product. */
+float Clamp01(float v)
+{
+    return !(v > 0.0f) ? 0.0f : (v > 1.0f ? 1.0f : v);
+}
+
 RgbColor ScaleColor(RgbColor c, float brightness)
 {
-    const float b = !(brightness > 0.0f) ? 0.0f
-                  : (brightness > 1.0f ? 1.0f : brightness);
+    const float b = Clamp01(brightness);
     RgbColor out;
     out.r = uint8_t((unsigned)(c.r * b));
     out.g = uint8_t((unsigned)(c.g * b));
@@ -280,6 +284,13 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
     std::vector<RgbFrame> out;
     if(doc)
     {
+    /* R-1: document brightness x the runtime master scale, read
+       once per map. Each factor clamps on its own so a
+       hostile document value can never swallow the master. */
+    const std::atomic<float>* scale_src = output_scale_.load();
+    const float brightness =
+        Clamp01(doc->brightness) *
+        (scale_src ? Clamp01(scale_src->load()) : 1.0f);
 
     /* Collect writes per controller BEFORE assembling frames —
        document order is preserved per zone so overlapping
@@ -340,7 +351,7 @@ std::vector<RgbFrame> DeviceMapper::MapFrame(const EvaluatedFrame& eval)
                     : studio::EmitterColor(*doc, obj.id, (int)e);
             queue.emplace_back(zone.start_idx + (uint32_t)addr,
                                ScaleColor(FromSceneColor(c),
-                                          doc->brightness));
+                                          brightness));
             wrote = true;
         }
         if(wrote)
@@ -714,6 +725,11 @@ void DeviceMapper::SetLogger(EngineLogFn log)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     log_ = std::move(log);
+}
+
+void DeviceMapper::SetOutputScaleSource(const std::atomic<float>* scale)
+{
+    output_scale_.store(scale);
 }
 
 void DeviceMapper::Log(const std::string& line) const

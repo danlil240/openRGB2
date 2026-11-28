@@ -52,6 +52,7 @@
 #include "DeviceMapper.h"
 #include "Engine.h"
 #include "OrderlyShutdown.h"
+#include "OutputControl.h"
 #include "OwnershipScan.h"
 #include "PlaybackController.h"
 #include "PowerLifecycle.h"
@@ -280,6 +281,7 @@ public:
     Engine&                  GetEngine()     { return engine_; }
     PlaybackController*      GetPlayback()   { return playback_.get(); }
     DeviceMapper&            GetMapper()     { return mapper_; }
+    OutputControl&           GetOutput()     { return output_; }
     DeliveryPipeline*        GetPipeline()   { return pipeline_.get(); }
     ipc::EngineService*      GetService()    { return service_.get(); }
     /* Task 2 (studio-import): the workspace commit surface —
@@ -363,6 +365,10 @@ private:
 
     Engine                                   engine_;
     std::shared_ptr<DeliveryPipeline>        pipeline_;
+    /* R-1: runtime output overrides. Declared BEFORE mapper_ —
+       the mapper holds a pointer to its effective-scale atomic,
+       so it must outlive the mapper. */
+    OutputControl                            output_;
     DeviceMapper                             mapper_;
     std::shared_ptr<sdk::OpenRgbClient>      sdk_;
     std::unique_ptr<PlaybackController>      playback_;

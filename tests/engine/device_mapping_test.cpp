@@ -24,6 +24,7 @@
 
 #include "scene/SceneTypes.h"
 
+#include <atomic>
 #include <cstdio>
 #include <map>
 #include <memory>
@@ -1112,6 +1113,99 @@ static void TestBrightnessClamps()
     }
 }
 
+/* R-1: the runtime master scale (OutputControl's effective
+   atomic) multiplies into the document brightness on the NEXT
+   map — no document edit, no re-apply. Blackout (scale 0)
+   still emits a frame per tick (black, same sequence cadence),
+   so the LEDs go dark instead of holding the last colors. */
+static void TestOutputScaleSource()
+{
+    auto doc = std::make_shared<studio::SceneDocument>();
+    doc->brightness = 1.0f;
+    doc->bindings = {
+        Binding("b-h1", "X870E", "", "", "ARGB_V2_1", 8),
+    };
+    doc->objects = { DevObj("o-h1", "b-h1", 0, 8) };
+
+    std::atomic<float> scale{ 0.5f };
+    DeviceMapper mapper;
+    mapper.SetOutputScaleSource(&scale);
+    mapper.SetScene(doc);
+    const DeviceSnapshot mb = Motherboard();
+    mapper.SyncDevices({ mb });
+    const EvaluatedFrame eval = EvalAll(*doc, {
+        { "o-h1", SC(200, 100, 50) },
+    });
+
+    std::vector<RgbFrame> frames = mapper.MapFrame(eval);
+    const RgbFrame* f = FrameFor(frames, mb.key);
+    CHECK(f != nullptr);
+    uint64_t seq = 0;
+    if(f)
+    {
+        CHECK(AllEqual(f->colors, 0, 8, RGB(100, 50, 25)));
+        CHECK(f->colors[32] == kEnumerated);   /* unmapped kept */
+        seq = f->sequence;
+    }
+
+    /* Blackout: black frame, next sequence number. */
+    scale.store(0.0f);
+    frames = mapper.MapFrame(eval);
+    f = FrameFor(frames, mb.key);
+    CHECK(f != nullptr);
+    if(f)
+    {
+        CHECK(AllEqual(f->colors, 0, 8, RGB(0, 0, 0)));
+        CHECK(f->sequence == seq + 1);
+        seq = f->sequence;
+    }
+    frames = mapper.MapFrame(eval);
+    f = FrameFor(frames, mb.key);
+    CHECK(f != nullptr && f->sequence == seq + 1);
+
+    /* Release: full colors on the very next map. */
+    scale.store(1.0f);
+    frames = mapper.MapFrame(eval);
+    f = FrameFor(frames, mb.key);
+    CHECK(f != nullptr);
+    if(f)
+    {
+        CHECK(AllEqual(f->colors, 0, 8, RGB(200, 100, 50)));
+    }
+
+    /* Document brightness and master multiply; an out-of-range
+       document value clamps BEFORE the master applies (1e30 x
+       0.5 must still halve). */
+    doc->brightness = 0.5f;
+    scale.store(0.5f);
+    frames = mapper.MapFrame(eval);
+    f = FrameFor(frames, mb.key);
+    CHECK(f != nullptr);
+    if(f)
+    {
+        CHECK(AllEqual(f->colors, 0, 8, RGB(50, 25, 12)));
+    }
+    doc->brightness = 1e30f;
+    frames = mapper.MapFrame(eval);
+    f = FrameFor(frames, mb.key);
+    CHECK(f != nullptr);
+    if(f)
+    {
+        CHECK(AllEqual(f->colors, 0, 8, RGB(100, 50, 25)));
+    }
+
+    /* Detaching the source restores the identity scale. */
+    doc->brightness = 1.0f;
+    mapper.SetOutputScaleSource(nullptr);
+    frames = mapper.MapFrame(eval);
+    f = FrameFor(frames, mb.key);
+    CHECK(f != nullptr);
+    if(f)
+    {
+        CHECK(AllEqual(f->colors, 0, 8, RGB(200, 100, 50)));
+    }
+}
+
 /* E-1 regression: a scene apply must not freeze output until
    the host's next SyncDevices (the 500 ms maintenance poll).
    SetScene resolves the new bindings against the snapshots it
@@ -1302,6 +1396,7 @@ int main()
     TestZeroBrightnessEmitsBlackFrame();
     TestBrightnessScalesMappedOnly();
     TestBrightnessClamps();
+    TestOutputScaleSource();
     TestSceneApplyResolvesWithoutResync();
     TestIdentifyThenBindKeepsSequence();
 
